@@ -881,80 +881,166 @@ allow_hits:
     via the general PLUGIN_CRASH path, so the audit row still lands recording "the dispatch produced an unrecordable
     result" — rather than the alternative of silently writing zero into the audit trail.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=7a735230be0f50f8
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=1fc422049f792ccd
   owner: bugfix
   reason: Tier 3 boundary - LiteLLM tool-call arguments can decode to JSON arrays, nulls, or scalars; the composer must reject
     non-object arguments before cache lookup or tool dispatch
   safety: Emits a tool error back to the LLM, does not call execute_tool, marks mutation intent for budget accounting, and
     preserves current state
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=be66680f548d84bc
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=064127b39b0e27c4
   owner: web-composer
   reason: isinstance(cached, ValidationResult) narrows the union RuntimePreflightEntry = ValidationResult | RuntimePreflightFailure
     — not defensive access, structural type dispatch on a typed sum type
   safety: Union covers all cases; no third value possible; isinstance correct
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=ce27e403a745da43
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=666f1c5ddb840f35
   owner: web-composer
   reason: isinstance(cached, RuntimePreflightFailure) narrows RuntimePreflightEntry union for the failure re-raise path
   safety: Paired with ValidationResult check above; exhaustive union dispatch
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=78a6d47b6929bb14
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=78fe10881a519e95
   owner: web-composer
   reason: isinstance(entry, RuntimePreflightFailure) narrows freshly-resolved coordinator entry for failure re-raise; mirrors
     cached check above
   safety: entry is RuntimePreflightEntry (ValidationResult | RuntimePreflightFailure); all cases handled
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=e2ee48418ae39a2f
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=2bd4e0ce2720707f
   owner: web-composer
   reason: cache.get(key) checks per-compose runtime preflight cache for an existing result before running the coordinator;
     key is RuntimePreflightKey, not external data
   safety: Returns None on miss; handled by coordinator.run() path below
   expires: null
+- key: web/composer/service.py:R5:_optional_ancestor_present:fp=7d42cd9618597dd4
+  owner: composer-walker
+  reason: |
+    Tier 3 boundary — LLM tool-call arguments may decode to scalars, lists, or nulls at any depth
+    along the optional-ancestor path. The walker must distinguish "absent ancestor" (skip the
+    inner check) from "present ancestor with mistyped descendant" (let the inner walker surface
+    the missing field). isinstance(cursor, Mapping) gates that decision; without it a malformed
+    payload (e.g. a string where an object is expected) would crash with TypeError instead of
+    being reported as a clean missing-required-paths arg error.
+  safety: |
+    Non-Mapping cursor returns False (treat ancestor as absent); the inner walker then runs
+    against the original value via _find_missing_path_instances which is itself isinstance-guarded
+    for dict/list and returns [] for non-conforming shapes. End result is a Tier-3 arg error
+    pushed back to the LLM, never a crash.
+  expires: null
+# --- Anthropic prompt-cache marker helpers (elspeth-4e79436719 §Phase 3) ---
+- key: web/composer/service.py:R5:_supports_anthropic_prompt_cache_markers:fp=ea3d57b0d2bf7738
+  owner: composer-cache-markers
+  reason: |
+    Provider-detection predicate for the cache_control transform. The model
+    identifier is configuration-supplied (operator-controlled) but may be
+    None (e.g., before settings load) or accidentally set to a non-string by a
+    misconfigured deployment. The isinstance(model, str) guard converts that
+    case into a clean False return rather than an AttributeError when calling
+    .lower() on a non-string.
+  safety: Non-string input returns False; transform skipped; LiteLLM call still proceeds with un-marked payload.
+  expires: null
+- key: web/composer/service.py:R1:_apply_anthropic_cache_markers:fp=37f04802c35a6c48
+  owner: composer-cache-markers
+  reason: |
+    The transform iterates over messages to find the first system message,
+    using message.get("role") to handle messages constructed without a role
+    field defensively. Tier-3 boundary: the messages list could in principle
+    carry malformed entries (e.g., placeholder dicts during a future test
+    fixture extension); the transform must skip them without raising.
+  safety: Missing role key → message is not marked → transform proceeds without altering that entry.
+  expires: null
+# --- _token_usage_from_response Tier-3 boundary ---
+# This function is the canonical Tier-3 ingestion site for LiteLLM
+# response.usage objects, including provider cache metadata in either
+# the OpenAI nested (prompt_tokens_details.cached_tokens) or Anthropic
+# sibling (cache_creation_input_tokens / cache_read_input_tokens) shapes.
+# Every dict.get(), getattr-with-default, and isinstance() inside is a
+# Tier-3 absence handler that must coerce missing/malformed values to
+# None — never fabricate zero (CLAUDE.md fabrication policy and
+# elspeth-4e79436719 §Bug C).
 - key: web/composer/service.py:R2:_token_usage_from_response:fp=56e23601a1fa80b5
   owner: composer-audit
-  reason: Tier 3 LiteLLM response metadata boundary — usage may be absent on provider responses, errors, or malformed responses;
-    absence must be preserved as unknown token counts instead of fabricated zeroes.
-  safety: Missing usage becomes TokenUsage.unknown(); no raw provider response is persisted in the audit row.
+  reason: Function entry — getattr(response, "usage", None) handles provider responses where the usage object is absent (errors, partial responses, malformed providers).
+  safety: Missing usage → TokenUsage.unknown(); no fabrication.
   expires: null
 - key: web/composer/service.py:R5:_token_usage_from_response:fp=8280d91312ad070b
   owner: composer-audit
-  reason: Tier 3 LiteLLM response metadata boundary — providers may expose usage either as a Mapping or as an attribute object,
-    so the audit extractor must dispatch shape before normalizing.
-  safety: Both branches feed TokenUsage.from_dict(), which preserves missing and invalid counts as None.
+  reason: Function entry — isinstance(usage, Mapping) dispatches between dict-shaped and Pydantic-shaped usage objects.
+  safety: Both branches feed TokenUsage.from_dict; missing/invalid counts coerced to None.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=7b2d8956294e5061
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=a10b86685ae4ff97
   owner: composer-audit
-  reason: Tier 3 LiteLLM usage mapping boundary — prompt_tokens is optional provider metadata and missing means unknown, not
-    zero.
-  safety: Missing value is passed as None into TokenUsage.from_dict(); the audit row records honest absence.
+  reason: Mapping branch — usage.get("prompt_tokens_details") may be absent on providers that do not report cache metadata.
+  safety: Absent → details stays None → cached_prompt_tokens stays None on the audit row.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=a4bff41b1a81b7d6
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=2e58ecc8b789c803
   owner: composer-audit
-  reason: Tier 3 LiteLLM usage mapping boundary — completion_tokens is optional provider metadata and missing means unknown,
-    not zero.
-  safety: Missing value is passed as None into TokenUsage.from_dict(); the audit row records honest absence.
+  reason: Mapping branch — prompt_tokens optional in provider response.
+  safety: Missing value → TokenUsage.from_dict coerces to None; audit records honest absence.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=b584553e0c526b64
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=e03d772011301846
   owner: composer-audit
-  reason: Tier 3 LiteLLM usage mapping boundary — total_tokens is optional provider metadata and missing means unknown, not
-    zero.
-  safety: Missing value is passed as None into TokenUsage.from_dict(); the audit row records honest absence.
+  reason: Mapping branch — completion_tokens optional in provider response.
+  safety: Missing value → TokenUsage.from_dict coerces to None; audit records honest absence.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=699f4946ddac020a
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=94e75bae096b5de7
   owner: composer-audit
-  reason: Tier 3 LiteLLM usage-object boundary — prompt_tokens may be absent from provider usage objects.
-  safety: Missing value is passed as None into TokenUsage.from_dict(); the audit row records honest absence.
+  reason: Mapping branch — total_tokens optional in provider response.
+  safety: Missing value → TokenUsage.from_dict coerces to None; audit records honest absence.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=16392393da0f8fb7
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=026e5e018596c429
   owner: composer-audit
-  reason: Tier 3 LiteLLM usage-object boundary — completion_tokens may be absent from provider usage objects.
-  safety: Missing value is passed as None into TokenUsage.from_dict(); the audit row records honest absence.
+  reason: Mapping branch — Anthropic cache_creation_input_tokens optional, only present when prompt caching is active.
+  safety: Missing value → TokenUsage.from_dict coerces to None; audit records "no cache reported" rather than fabricating zero.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=0242c787b37f463e
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=a7cafac310a49ffa
   owner: composer-audit
-  reason: Tier 3 LiteLLM usage-object boundary — total_tokens may be absent from provider usage objects.
-  safety: Missing value is passed as None into TokenUsage.from_dict(); the audit row records honest absence.
+  reason: Mapping branch — Anthropic cache_read_input_tokens optional, only present when prompt caching is active.
+  safety: Missing value → TokenUsage.from_dict coerces to None; audit records "no cache reported" rather than fabricating zero.
+  expires: null
+- key: web/composer/service.py:R5:_token_usage_from_response:fp=c94d51a5fb5dd2ee
+  owner: composer-audit
+  reason: Mapping branch — isinstance(details, Mapping) gates whether prompt_tokens_details is a usable nested dict; provider may return string, list, or null.
+  safety: Non-Mapping → details replaced with None; from_dict ignores it. No crash, no fabrication.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=615bcadd840ed573
+  owner: composer-audit
+  reason: Attribute branch — getattr(usage, "prompt_tokens_details", None) handles Pydantic-shaped LiteLLM responses where this attr may be absent.
+  safety: Missing attr → None → cached_prompt_tokens stays None on audit row.
+  expires: null
+- key: web/composer/service.py:R5:_token_usage_from_response:fp=293ce467e9d95617
+  owner: composer-audit
+  reason: Attribute branch — isinstance(details_attr, Mapping) dispatches between dict-shaped and Pydantic-shaped provider responses for prompt_tokens_details.
+  safety: Mapping → take dict directly; non-Mapping → derive from attribute access; either path produces None for absent fields.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=33efd77d01328ae7
+  owner: composer-audit
+  reason: Attribute branch — getattr(details_attr, "cached_tokens", None) handles OpenAI Pydantic prompt_tokens_details where cached_tokens is the only nested attribute.
+  safety: Missing nested attr → None → cached_prompt_tokens stays None.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=bf45d3948a79913e
+  owner: composer-audit
+  reason: Attribute branch — prompt_tokens may be absent on Pydantic-shaped usage objects.
+  safety: Missing attr → None into TokenUsage.from_dict; honest absence recorded.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=e9ecf4cd7678f2cb
+  owner: composer-audit
+  reason: Attribute branch — completion_tokens may be absent on Pydantic-shaped usage objects.
+  safety: Missing attr → None into TokenUsage.from_dict; honest absence recorded.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=df18b115a9a9f60f
+  owner: composer-audit
+  reason: Attribute branch — total_tokens may be absent on Pydantic-shaped usage objects.
+  safety: Missing attr → None into TokenUsage.from_dict; honest absence recorded.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=8d80e7a51c7dcda6
+  owner: composer-audit
+  reason: Attribute branch — Anthropic cache_creation_input_tokens may be absent when caching is not active for the call.
+  safety: Missing attr → None into TokenUsage.from_dict; "no cache reported" persisted to audit row, not synthetic zero.
+  expires: null
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=2ab99aebd3f1acf8
+  owner: composer-audit
+  reason: Attribute branch — Anthropic cache_read_input_tokens may be absent when caching is not active for the call.
+  safety: Missing attr → None into TokenUsage.from_dict; "no cache reported" persisted to audit row, not synthetic zero.
   expires: null
 - key: web/composer/service.py:R2:_safe_response_model:fp=6bb4138da6a084df
   owner: composer-audit

@@ -4872,6 +4872,39 @@ def _valid_pipeline_args() -> dict[str, Any]:
     }
 
 
+class TestSetPipelineSchemaShape:
+    """Lock the ``set_pipeline`` schema shape so the elspeth-4e79436719 Bug A
+    regression cannot return via a future schema edit.
+
+    The walker treats nested ``required`` as conditional-on-presence; for that
+    contract to hold, ``inline_blob`` must remain *outside* the outer
+    ``source.required`` list. If a future commit adds ``inline_blob`` to the
+    outer ``required`` list, every regular ``set_pipeline`` call (which
+    correctly does not ship inline literal data) starts failing pre-dispatch.
+    """
+
+    def test_inline_blob_is_optional_at_source_level(self) -> None:
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        defns = {d["name"]: d for d in get_tool_definitions()}
+        source = defns["set_pipeline"]["parameters"]["properties"]["source"]
+        assert "inline_blob" in source["properties"], "inline_blob property must exist on source"
+        assert "inline_blob" not in source["required"], (
+            "inline_blob must remain optional at source level — adding it to "
+            "source.required reintroduces elspeth-4e79436719 Bug A by forcing "
+            "every regular set_pipeline call to ship literal inline content."
+        )
+
+    def test_inline_blob_inner_required_is_well_formed(self) -> None:
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        defns = {d["name"]: d for d in get_tool_definitions()}
+        inline = defns["set_pipeline"]["parameters"]["properties"]["source"]["properties"]["inline_blob"]
+        # The conditional-on-presence semantics rely on this list being non-empty
+        # — if inline_blob is supplied, these are the fields the walker enforces.
+        assert set(inline["required"]) == {"filename", "mime_type", "content"}
+
+
 class TestSetPipeline:
     def test_set_pipeline_creates_valid_state(self) -> None:
         state = _empty_state()

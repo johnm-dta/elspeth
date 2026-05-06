@@ -42,6 +42,15 @@ class ComposerLLMCall:
     ``tools_spec_hash`` is the canonical hash of the exact ``tools=[...]``
     specification sent to LiteLLM, or ``None`` when the call did not carry
     tools (for example diagnostics text generation).
+
+    Cache-token fields (``cached_prompt_tokens``,
+    ``cache_creation_input_tokens``, ``cache_read_input_tokens``) capture
+    provider-reported prompt-cache statistics. They default to ``None``
+    because most providers do not report cache metadata when caching is
+    not active for the call. Per the CLAUDE.md fabrication policy, an
+    absent cache field stays ``None`` rather than coerced to zero — an
+    auditor can then distinguish "no cache reported" from "cache reported
+    zero hits."
     """
 
     model_requested: str
@@ -58,6 +67,9 @@ class ComposerLLMCall:
     finished_at: datetime
     error_class: str | None
     error_message: str | None
+    cached_prompt_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict for sidecar serialization."""

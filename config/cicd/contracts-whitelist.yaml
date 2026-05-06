@@ -675,5 +675,10 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm_before_deadline:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm_with_audit:messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm_with_audit:tools (list)"
+  # elspeth-4e79436719 §Phase 3: Anthropic cache_control marker transform
+  # operates on the same provider-call payload shape as the call sites above.
+  # The `tools` parameter is typed `list | None`, so the contracts check
+  # treats it as a separate shape; only `messages (list)` is whitelisted here.
+  - "src/elspeth/web/composer/service.py:_apply_anthropic_cache_markers:messages (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:chat_history (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:return (list)"

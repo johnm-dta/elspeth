@@ -120,10 +120,18 @@ per_file_rules:
   max_hits: 5
 - pattern: contracts/token_usage.py
   rules:
+  - R1
   - R5
-  reason: Tier 3 LLM API response dict validation in from_dict and __post_init__ validation
+  reason: |
+    Tier 3 LLM API response dict validation in from_dict and __post_init__.
+    Every dict.get() and isinstance() inside this file is the canonical
+    Tier-3 boundary for token-usage data. Provider responses may be
+    absent, malformed, or carry varying nesting shapes (OpenAI nested
+    prompt_tokens_details vs Anthropic flat sibling fields per
+    elspeth-4e79436719 §Bug C). All absence cases coerce to None,
+    never zero — the audit row records what the provider actually said.
   expires: null
-  max_hits: 7
+  max_hits: 20
 - pattern: contracts/transform_contract.py
   rules:
   - R5
@@ -219,18 +227,6 @@ allow_hits:
   owner: architecture
   reason: Offensive guard — validates status is RunStatus enum at contract construction
   safety: TypeError raised immediately; prevents str from leaking through to consumers
-- key: contracts/token_usage.py:R1:TokenUsage:from_dict:fp=3ce15b6cf9c7f9ea
-  owner: architecture
-  reason: Tier 3 boundary — from_dict() uses .get() on external LLM API response dicts where keys may be absent
-  safety: Missing keys produce None (unknown); no fabrication
-- key: contracts/token_usage.py:R1:TokenUsage:from_dict:fp=d1323563ca91841e
-  owner: architecture
-  reason: Tier 3 boundary — from_dict() uses .get() on external LLM API response dicts where keys may be absent
-  safety: Missing keys produce None (unknown); no fabrication
-- key: contracts/token_usage.py:R1:TokenUsage:from_dict:fp=576af1367368f2fe
-  owner: architecture
-  reason: Tier 3 boundary — from_dict() uses .get() on external LLM API response dicts for total_tokens
-  safety: Missing keys produce None (unknown); no fabrication
 - key: contracts/schema_contract_factory.py:R1:create_contract_from_config:fp=caa0070eb7edad8e
   owner: feature
   reason: Intentional identity fallback - fields without resolution mapping use normalized name as original name

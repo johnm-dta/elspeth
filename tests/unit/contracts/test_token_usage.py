@@ -308,3 +308,103 @@ class TestTokenUsageRoundTrip:
         deserialized = json.loads(serialized)
         restored = TokenUsage.from_dict(deserialized)
         assert restored == original
+
+
+class TestTokenUsageProviderCacheFields:
+    """Cache-token capture across provider shapes (elspeth-4e79436719 Bug C).
+
+    OpenAI / OpenRouter expose cache hits via the nested
+    ``prompt_tokens_details.cached_tokens`` field. Anthropic exposes
+    ``cache_creation_input_tokens`` and ``cache_read_input_tokens`` as
+    sibling fields on the usage object. Both shapes must land on the
+    canonical ``TokenUsage`` fields so the audit row records what the
+    provider actually reported — never fabricating zero when absent.
+    """
+
+    def test_openai_nested_cached_tokens_shape(self) -> None:
+        usage = TokenUsage.from_dict(
+            {
+                "prompt_tokens": 1200,
+                "completion_tokens": 80,
+                "total_tokens": 1280,
+                "prompt_tokens_details": {"cached_tokens": 1024},
+            }
+        )
+        assert usage.prompt_tokens == 1200
+        assert usage.cached_prompt_tokens == 1024
+        # Anthropic-shape fields stay None when only OpenAI shape is present.
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+    def test_anthropic_sibling_cache_fields_shape(self) -> None:
+        usage = TokenUsage.from_dict(
+            {
+                "prompt_tokens": 8200,
+                "completion_tokens": 120,
+                "cache_creation_input_tokens": 7000,
+                "cache_read_input_tokens": 1100,
+            }
+        )
+        assert usage.cache_creation_input_tokens == 7000
+        assert usage.cache_read_input_tokens == 1100
+        # OpenAI-shape field stays None when only Anthropic shape is present.
+        assert usage.cached_prompt_tokens is None
+
+    def test_canonical_top_level_cached_prompt_tokens_round_trip(self) -> None:
+        """``to_dict`` emits ``cached_prompt_tokens`` at top level — round-trip preserves it."""
+        original = TokenUsage(
+            prompt_tokens=1200,
+            completion_tokens=80,
+            cached_prompt_tokens=1024,
+        )
+        restored = TokenUsage.from_dict(original.to_dict())
+        assert restored == original
+
+    def test_anthropic_round_trip(self) -> None:
+        original = TokenUsage(
+            prompt_tokens=8200,
+            completion_tokens=120,
+            cache_creation_input_tokens=7000,
+            cache_read_input_tokens=1100,
+        )
+        restored = TokenUsage.from_dict(original.to_dict())
+        assert restored == original
+
+    def test_no_cache_fields_returns_none(self) -> None:
+        usage = TokenUsage.from_dict({"prompt_tokens": 100, "completion_tokens": 20})
+        assert usage.cached_prompt_tokens is None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+    def test_negative_cached_tokens_coerced_to_none(self) -> None:
+        """Tier-3 boundary: negative values mean broken provider, not negative cache."""
+        usage = TokenUsage.from_dict(
+            {
+                "prompt_tokens": 1200,
+                "prompt_tokens_details": {"cached_tokens": -5},
+                "cache_creation_input_tokens": -1,
+                "cache_read_input_tokens": "not-an-int",
+            }
+        )
+        assert usage.cached_prompt_tokens is None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+    def test_non_mapping_prompt_tokens_details_ignored(self) -> None:
+        """If prompt_tokens_details is a string or list, treat as no cache info."""
+        usage = TokenUsage.from_dict({"prompt_tokens": 100, "prompt_tokens_details": "garbage"})
+        assert usage.cached_prompt_tokens is None
+
+    def test_to_dict_omits_unset_cache_fields(self) -> None:
+        usage = TokenUsage.known(100, 20)
+        d = usage.to_dict()
+        assert "cached_prompt_tokens" not in d
+        assert "cache_creation_input_tokens" not in d
+        assert "cache_read_input_tokens" not in d
+
+    def test_negative_cached_prompt_tokens_rejected_by_post_init(self) -> None:
+        """Direct construction (Tier 1) refuses negative values."""
+        import pytest
+
+        with pytest.raises(ValueError, match="cached_prompt_tokens must be >= 0"):
+            TokenUsage(prompt_tokens=100, cached_prompt_tokens=-1)

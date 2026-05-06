@@ -136,6 +136,37 @@ def test_l0_module_has_no_upward_imports() -> None:
             assert not ref_module.startswith(prefix), f"composer_llm_audit imports {ref!r} from forbidden module {ref_module}"
 
 
+def test_cache_token_fields_default_to_none() -> None:
+    """Cache token fields default to None — absence is evidence, not zero.
+
+    Per CLAUDE.md fabrication policy and elspeth-4e79436719 §Bug C: a
+    missing provider cache statistic must NOT be coerced to zero. The
+    audit row distinguishes "no cache reported" from "cache reported
+    zero hits" — only the latter is a real provider claim.
+    """
+    call = _make_call()
+    payload = call.to_dict()
+    assert call.cached_prompt_tokens is None
+    assert call.cache_creation_input_tokens is None
+    assert call.cache_read_input_tokens is None
+    assert payload["cached_prompt_tokens"] is None
+    assert payload["cache_creation_input_tokens"] is None
+    assert payload["cache_read_input_tokens"] is None
+
+
+def test_cache_token_fields_round_trip_when_known() -> None:
+    """Cache fields persist through to_dict for both provider shapes."""
+    call = _make_call(
+        cached_prompt_tokens=1024,
+        cache_creation_input_tokens=500,
+        cache_read_input_tokens=900,
+    )
+    payload = call.to_dict()
+    assert payload["cached_prompt_tokens"] == 1024
+    assert payload["cache_creation_input_tokens"] == 500
+    assert payload["cache_read_input_tokens"] == 900
+
+
 def test_recorder_protocol_runtime_check() -> None:
     class _StubRecorder:
         def record_llm_call(self, call: ComposerLLMCall) -> None:

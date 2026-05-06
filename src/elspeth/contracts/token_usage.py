@@ -37,11 +37,30 @@ class TokenUsage:
             if not reported. Preserved when the provider reports only an
             aggregate without a prompt/completion breakdown. Use the
             ``total_tokens`` property for the best available total.
+        cached_prompt_tokens: Subset of ``prompt_tokens`` that the provider
+            reports as served from its prompt cache (OpenAI / OpenRouter
+            ``prompt_tokens_details.cached_tokens`` shape). ``None`` when
+            unreported. Always ``<= prompt_tokens`` when both known.
+        cache_creation_input_tokens: Anthropic write-side cache token count
+            (number of input tokens written into the prompt cache on this
+            call). ``None`` when unreported.
+        cache_read_input_tokens: Anthropic read-side cache token count
+            (number of input tokens served from the prompt cache on this
+            call). ``None`` when unreported.
+
+    Note on provider differences: OpenAI/OpenRouter expose a single
+    ``cached_tokens`` figure inside ``prompt_tokens_details``; Anthropic
+    splits cache hits and misses across two sibling fields. The contract
+    captures both shapes verbatim — no normalization that would flatten
+    the audit record.
     """
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     reported_total: int | None = None
+    cached_prompt_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
         """Validate token counts are non-negative when known.
@@ -53,6 +72,14 @@ class TokenUsage:
         require_int(self.prompt_tokens, "prompt_tokens", optional=True, min_value=0)
         require_int(self.completion_tokens, "completion_tokens", optional=True, min_value=0)
         require_int(self.reported_total, "reported_total", optional=True, min_value=0)
+        require_int(self.cached_prompt_tokens, "cached_prompt_tokens", optional=True, min_value=0)
+        require_int(
+            self.cache_creation_input_tokens,
+            "cache_creation_input_tokens",
+            optional=True,
+            min_value=0,
+        )
+        require_int(self.cache_read_input_tokens, "cache_read_input_tokens", optional=True, min_value=0)
 
     # ------------------------------------------------------------------
     # Derived properties
@@ -94,8 +121,10 @@ class TokenUsage:
         """Convert to a plain dict, omitting unknown (``None``) fields.
 
         Returns ``{}`` for fully unknown, ``{"prompt_tokens": 10}`` for
-        partial, or all three fields when known (reported_total serialized
-        as ``total_tokens``).
+        partial, or all reported fields when known (``reported_total``
+        serialized as ``total_tokens``). Cache fields are emitted under
+        their canonical names so a future ``from_dict`` round-trips them
+        without re-deriving from provider shape.
         """
         result: dict[str, int] = {}
         if self.prompt_tokens is not None:
@@ -104,6 +133,12 @@ class TokenUsage:
             result["completion_tokens"] = self.completion_tokens
         if self.reported_total is not None:
             result["total_tokens"] = self.reported_total
+        if self.cached_prompt_tokens is not None:
+            result["cached_prompt_tokens"] = self.cached_prompt_tokens
+        if self.cache_creation_input_tokens is not None:
+            result["cache_creation_input_tokens"] = self.cache_creation_input_tokens
+        if self.cache_read_input_tokens is not None:
+            result["cache_read_input_tokens"] = self.cache_read_input_tokens
         return result
 
     # ------------------------------------------------------------------
@@ -136,6 +171,17 @@ class TokenUsage:
         - Non-int types (``float``, ``str``, …) → ``None``
         - Empty / non-dict input → fully unknown
 
+        Cache token capture (Tier 3 boundary):
+        - OpenAI / OpenRouter: ``cached_tokens`` lives nested at
+          ``prompt_tokens_details.cached_tokens`` on the provider response,
+          OR can be passed at top level under the canonical
+          ``cached_prompt_tokens`` key (round-trip path).
+        - Anthropic: ``cache_creation_input_tokens`` /
+          ``cache_read_input_tokens`` are sibling fields on the usage object.
+        - When neither provider exposes the relevant field, it stays
+          ``None`` — a missing cache statistic must NOT be coerced to zero
+          (per CLAUDE.md fabrication policy: absence is evidence, not zero).
+
         Args:
             data: Raw dict from an LLM API response, or ``None``/non-dict.
         """
@@ -159,4 +205,36 @@ class TokenUsage:
         )
         total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total >= 0 else None
 
-        return cls(prompt_tokens=prompt, completion_tokens=completion, reported_total=total)
+        # Cache field extraction. Try the canonical top-level form first
+        # (round-trip path), then fall back to the OpenAI nested shape for
+        # the from-provider-response path.
+        cached_prompt = _coerce_nonneg_int(data.get("cached_prompt_tokens"))
+        if cached_prompt is None:
+            details = data.get("prompt_tokens_details")
+            if isinstance(details, Mapping):
+                cached_prompt = _coerce_nonneg_int(details.get("cached_tokens"))
+
+        cache_creation = _coerce_nonneg_int(data.get("cache_creation_input_tokens"))
+        cache_read = _coerce_nonneg_int(data.get("cache_read_input_tokens"))
+
+        return cls(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            reported_total=total,
+            cached_prompt_tokens=cached_prompt,
+            cache_creation_input_tokens=cache_creation,
+            cache_read_input_tokens=cache_read,
+        )
+
+
+def _coerce_nonneg_int(value: Any) -> int | None:
+    """Tier-3 helper: coerce arbitrary input to a non-negative int or ``None``.
+
+    Mirrors the per-field coercion used for ``prompt_tokens`` /
+    ``completion_tokens`` / ``total_tokens`` so cache fields obey the same
+    "absence is evidence, not zero" semantics. ``bool`` is excluded because
+    ``isinstance(True, int)`` is ``True`` in Python.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None

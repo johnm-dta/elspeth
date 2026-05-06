@@ -128,21 +128,48 @@ async def _litellm_acompletion(**kwargs: Any) -> Any:
 
 
 def _token_usage_from_response(response: Any | None) -> TokenUsage:
-    """Normalize provider usage metadata without fabricating missing counts."""
+    """Normalize provider usage metadata without fabricating missing counts.
+
+    Captures provider-reported prompt-cache statistics in addition to the
+    base prompt/completion/total counts. Cache fields are exposed as:
+
+    - OpenAI / OpenRouter: nested ``usage.prompt_tokens_details.cached_tokens``
+    - Anthropic: sibling ``usage.cache_creation_input_tokens`` and
+      ``usage.cache_read_input_tokens``
+
+    All cache fields are read defensively: a non-Mapping ``usage`` whose
+    attributes are missing yields ``None`` rather than a fabricated zero.
+    See elspeth-4e79436719 §Bug C.
+    """
     if response is None:
         return TokenUsage.unknown()
     usage = getattr(response, "usage", None)
     if isinstance(usage, Mapping):
+        details = usage.get("prompt_tokens_details")
         usage_data = {
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
+            "prompt_tokens_details": details if isinstance(details, Mapping) else None,
+            "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+            "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
         }
     else:
+        details_attr = getattr(usage, "prompt_tokens_details", None)
+        if isinstance(details_attr, Mapping):
+            details_payload: Any = details_attr
+        elif details_attr is not None:
+            # OpenAI Pydantic-shaped objects expose cached_tokens as an attribute.
+            details_payload = {"cached_tokens": getattr(details_attr, "cached_tokens", None)}
+        else:
+            details_payload = None
         usage_data = {
             "prompt_tokens": getattr(usage, "prompt_tokens", None),
             "completion_tokens": getattr(usage, "completion_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
+            "prompt_tokens_details": details_payload,
+            "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
+            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
         }
     return TokenUsage.from_dict(usage_data)
 
@@ -186,6 +213,9 @@ def _build_llm_call_record(
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
         total_tokens=usage.total_tokens,
+        cached_prompt_tokens=usage.cached_prompt_tokens,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens,
+        cache_read_input_tokens=usage.cache_read_input_tokens,
         latency_ms=(time.monotonic_ns() - started_ns) // 1_000_000,
         provider_request_id=_safe_provider_request_id(response),
         messages_hash=stable_hash(messages),
@@ -205,42 +235,208 @@ def _attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) ->
     exc_with_calls.llm_calls = recorder.llm_calls
 
 
+# ---------------------------------------------------------------------------
+# Provider prompt-cache markers (elspeth-4e79436719 §Phase 3)
+#
+# Anthropic-family providers (Anthropic direct, OpenRouter Anthropic routing,
+# AWS Bedrock Anthropic, Google Vertex Anthropic) use explicit
+# ``cache_control: {"type": "ephemeral"}`` markers placed on the system
+# message and on the trailing function tool to indicate the static prefix
+# that should be cached for follow-up requests within a session.
+#
+# OpenAI / OpenRouter OpenAI / Azure OpenAI providers use *automatic* prefix
+# caching above a 1024-token threshold and do NOT honor the ``cache_control``
+# field — for them, the marker is silently ignored. We still skip the
+# transform on those providers to keep the wire payload smaller and the
+# audit ``messages_hash`` clean.
+#
+# LiteLLM's Anthropic adapter (verified against
+# ``litellm/llms/anthropic/chat/transformation.py``) accepts cache_control
+# either at the message level OR per-content-block; we use the simpler
+# message-level shape so existing message-construction code in prompts.py
+# stays untouched. Tools accept cache_control either at the tool level OR
+# inside the ``function`` field; we use the tool-level shape for symmetry.
+# ---------------------------------------------------------------------------
+
+
+def _supports_anthropic_prompt_cache_markers(model: str | None) -> bool:
+    """Return True when the configured model honors Anthropic cache_control markers.
+
+    Coverage: Anthropic direct (``anthropic/...``), OpenRouter Anthropic
+    routing (``openrouter/anthropic/...``), AWS Bedrock Anthropic
+    (``bedrock/anthropic.*``), Google Vertex Anthropic
+    (``vertex_ai/claude-*``), and bare ``claude-*`` model identifiers.
+
+    Returns False for OpenAI, Azure OpenAI, Google Gemini, and any model
+    not matched by the prefix heuristics — those providers use automatic
+    prefix caching that doesn't need explicit markers.
+    """
+    if not isinstance(model, str):
+        return False
+    lowered = model.lower()
+    return (
+        lowered.startswith("anthropic/")
+        or lowered.startswith("openrouter/anthropic/")
+        or lowered.startswith("bedrock/anthropic.")
+        or lowered.startswith("vertex_ai/claude-")
+        or "claude-" in lowered
+    )
+
+
+def _apply_anthropic_cache_markers(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+    """Return new messages/tools lists with Anthropic ``cache_control`` markers.
+
+    Behavior:
+    - The first message with ``role == "system"`` receives a top-level
+      ``cache_control: {"type": "ephemeral"}`` field. LiteLLM's Anthropic
+      transform recognizes this and propagates it onto the corresponding
+      ``AnthropicSystemMessageContent`` block on the wire.
+    - The LAST tool in ``tools`` receives the same marker at the tool
+      level. Anthropic caches all tools up to and including the marker,
+      so marking the trailing tool covers the full tools array.
+
+    Inputs are NOT mutated; new lists are returned. Messages and tools
+    other than the marked entries are passed through by reference (their
+    contents are not deep-copied) — this keeps the transform cheap and
+    is safe because the receiver (LiteLLM) does not mutate them.
+    """
+    new_messages: list[dict[str, Any]] = list(messages)
+    for index, message in enumerate(new_messages):
+        if message.get("role") == "system":
+            new_messages[index] = {**message, "cache_control": {"type": "ephemeral"}}
+            break
+
+    new_tools: list[dict[str, Any]] | None = None
+    if tools:
+        new_tools = list(tools)
+        # Cache-key contract: the marker is placed on the trailing tool because
+        # Anthropic caches "all content up to and including the marker." Tool
+        # ORDER is therefore part of the cache key — a reordering of
+        # ``get_tool_definitions()`` would silently shift which tool is "last"
+        # and invalidate the prompt cache for every follow-up turn. The order
+        # contract is locked by ``TestToolListOrderIsCacheKeyContract`` in
+        # ``tests/unit/web/composer/test_provider_cache_markers.py``.
+        new_tools[-1] = {**new_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+    return new_messages, new_tools
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledRequiredPath:
+    """One schema-required path with conditional-on-presence semantics.
+
+    JSON-Schema required semantics: a nested object's ``required`` list
+    only applies when that object itself is present. The ``optional_ancestor``
+    field captures the deepest path segment whose containing object is
+    optional at its parent level — when any ancestor on that path is absent
+    in the value, the inner ``path`` check short-circuits.
+
+    For paths that are required at every level of the tree,
+    ``optional_ancestor`` is the empty tuple and the path is enforced
+    unconditionally.
+    """
+
+    path: RequiredPath
+    optional_ancestor: RequiredPath = ()
+
+
 def _collect_required_paths(
     schema: Mapping[str, object],
     prefix: RequiredPath = (),
-) -> tuple[RequiredPath, ...]:
-    """Compile schema-declared required fields into dotted/indexed paths.
+    optional_ancestor: RequiredPath = (),
+) -> tuple[_CompiledRequiredPath, ...]:
+    """Compile schema-declared required fields into compiled-path records.
 
     The schema tree is system-owned tool metadata, so direct key access is
     intentional: a malformed tool definition should crash at import time.
+
+    Each emitted :class:`_CompiledRequiredPath` carries the deepest optional
+    ancestor seen on the way down. When the walker descends into a property
+    that is NOT in the parent's ``required`` list, that property becomes the
+    new ``optional_ancestor`` for everything emitted below it; the validator
+    then short-circuits the inner check when that ancestor is absent in the
+    value (correct JSON-Schema semantics: nested ``required`` applies only
+    when the parent is present). Required-at-every-level paths keep an empty
+    ``optional_ancestor`` and are enforced unconditionally.
     """
     schema_type = cast(str, schema["type"])
 
     if schema_type == "object":
-        required_paths: list[RequiredPath] = []
+        compiled: list[_CompiledRequiredPath] = []
+        required_fields: set[str] = set()
         if "required" in schema:
-            required_fields = cast(list[str], schema["required"])
-            required_paths.extend((*prefix, field) for field in required_fields)
+            raw_required = cast(list[str], schema["required"])
+            required_fields = set(raw_required)
+            for field in raw_required:
+                compiled.append(_CompiledRequiredPath(path=(*prefix, field), optional_ancestor=optional_ancestor))
         if "properties" in schema:
             properties = cast(Mapping[str, Mapping[str, object]], schema["properties"])
             for key, child_schema in properties.items():
-                required_paths.extend(_collect_required_paths(child_schema, (*prefix, key)))
-        return tuple(required_paths)
+                child_prefix = (*prefix, key)
+                # If this property is NOT required at the current level, it
+                # becomes the deepest optional ancestor for any nested-required
+                # paths emitted below. If it IS required, propagate whatever
+                # ancestor we already had (which is itself a required-at-this
+                # -level path or empty).
+                child_ancestor = optional_ancestor if key in required_fields else child_prefix
+                compiled.extend(_collect_required_paths(child_schema, child_prefix, child_ancestor))
+        return tuple(compiled)
 
     if schema_type == "array" and "items" in schema:
         item_schema = cast(Mapping[str, object], schema["items"])
-        return _collect_required_paths(item_schema, (*prefix, _ARRAY_ITEM_SEGMENT))
+        # Array items inherit the array's optional_ancestor: required fields
+        # inside an item only matter if the array itself is present (and per
+        # _find_missing_path_instances semantics, an empty array produces no
+        # missing-path entries).
+        return _collect_required_paths(item_schema, (*prefix, _ARRAY_ITEM_SEGMENT), optional_ancestor)
 
     return ()
 
 
-def _build_tool_required_paths_index() -> dict[str, tuple[RequiredPath, ...]]:
+def _build_tool_required_paths_index() -> dict[str, tuple[_CompiledRequiredPath, ...]]:
     """Build a lookup of required argument paths per tool definition."""
-    index: dict[str, tuple[RequiredPath, ...]] = {}
+    index: dict[str, tuple[_CompiledRequiredPath, ...]] = {}
     for defn in get_tool_definitions():
         parameters = cast(Mapping[str, object], defn["parameters"])
         index[defn["name"]] = _collect_required_paths(parameters)
     return index
+
+
+def _optional_ancestor_present(value: object, ancestor: RequiredPath) -> bool:
+    """Walk down ``value`` along ``ancestor``; return False as soon as a segment is absent.
+
+    Empty ``ancestor`` is the always-required case — treated as present.
+
+    Today ``_collect_required_paths`` only sets ``optional_ancestor`` to a new
+    path when descending into an OBJECT property that's not in ``required``;
+    descending into array items propagates the existing ancestor unchanged.
+    So array segments never appear in ``optional_ancestor`` under the current
+    schema set. A future schema with an optional sub-object inside array items
+    (e.g., ``tags: array<{ details?: { name: required } }>``) WOULD produce
+    such an ancestor, and the all-or-nothing semantics here can't express
+    "present in some items, absent in others." Per CLAUDE.md offensive
+    programming: crash loudly with a diagnostic that points the maintainer at
+    the extension site, rather than silently producing wrong validation.
+    """
+    if not ancestor:
+        return True
+    cursor: object = value
+    for segment in ancestor:
+        if segment == _ARRAY_ITEM_SEGMENT:
+            raise AssertionError(
+                "Array-segment in optional_ancestor is not yet supported by this walker. "
+                f"Saw ancestor={ancestor!r}. To handle optional sub-objects inside array "
+                "items, extend _find_missing_required_paths to evaluate ancestor presence "
+                "per-array-item (rather than once globally) and update this walker to "
+                "descend through array segments accordingly."
+            )
+        if not isinstance(cursor, Mapping) or segment not in cursor:
+            return False
+        cursor = cursor[segment]
+    return True
 
 
 def _find_missing_path_instances(
@@ -279,16 +475,23 @@ def _find_missing_path_instances(
 
 def _find_missing_required_paths(
     value: object,
-    required_paths: tuple[RequiredPath, ...],
+    required_paths: tuple[_CompiledRequiredPath, ...],
 ) -> list[str]:
-    """Return dotted/indexed paths for missing schema-required fields."""
+    """Return dotted/indexed paths for missing schema-required fields.
+
+    Skips any compiled path whose ``optional_ancestor`` is absent in the
+    value: that mirrors JSON-Schema semantics where nested ``required``
+    only applies when the containing optional object is itself present.
+    """
     missing_paths: list[str] = []
-    for required_path in required_paths:
-        missing_paths.extend(_find_missing_path_instances(value, required_path))
+    for compiled in required_paths:
+        if not _optional_ancestor_present(value, compiled.optional_ancestor):
+            continue
+        missing_paths.extend(_find_missing_path_instances(value, compiled.path))
     return missing_paths
 
 
-_TOOL_REQUIRED_PATHS: dict[str, tuple[RequiredPath, ...]] = _build_tool_required_paths_index()
+_TOOL_REQUIRED_PATHS: dict[str, tuple[_CompiledRequiredPath, ...]] = _build_tool_required_paths_index()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1538,9 +1741,21 @@ class ComposerServiceImpl:
         timeout: float,
         recorder: BufferingRecorder | None,
     ) -> Any:
-        """Call the composer LLM once and record an audit sidecar."""
+        """Call the composer LLM once and record an audit sidecar.
+
+        For Anthropic-family providers, ``cache_control`` markers are
+        applied to the system message and the trailing tool before the
+        call. The transformed payload is what flows to LiteLLM and what
+        the audit ``messages_hash`` / ``tools_spec_hash`` record — the
+        hash is over the bytes actually sent, so the audit row is
+        truthful about the wire payload (elspeth-4e79436719 §Phase 3).
+        """
         from litellm.exceptions import APIError as LiteLLMAPIError
         from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+
+        if _supports_anthropic_prompt_cache_markers(self._model):
+            messages, tools_or_none = _apply_anthropic_cache_markers(messages, tools)
+            tools = tools_or_none if tools_or_none is not None else tools
 
         started_at = datetime.now(UTC)
         started_ns = time.monotonic_ns()

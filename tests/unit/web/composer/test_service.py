@@ -858,8 +858,14 @@ class TestComposerErrorHandling:
         assert result.message == "Fixed."
 
     @pytest.mark.asyncio
-    async def test_malformed_set_pipeline_nested_required_field_returns_error(self) -> None:
-        """Nested required fields in set_pipeline stay recoverable tool errors."""
+    async def test_malformed_set_pipeline_missing_top_level_required_field_returns_error(self) -> None:
+        """Top-level required field omission in set_pipeline returns a Tier-3 arg error.
+
+        Renamed from test_malformed_set_pipeline_nested_required_field_returns_error
+        — the body always tested top-level ``source.plugin`` omission, not a nested
+        required field. Coverage of nested-optional + inner-required semantics lives
+        in the two tests below.
+        """
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -915,6 +921,162 @@ class TestComposerErrorHandling:
         error_content = json.loads(tool_msg["content"])
         assert "source.plugin" in error_content["error"]
         assert "missing required" in error_content["error"].lower()
+        # Regression guard: the conditional-on-presence walker must NOT
+        # surface false-positive errors for the optional ``source.inline_blob``
+        # branch when no inline blob was supplied. See elspeth-4e79436719 §Bug A.
+        assert "inline_blob" not in error_content["error"]
+
+    @pytest.mark.asyncio
+    async def test_set_pipeline_without_inline_blob_passes_predispatch_validation(self) -> None:
+        """No-inline set_pipeline payloads must reach the handler.
+
+        Regression guard for elspeth-4e79436719 Bug A: the required-paths
+        walker previously lifted ``source.inline_blob.{filename,mime_type,content}``
+        into top-level required paths because it recursed into nested
+        ``properties`` blocks unconditionally — even when the containing
+        property (``inline_blob``) was optional at its parent. Correct
+        JSON-Schema semantics: nested ``required`` applies only when the
+        containing object is present in the value.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        good_call = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_ok",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {
+                            "plugin": "csv",
+                            "on_success": "t1",
+                            "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                        },
+                        "nodes": [
+                            {
+                                "id": "t1",
+                                "node_type": "transform",
+                                "plugin": "uppercase",
+                                "input": "main",
+                                "on_success": "main",
+                                "options": {},
+                            }
+                        ],
+                        "edges": [
+                            {
+                                "id": "e1",
+                                "from_node": "source",
+                                "to_node": "t1",
+                                "edge_type": "on_success",
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "sink_name": "main",
+                                "plugin": "csv",
+                                "options": {"path": "/data/out.csv", "schema": {"mode": "observed"}},
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        text = _make_llm_response(content="Pipeline ready.")
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [good_call, text]
+            await service.compose("Setup", [], state)
+
+        # The pre-dispatch validator must not have rejected the call.
+        # Verify by inspecting the tool-result message content: the
+        # MissingRequiredPaths code path produces a JSON object whose
+        # ``error`` field starts with ``Tool 'set_pipeline' missing required
+        # argument(s):``. A no-inline payload must not trigger that path,
+        # regardless of what the tool handler returns afterwards.
+        tool_msg = mock_llm.call_args_list[1][0][0][-1]
+        assert tool_msg["role"] == "tool"
+        try:
+            error_content = json.loads(tool_msg["content"])
+            error_text = error_content.get("error", "") if isinstance(error_content, dict) else ""
+        except json.JSONDecodeError:
+            error_text = ""
+        assert "missing required argument" not in error_text.lower()
+        assert "inline_blob" not in error_text
+
+    @pytest.mark.asyncio
+    async def test_set_pipeline_with_partial_inline_blob_returns_tier3_arg_error(self) -> None:
+        """When ``inline_blob`` is present but incomplete, the inner required fields ARE enforced.
+
+        Conditional-on-presence semantics: an absent optional object skips
+        its inner ``required`` checks; a present-but-incomplete optional
+        object surfaces them as Tier-3 arg errors. See elspeth-4e79436719
+        §Bug A.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        partial_call = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_partial",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {
+                            "plugin": "csv",
+                            "on_success": "t1",
+                            "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                            "inline_blob": {"filename": "data.csv"},
+                        },
+                        "nodes": [
+                            {
+                                "id": "t1",
+                                "node_type": "transform",
+                                "plugin": "uppercase",
+                                "input": "main",
+                                "on_success": "main",
+                                "options": {},
+                            }
+                        ],
+                        "edges": [
+                            {
+                                "id": "e1",
+                                "from_node": "source",
+                                "to_node": "t1",
+                                "edge_type": "on_success",
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "sink_name": "main",
+                                "plugin": "csv",
+                                "options": {"path": "/data/out.csv", "schema": {"mode": "observed"}},
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        text = _make_llm_response(content="Adjusted.")
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [partial_call, text]
+            result = await service.compose("Setup", [], state)
+
+        assert result.message == "Adjusted."
+        tool_msg = mock_llm.call_args_list[1][0][0][-1]
+        error_content = json.loads(tool_msg["content"])
+        assert "source.inline_blob.mime_type" in error_content["error"]
+        assert "source.inline_blob.content" in error_content["error"]
+        # filename WAS supplied — must not be reported.
+        assert "source.inline_blob.filename" not in error_content["error"]
 
     @pytest.mark.asyncio
     async def test_internal_key_error_is_not_swallowed(self) -> None:
@@ -1064,6 +1226,120 @@ class TestComposerErrorHandling:
         tool_msg = mock_llm.call_args_list[1][0][0][-1]
         error_content = json.loads(tool_msg["content"])
         assert "arguments must be a JSON object" in error_content["error"]
+
+
+class TestProviderCacheTokenAudit:
+    """Audit-write capture of provider prompt-cache statistics (elspeth-4e79436719 Bug C).
+
+    Provider responses can carry cache-hit information in two distinct
+    shapes:
+    - OpenAI / OpenRouter: ``usage.prompt_tokens_details.cached_tokens``
+    - Anthropic: ``usage.cache_creation_input_tokens`` and
+      ``usage.cache_read_input_tokens`` as siblings on usage
+
+    Both must land on the ``ComposerLLMCall`` audit record with their
+    canonical names, so the audit DB records what the provider actually
+    reported. A missing field must remain ``None`` per the
+    "absence as evidence" rule from CLAUDE.md.
+    """
+
+    @staticmethod
+    def _response_with_usage(usage: dict[str, Any]) -> FakeLLMResponse:
+        """Build a fake response carrying a usage object as a Mapping.
+
+        FakeLLMResponse only carries .choices; add .usage so the audit
+        extractor's Mapping branch fires. Using a separate dataclass keeps
+        the typed FakeLLMResponse intact for the rest of the test suite.
+        """
+
+        @dataclass
+        class FakeResponseWithUsage:
+            choices: list[FakeChoice]
+            usage: dict[str, Any]
+            model: str = "openrouter/openai/gpt-5.5"
+            id: str = "chatcmpl-test"
+
+        text = _make_llm_response(content="Done.")
+        return FakeResponseWithUsage(choices=text.choices, usage=usage)  # type: ignore[return-value]
+
+    @pytest.mark.asyncio
+    async def test_openai_nested_cached_tokens_lands_on_audit_record(self) -> None:
+        from elspeth.web.composer.service import _token_usage_from_response
+
+        response = self._response_with_usage(
+            {
+                "prompt_tokens": 1200,
+                "completion_tokens": 80,
+                "total_tokens": 1280,
+                "prompt_tokens_details": {"cached_tokens": 1024},
+            }
+        )
+        usage = _token_usage_from_response(response)
+        assert usage.prompt_tokens == 1200
+        assert usage.cached_prompt_tokens == 1024
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_anthropic_sibling_cache_fields_land_on_audit_record(self) -> None:
+        from elspeth.web.composer.service import _token_usage_from_response
+
+        response = self._response_with_usage(
+            {
+                "prompt_tokens": 8200,
+                "completion_tokens": 120,
+                "cache_creation_input_tokens": 7000,
+                "cache_read_input_tokens": 1100,
+            }
+        )
+        usage = _token_usage_from_response(response)
+        assert usage.cache_creation_input_tokens == 7000
+        assert usage.cache_read_input_tokens == 1100
+        assert usage.cached_prompt_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_no_cache_metadata_leaves_fields_none(self) -> None:
+        """Absent cache metadata must NOT be fabricated to zero."""
+        from elspeth.web.composer.service import _token_usage_from_response
+
+        response = self._response_with_usage({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})
+        usage = _token_usage_from_response(response)
+        assert usage.cached_prompt_tokens is None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_cache_fields_propagate_through_compose_to_llm_call_record(self) -> None:
+        """End-to-end: cache fields appear on the buffered ComposerLLMCall record.
+
+        Patches the LLM call to return a response with OpenAI-shape cache
+        metadata, then checks the recorded ComposerLLMCall on the
+        ``ComposerResult.llm_calls`` tuple.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        response = self._response_with_usage(
+            {
+                "prompt_tokens": 500,
+                "completion_tokens": 12,
+                "total_tokens": 512,
+                "prompt_tokens_details": {"cached_tokens": 256},
+            }
+        )
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = response
+            result = await service.compose("Hi", [], state)
+
+        assert len(result.llm_calls) == 1
+        call_record = result.llm_calls[0]
+        assert call_record.prompt_tokens == 500
+        assert call_record.cached_prompt_tokens == 256
+        assert call_record.cache_creation_input_tokens is None
+        assert call_record.cache_read_input_tokens is None
 
 
 class TestBuildMessages:

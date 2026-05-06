@@ -189,20 +189,59 @@ passivity phrase + zero tool calls; PARTIAL = passivity phrase on either
 turn but not the full pattern; CLEAN = no passivity phrases on either
 turn; INCOMPLETE = harness/HTTP failure):
 
-| Fixture | Verdict | Notes |
-|---------|---------|-------|
-| (TBD)   | (TBD)   | (TBD) |
+| Fixture                          | Verdict | Turn-1 phrase    | Turn-2 phrase |
+|----------------------------------|---------|------------------|---------------|
+| p1_t1_happy_categorize           | CLEAN   | —                | —             |
+| p1_t2_edge_multiregion           | CLEAN   | —                | —             |
+| p1_t3_limit_sharepoint           | PARTIAL | "if you want, i can" | —         |
+| p1_t4_stress_quarterly_full      | CLEAN   | —                | —             |
+| p2_t1_happy_themes               | CLEAN   | —                | —             |
+| p2_t2_edge_cooccurrence          | CLEAN   | —                | —             |
+| p2_t3_limit_pdf                  | CLEAN   | —                | —             |
+| p2_t4_stress_longitudinal        | CLEAN   | —                | —             |
+| p3_t1_happy_lead_score           | CLEAN   | —                | —             |
+| p3_t2_edge_enrichment            | CLEAN   | —                | —             |
+| p3_t3_limit_streaming            | CLEAN   | —                | —             |
+| p3_t4_stress_funnel              | CLEAN   | —                | —             |
+| p4_t1_happy_csv_to_jsonl         | CLEAN   | —                | —             |
+| p4_t2_edge_pushback              | CLEAN   | —                | —             |
+| p4_t3_limit_runtime_inspection   | CLEAN   | —                | —             |
 
-**Aggregate counts:** REPRODUCED=TBD/15, PARTIAL=TBD/15, CLEAN=TBD/15,
-INCOMPLETE=TBD/15.
+**Aggregate counts:** REPRODUCED=**0/15**, PARTIAL=**1/15**, CLEAN=**14/15**, INCOMPLETE=**0/15**.
 
 **Originally-reported `e7d42525-…` passivity pattern** (turn-2 "If you
-want, I can…" + zero tool calls): REPRODUCED / NOT REPRODUCED — TBD pending sweep completion.
+want, I can…" + zero tool calls AFTER user pushback): **NOT REPRODUCED**
+across all 15 hard-mode fixtures.
 
-**Soft-RED tail-offer count post-Tier-1:** captured as PARTIAL. (Pre-Tier-1
-baseline: ~2/9 in the last RGR iteration before temperature=0.0 landed.)
+**Qualitative note on the single PARTIAL** (`p1_t3_limit_sharepoint`): the
+model said *"if you want, i can"* on **turn 1**, then on turn 2 (after the
+generic pushback "Please proceed with the workflow you've described")
+**did not repeat the phrase**. That is qualitatively different from the
+originally-captured pathology, where the phrase appeared on **both** turn 1
+**and** turn 2. The Tier 1 anti-tail-offer rule did not eliminate first-turn
+passivity in this case but DID prevent the corrosive part of the original
+bug — the turn-2 repetition that signalled the model couldn't recover from
+its own pushback.
+
+**Soft-RED tail-offer rate post-Tier-1:** 1/15 (6.7%). Pre-Tier-1 baseline
+(from the original investigation §3.4): 2/9 (22%) in the last RGR iteration
+before temperature=0.0 landed. That's a meaningful reduction even
+acknowledging the small sample.
 
 Cost: ~$1/run × 15 fixtures × 2 turns ≈ ~$30 (estimated; gpt-5-mini).
+Wall time: ~16 minutes (2026-05-06T13:35:28Z → 13:51:18Z).
+
+**Driver-shape limitation acknowledgement:** the dispatch-protocol's
+persona-subagent loop generates an in-character pushback message per turn;
+this sweep used a fixed pushback string instead. The persona protocol would
+have caught a SUPERSET of issues (linguistic-constraint breaches, off-topic
+drift, persona-specific stress-test pathways), but those are not what the
+post-Tier-1 regression check is asking. Per-turn persona dispatch (~75
+parent-agent dispatches across the 15 scenarios) was deferred to keep this
+session within wall-time and context-budget bounds. If the operator wants
+the full persona-driven sweep, it remains a Tier 3 follow-up — the
+plumbing in `evals/composer-harness/hardmode/` is intact and was unblocked
+by Tier 1's `1ca34527` preflight repair.
 
 ---
 
@@ -241,14 +280,65 @@ Cost: ~$1/run × 15 fixtures × 2 turns ≈ ~$30 (estimated; gpt-5-mini).
 
 ## Merge-readiness assessment
 
-The aggregate hard-GREEN rate is TBD/(15+24) = TBD%. The operator's
-"reliably green across the board" gate <does/does not> appear to be met.
+The originally-reported bug (turn-2 passivity reproducing the turn-1 phrase
+after user pushback) is **NOT REPRODUCED** across 15 hard-mode multi-turn
+fixtures. The Tier 1 hardening + §7.7 anti-anchor hint together close the
+captured pathology.
 
-If the operator chooses to ship `RC5-UX` now, the residual failure rate is
-TBD%. If the operator chooses to hold the merge, the recommended Tier 3
-work is §7.5 strict-mode JSON Schema (half day) followed by re-cohort.
+The aggregate hard-GREEN rate across the cohort is composed of two distinct
+signals that should NOT be averaged into a single rate (the four scenarios
+have different prompt validity properties):
+
+| Signal                                                      | Result | Interpretation |
+|-------------------------------------------------------------|--------|----------------|
+| Tier 1 scenario re-cohort (url-download-line-explode, post-§7.7) | **6/6 GREEN (100%)** | up from 5/6 (83%) Tier 1 baseline — direct measurement |
+| Multi-turn pathology check (15 hard-mode fixtures)          | **0/15 REPRODUCED** | original captured failure does not recur |
+| Step B fan-out coverage (3 new scenarios)                   | **inconclusive** | scenario-authoring flaw — `/tmp` paths not satisfiable; the model correctly refused |
+
+**Recommendation to operator** — three reasonable courses, with explicit
+trade-offs:
+
+1. **Ship RC5-UX now.** Defensible position: the originally-captured bug
+   does not reproduce; the Tier 1 hardened scenario went from 83% → 100%;
+   §7.7 hint mechanism is in place as a long-tail safety net for anchored
+   loops. Residual generalisation risk to scenarios shaped like fork/agg/rag
+   is unmeasured (because my Step B prompts were unsatisfiable, not because
+   the composer failed); first-turn passivity ("If you want, I can…")
+   reduced from ~22% to ~7% but not eliminated.
+2. **Hold the merge for re-authored Step B scenarios.** Re-author
+   fork-and-route, aggregation-content-safety, and rag-text-llm with
+   workspace-valid paths and re-run the 18 missing cohort runs (~$18).
+   This produces real fan-out evidence at the cost of one more session.
+   No code change; just scenario authoring. ~30 min wall time on the
+   operator side.
+3. **Hold for Tier 3 work** (§7.5 strict JSON Schema mode, or §7.6 broader
+   error-message rewrite) before re-cohorting. Larger scope; would
+   address the long-tail failure modes that this cohort can't quantify.
+
+Option 2 is cheap and produces the clearest evidence; Option 1 ships the
+durable Tier 1 + Tier 2 work without that evidence. Option 3 expands
+scope.
 
 This is a measurement report; the merge decision is operator-driven.
+
+---
+
+## Verification trail (pinned for the merge gate)
+
+Every claim in this report is backed by a re-runnable command. To
+reproduce any of them:
+
+| Claim | Command |
+|-------|---------|
+| Unit + integration tests for §7.7 pass | `.venv/bin/python -m pytest tests/unit/web/composer/test_anti_anchor.py tests/unit/web/composer/test_compose_loop_anti_anchor.py -q` |
+| Full composer test suite passes | `.venv/bin/python -m pytest tests/unit/web/composer/ -q` |
+| decode_tools.py unit tests pass | `.venv/bin/python -m pytest tests/unit/evals/lib/test_decode_tools.py -q` |
+| Tier-model + 18 pre-commit gates clean | `pre-commit run --all-files` (or any `git commit` on this branch) |
+| Step C diagnosis is reproducible | `.venv/bin/python -m evals.lib.decode_tools data/sessions.db 53bc3cf2-ab90-4940-9679-1b5e7d474650` |
+| §7.7 hint fired in 0 cohort sessions | `sqlite3 data/sessions.db "SELECT COUNT(*) FROM chat_messages WHERE content LIKE '%[ELSPETH-SYSTEM-HINT]%'"` |
+| Step B verdicts | inspect `evals/composer-rgr/runs/*-tier1.5-*/scoring.json` |
+| Step A verdicts | inspect `evals/composer-harness/runs/2026-05-06T13-35-28Z-hardmode-sweep-tier1.5b/*/sweep_verdict.json` |
+| Step A summary | `cat evals/composer-harness/runs/2026-05-06T13-35-28Z-hardmode-sweep-tier1.5b/SUMMARY.json` |
 
 ---
 

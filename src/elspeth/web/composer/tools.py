@@ -405,7 +405,17 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "plugin": {"type": "string", "description": "Source plugin name."},
-                    "on_success": {"type": "string", "description": "Connection name for downstream."},
+                    "on_success": {
+                        "type": "string",
+                        "description": (
+                            "Connection-name string this source PUBLISHES. Some downstream consumer "
+                            "(transform 'input' or output 'sink_name') MUST equal this value for wiring "
+                            "to resolve. The runtime matches strings, not graph topology — pick any "
+                            "name unique within the pipeline; it does not need to be the downstream "
+                            "node's id."
+                        ),
+                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+                    },
                     "options": {"type": "object", "description": "Plugin-specific config."},
                     "on_validation_failure": {
                         "type": "string",
@@ -438,10 +448,25 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                         "type": ["string", "null"],
                         "description": "Plugin name. Required for transform/aggregation. Null for gate/coalesce.",
                     },
-                    "input": {"type": "string", "description": "Input connection name."},
+                    "input": {
+                        "type": "string",
+                        "description": (
+                            "Connection-name string this node CONSUMES. MUST equal the value of some "
+                            "upstream's on_success (or routes value, or on_error) field. NOT the upstream "
+                            "node's id — connections are matched by string, not by graph topology. "
+                            "Example: if source.on_success='raw_url_rows', this node sets input='raw_url_rows'."
+                        ),
+                        "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
+                    },
                     "on_success": {
                         "type": ["string", "null"],
-                        "description": "Output connection. Required for transform/aggregation/coalesce. Null for gates (routing is via condition/routes).",
+                        "description": (
+                            "Output connection. Required for transform/aggregation/coalesce. Null for "
+                            "gates (routing is via condition/routes). When set, this is the connection-name "
+                            "string the node PUBLISHES — some downstream input/sink_name MUST equal this "
+                            "value. The runtime matches strings, not topology."
+                        ),
+                        "examples": ["fetched_text", "scored_rows", "lines_out"],
                     },
                     "on_error": {"type": ["string", "null"], "description": "Error output connection (transform/aggregation only)."},
                     "options": {"type": "object", "description": "Plugin-specific config (transform/aggregation only)."},
@@ -560,7 +585,17 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sink_name": {"type": "string", "description": "Sink name (connection point for edges/routes)."},
+                    "sink_name": {
+                        "type": "string",
+                        "description": (
+                            "Sink name. This string is BOTH the sink's identifier (used by "
+                            "patch_output_options/remove_output) AND the connection-name the sink "
+                            "consumes — it MUST equal some upstream's on_success value. Pick a name "
+                            "describing the data being written; it does not need to match an upstream "
+                            "node's id."
+                        ),
+                        "examples": ["lines_out", "scored_results", "errors_quarantine"],
+                    },
                     "plugin": {"type": "string", "description": "Sink plugin name (e.g. 'csv', 'json')."},
                     "options": {
                         "type": "object",
@@ -663,7 +698,15 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                         "properties": {
                             "plugin": {"type": "string"},
                             "options": {"type": "object"},
-                            "on_success": {"type": "string"},
+                            "on_success": {
+                                "type": "string",
+                                "description": (
+                                    "Connection-name string the source PUBLISHES. Some downstream "
+                                    "consumer (node 'input' or output 'sink_name') MUST equal this. "
+                                    "Connections match by string, not by node id."
+                                ),
+                                "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+                            },
                             "on_validation_failure": {
                                 "type": "string",
                                 "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
@@ -704,8 +747,25 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                 "id": {"type": "string"},
                                 "node_type": {"type": "string"},
                                 "plugin": {"type": "string"},
-                                "input": {"type": "string"},
-                                "on_success": {"type": "string"},
+                                "input": {
+                                    "type": "string",
+                                    "description": (
+                                        "Connection-name string this node CONSUMES. MUST equal some "
+                                        "upstream's on_success/routes value/on_error. NOT the upstream "
+                                        "node's id. If source.on_success='raw_url_rows', this node sets "
+                                        "input='raw_url_rows'."
+                                    ),
+                                    "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
+                                },
+                                "on_success": {
+                                    "type": "string",
+                                    "description": (
+                                        "Connection-name string this node PUBLISHES (transform/aggregation/"
+                                        "coalesce). Some downstream input/sink_name MUST equal this. Omit "
+                                        "for gates (routing is via condition+routes)."
+                                    ),
+                                    "examples": ["fetched_text", "scored_rows", "lines_out"],
+                                },
                                 "on_error": {"type": "string"},
                                 "options": {"type": "object"},
                                 "condition": {"type": "string"},
@@ -742,7 +802,16 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "sink_name": {"type": "string"},
+                                "sink_name": {
+                                    "type": "string",
+                                    "description": (
+                                        "Sink name. BOTH the sink's identifier AND the connection-name "
+                                        "the sink consumes — it MUST equal some upstream's on_success "
+                                        "value. Pick a descriptive name; it does not need to match an "
+                                        "upstream node's id."
+                                    ),
+                                    "examples": ["lines_out", "scored_results", "errors_quarantine"],
+                                },
                                 "plugin": {"type": "string"},
                                 "options": {"type": "object"},
                                 "on_write_failure": {"type": "string"},
@@ -899,7 +968,16 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "blob_id": {"type": "string", "description": "Blob ID to use as source."},
                     "plugin": {"type": "string", "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted."},
-                    "on_success": {"type": "string", "description": "Node ID to route rows to after source."},
+                    "on_success": {
+                        "type": "string",
+                        "description": (
+                            "Connection-name string the source PUBLISHES. Some downstream consumer "
+                            "(node 'input' or output 'sink_name') MUST equal this value. Despite the "
+                            "field name, this is NOT a node id — connections match by string, not by "
+                            "topology."
+                        ),
+                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+                    },
                     "on_validation_failure": {
                         "type": "string",
                         "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "

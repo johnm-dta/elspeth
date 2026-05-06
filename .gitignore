@@ -58,6 +58,9 @@ lib64/
 # the generic `lib/` rule above would otherwise hide it.
 !evals/lib/
 !evals/lib/**
+# Tests for evals/lib mirror the source tree; same hide-by-default issue.
+!tests/unit/evals/lib/
+!tests/unit/evals/lib/**
 parts/
 sdist/
 var/

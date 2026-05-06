@@ -78,6 +78,15 @@ Each run lands in `runs/<utc-ts>-<label>/` with `messages.json`,
 `state.json`, `scoring.json`, `session_id.txt`, and a session URL printed to
 stderr.
 
+### Diagnostic helper
+
+`evals/lib/decode_tools.py` decodes the chronological `chat_messages.tool_calls`
+audit envelopes for a session — useful when triaging a RED run. CLI:
+
+```bash
+.venv/bin/python -m evals.lib.decode_tools data/sessions.db "$(cat runs/<run-dir>/session_id.txt)"
+```
+
 ## Restarting matters
 
 The skill is read once at process start (`prompts.py:23` —
@@ -133,10 +142,9 @@ as a stalling primary response) **did not reproduce** in any post-edit run
 
 - Multi-turn conversations. Real failures often emerge after user pushback;
   this single-turn harness can't reach those. Use the older
-  `evals/composer-harness/` for multi-turn persona scenarios (note: that
-  harness's preflight uses `/api/login` and `/api/catalog` which have moved
-  in the current API — `lib/preflight.sh` will need an endpoint update
-  before it can pass `--doctor`).
+  `evals/composer-harness/` for multi-turn persona scenarios (its shared
+  `evals/lib/preflight.sh` was repaired in commit `1ca34527` to use
+  `/api/catalog/sources`, so `--doctor` now passes).
 - Different scenarios. One opening prompt covers URL+download+line-explode;
   other failure modes (e.g. fork-and-route, conflicting consumer
   requirements, content-safety pipelines) need their own scenarios. Add

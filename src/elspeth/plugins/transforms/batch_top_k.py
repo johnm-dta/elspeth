@@ -74,7 +74,7 @@ class BatchTopK(BaseTransform):
 
     name = "batch_top_k"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f079e154330a348a"
+    source_file_hash: str | None = "sha256:8e4eae5cb568af97"
     config_model = BatchTopKConfig
     is_batch_aware = True
 
@@ -171,8 +171,15 @@ class BatchTopK(BaseTransform):
 
     @staticmethod
     def _increment_frequency(entries: list[_FrequencyEntry], value: TopKValue) -> None:
+        # Type-identity gate: Python's value equality treats True/1, 1/1.0, and
+        # 0/False as equal (and hashes them identically), which would merge
+        # type-distinct scalars from the configured TopKValue union into one
+        # bucket. The audit trail must preserve the representational identity
+        # the upstream emitted, so use `type(...) is type(...)` (NOT
+        # isinstance — bool is a subclass of int) before the equality check.
+        value_type = type(value)
         for entry in entries:
-            if entry.value == value:
+            if type(entry.value) is value_type and entry.value == value:
                 entry.count += 1
                 return
         entries.append(_FrequencyEntry(value=value, count=1))

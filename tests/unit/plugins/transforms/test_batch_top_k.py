@@ -97,6 +97,96 @@ class TestBatchTopK:
         with pytest.raises(TypeError, match="must be a scalar top-k value"):
             transform.process([_make_row({"label": ["a"]})], ctx)
 
+    def test_bool_and_int_do_not_collide(self, ctx: PluginContext) -> None:
+        # Python: True == 1 and hash(True) == hash(1). Treating them as the same
+        # frequency bucket merges semantically distinct scalars, undercounts
+        # distinct_count, and freezes top_values[].value to whichever type
+        # appeared first in the batch.
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "flag", "k": 4})
+        rows = [
+            _make_row({"flag": True}),
+            _make_row({"flag": 1}),
+            _make_row({"flag": True}),
+            _make_row({"flag": 1}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["distinct_count"] == 2
+        top_values_by_value = {(type(tv["value"]).__name__, tv["value"]): tv for tv in deep_thaw(result.row["top_values"])}
+        assert ("bool", True) in top_values_by_value
+        assert ("int", 1) in top_values_by_value
+        assert top_values_by_value[("bool", True)]["count"] == 2
+        assert top_values_by_value[("int", 1)]["count"] == 2
+
+    def test_int_and_float_do_not_collide(self, ctx: PluginContext) -> None:
+        # 1 == 1.0 and hash(1) == hash(1.0). The transform's TopKValue contract
+        # admits both — the source could legitimately emit a column that mixes
+        # int and float representations of the same numeric value, and they
+        # represent distinct provider-emitted facts that the audit trail must
+        # preserve.
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "score", "k": 4})
+        rows = [
+            _make_row({"score": 1}),
+            _make_row({"score": 1.0}),
+            _make_row({"score": 1}),
+            _make_row({"score": 1.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["distinct_count"] == 2
+        top_values_by_value = {(type(tv["value"]).__name__, tv["value"]): tv for tv in deep_thaw(result.row["top_values"])}
+        assert ("int", 1) in top_values_by_value
+        assert ("float", 1.0) in top_values_by_value
+        assert top_values_by_value[("int", 1)]["count"] == 2
+        assert top_values_by_value[("float", 1.0)]["count"] == 2
+
+    def test_homogeneous_int_batch_still_merges(self, ctx: PluginContext) -> None:
+        # Regression guard: the type-identity fix must not split same-type
+        # values into separate buckets. A batch of plain ints must produce
+        # distinct_count == 1.
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "score", "k": 4})
+        rows = [_make_row({"score": 1}) for _ in range(5)]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["distinct_count"] == 1
+        top_values = deep_thaw(result.row["top_values"])
+        assert top_values == [{"value": 1, "count": 5, "rate": 1.0}]
+
+    def test_zero_int_and_false_do_not_collide(self, ctx: PluginContext) -> None:
+        # 0 == False and hash(0) == hash(False). Symmetric to the True/1 case.
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "flag", "k": 4})
+        rows = [
+            _make_row({"flag": 0}),
+            _make_row({"flag": False}),
+            _make_row({"flag": 0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["distinct_count"] == 2
+        top_values_by_value = {(type(tv["value"]).__name__, tv["value"]): tv for tv in deep_thaw(result.row["top_values"])}
+        assert ("int", 0) in top_values_by_value
+        assert ("bool", False) in top_values_by_value
+
 
 class TestBatchTopKConfig:
     @pytest.mark.parametrize("config", [{"field": ""}, {"field": "label", "group_by": "label"}, {"field": "label", "k": 0}])

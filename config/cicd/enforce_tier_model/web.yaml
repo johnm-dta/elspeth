@@ -438,22 +438,22 @@ allow_hits:
     primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=0fedd060cfbb3911
+- key: web/execution/validation.py:R5:validate_pipeline:fp=c1342fe430c75fb3
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to extract plugin_name attribute
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=2ac7f40b0ea4a09e
+- key: web/execution/validation.py:R5:validate_pipeline:fp=72eee09a997f074c
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to prefer cause detail over generic str(exc)
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=32458bed9cd2e510
+- key: web/execution/validation.py:R1:validate_pipeline:fp=9c93496c189561ba
   owner: web-execution
   reason: Validation checks optional source path/file keys supplied by composition state
   safety: Absent keys are treated honestly as 'no path provided' and the check is recorded as skipped/passed
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=1b0856836925abd5
+- key: web/execution/validation.py:R1:validate_pipeline:fp=748e1c9af8952265
   owner: web-execution
   reason: Validation checks optional output path/file keys supplied by composition state
   safety: Absent keys treated as 'no path provided'; check recorded as skipped/passed
@@ -579,63 +579,68 @@ allow_hits:
 
     '
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=d106a2385f341c81
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=8c351149d206a191
   owner: web-execution
   reason: Tree-walk — isinstance(Mapping) dispatches dict/list/scalar branches in recursive config traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=d0b6fca60230e23b
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=1c0538835f4b555b
   owner: web-execution
   reason: Tree-walk — isinstance(ref, str) validates secret_ref marker value type
   safety: Non-string ref is silently skipped (malformed marker); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=4eafa014e224e701
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=c00d514ff8cb45d5
   owner: web-execution
   reason: Tree-walk — isinstance() dispatches list/tuple branch in recursive config traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=9526b5ebc2462f9d
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=96e9437fe5133a00
   owner: web-execution
   reason: isinstance(value, Mapping) on user-supplied YAML option value to recognise a wired secret_ref marker (issue elspeth-72d1dccd44
     fabrication check)
   safety: Non-mapping values fall through to the literal-string branch; no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=bcfdcf00164e94a8
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=b382eb93687a92ea
   owner: web-execution
   reason: isinstance(value['secret_ref'], str) validates the marker payload type before accepting a value as wired
   safety: Non-string secret_ref payload is treated as un-wired (rejected by fabrication check); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=9b31e051a18897e3
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=191cd4b8cc1b34eb
   owner: web-execution
   reason: isinstance(value, str) gates the env-marker shape check on user-supplied YAML option values
   safety: Non-string values fall through and are not treated as env markers; no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=b47570883a264ddc
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=ba26e4ef894b8ccf
   owner: web-execution
   reason: Tree-walk — isinstance(options, Mapping) dispatches recursive descent through user-supplied YAML option dicts
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=1df413eaee44e1b5
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=5215e2c08a23974c
   owner: web-execution
   reason: isinstance(key, str) before applying is_secret_field — defensive against non-string keys produced by YAML edge cases
   safety: Non-string keys are skipped (no false positives); recursion continues
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=e4a15c99f2d77e28
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=8aaf7ebcd75ce1ca
   owner: web-execution
   reason: isinstance(value, str) discriminates literal-placeholder credential values from non-string types (which Pydantic
     rejects later with a precise schema error)
   safety: Non-string values in credential fields are deferred to settings_load — no double-reporting, no contract masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=d106c824ee1683aa
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=42a7a7ce6347db44
   owner: web-execution
   reason: Tree-walk — isinstance() dispatches list/tuple branch in recursive option traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=6e72151e130e829a
+- key: web/execution/validation.py:R5:validate_pipeline:fp=e6df607ba6e110ec
   owner: web-execution
   reason: isinstance(config_dict, dict) validates YAML parse output before resolve_secret_refs — yaml.safe_load can return
     non-dict for malformed input
   safety: Raises TypeError with diagnostic message; no error suppression
+  expires: null
+- key: web/execution/validation.py:R5:validate_pipeline:fp=b5640f0dd35b1713
+  owner: web-execution
+  reason: isinstance(exc, EdgeContractError) discriminates schema-contract failures to format edge-specific remediation
+  safety: Type dispatch only selects error presentation; non-edge configuration errors still produce validation errors
   expires: null
 - key: web/app.py:R1:create_app:fp=8d07b8380b030844
   owner: web-app

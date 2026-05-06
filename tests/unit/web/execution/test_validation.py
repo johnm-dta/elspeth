@@ -1990,9 +1990,7 @@ class TestEdgeContractFailureFormatting:
         assert exc.producer_schema_name == "WebScrapeOutput"
         assert exc.consumer_schema_name == "LineExplodeInput"
         assert exc.compatibility_result.compatible is False
-        assert exc.compatibility_result.type_mismatches == (
-            ("fetch_status", "str | None", "int"),
-        )
+        assert exc.compatibility_result.type_mismatches == (("fetch_status", "str | None", "int"),)
 
     # ── Captured-RED scenario regression ─────────────────────────────────
 
@@ -2003,7 +2001,7 @@ class TestEdgeContractFailureFormatting:
             to_node_id="transform_split_lines_c3322ba122ca",
             type_mismatches=(("fetch_status", "str | None", "int"),),
         )
-        message, suggestion = _format_edge_contract_failure(exc)
+        message, _suggestion = _format_edge_contract_failure(exc)
 
         # Both nodes named (the model uses these as node_id= arguments).
         assert "transform_fetch_rules_46d77f2bcb4a" in message

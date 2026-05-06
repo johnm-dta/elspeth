@@ -1,8 +1,6 @@
 # tests/plugins/test_context.py
 """Tests for plugin context."""
 
-
-
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.factories import make_source_context
@@ -28,7 +26,6 @@ class TestPluginContext:
         ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
         assert ctx.rate_limit_registry is None
         assert ctx.concurrency_config is None
-
 
 
 class TestValidationErrorRecording:

@@ -79,6 +79,7 @@ class TestAzureStateIdSnapshot:
 
             transform.close()
 
+
 class TestLLMOutputSchemaDivergence:
     """Regression: output_schema must include LLM-added fields.
 
@@ -118,6 +119,7 @@ class TestLLMOutputSchemaDivergence:
         assert "llm_response" in transform.output_schema.model_fields
         # input_schema should not
         assert "llm_response" not in transform.input_schema.model_fields
+
 
 # ---------------------------------------------------------------------------
 # Bug 5: enable_content_recording accepted but never applied

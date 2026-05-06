@@ -163,7 +163,6 @@ class TestRowLineageDeepFreeze:
         assert lineage.source_data is None
 
 
-
 class TestHTTPCallResponseBodyFreeze:
     """Bug: non-dict Mapping types bypassed isinstance(…, dict) guard."""
 
@@ -391,6 +390,7 @@ class TestFreezeFieldsUtility:
         """freeze_fields on a None-valued field is a no-op."""
         lineage = _make_lineage(source_data=None, payload_available=False)
         assert lineage.source_data is None
+
 
 # ── Nested Mutation Rejection Tests ─────────────────────────────────────────
 #

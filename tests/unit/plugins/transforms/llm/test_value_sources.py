@@ -154,4 +154,3 @@ class TestWalkerBehaviour:
         assert finding.component_id == "openrouter_node_1"
         assert finding.field_name == "model"
         assert "anthropic/claude-3.5-sonnet" in finding.reason
-

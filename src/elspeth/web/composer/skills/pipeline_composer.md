@@ -130,6 +130,80 @@ Trace each connection name through the diagram and confirm both endpoints match.
 | Adding `edges: [...]` and assuming that wires the pipeline without matching `on_success` / `input` strings | Same as above — edges are metadata, not wiring | Set the strings; `edges` is only for the metadata layer. |
 | Setting `outputs[i].sink_name` to a value that no upstream `on_success` produces | `No producer for connection '<sink_name>'` | Match the sink's `sink_name` to an upstream `on_success`. |
 
+#### Wiring repair examples
+
+These are the two empirically-observed failure shapes from real composer sessions. Each example shows the broken `set_pipeline` snippet, the verbatim `preview_pipeline` error, and the fix.
+
+**Example A — `input` set to an upstream node's id instead of a connection name.**
+
+Broken (only the relevant fields shown):
+
+```json
+{
+  "source": {"plugin": "text", "on_success": "fetch", "options": {"...": "..."}},
+  "nodes": [
+    {"id": "fetch", "node_type": "transform", "plugin": "web_scrape", "input": "source", "on_success": "split_lines", "options": {"...": "..."}}
+  ]
+}
+```
+
+`preview_pipeline` returns:
+
+```
+No producer for connection 'source'. Available connections: fetch.
+```
+
+Why: `node.input` is the **connection-name string the upstream publishes**, not the upstream node's `id`. `source.on_success` publishes the connection named `fetch`; nothing publishes a connection named `source`. The runtime resolves wiring by string match, never by walking from `id` to `id`.
+
+Fix — change `fetch.input` to match `source.on_success`:
+
+```json
+{
+  "source": {"plugin": "text", "on_success": "fetch", "options": {"...": "..."}},
+  "nodes": [
+    {"id": "fetch", "node_type": "transform", "plugin": "web_scrape", "input": "fetch", "on_success": "split_lines", "options": {"...": "..."}}
+  ]
+}
+```
+
+The id `"fetch"` and the connection name `"fetch"` happen to coincide here — that's allowed but not required. Either rename one (e.g. `source.on_success: "raw_url_rows"` and `fetch.input: "raw_url_rows"`) or leave them coincident. What matters is that the string on `input` matches the string published by some upstream `on_success`.
+
+**Example B — `outputs[].sink_name` doesn't match the publishing upstream's `on_success`.**
+
+Broken:
+
+```json
+{
+  "nodes": [
+    {"id": "split_lines", "node_type": "transform", "plugin": "line_explode", "input": "fetched_text", "on_success": "lines_out", "options": {"...": "..."}}
+  ],
+  "outputs": [
+    {"sink_name": "output_lines", "plugin": "json", "options": {"...": "..."}}
+  ]
+}
+```
+
+`preview_pipeline` returns:
+
+```
+No producer for connection 'output_lines'. Available connections: lines_out.
+```
+
+Why: `outputs[i].sink_name` is the consumer-side connection-name string; it must equal an upstream `on_success` value. `split_lines.on_success` publishes `"lines_out"`; the sink consumes `"output_lines"`. Different strings → no producer for the sink's connection.
+
+Fix — change one to match the other. Renaming the sink is simpler:
+
+```json
+{
+  "nodes": [
+    {"id": "split_lines", "node_type": "transform", "plugin": "line_explode", "input": "fetched_text", "on_success": "lines_out", "options": {"...": "..."}}
+  ],
+  "outputs": [
+    {"sink_name": "lines_out", "plugin": "json", "options": {"...": "..."}}
+  ]
+}
+```
+
 #### Boolean routes — quote them
 
 Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit them quoted:

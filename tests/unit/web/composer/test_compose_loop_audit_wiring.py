@@ -435,7 +435,12 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
             }
         ],
     )
+    # §7.6 Option C: even though the mutation was a SUCCESS, state is
+    # still structurally empty (set_metadata bumps version but doesn't
+    # populate source/nodes/outputs), so the recovery nudge fires after
+    # the surrender prose and one more text turn finalizes.
     turn2 = _make_llm_response(content="Done.")
+    turn3 = _make_llm_response(content="Still empty after nudge.")
 
     # The empty test state has no source/sinks so the post-loop runtime
     # preflight would fail and replace the assistant text with a
@@ -454,13 +459,12 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
             return_value=bad_result,
         ),
     ):
-        mock_llm.side_effect = [turn1, turn2]
+        mock_llm.side_effect = [turn1, turn2, turn3]
         result = await service.compose("Trigger non-finite payload", [], state)
 
     # The compose call completed normally — the audit row lands with
     # a sentinel canonical, the success path returns the mutation,
     # the LLM gets to produce its text reply.
-    assert result.message == "Done."
     invocations = result.tool_invocations
     assert len(invocations) == 1
     inv = invocations[0]
@@ -701,7 +705,10 @@ async def test_compose_loop_records_arg_error_for_non_finite_object_arguments() 
             }
         ],
     )
+    # §7.6 Option C: failed mutation + empty state + surrender prose
+    # → recovery nudge fires; one more text turn falls through.
     turn2 = _make_llm_response(content="Recovered.")
+    turn3 = _make_llm_response(content="Still empty after nudge.")
     passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
 
     with (
@@ -709,10 +716,9 @@ async def test_compose_loop_records_arg_error_for_non_finite_object_arguments() 
         patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
     ):
-        mock_llm.side_effect = [turn1, turn2]
+        mock_llm.side_effect = [turn1, turn2, turn3]
         result = await service.compose("Trigger non-finite object arguments", [], state)
 
-    assert result.message == "Recovered."
     mock_execute_tool.assert_not_called()
     assert len(result.tool_invocations) == 1
     inv = result.tool_invocations[0]
@@ -744,7 +750,10 @@ async def test_compose_loop_records_arg_error_for_non_finite_non_object_argument
             }
         ],
     )
+    # §7.6 Option C: failed mutation + empty state + surrender prose
+    # → recovery nudge fires; one more text turn falls through.
     turn2 = _make_llm_response(content="Recovered.")
+    turn3 = _make_llm_response(content="Still empty after nudge.")
     passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
 
     with (
@@ -752,10 +761,9 @@ async def test_compose_loop_records_arg_error_for_non_finite_non_object_argument
         patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
     ):
-        mock_llm.side_effect = [turn1, turn2]
+        mock_llm.side_effect = [turn1, turn2, turn3]
         result = await service.compose("Trigger non-finite scalar arguments", [], state)
 
-    assert result.message == "Recovered."
     mock_execute_tool.assert_not_called()
     assert len(result.tool_invocations) == 1
     inv = result.tool_invocations[0]
@@ -1115,7 +1123,10 @@ async def test_canonicalization_sentinel_carries_payload_keys_diagnostic() -> No
             }
         ],
     )
+    # §7.6 Option C: empty state + mutation attempt → nudge fires;
+    # provide one extra text response for the post-nudge turn.
     turn2 = _make_llm_response(content="Done.")
+    turn3 = _make_llm_response(content="Still empty after nudge.")
 
     passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
 
@@ -1127,7 +1138,7 @@ async def test_canonicalization_sentinel_carries_payload_keys_diagnostic() -> No
             return_value=bad_result,
         ),
     ):
-        mock_llm.side_effect = [turn1, turn2]
+        mock_llm.side_effect = [turn1, turn2, turn3]
         await service.compose("Trigger diagnostic", [], state)
 
     # No-arg gating to keep the structural assertions self-contained;
@@ -1162,7 +1173,7 @@ async def test_canonicalization_sentinel_carries_payload_keys_diagnostic() -> No
         ),
         patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
     ):
-        mock_llm2.side_effect = [turn1, turn2]
+        mock_llm2.side_effect = [turn1, turn2, turn3]
         await service2.compose("Trigger diagnostic", [], state2)
 
     spy = captured_recorder["instance"]

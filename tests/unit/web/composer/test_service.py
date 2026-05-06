@@ -621,18 +621,23 @@ class TestComposerConvergence:
                 }
             ],
         )
-        # Turn 3: text response — loop terminates
+        # Turn 3: text response — pre-nudge surrender on still-empty state
         text = _make_llm_response(content="Done.")
+        # §7.6 Option C: state is structurally empty (set_metadata only
+        # populated metadata, no source/nodes/outputs). Recovery nudge
+        # fires, charging composition_turns_used += 1 (now 2/2 = limit).
+        # Next iteration's text response triggers the empty-state
+        # passthrough; the LATER text is what reaches the operator.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
-            mock_llm.side_effect = [disc, mut, text]
+            mock_llm.side_effect = [disc, mut, text, post_nudge_text]
             result = await service.compose("Build", [], state)
 
-        assert result.message == "Done."
         assert result.state.metadata.name == "Works"
 
 
@@ -777,12 +782,14 @@ class TestComposerErrorHandling:
         )
         # Turn 2: text response (self-corrected)
         text = _make_llm_response(content="Sorry, let me try again.")
+        # §7.6 Option C nudge fires (failed mutation + empty state) →
+        # one more text turn falls through to empty-state passthrough.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [bad_call, text]
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
             result = await service.compose("Do something", [], state)
 
-        assert result.message == "Sorry, let me try again."
         # State unchanged — the bad tool call didn't modify anything
         assert result.state.version == 1
 
@@ -806,12 +813,12 @@ class TestComposerErrorHandling:
         )
         # Turn 2: text
         text = _make_llm_response(content="Fixed.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [bad_call, text]
-            result = await service.compose("Setup", [], state)
-
-        assert result.message == "Fixed."
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
+            await service.compose("Setup", [], state)
 
     @pytest.mark.asyncio
     async def test_wrong_type_tool_arg_returns_error(self) -> None:
@@ -840,6 +847,8 @@ class TestComposerErrorHandling:
         )
         # Turn 2: LLM self-corrects
         text = _make_llm_response(content="Fixed.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with (
             patch(
@@ -852,10 +861,8 @@ class TestComposerErrorHandling:
             ),
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         ):
-            mock_llm.side_effect = [bad_call, text]
-            result = await service.compose("Setup", [], state)
-
-        assert result.message == "Fixed."
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
+            await service.compose("Setup", [], state)
 
     @pytest.mark.asyncio
     async def test_malformed_set_pipeline_missing_top_level_required_field_returns_error(self) -> None:
@@ -911,13 +918,15 @@ class TestComposerErrorHandling:
             ],
         )
         text = _make_llm_response(content="Recovered.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [bad_call, text]
-            result = await service.compose("Setup", [], state)
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
+            await service.compose("Setup", [], state)
 
-        assert result.message == "Recovered."
-        tool_msg = mock_llm.call_args_list[1][0][0][-1]
+        second_call_messages = mock_llm.call_args_list[1][0][0]
+        tool_msg = next(m for m in reversed(second_call_messages) if m.get("role") == "tool")
         error_content = json.loads(tool_msg["content"])
         assert "source.plugin" in error_content["error"]
         assert "missing required" in error_content["error"].lower()
@@ -984,13 +993,18 @@ class TestComposerErrorHandling:
             ],
         )
         text = _make_llm_response(content="Pipeline ready.")
+        # §7.6 Option C: this set_pipeline doesn't fully validate (it
+        # does, however, pass pre-dispatch validation — the assertion
+        # below). State remains empty post-call → nudge fires; one more
+        # text response is needed for the post-nudge turn.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
         passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
-            mock_llm.side_effect = [good_call, text]
+            mock_llm.side_effect = [good_call, text, post_nudge_text]
             await service.compose("Setup", [], state)
 
         # The pre-dispatch validator must not have rejected the call.
@@ -999,7 +1013,8 @@ class TestComposerErrorHandling:
         # ``error`` field starts with ``Tool 'set_pipeline' missing required
         # argument(s):``. A no-inline payload must not trigger that path,
         # regardless of what the tool handler returns afterwards.
-        tool_msg = mock_llm.call_args_list[1][0][0][-1]
+        second_call_messages = mock_llm.call_args_list[1][0][0]
+        tool_msg = next(m for m in reversed(second_call_messages) if m.get("role") == "tool")
         assert tool_msg["role"] == "tool"
         try:
             error_content = json.loads(tool_msg["content"])
@@ -1065,13 +1080,15 @@ class TestComposerErrorHandling:
             ],
         )
         text = _make_llm_response(content="Adjusted.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [partial_call, text]
-            result = await service.compose("Setup", [], state)
+            mock_llm.side_effect = [partial_call, text, post_nudge_text]
+            await service.compose("Setup", [], state)
 
-        assert result.message == "Adjusted."
-        tool_msg = mock_llm.call_args_list[1][0][0][-1]
+        second_call_messages = mock_llm.call_args_list[1][0][0]
+        tool_msg = next(m for m in reversed(second_call_messages) if m.get("role") == "tool")
         error_content = json.loads(tool_msg["content"])
         assert "source.inline_blob.mime_type" in error_content["error"]
         assert "source.inline_blob.content" in error_content["error"]
@@ -1144,13 +1161,19 @@ class TestComposerErrorHandling:
             ],
         )
         text = _make_llm_response(content="Ok.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [bad_call, text]
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
             await service.compose("Setup", [], state)
 
-        # Verify the error message sent back to the LLM mentions the missing keys
-        tool_msg = mock_llm.call_args_list[1][0][0][-1]  # last message in second call
+        # Verify the error message sent back to the LLM mentions the missing keys.
+        # Filter for the tool-role message rather than indexing with [-1] —
+        # the §7.6 nudge appends a user-role message after the tool result
+        # in subsequent turns, which would shadow the [-1] selector.
+        second_call_messages = mock_llm.call_args_list[1][0][0]
+        tool_msg = next(m for m in reversed(second_call_messages) if m.get("role") == "tool")
         error_content = json.loads(tool_msg["content"])
         assert "on_success" in error_content["error"]
         assert "missing required" in error_content["error"].lower()
@@ -1174,6 +1197,8 @@ class TestComposerErrorHandling:
             ],
         )
         text = _make_llm_response(content="Recovered.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with (
             patch(
@@ -1182,12 +1207,12 @@ class TestComposerErrorHandling:
             ) as mock_execute_tool,
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         ):
-            mock_llm.side_effect = [bad_call, text]
-            result = await service.compose("Setup", [], state)
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
+            await service.compose("Setup", [], state)
 
-        assert result.message == "Recovered."
         mock_execute_tool.assert_not_called()
-        tool_msg = mock_llm.call_args_list[1][0][0][-1]
+        second_call_messages = mock_llm.call_args_list[1][0][0]
+        tool_msg = next(m for m in reversed(second_call_messages) if m.get("role") == "tool")
         error_content = json.loads(tool_msg["content"])
         assert "arguments must be a JSON object" in error_content["error"]
 
@@ -1707,9 +1732,13 @@ class TestDiscoveryCache:
             ],
         )
         text = _make_llm_response(content="Done.")
+        # §7.6 Option C: set_metadata only mutates metadata so state is
+        # still structurally empty after both mutations → recovery nudge
+        # fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [mut1, mut2, text]
+            mock_llm.side_effect = [mut1, mut2, text, post_nudge_text]
             result = await service.compose("Update metadata", [], state)
 
         assert result.state.metadata.name == "Y"
@@ -2528,6 +2557,8 @@ class TestPluginBugCrashesFromToolExecution:
             ],
         )
         text = _make_llm_response(content="Got it, trying again.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -2540,7 +2571,7 @@ class TestPluginBugCrashesFromToolExecution:
                 ),
             ),
         ):
-            mock_llm.side_effect = [valid_call, text]
+            mock_llm.side_effect = [valid_call, text, post_nudge_text]
             result = await service.compose("Setup", [], state)
 
         assert isinstance(result, ComposerResult)
@@ -2595,6 +2626,8 @@ class TestPluginBugCrashesFromToolExecution:
             ],
         )
         text = _make_llm_response(content="Got it.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -2603,7 +2636,7 @@ class TestPluginBugCrashesFromToolExecution:
                 side_effect=leaky,
             ),
         ):
-            mock_llm.side_effect = [valid_call, text]
+            mock_llm.side_effect = [valid_call, text, post_nudge_text]
             await service.compose("Setup", [], state)
 
         second_call_messages = mock_llm.call_args_list[1].args[0]
@@ -3083,6 +3116,14 @@ class TestToolExecutionThreadOffloading:
                 data={"sources": []},
             )
 
+        # §7.6 Option C: when the mutation case runs (set_source), the
+        # capture_thread fake doesn't actually populate the state, so it
+        # remains structurally empty and the recovery nudge fires. The
+        # discovery case never sets turn_has_mutation, so the nudge does
+        # not fire there. Provide a third text response which is harmless
+        # for the discovery case and required for the mutation case.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
+
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
@@ -3090,7 +3131,7 @@ class TestToolExecutionThreadOffloading:
                 side_effect=_capture_thread,
             ),
         ):
-            mock_llm.side_effect = [tool_call_response, text_response]
+            mock_llm.side_effect = [tool_call_response, text_response, post_nudge_text]
             await service.compose(user_message, [], state)
 
         assert tool_execution_thread is not None, "execute_tool was never called"
@@ -3197,6 +3238,10 @@ class TestToolExecutionThreadOffloading:
             ],
         )
         text = _make_llm_response(content="Done.")
+        # §7.6 Option C: _blocking_tool returns the unchanged state, so
+        # state is still structurally empty → nudge fires; provide one
+        # more text turn for the post-nudge call.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -3205,7 +3250,7 @@ class TestToolExecutionThreadOffloading:
                 side_effect=_blocking_tool,
             ),
         ):
-            mock_llm.side_effect = [tool_call, text]
+            mock_llm.side_effect = [tool_call, text, post_nudge_text]
             hb_task = asyncio.create_task(heartbeat())
             try:
                 await service.compose("List sources", [], state)
@@ -3438,12 +3483,13 @@ class TestToolArgumentErrorAcrossThreadBoundary:
             ],
         )
         text = _make_llm_response(content="Fixed.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [bad_call, text]
-            result = await service.compose("Setup", [], state, session_id=self.session_id)
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
+            await service.compose("Setup", [], state, session_id=self.session_id)
 
-        assert result.message == "Fixed."
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1
@@ -3488,12 +3534,13 @@ class TestToolArgumentErrorAcrossThreadBoundary:
             ],
         )
         text = _make_llm_response(content="Fixed.")
+        # §7.6 Option C nudge fires; one more text turn falls through.
+        post_nudge_text = _make_llm_response(content="Still empty after nudge.")
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [bad_call, text]
-            result = await service.compose("Setup", [], state, session_id=self.session_id)
+            mock_llm.side_effect = [bad_call, text, post_nudge_text]
+            await service.compose("Setup", [], state, session_id=self.session_id)
 
-        assert result.message == "Fixed."
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1
@@ -4188,3 +4235,244 @@ class TestEmptyStateFinalizePassthrough:
 
         assert result.message == "All good."
         assert result.raw_assistant_content is None  # no replacement happened
+
+
+class TestOptionCRecoveryNudge:
+    """Tier 1.5 §7.6 Option C — empty-state recovery nudge in _compose_loop.
+
+    Trigger predicate (all must hold):
+    - assistant_message.tool_calls is None (model surrendered with prose)
+    - state is structurally empty (no source, nodes, or outputs)
+    - tracker has not fired in this compose call (single-fire)
+    - at least one prior non-discovery tool was invoked (pure-Q&A guard)
+    - composition + discovery budget remaining >= 1 turn
+
+    When triggered, the loop appends a [ELSPETH-RECOVERY-NUDGE] user
+    message, increments composition_turns_used by 1, and re-enters the
+    loop for one more LLM turn. A second arrival at the no-tool-call
+    branch finds tracker.has_fired() is True and falls through to the
+    existing empty-state passthrough.
+
+    The bonus-call path at line ~1760 is reached after budget
+    exhaustion and MUST NOT inject a nudge (re-entering the loop after
+    budget exhaustion violates the bonus-call contract).
+    """
+
+    @pytest.mark.asyncio
+    async def test_nudge_fires_when_all_conditions_met(self) -> None:
+        """The canonical hit path: failed mutation, empty state, surrender,
+        budget remaining, tracker fresh → loop re-enters with nudge."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        bad_mutation = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "c1",
+                    "name": "set_source",
+                    "arguments": {"plugin": "csv"},  # missing required fields
+                }
+            ],
+        )
+        surrender = _make_llm_response(content="I cannot converge on a valid build.")
+        post_nudge = _make_llm_response(content="Still empty after the nudge.")
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [bad_mutation, surrender, post_nudge]
+            await service.compose("Build a CSV pipeline", [], state)
+
+        # Three LLM calls: turn 1 mutation, turn 2 surrender, turn 3 post-nudge.
+        assert mock_llm.call_count == 3
+        # The third LLM call's input messages must contain the recovery nudge.
+        third_call_messages = mock_llm.call_args_list[2].args[0]
+        nudge_messages = [
+            m
+            for m in third_call_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+        ]
+        assert len(nudge_messages) == 1, (
+            f"expected exactly one [ELSPETH-RECOVERY-NUDGE] in third-turn messages; got {len(nudge_messages)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nudge_does_not_fire_without_prior_mutation_attempt(self) -> None:
+        """Pure-Q&A guard: if no non-discovery tool ran, the empty state
+        is the natural answer to the operator's question, not a failed
+        build → nudge must not fire."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        discovery = _make_llm_response(
+            tool_calls=[{"id": "d1", "name": "list_sources", "arguments": {}}],
+        )
+        surrender = _make_llm_response(content="Here are the available sources.")
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [discovery, surrender]
+            await service.compose("What sources are available?", [], state)
+
+        # Only two LLM calls: discovery, then surrender. No nudge re-entry.
+        assert mock_llm.call_count == 2
+        for call in mock_llm.call_args_list:
+            messages = call.args[0]
+            assert not any(
+                isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+                for m in messages
+            ), "nudge fired even though no prior mutation attempt was made"
+
+    @pytest.mark.asyncio
+    async def test_nudge_does_not_fire_when_state_is_non_empty(self) -> None:
+        """Non-empty state means the model is reporting truthful completion
+        (or a partial build the synthesizer still handles) — nudge must
+        not fire there."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        good_mutation = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "c1",
+                    "name": "set_source",
+                    "arguments": {
+                        "plugin": "csv",
+                        "on_success": "out",
+                        "options": {"path": "/data/blobs/x.csv", "schema": {"mode": "observed"}},
+                        "on_validation_failure": "quarantine",
+                    },
+                }
+            ],
+        )
+        finish = _make_llm_response(content="Source configured.")
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [good_mutation, finish]
+            await service.compose("Set source", [], state)
+
+        # Two LLM calls — no nudge re-entry because the state is non-empty.
+        assert mock_llm.call_count == 2
+        for call in mock_llm.call_args_list:
+            messages = call.args[0]
+            assert not any(
+                isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+                for m in messages
+            ), "nudge fired on a non-empty state"
+
+    @pytest.mark.asyncio
+    async def test_nudge_fires_only_once_per_compose(self) -> None:
+        """Single-fire guard: if the model ignores the nudge and produces
+        another no-tool-call empty-state reply, the second arrival falls
+        through to the empty-state passthrough — no second nudge."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        bad_mutation = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "c1",
+                    "name": "set_source",
+                    "arguments": {"plugin": "csv"},
+                }
+            ],
+        )
+        surrender_1 = _make_llm_response(content="First surrender.")
+        surrender_2 = _make_llm_response(content="Second surrender — same prose.")
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [bad_mutation, surrender_1, surrender_2]
+            await service.compose("Build", [], state)
+
+        # Three LLM calls: mutation, first surrender (nudge fires), second
+        # surrender (tracker fired, falls through to passthrough). No 4th
+        # call from a re-fire.
+        assert mock_llm.call_count == 3
+        # Nudge appears exactly once across all sent messages.
+        all_nudge_messages: list[Any] = []
+        for call in mock_llm.call_args_list:
+            messages = call.args[0]
+            all_nudge_messages.extend(
+                m
+                for m in messages
+                if isinstance(m, dict)
+                and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+            )
+        # The nudge is appended once and persists across both subsequent
+        # call inputs; counting unique appearances within the FINAL call's
+        # input is the load-bearing assertion (the same instance shows up
+        # in earlier-call inputs only if it was already appended, which
+        # would imply two distinct nudges if call_count > 3).
+        final_call_messages = mock_llm.call_args_list[-1].args[0]
+        final_nudges = [
+            m
+            for m in final_call_messages
+            if isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+        ]
+        assert len(final_nudges) == 1, (
+            f"expected exactly one [ELSPETH-RECOVERY-NUDGE] in the final messages even after a 2nd surrender; got {len(final_nudges)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nudge_does_not_inject_from_bonus_call_path(self) -> None:
+        """Bonus-call path (line ~1760) MUST NOT inject the nudge.
+
+        After a mutation exhausts the composition budget, the loop's
+        bonus-call site at line ~1760 calls the LLM one more time. If
+        that call returns no-tool-calls, the loop calls
+        ``_finalize_no_tool_response`` directly without consulting the
+        trigger predicate. Re-entering the loop here would violate the
+        bonus-call contract — composition_turns_used == max.
+
+        This is BOTH a structural test (the hook is at the primary no-
+        tool-call site only) AND a budget-safety test (the predicate's
+        budget-remaining check is a redundant guard, since the bonus-
+        call path doesn't reach the predicate in the first place).
+        """
+        catalog = _mock_catalog()
+        # composition=1 means after the first mutation, composition is
+        # exhausted and the bonus-call path fires. discovery=1 is the
+        # minimum the WebSettings model accepts; it's not exercised here.
+        settings = _make_settings(composer_max_composition_turns=1, composer_max_discovery_turns=1)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        # First (and only) composition turn: mutation that leaves state empty.
+        mutation = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "c1",
+                    "name": "set_source",
+                    "arguments": {"plugin": "csv"},
+                }
+            ],
+        )
+        # Bonus call: no-tool-call surrender on still-empty state. The
+        # bonus-call path reaches _finalize_no_tool_response directly;
+        # the nudge predicate is not consulted there.
+        bonus = _make_llm_response(content="Bonus call surrender.")
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [mutation, bonus]
+            await service.compose("Build", [], state)
+
+        # Exactly two LLM calls: mutation + bonus-call. No third call
+        # from a nudge re-entry — the bonus-call path finalized directly.
+        assert mock_llm.call_count == 2
+        for call in mock_llm.call_args_list:
+            messages = call.args[0]
+            assert not any(
+                isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+                for m in messages
+            ), "nudge injected from bonus-call path — budget contract violated"

@@ -24,6 +24,14 @@
 
 **Bottom line:** the hello-world and fork-and-route demos are reliable enough to demo without a backup plan. The research/RAG demo has a >50% failure probability per run — operator should either pre-rehearse a specific RAG prompt that works on staging or be ready with fallback narrative.
 
+### Critical merge-decision context (read before signing off)
+
+The branch's Tier 1.5 ticket landed `§7.7` (anti-anchor hint) **specifically to address the captured Tier 1 RED `53bc3cf2-…`**. This session's investigation proves §7.7 does NOT catch that RED's failure pattern (the diagnosis was wrong — the model drifted, didn't anchor; see findings §1 and §2 below). And the same drift-on-web_scrape failure pattern **recurs in 7 of 11 of today's REDs** (~25% of cohort runs).
+
+So: the merge candidate's Tier 1 hardening (anti-tail-offer rule, temperature=0.0, skill quality, workspace input contract) IS load-bearing and real — that's where the convergence-rate floor of 75-83% comes from on simple shapes. **But the §7.7 work added on top does not solve the problem it claims to solve.** The Tier 1.5 child ticket that landed §7.7 is closeable as "shipped, harmless, but does not address its stated motivation." The actual fix for the recurring failure pattern is **§7.6 (broader runtime-preflight error rewrite)**, which was deferred and is the highest-leverage post-demo work item.
+
+This affects the merge call: the branch is shippable for "demonstrate plugin breadth and audit primacy" (the demo's narrative goal) but is NOT a regression-fixed RC for production high-volume use. Communicate accordingly.
+
 ---
 
 ## Key findings (vs prior cohort report's claims)
@@ -70,6 +78,32 @@ The 18 RED runs from the prior cohort's Step B (`/tmp/customers.csv` etc.) were 
 ### 6. The cohort scorer had a measurement-instrument bug
 
 `evals/composer-rgr/score.py` checked `n.get("plugin") or n.get("type")` for gate detection, but gate nodes have `plugin: null` and identify themselves via `node_type`. The `"type"` field was always None. Fix landed this session as commit `9a51ac97` — fallback chain now: `plugin -> node_type -> type -> ""`. Without this fix, fork-and-route's prior cohort scored 4/6 AMBER on functionally-correct gate routing.
+
+### 7. Skill prose gap on `web_scrape` required options (DEPLOY CANDIDATE)
+
+The pipeline-composer skill's `web_scrape` entry historically said: "**Gotchas**: You must specify `url_field` — the name of the row field containing the URL to fetch. There is no default." That language **is misleading** — `url_field` alone is insufficient. Runtime validation requires:
+
+| Option | Required value or example |
+|--------|---------------------------|
+| `schema` | input contract, e.g. `{"mode": "fixed", "fields": ["url: str"]}` |
+| `url_field` | name of URL field on row (no default) |
+| `content_field` | output field for scraped content (canonical: `"content"`) |
+| `fingerprint_field` | output field for content hash (canonical: `"content_fingerprint"`) |
+| `format` | `"text"` / `"markdown"` / `"html"` |
+| `text_separator` | required when `format: "text"` (canonical: `"\n"`) |
+| `http.abuse_contact` | contact email for abuse reports |
+| `http.scraping_reason` | one-line human-readable reason |
+| `http.allowed_hosts` | usually `"public_only"` |
+
+Without these, `set_pipeline` returns a "Field required" cascade. The skill's old prose pushed the model to discover them via `get_plugin_schema(web_scrape)` only — sometimes the model internalised correctly, sometimes it surrendered after a few attempts (the dominant failure pattern, per finding §3 above).
+
+A **skill update is committed in this session's branch** (commit will appear once posted) that adds a "Required options" subsection plus a canonical full options block. **NOT YET DEPLOYED to staging.** The deploy involves either (a) merging the worktree branch to main, or (b) cherry-picking the commit, then `systemctl restart elspeth-web.service`.
+
+**Operator decision before demo:**
+- *Deploy* → expected effect: lift convergence on simple shapes (`url-download`, `fork-and-route`) from ~80% to ~90%+, lift `rag-text-llm` from 42% to ~60%+. Untested on staging; risk of regression on other shapes is small (skill update is purely additive prose) but non-zero.
+- *Don't deploy* → demo runs at the rates above; mitigations stay as documented in TL;DR.
+
+If deploying, run a quick verification: 6 sequential url-download runs + 6 rag-text-llm runs after restart. If the rates lift and no regression on existing shapes, ship. If not, revert.
 
 ---
 

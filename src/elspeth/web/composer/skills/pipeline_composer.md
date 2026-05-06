@@ -56,6 +56,90 @@ This rule overrides any default LLM tendency to "summarise progress so far" befo
 
 **Out of scope.** This skill is for *composing* pipelines. Forensic queries about past runs (token lineage, audit lookups, debug analysis) belong to the Landscape MCP tools, not the composer. If the user asks "what happened in run X?", do not reach for `set_pipeline` — say the request needs the run-analysis tools and stop.
 
+### Connection Model
+
+**Connections are named strings, not node IDs.** This is the most common schema-blindness failure in `set_pipeline` — get this wrong and every preview will return `No producer for connection 'X'. Available connections: ...` no matter how many times you retry.
+
+A connection has **two endpoints**, and the same string value must appear on both:
+
+| Endpoint | Field that names the connection | Example |
+|----------|---------------------------------|---------|
+| Producer (source) | `source.on_success: "<name>"` | `"on_success": "main"` |
+| Producer (transform/gate route) | `node.on_success: "<name>"` or `node.routes: {"true": "<name>"}` or `node.on_error: "<name>"` | `"on_success": "split_lines_in"` |
+| Consumer (transform/gate/aggregation/coalesce) | `node.input: "<name>"` | `"input": "main"` |
+| Consumer (sink) | `outputs[].sink_name: "<name>"` | `"sink_name": "lines_out"` |
+
+`node.input` is **NOT** the upstream node's `id`. `node.input` is the connection-name string that some upstream `on_success` (or `routes` value, or `on_error`) **publishes**. The runtime resolves wiring by matching strings, not by graph topology in `edges`.
+
+The `edges` array in `set_pipeline` carries metadata (id, label) about each connection but does **not** define the wiring. Wiring is exclusively via the `on_success` / `input` / `sink_name` strings above. If you write `edges: [{from_node: "source", to_node: "fetch"}]` but no `on_success` produces a connection named `"fetch"` and no `input: "fetch"` exists on a real node, the wiring is broken regardless of what `edges` says.
+
+#### Worked example — source → transform → transform → sink
+
+```json
+{
+  "source": {
+    "plugin": "text",
+    "options": {"...": "..."},
+    "on_success": "raw_url_rows"
+  },
+  "nodes": [
+    {
+      "id": "fetch",
+      "node_type": "transform",
+      "plugin": "web_scrape",
+      "input": "raw_url_rows",
+      "on_success": "fetched_text",
+      "on_error": "discard",
+      "options": {"...": "..."}
+    },
+    {
+      "id": "split_lines",
+      "node_type": "transform",
+      "plugin": "line_explode",
+      "input": "fetched_text",
+      "on_success": "lines_out",
+      "on_error": "discard",
+      "options": {"...": "..."}
+    }
+  ],
+  "edges": [
+    {"id": "e1", "from_node": "source", "to_node": "fetch", "edge_type": "on_success"},
+    {"id": "e2", "from_node": "fetch", "to_node": "split_lines", "edge_type": "on_success"},
+    {"id": "e3", "from_node": "split_lines", "to_node": "output_lines", "edge_type": "on_success"}
+  ],
+  "outputs": [
+    {"sink_name": "lines_out", "plugin": "json", "options": {"...": "..."}}
+  ]
+}
+```
+
+Trace each connection name through the diagram and confirm both endpoints match. Three connections, three matching pairs:
+
+| Connection name | Producer side | Consumer side |
+|-----------------|---------------|---------------|
+| `raw_url_rows` | `source.on_success` | `fetch.input` |
+| `fetched_text` | `fetch.on_success` | `split_lines.input` |
+| `lines_out` | `split_lines.on_success` | `outputs[0].sink_name` |
+
+#### Common mistakes (all cause `No producer for connection ...`)
+
+| Mistake | Symptom in preview | Fix |
+|---------|--------------------|-----|
+| Setting `node.input` to an upstream node's `id` (e.g. `"input": "source"`) | `No producer for connection 'source'. Available connections: <whatever on_success values you defined>` | Change `input` to the upstream's `on_success` value, not its `id`. |
+| Setting `node.input` to a connection that no upstream `on_success` produces | `No producer for connection '<name>'` | Either add the matching `on_success` upstream, or change `input` to one of the available connections. |
+| Adding `edges: [...]` and assuming that wires the pipeline without matching `on_success` / `input` strings | Same as above — edges are metadata, not wiring | Set the strings; `edges` is only for the metadata layer. |
+| Setting `outputs[i].sink_name` to a value that no upstream `on_success` produces | `No producer for connection '<sink_name>'` | Match the sink's `sink_name` to an upstream `on_success`. |
+
+#### Boolean routes — quote them
+
+Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit them quoted:
+
+```json
+{"routes": {"true": "high", "false": "normal"}}
+```
+
+In YAML: `routes: {"true": high, "false": normal}`. **Never** write `routes: {true: high}` — YAML parses the unquoted `true` as a boolean and the route lookup fails at runtime.
+
 ---
 
 ## Schema Vocabulary — Five Distinct Concepts
@@ -152,90 +236,6 @@ Forward-patching is appropriate only when the user describes the *desired final 
 ### Discover Only When Context Is Insufficient
 
 Never guess plugin names or option fields. The web system context already lists available plugin names, so do not call `list_sources`, `list_transforms`, or `list_sinks` merely to rediscover that inventory. Call `get_plugin_schema` for the selected plugins when you need exact option fields before setting options.
-
-### Connection Model
-
-**Connections are named strings, not node IDs.** This is the most common schema-blindness failure in `set_pipeline` — get this wrong and every preview will return `No producer for connection 'X'. Available connections: ...` no matter how many times you retry.
-
-A connection has **two endpoints**, and the same string value must appear on both:
-
-| Endpoint | Field that names the connection | Example |
-|----------|---------------------------------|---------|
-| Producer (source) | `source.on_success: "<name>"` | `"on_success": "main"` |
-| Producer (transform/gate route) | `node.on_success: "<name>"` or `node.routes: {"true": "<name>"}` or `node.on_error: "<name>"` | `"on_success": "split_lines_in"` |
-| Consumer (transform/gate/aggregation/coalesce) | `node.input: "<name>"` | `"input": "main"` |
-| Consumer (sink) | `outputs[].sink_name: "<name>"` | `"sink_name": "lines_out"` |
-
-`node.input` is **NOT** the upstream node's `id`. `node.input` is the connection-name string that some upstream `on_success` (or `routes` value, or `on_error`) **publishes**. The runtime resolves wiring by matching strings, not by graph topology in `edges`.
-
-The `edges` array in `set_pipeline` carries metadata (id, label) about each connection but does **not** define the wiring. Wiring is exclusively via the `on_success` / `input` / `sink_name` strings above. If you write `edges: [{from_node: "source", to_node: "fetch"}]` but no `on_success` produces a connection named `"fetch"` and no `input: "fetch"` exists on a real node, the wiring is broken regardless of what `edges` says.
-
-#### Worked example — source → transform → transform → sink
-
-```json
-{
-  "source": {
-    "plugin": "text",
-    "options": {"...": "..."},
-    "on_success": "raw_url_rows"
-  },
-  "nodes": [
-    {
-      "id": "fetch",
-      "node_type": "transform",
-      "plugin": "web_scrape",
-      "input": "raw_url_rows",
-      "on_success": "fetched_text",
-      "on_error": "discard",
-      "options": {"...": "..."}
-    },
-    {
-      "id": "split_lines",
-      "node_type": "transform",
-      "plugin": "line_explode",
-      "input": "fetched_text",
-      "on_success": "lines_out",
-      "on_error": "discard",
-      "options": {"...": "..."}
-    }
-  ],
-  "edges": [
-    {"id": "e1", "from_node": "source", "to_node": "fetch", "edge_type": "on_success"},
-    {"id": "e2", "from_node": "fetch", "to_node": "split_lines", "edge_type": "on_success"},
-    {"id": "e3", "from_node": "split_lines", "to_node": "output_lines", "edge_type": "on_success"}
-  ],
-  "outputs": [
-    {"sink_name": "lines_out", "plugin": "json", "options": {"...": "..."}}
-  ]
-}
-```
-
-Trace each connection name through the diagram and confirm both endpoints match. Three connections, three matching pairs:
-
-| Connection name | Producer side | Consumer side |
-|-----------------|---------------|---------------|
-| `raw_url_rows` | `source.on_success` | `fetch.input` |
-| `fetched_text` | `fetch.on_success` | `split_lines.input` |
-| `lines_out` | `split_lines.on_success` | `outputs[0].sink_name` |
-
-#### Common mistakes (all cause `No producer for connection ...`)
-
-| Mistake | Symptom in preview | Fix |
-|---------|--------------------|-----|
-| Setting `node.input` to an upstream node's `id` (e.g. `"input": "source"`) | `No producer for connection 'source'. Available connections: <whatever on_success values you defined>` | Change `input` to the upstream's `on_success` value, not its `id`. |
-| Setting `node.input` to a connection that no upstream `on_success` produces | `No producer for connection '<name>'` | Either add the matching `on_success` upstream, or change `input` to one of the available connections. |
-| Adding `edges: [...]` and assuming that wires the pipeline without matching `on_success` / `input` strings | Same as above — edges are metadata, not wiring | Set the strings; `edges` is only for the metadata layer. |
-| Setting `outputs[i].sink_name` to a value that no upstream `on_success` produces | `No producer for connection '<sink_name>'` | Match the sink's `sink_name` to an upstream `on_success`. |
-
-#### Boolean routes — quote them
-
-Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit them quoted:
-
-```json
-{"routes": {"true": "high", "false": "normal"}}
-```
-
-In YAML: `routes: {"true": high, "false": normal}`. **Never** write `routes: {true: high}` — YAML parses the unquoted `true` as a boolean and the route lookup fails at runtime.
 
 Every pipeline needs: **one source**, **one or more sinks**, and **connections between them**.
 

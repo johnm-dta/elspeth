@@ -23,6 +23,23 @@ const LLM_UNAVAILABLE_MESSAGE =
   "The AI service is temporarily unavailable. Please try again in a moment.";
 const LLM_AUTH_ERROR_MESSAGE =
   "The AI service configuration is invalid. Please contact your administrator.";
+// Surfaced when the client-side AbortController fires (typically the
+// COMPOSE_TIMEOUT_MS guard in useComposer). Distinct from the backend's
+// 422/convergence_wall_clock_timeout copy because the cause is different:
+// the browser gave up before the server reached its own deadline.
+const COMPOSE_TIMEOUT_MESSAGE =
+  "ELSPETH took too long to compose a response. Try a smaller request or split it into multiple steps.";
+
+function isAbortError(err: unknown): boolean {
+  // DOMException ('AbortError'/'TimeoutError') is not always an Error
+  // subclass across runtimes (browsers, jsdom, Node). Match on the
+  // structural `name` field — that's the cross-platform contract.
+  if (typeof err !== "object" || err === null) {
+    return false;
+  }
+  const name = (err as { name?: unknown }).name;
+  return name === "AbortError" || name === "TimeoutError";
+}
 
 let composerProgressPollTimer: ReturnType<typeof setInterval> | null = null;
 let composerProgressPollSessionId: string | null = null;
@@ -251,25 +268,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Fire-and-forget: refresh blob list in case the LLM created files
       useBlobStore.getState().loadBlobs(activeSessionId);
     } catch (err) {
-      const apiErr = err as ApiError;
       let errorMessage: string;
-      // Error dispatch based on HTTP status + error_type field
-      if (apiErr.status === 422 && apiErr.error_type === "convergence") {
-        errorMessage =
-          "ELSPETH couldn't complete the composition after multiple attempts. Try breaking your request into smaller steps.";
-      } else if (
-        apiErr.status === 502 &&
-        apiErr.error_type === "llm_unavailable"
-      ) {
-        errorMessage = formatLlmUnavailableError(apiErr);
-      } else if (
-        apiErr.status === 502 &&
-        apiErr.error_type === "llm_auth_error"
-      ) {
-        errorMessage = formatLlmAuthError(apiErr);
+      // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any
+      // user-supplied signal) fires a DOMException with name 'AbortError',
+      // not a structured ApiError — the apiErr.detail fallback below would
+      // otherwise mask it as a generic send failure.
+      if (isAbortError(err)) {
+        errorMessage = COMPOSE_TIMEOUT_MESSAGE;
       } else {
-        errorMessage =
-          apiErr.detail ?? "Failed to send message. Please try again.";
+        const apiErr = err as ApiError;
+        // Error dispatch based on HTTP status + error_type field
+        if (apiErr.status === 422 && apiErr.error_type === "convergence") {
+          errorMessage =
+            "ELSPETH couldn't complete the composition after multiple attempts. Try breaking your request into smaller steps.";
+        } else if (
+          apiErr.status === 502 &&
+          apiErr.error_type === "llm_unavailable"
+        ) {
+          errorMessage = formatLlmUnavailableError(apiErr);
+        } else if (
+          apiErr.status === 502 &&
+          apiErr.error_type === "llm_auth_error"
+        ) {
+          errorMessage = formatLlmAuthError(apiErr);
+        } else {
+          errorMessage =
+            apiErr.detail ?? "Failed to send message. Please try again.";
+        }
       }
       set((state) => ({
         isComposing: false,
@@ -409,15 +434,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Fire-and-forget: refresh blob list in case the LLM created files
       useBlobStore.getState().loadBlobs(activeSessionId);
     } catch (err) {
-      const apiErr = err as ApiError;
-      const errorMessage =
-        apiErr.status === 502 && apiErr.error_type === "llm_unavailable"
-          ? formatLlmUnavailableError(apiErr)
-          : apiErr.status === 502 && apiErr.error_type === "llm_auth_error"
-            ? formatLlmAuthError(apiErr)
-            : apiErr.status === 422 && apiErr.error_type === "convergence"
-              ? "ELSPETH couldn't complete the composition after multiple attempts. Try breaking your request into smaller steps."
-              : apiErr.detail ?? "Failed to send message. Please try again.";
+      let errorMessage: string;
+      if (isAbortError(err)) {
+        errorMessage = COMPOSE_TIMEOUT_MESSAGE;
+      } else {
+        const apiErr = err as ApiError;
+        errorMessage =
+          apiErr.status === 502 && apiErr.error_type === "llm_unavailable"
+            ? formatLlmUnavailableError(apiErr)
+            : apiErr.status === 502 && apiErr.error_type === "llm_auth_error"
+              ? formatLlmAuthError(apiErr)
+              : apiErr.status === 422 && apiErr.error_type === "convergence"
+                ? "ELSPETH couldn't complete the composition after multiple attempts. Try breaking your request into smaller steps."
+                : apiErr.detail ?? "Failed to send message. Please try again.";
+      }
 
       set((state) => ({
         isComposing: false,

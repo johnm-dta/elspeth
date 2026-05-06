@@ -124,6 +124,31 @@ describe("sessionStore", () => {
       expect(state.error).toContain("couldn't complete the composition");
     });
 
+    it("maps a client-side AbortError to the compose-timeout copy, not the generic fallback", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      // AbortController.abort() rejects the in-flight fetch with a
+      // DOMException whose name is 'AbortError'. The store must
+      // distinguish this from a server failure or the user gets the
+      // misleading "Failed to send message. Please try again." fallback.
+      const abortError = new DOMException(
+        "The user aborted a request.",
+        "AbortError",
+      );
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        abortError,
+      );
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().sendMessage("hello");
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toContain("ELSPETH took too long");
+      expect(state.error).not.toContain("Failed to send message");
+      expect(state.messages[0].local_status).toBe("failed");
+      expect(state.messages[0].local_error).toBe(state.error);
+    });
+
     it("includes provider detail when an LLM unavailable response exposes it", async () => {
       const { sendMessage: mockSendMessage } = await import("@/api/client");
       (mockSendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
@@ -204,6 +229,41 @@ describe("sessionStore", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("retryMessage abort handling", () => {
+    it("maps a client-side AbortError to the compose-timeout copy", async () => {
+      const { recompose: mockRecompose } = await import("@/api/client");
+      const abortError = new DOMException(
+        "The user aborted a request.",
+        "AbortError",
+      );
+      (mockRecompose as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        abortError,
+      );
+
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: new Date().toISOString(),
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+      });
+
+      await useSessionStore.getState().retryMessage("user-1");
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toContain("ELSPETH took too long");
+      expect(state.error).not.toContain("Failed to send message");
+      expect(state.messages[0].local_status).toBe("failed");
+      expect(state.messages[0].local_error).toBe(state.error);
     });
   });
 

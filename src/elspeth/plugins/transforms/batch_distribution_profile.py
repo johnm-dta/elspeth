@@ -92,7 +92,7 @@ class BatchDistributionProfile(BaseTransform):
 
     name = "batch_distribution_profile"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:84acde429cd39429"
+    source_file_hash: str | None = "sha256:2a612894008f3673"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
 
@@ -116,19 +116,18 @@ class BatchDistributionProfile(BaseTransform):
             declared_output_fields.add(cfg.group_by)
         self.declared_output_fields = frozenset(declared_output_fields)
 
+        base_required = set(cfg.schema_config.required_fields or ())
+        base_required.add(cfg.value_field)
         if cfg.group_by is not None:
-            base_required = set(cfg.schema_config.required_fields or ())
             base_required.add(cfg.group_by)
-            if base_required != set(cfg.schema_config.required_fields or ()):
-                schema_config = SchemaConfig(
-                    mode=cfg.schema_config.mode,
-                    fields=cfg.schema_config.fields,
-                    guaranteed_fields=cfg.schema_config.guaranteed_fields,
-                    audit_fields=cfg.schema_config.audit_fields,
-                    required_fields=tuple(base_required),
-                )
-            else:
-                schema_config = cfg.schema_config
+        if base_required != set(cfg.schema_config.required_fields or ()):
+            schema_config = SchemaConfig(
+                mode=cfg.schema_config.mode,
+                fields=cfg.schema_config.fields,
+                guaranteed_fields=cfg.schema_config.guaranteed_fields,
+                audit_fields=cfg.schema_config.audit_fields,
+                required_fields=tuple(base_required),
+            )
         else:
             schema_config = cfg.schema_config
 

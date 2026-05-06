@@ -207,6 +207,47 @@ class TestBatchDistributionProfileConfig:
         with pytest.raises(PluginConfigError, match="collides with profile output key"):
             BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": colliding_group_by})
 
+    def test_value_field_required_in_input_schema_without_group_by(self) -> None:
+        # Misspelled value_field in a pipeline YAML must fail at config / DAG
+        # validation, not at first batch flush. Mirrors the cohort behavior of
+        # batch_top_k, which adds cfg.field to required_fields unconditionally.
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        required = transform._schema_config.required_fields or ()
+        assert "score" in required
+
+    def test_value_field_required_in_input_schema_with_group_by(self) -> None:
+        # When group_by is configured, BOTH value_field and group_by must be
+        # required in the input schema. Without the fix, only group_by is added.
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": "variant"})
+
+        required = transform._schema_config.required_fields or ()
+        assert "score" in required
+        assert "variant" in required
+
+    def test_user_supplied_required_fields_preserved_when_value_field_added(self) -> None:
+        # The fix must add value_field to required_fields without dropping the
+        # user's existing required_fields entries.
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["id: int", "score: float"],
+                    "required_fields": ["id"],
+                },
+                "value_field": "score",
+            }
+        )
+
+        required = set(transform._schema_config.required_fields or ())
+        assert required == {"id", "score"}
+
     def test_output_schema_config_guarantees_profile_fields_and_group_by(self) -> None:
         from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
 

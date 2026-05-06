@@ -19,11 +19,11 @@ The same principle applies to **your responses to the user**, not just to pipeli
 - **When asked "what tool/plugin/option should I use for X"**, if no listed item matches, say "no listed plugin matches X; this may need a new plugin or a different approach." Do not pick the closest-named item by default.
 - **The skill text is not exhaustive about ELSPETH internals.** If a question is about runtime behaviour, audit semantics, or engine code that this skill doesn't cover, defer to the appropriate authority (`get_plugin_assistance`, the Landscape MCP for forensic queries, or the human operator) rather than guessing.
 
-## CRITICAL: Load Tool Schemas First
+## CRITICAL: Tool Schema Availability
 
-**Composer MCP tools are deferred.** Before calling ANY tool, you MUST load its schema. Calling a deferred tool without its schema loaded fails with `InputValidationError`.
+The web composer sends the JSON Schema for every LiteLLM function tool with each model request. Do not call discovery tools just to load function signatures; use tool calls for real discovery, mutation, validation, or preview work.
 
-**Step 0 (mandatory before any pipeline work):** load schemas for every composer tool you may use. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
+**Step 0 (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
 
 - **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`
 - **State / preview:** `get_pipeline_state`, `preview_pipeline`, `diff_pipeline`
@@ -32,7 +32,7 @@ The same principle applies to **your responses to the user**, not just to pipeli
 - **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `update_blob`, `delete_blob`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 
-If any tool you intend to call still shows a placeholder signature (e.g. `patch_source_options = () => any`) — **STOP** and reload its schema before invoking it.
+If any tool you intend to call still shows a placeholder signature in a deferred MCP client (e.g. `patch_source_options = () => any`) — **STOP** and reload its schema before invoking it. In the web composer path this should not happen because the function schemas are already supplied in the `tools` request payload.
 
 **Final gate before reporting completion:** call `preview_pipeline` and confirm it succeeds. Do **not** call `generate_yaml` — it is a service-side function, not an LLM tool. The composer renders YAML on demand once the pipeline is in a valid, contract-proven state.
 
@@ -86,8 +86,8 @@ When `preview_pipeline` returns an unsatisfied `edge_contract`, **name the conce
 
 ## Workflow
 
-1. **Discover** — call `list_sources`, `list_transforms`, `list_sinks` to see what's available
-2. **Check schemas** — call `get_plugin_schema` before configuring any plugin
+1. **Orient** — read `available_plugins` in the system context; call `list_sources`, `list_transforms`, or `list_sinks` only when you need refreshed summaries or the context is insufficient
+2. **Check selected plugin schemas** — call `get_plugin_schema` before configuring a plugin whose exact option schema is not already visible
 3. **Build** — use `set_pipeline` for a complete pipeline, or individual tools for edits
 4. **Validate** — every tool returns validation state; fix all errors before responding
 5. **Preview** — call `preview_pipeline` to confirm the pipeline is correct
@@ -98,6 +98,8 @@ When `preview_pipeline` returns an unsatisfied `edge_contract`, **name the conce
 ### Prefer `set_pipeline` for Complete Pipelines
 
 When the user describes a complete pipeline, build it atomically with `set_pipeline` rather than calling `set_source` + `upsert_node` + `set_output` sequentially. This is faster and avoids intermediate validation errors.
+
+For complete new pipelines with inline/literal source data from the user's message, include `source.inline_blob` in the same `set_pipeline` call. This replaces the serial `create_blob + set_source_from_blob` setup while preserving the same blob-backed source semantics and audit trail inside one atomic mutation.
 
 **When using `set_pipeline` with external sinks (database, azure_blob, dataverse, chroma_sink), include the companion failsink in the same call.** See "Automatic Failsink Creation" below.
 
@@ -129,9 +131,9 @@ If the user asks to **undo** a previous change ("go back to the version before X
 
 Forward-patching is appropriate only when the user describes the *desired final shape* (whether or not it matches an earlier version) rather than asking to undo.
 
-### Always Discover Before Configuring
+### Discover Only When Context Is Insufficient
 
-Never guess plugin names or option fields. Always call `get_plugin_schema` to get the exact JSON Schema before setting options.
+Never guess plugin names or option fields. The web system context already lists available plugin names, so do not call `list_sources`, `list_transforms`, or `list_sinks` merely to rediscover that inventory. Call `get_plugin_schema` for the selected plugins when you need exact option fields before setting options.
 
 ### Connection Model
 
@@ -547,6 +549,16 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 | `line_explode` | Split a string field into one row per line | **yes** | no | no | Emits one row per line with `line`/`line_index` fields |
 | `batch_stats` | Compute statistics over a batch of rows | **yes** | no | no | Emits one aggregate row per batch, or per `group_by` value |
 | `batch_replicate` | Replicate rows for fan-out | no | no | no | Emits multiple copies per input row |
+| `batch_distribution_profile` | Profile numeric distributions over a batch | **yes** | no | no | Emits distribution profile rows, optionally per `group_by` value |
+| `batch_drift_compare` | Compare baseline/current distributions | **yes** | no | no | Emits distribution-distance comparison rows |
+| `batch_paired_preference` | Compare paired variant scores | **yes** | no | no | Emits paired preference comparison rows |
+| `batch_outlier_annotator` | Annotate numeric values with outlier scores | **yes** | no | no | Emits one annotated row per finite numeric value |
+| `batch_data_quality_report` | Summarise missing, invalid, and duplicate values | **yes** | no | no | Emits per-field data-quality report rows |
+| `batch_top_k` | Summarise most frequent values in a batch | **yes** | no | no | Emits top-k frequency summary rows |
+| `batch_classifier_metrics` | Compute classifier confusion/F-score metrics | **yes** | no | no | Emits classifier metric summary rows |
+| `batch_threshold_summary` | Count rows matching named numeric thresholds | **yes** | no | no | Emits threshold count/rate summary rows |
+| `batch_experiment_compare` | Compare score distributions across variants | **yes** | no | no | Emits variant comparison rows |
+| `batch_effect_size` | Compute effect sizes across variants | **yes** | no | no | Emits effect-size summary rows |
 | `web_scrape` | Fetch and extract content from URLs | no | no | yes | Adds `content` field (scraped text/HTML) |
 | `llm` | Send row data to an LLM via template | no | yes | yes | Adds `llm_response` field (or custom `response_field`) |
 | `azure_content_safety` | Content moderation via Azure AI | no | yes | yes | Adds safety category scores |
@@ -620,6 +632,11 @@ Gotchas:
 Gotchas:
 - Set `source_field` to the string field to split and choose `output_field`/`index_field` names that do not collide with existing fields.
 - When `web_scrape` feeds `line_explode` and validation reports a `semantic_contracts` violation with `requirement_code: line_explode.source_field.line_framed_text`, call `get_plugin_assistance(plugin_name="line_explode", issue_code="line_explode.source_field.line_framed_text")` for the structured fix prose and before/after examples. The plugin owns the guidance; the skill no longer mirrors it.
+
+**Batch analytics transforms** — `batch_distribution_profile`, `batch_drift_compare`, `batch_paired_preference`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_classifier_metrics`, `batch_threshold_summary`, `batch_experiment_compare`, and `batch_effect_size` consume buffered batches and emit analytic summary/comparison rows.
+Gotchas:
+- These transforms are batch-aware. Configure a `trigger` block when you need count/timeout/condition flushing; otherwise they flush at end of source.
+- Most of them are shape-changing: downstream sinks receive the emitted summary/comparison rows, not the original input rows. Use `get_plugin_schema` for the exact required option fields before authoring one.
 
 **field_mapper** — Rename fields in each row.
 
@@ -718,10 +735,14 @@ See "Schema Configuration" above for full mode reference, field format, and the 
 
 ### Inline data (no file upload needed)
 
-When the user provides data directly in conversation (a URL, a JSON snippet, a few CSV rows), create a blob and wire it as the source instead of asking for a file upload:
+When the user provides data directly in conversation (a URL, a JSON snippet, a few CSV rows), use a blob-backed source instead of asking for a file upload.
 
-1. Call `create_blob` with the content and appropriate MIME type
-2. Call `set_source_from_blob` with the returned `blob_id`
+For a complete new pipeline, prefer one `set_pipeline` call with `source.inline_blob`:
+
+1. Put the literal content under `source.inline_blob` with `filename`, `mime_type`, `content`, and optional `description`.
+2. Put the source plugin config under `source.options` exactly as you would for `set_source_from_blob` (for text sources, include `column` and `schema`).
+
+For incremental source-only edits to an existing pipeline, call `create_blob` with the content and appropriate MIME type, then call `set_source_from_blob` with the returned `blob_id`.
 
 This is the canonical way to handle inline/literal data. There is no separate "inline source" plugin — the blob system handles it.
 
@@ -961,6 +982,7 @@ Always check `list_secret_refs` to see what secrets the user has configured befo
 | `llm` (multi-query) | Row + one field per query | New fields added to row | Original fields + named response fields |
 | `batch_stats` | Aggregate row per batch, or per `group_by` value — NOT input rows | **Replaces** input rows | Aggregate statistics plus `group_by` field when configured |
 | `batch_replicate` | Multiple copies of each input row | Emits N rows per 1 input | Copies of original row |
+| Batch analytics transforms (`batch_distribution_profile`, `batch_drift_compare`, `batch_paired_preference`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_classifier_metrics`, `batch_threshold_summary`, `batch_experiment_compare`, `batch_effect_size`) | Analytic summary/comparison rows per batch, group, threshold, label, or variant | Usually **replaces** input rows | Declared summary fields for the selected analytic transform |
 | `azure_content_safety` | Row + safety category score fields | New fields added to row | Original fields + safety scores |
 | `azure_prompt_shield` | Row + shield result fields | New fields added to row | Original fields + shield results |
 | `rag_retrieval` | Row + retrieval results field | New field added to row | Original fields + retrieved documents |
@@ -970,7 +992,7 @@ Always check `list_secret_refs` to see what secrets the user has configured befo
 ### Key rules
 
 - **Most transforms ADD fields** — the original row fields are preserved, and the transform appends its output field(s). The sink receives all accumulated fields.
-- **`batch_stats` is the exception** — it consumes input rows and emits new aggregate rows. With `group_by`, it emits one row per distinct group value. Input row fields other than the configured `group_by` field are NOT preserved.
+- **Batch summary/comparison transforms are exceptions** — `batch_stats` and the batch analytics transforms consume input rows and emit new aggregate/profile/comparison rows. Input row fields are NOT preserved unless the selected plugin explicitly declares them in its output.
 - **LLM response is always a string** — even if the model returns JSON, the `llm_response` field contains a string. Use `json_explode` after the LLM step to parse it into structured fields.
 - **Gates don't modify data** — they route the unchanged row to different outputs based on the condition result.
 - **Sinks serialize the full row** — all fields accumulated through the pipeline appear in the output. Use `field_mapper` before the sink to remove unwanted fields.

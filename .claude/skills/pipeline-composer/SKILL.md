@@ -180,6 +180,16 @@ Invalid text-column keyword example:
 | `line_explode` | Split a string field into one row per line | **yes** | no | no | Emits `line`/`line_index` fields |
 | `batch_stats` | Compute batch statistics | **yes** | no | no | Emits aggregate rows |
 | `batch_replicate` | Replicate rows for fan-out | no | no | no | Emits N copies per row |
+| `batch_distribution_profile` | Profile numeric distributions over a batch | **yes** | no | no | Emits distribution profile rows |
+| `batch_drift_compare` | Compare baseline/current distributions | **yes** | no | no | Emits distribution-distance rows |
+| `batch_paired_preference` | Compare paired variant scores | **yes** | no | no | Emits paired preference rows |
+| `batch_outlier_annotator` | Annotate numeric values with outlier scores | **yes** | no | no | Emits annotated numeric rows |
+| `batch_data_quality_report` | Summarise missing, invalid, and duplicate values | **yes** | no | no | Emits data-quality report rows |
+| `batch_top_k` | Summarise most frequent values in a batch | **yes** | no | no | Emits top-k summary rows |
+| `batch_classifier_metrics` | Compute classifier confusion/F-score metrics | **yes** | no | no | Emits classifier metric rows |
+| `batch_threshold_summary` | Count rows matching named numeric thresholds | **yes** | no | no | Emits threshold summary rows |
+| `batch_experiment_compare` | Compare score distributions across variants | **yes** | no | no | Emits variant comparison rows |
+| `batch_effect_size` | Compute effect sizes across variants | **yes** | no | no | Emits effect-size rows |
 | `web_scrape` | Fetch content from URLs | no | no | yes | Adds `content` field |
 | `llm` | Send row data to LLM via template | no | yes | yes | Adds `llm_response` field |
 | `azure_content_safety` | Content moderation | no | yes | yes | Adds safety scores |
@@ -260,6 +270,11 @@ Minimal config: `{"source_field": "content", "output_field": "line", "include_in
 Gotchas:
 - Choose `output_field`/`index_field` names that do not collide with existing fields.
 - When `web_scrape` feeds `line_explode` and validation reports a `semantic_contracts` violation with `requirement_code: line_explode.source_field.line_framed_text`, call `get_plugin_assistance(plugin_name="line_explode", issue_code="line_explode.source_field.line_framed_text")` for the structured fix prose and before/after examples. The plugin owns the guidance; the skill no longer mirrors it.
+
+**Batch analytics transforms** — `batch_distribution_profile`, `batch_drift_compare`, `batch_paired_preference`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_classifier_metrics`, `batch_threshold_summary`, `batch_experiment_compare`, and `batch_effect_size` consume buffered batches and emit analytic summary/comparison rows.
+Gotchas:
+- Configure a `trigger` block when you need count/timeout/condition flushing; otherwise they flush at end of source.
+- Most batch analytics transforms replace input rows with summary/profile/comparison rows. Use `get_plugin_schema` for exact required options before authoring one.
 
 **field_mapper** — Rename fields in each row.
 Minimal config: `{"mapping": {"old_name": "new_name"}}`
@@ -363,7 +378,7 @@ source → fork gate → path A + path B → `coalesce` → sink
 ## Execution Shape Reference
 
 Most transforms **add** fields — original row fields are preserved. Key exceptions:
-- `batch_stats`: **replaces** input rows with aggregate results
+- `batch_stats` and batch analytics transforms: **replace** input rows with aggregate/profile/comparison rows unless the selected plugin explicitly declares otherwise
 - `line_explode`: emits one row per line and replaces the source text field with line fields
 - `gate`: routes unchanged row (no field changes)
 - LLM response is always a **string** — use `json_explode` after LLM to parse into structured fields

@@ -419,12 +419,12 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=719a709512ce8cc8
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=2c70dbd8c0fc7293
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=e8ae25de04aa8f72
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=37c5139edbc2ddd9
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
     rollback expected; programmer bugs still propagate
@@ -432,7 +432,7 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=23d5ccb1ef62eb54
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=7dc6d8fde234ee0c
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
     primary DB exception
@@ -776,7 +776,7 @@ allow_hits:
   safety: Logged via slog.error with class name only and session_id/model/status correlation; exc_info is omitted so SQLAlchemy
     cause chains cannot leak connection strings or raw SQL into structured logs.
   expires: null
-- key: web/composer/audit.py:R5:begin_dispatch:fp=7f17d6882f630701
+- key: web/composer/audit.py:R5:begin_dispatch:fp=6b7675b334ff7856
   owner: composer-audit
   reason: Typed-union narrowing inside the audit envelope helper — begin_dispatch accepts Mapping[str, Any] | str (parsed
     dict from successful json.loads, or raw string from the JSON-decode-failure branch). isinstance(arguments, str) selects
@@ -785,20 +785,85 @@ allow_hits:
   safety: Both branches build a canonical_json + stable_hash payload; no defensive access of attributes; no silent fallback.
     The dispatch site documents which call pattern is allowed.
   expires: null
-- key: web/composer/audit.py:R6:finish_success:fp=776906c0f7b5632a
+- key: web/composer/audit.py:R5:_normalize_audit_payload:fp=40b234ca7e3778ba
+  owner: composer-audit
+  reason: Pydantic-aware audit-payload normalization (elspeth-281f259235 fix). The web composer audit canonicalizes
+    payloads via canonical_json -> rfc8785.dumps which rejects Pydantic BaseModel; without this normalization, discovery
+    tool results (PluginSummary, PluginSchemaInfo) trigger the sentinel-canonical fallback and obliterate the actual
+    catalog data the LLM saw. The isinstance(value, BaseModel) check selects the Pydantic-conversion branch (model_dump)
+    inside a recursive walker — structurally identical to deep_freeze/deep_thaw in contracts/freeze.py. Mirrors the
+    working pattern in composer_mcp/server.py:_ensure_serializable. Type-dispatch, not contract-violation hiding.
+  safety: BaseModel branch returns a fully-converted dict via model_dump (Pydantic's canonical serializer). No silent
+    fallback; types that are neither BaseModel nor Mapping nor list|tuple pass through and rfc8785 will reject them
+    (sentinel fallback fires) — same fail-closed discipline as before this normalization step.
+  expires: null
+- key: web/composer/audit.py:R5:_normalize_audit_payload:fp=70c834a8c9944af6
+  owner: composer-audit
+  reason: Recursive container walking inside _normalize_audit_payload. isinstance(value, Mapping) is the standard
+    JSON-tree dispatch pattern (Mapping covers dict, MappingProxyType, OrderedDict, and any future Mapping subclass).
+    Same shape as deep_freeze in contracts/freeze.py and _ensure_serializable in composer_mcp/server.py. Not defensive
+    access — type dispatch on a heterogeneous Any-typed input from ToolResult.to_dict() / cache-hit hand-built dicts.
+  safety: Mapping branch recurses into key/value pairs; non-Mapping containers fall through to the list|tuple branch;
+    scalars and opaque types pass through. rfc8785 rejection downstream still fires the sentinel fallback.
+  expires: null
+- key: web/composer/audit.py:R5:_normalize_audit_payload:fp=2cd1d47c9a297586
+  owner: composer-audit
+  reason: List/tuple branch of the recursive normalizer. isinstance(value, list | tuple) ensures lists of Pydantic models
+    (e.g. list[PluginSummary] from catalog.list_sources()) get walked element-wise. Type dispatch, not defensive access.
+  safety: Returns a freshly-constructed list of normalized items; the original frozen tuples from ToolResult.data are
+    not mutated. Downstream rfc8785 rejection still fires sentinel fallback for unsupported element types.
+  expires: null
+- key: web/composer/audit.py:R5:build_canonicalization_sentinel:fp=313242b6c0f63d5a
+  owner: composer-audit
+  reason: "Allowlist policy gate for the sentinel-detail capture (elspeth-281f259235 diagnostic upgrade). isinstance(exc,
+    rfc8785.CanonicalizationError) selects exception classes whose messages are bounded and value-free by spec
+    (rfc8785 reports type names and JCS rule violations, never echoes payload bytes). Other ValueError/TypeError
+    paths (e.g. core/canonical.py raising non-finite-float ValueError with the offending Decimal/float interpolated)
+    are excluded from detail capture to prevent Tier-3 leak into the Tier-1 audit row. This is leak-prevention policy,
+    not contract-violation hiding."
+  safety: "rfc8785 detail captured at 512-char cap (belt-and-braces against future rfc8785 versions inlining longer
+    fragments); other exception paths get type-name-only treatment. Exact policy pinned by
+    test_canonicalization_sentinel_omits_detail_for_non_rfc8785_errors and companions in
+    tests/unit/web/composer/test_compose_loop_audit_wiring.py."
+  expires: null
+- key: web/composer/audit.py:R5:build_canonicalization_sentinel:fp=c9698b60d5007f6e
+  owner: composer-audit
+  reason: Audit-payload-shape diagnostic — isinstance(payload, Mapping) selects the branch that records sorted top-level
+    keys into _payload_keys. Lets auditors fingerprint the failure shape (discovery-tool result vs compose-state mutation
+    vs unparseable arguments) without correlating with operational logs. Non-Mapping payloads (the str branch from
+    begin_dispatch's raw-string path, or future list-shaped shapes) skip the diagnostic to avoid emitting a noisy index-
+    key list. Type dispatch, not defensive access — the helper is purposely called with Any so policy lives in one place.
+  safety: Captures only key NAMES (sorted, str-coerced), not values. No nested traversal. Bounded by definition (a
+    composition state has O(10) top-level keys; an LLM tool-call argument set is similar). Pinned by
+    test_canonicalization_sentinel_omits_payload_keys_for_non_mapping.
+  expires: null
+- key: web/composer/audit.py:R5:begin_dispatch_or_arg_error:fp=76a8dda47a83ecc6
+  owner: composer-audit
+  reason: Pass-through gate for the sentinel-diagnostic helper. begin_dispatch accepts Mapping[str, Any] | str and the
+    arg-canonicalization-failure path needs to forward the right shape to build_canonicalization_sentinel. The
+    isinstance(arguments, Mapping) check selects the Mapping branch (so _payload_keys gets meaningful key names) and
+    discards the str branch (so a raw-string truncation site doesn't emit a single-char index key list). Type dispatch
+    on the same union narrowing as begin_dispatch's primary isinstance check.
+  safety: Both branches feed build_canonicalization_sentinel a typed-correct value. No silent fallback; the sentinel
+    still records the exception class name regardless of payload shape.
+  expires: null
+- key: web/composer/audit.py:R6:finish_success:fp=2fabcd796b747c1b
   owner: composer-audit
   reason: Sentinel-canonical fallback for canonical_json failures on the SUCCESS path. Closes panel-review blocker B1 — a
     non-finite float in the tool result would otherwise raise from inside finish_success and bypass the recorder.record(...)
     call entirely (the audit hole the helper extraction was designed to close). Mirrors the standalone-MCP fallback at
     composer_mcp/server.py:715-721 byte-for-byte. Caught classes (ValueError, TypeError) are exactly what rfc8785.dumps
-    raises on non-finite floats / non-serializable types — narrow by RFC 8785 spec.
-  safety: The audit row still lands carrying {"_canonicalization_error":"<exc class>"} as result_canonical. An auditor
-    reading the row recognises the sentinel by the reserved key and correlates with operational telemetry. Tier-1 invariant
-    "version_after is None on dispatch-did-not-complete" is unaffected — this path runs on the SUCCESS branch where the
+    raises on non-finite floats / non-serializable types — narrow by RFC 8785 spec. Updated 2026-05-06 (elspeth-281f259235)
+    to delegate sentinel construction to build_canonicalization_sentinel for diagnostic-shape symmetry across audit surfaces.
+  safety: "The audit row still lands carrying a sentinel object whose _canonicalization_error key holds the exception
+    class name and whose _payload_keys key holds sorted top-level keys of the failed payload, set as the
+    result_canonical column. The diagnostic upgrade adds bounded, leak-safe metadata (top-level keys + rfc8785-allowlisted
+    detail) so auditors can fingerprint the failure shape without correlating with operational telemetry. Tier-1 invariant
+    version_after-is-None-on-dispatch-did-not-complete is unaffected — this path runs on the SUCCESS branch where the
     handler returned a result and the state was already advanced. The _canonicalization_error key is an internal sentinel
-    name reserved by the audit subsystem (composer_mcp/server.py and web/composer/audit.py — single source of truth).
+    name reserved by the audit subsystem (composer_mcp/server.py and web/composer/audit.py — single source of truth)."
   expires: null
-- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=e96528eb5d4aeeae
+- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=71c8a7d9cb04f04c
   owner: composer-audit
   reason: Coerce a tool-handler result into a canonicalizable Mapping. The compose loop's handler returns a ToolResult
     dataclass with a to_dict() method; the helper is callback-driven and does not import the concrete type. Tests pass
@@ -807,7 +872,7 @@ allow_hits:
   safety: Anything that is neither a Mapping nor exposes to_dict() crashes loud via the AttributeError below. The
     isinstance(Mapping) check fast-paths the test/dict case; the ``result.to_dict`` path serves the production case.
   expires: null
-- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=c8a2a5cb30843e62
+- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=46507706eb3c6494
   owner: composer-audit
   reason: Offensive guard — verify ``result.to_dict()`` actually returned a Mapping before passing it to canonical_json.
     A handler whose to_dict() drifted to return a list/tuple/scalar would silently corrupt the audit row; the explicit

@@ -36,6 +36,7 @@ from elspeth.contracts.composer_audit import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.audit import build_canonicalization_sentinel
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import (
@@ -569,7 +570,12 @@ def create_server(
             arguments_hash = stable_hash(arguments)
             canonicalization_failed: BaseException | None = None
         except (ValueError, TypeError) as canon_exc:
-            sentinel = {"_canonicalization_error": type(canon_exc).__name__}
+            # Shared sentinel discipline (see web.composer.audit
+            # build_canonicalization_sentinel docstring): captures
+            # type-name + ``str(exc)`` only for rfc8785 messages
+            # (value-free by spec) + sorted top-level argument keys.
+            # Audit-trail forensic fingerprint without leak risk.
+            sentinel = build_canonicalization_sentinel(canon_exc, arguments)
             arguments_canonical = canonical_json(sentinel)
             arguments_hash = stable_hash(sentinel)
             canonicalization_failed = canon_exc
@@ -729,7 +735,9 @@ def create_server(
                     result_canonical = canonical_json(result_dict)
                     result_hash = stable_hash(result_dict)
                 except (ValueError, TypeError) as canon_result_exc:
-                    sentinel = {"_canonicalization_error": type(canon_result_exc).__name__}
+                    # Shared sentinel discipline — see
+                    # web.composer.audit.build_canonicalization_sentinel.
+                    sentinel = build_canonicalization_sentinel(canon_result_exc, result_dict)
                     result_canonical = canonical_json(sentinel)
                     result_hash = stable_hash(sentinel)
                 version_after = state_ref[0].version

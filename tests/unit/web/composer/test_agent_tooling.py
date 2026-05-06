@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import (
     CompositionState,
@@ -126,19 +127,28 @@ class TestCreateBlob:
         assert result.data["content_hash"]
 
     def test_rejects_unsupported_mime_type(self, blob_env: dict[str, Any]) -> None:
+        # _prepare_blob_create raises ToolArgumentError (CEC1 channel
+        # discipline) for MIME types outside the operator allowlist —
+        # propagates to the compose loop's ARG_ERROR branch, not
+        # masked as SUCCESS-with-success=False. Leak-prevention: the
+        # rejected mime_type value is NOT echoed in the message;
+        # only the allowlist appears.
         state = _empty_state()
         catalog = _mock_catalog()
-        result = execute_tool(
-            "create_blob",
-            {"filename": "image.png", "mime_type": "image/png", "content": "fake"},
-            state,
-            catalog,
-            data_dir=blob_env["data_dir"],
-            session_engine=blob_env["engine"],
-            session_id=blob_env["session_id"],
-        )
-        assert result.success is False
-        assert "Unsupported MIME type" in result.data["error"]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "create_blob",
+                {"filename": "image.png", "mime_type": "image/png", "content": "fake"},
+                state,
+                catalog,
+                data_dir=blob_env["data_dir"],
+                session_engine=blob_env["engine"],
+                session_id=blob_env["session_id"],
+            )
+        assert exc_info.value.argument == "mime_type"
+        assert "one of:" in exc_info.value.expected
+        # Leak-prevention pin: the rejected value must not appear in args[0].
+        assert "image/png" not in exc_info.value.args[0]
 
     def test_requires_session_context(self) -> None:
         state = _empty_state()
@@ -588,19 +598,26 @@ class TestCreateBlobSecurity:
         assert result.data["filename"] == "evil.csv"
 
     def test_dot_dot_filename_rejected(self, blob_env: dict[str, Any]) -> None:
+        # sanitize_filename ValueError is wrapped by ToolArgumentError
+        # (CEC1 channel discipline). The original cause carrying the
+        # offending filename remains on __cause__ for auditors but
+        # is NOT echoed to the LLM via args[0].
         state = _empty_state()
         catalog = _mock_catalog()
-        result = execute_tool(
-            "create_blob",
-            {"filename": "..", "mime_type": "text/csv", "content": "x"},
-            state,
-            catalog,
-            data_dir=blob_env["data_dir"],
-            session_engine=blob_env["engine"],
-            session_id=blob_env["session_id"],
-        )
-        assert result.success is False
-        assert "Invalid filename" in result.data["error"]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "create_blob",
+                {"filename": "..", "mime_type": "text/csv", "content": "x"},
+                state,
+                catalog,
+                data_dir=blob_env["data_dir"],
+                session_engine=blob_env["engine"],
+                session_id=blob_env["session_id"],
+            )
+        assert exc_info.value.argument == "filename"
+        # The original sanitize_filename ValueError is preserved on __cause__.
+        assert exc_info.value.__cause__ is not None
+        assert isinstance(exc_info.value.__cause__, ValueError)
 
     def test_content_hash_is_valid_sha256(self, blob_env: dict[str, Any]) -> None:
         state = _empty_state()

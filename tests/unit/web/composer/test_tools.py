@@ -6,8 +6,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.catalog.schemas import (
@@ -35,6 +38,9 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import blobs_table, sessions_table
+from elspeth.web.sessions.schema import initialize_session_schema
 
 # Stub SHA-256 hex digest for test fixtures.  Must satisfy the
 # ``ck_blobs_ready_hash`` invariant — exactly 64 lowercase hex
@@ -110,6 +116,32 @@ def _mock_catalog() -> MagicMock:
         json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
     )
     return catalog
+
+
+def _session_engine_with_session() -> tuple[Any, str]:
+    """Create a session DB with one session row for blob-tool tests."""
+    from datetime import UTC, datetime
+
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="test-user",
+                auth_provider_type="local",
+                title="Test Session",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return engine, session_id
 
 
 class TestToolResult:
@@ -5042,6 +5074,104 @@ class TestSetPipeline:
         gate_nodes = [n for n in result.updated_state.nodes if n.node_type == "gate"]
         assert len(gate_nodes) == 1
         assert gate_nodes[0].condition == "row['score'] >= 0.5"
+
+    def test_set_pipeline_materializes_inline_blob_source(self, tmp_path: Path) -> None:
+        """set_pipeline can atomically bind inline literal data as the source."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        output_path = tmp_path / "outputs" / "append.csv"
+        args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "source_out",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "hello",
+                    "description": "literal input from the user prompt",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "append_world",
+                    "node_type": "transform",
+                    "plugin": "value_transform",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {
+                            "mode": "observed",
+                            "guaranteed_fields": ["text"],
+                            "required_fields": ["text"],
+                        },
+                        "operations": [
+                            {
+                                "target": "text",
+                                "expression": "row['text'] + ' world'",
+                            }
+                        ],
+                    },
+                }
+            ],
+            "edges": [
+                {
+                    "id": "source_to_append",
+                    "from_node": "source",
+                    "to_node": "append_world",
+                    "edge_type": "on_success",
+                },
+                {
+                    "id": "append_to_main",
+                    "from_node": "append_world",
+                    "to_node": "main",
+                    "edge_type": "on_success",
+                },
+            ],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(output_path),
+                        "schema": {"mode": "observed", "required_fields": ["text"]},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+            "metadata": {"name": "Append literal text"},
+        }
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        assert result.success is True
+        assert result.updated_state.source is not None
+        source_options = result.updated_state.source.options
+        assert source_options["column"] == "text"
+        assert source_options["blob_ref"] == result.data["inline_blob"]["blob_id"]
+        assert "hello" not in str(result.to_dict())
+
+        with engine.connect() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == source_options["blob_ref"])).one()
+        assert row.filename == "input.txt"
+        assert row.mime_type == "text/plain"
+        assert row.source_description == "literal input from the user prompt"
+        assert Path(row.storage_path).read_text(encoding="utf-8") == "hello"
 
     def test_set_pipeline_non_gate_with_condition_skips_validation(self) -> None:
         """set_pipeline only validates conditions on gate nodes.

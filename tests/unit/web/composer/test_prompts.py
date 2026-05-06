@@ -209,6 +209,16 @@ class TestBuildContextString:
 class TestBuildSystemPrompt:
     """System prompt composition with optional deployment layer."""
 
+    def test_web_prompt_does_not_mandate_mcp_schema_loading(self) -> None:
+        """The web LiteLLM path already sends tool schemas with each request."""
+        assert "Composer MCP tools are deferred" not in SYSTEM_PROMPT
+        assert "Do not call discovery tools just to load function signatures" in SYSTEM_PROMPT
+
+    def test_web_prompt_documents_atomic_inline_blob_set_pipeline(self) -> None:
+        """Prompt should steer complete inline-data builds to one atomic tool."""
+        assert "source.inline_blob" in SYSTEM_PROMPT
+        assert "create_blob + set_source_from_blob" in SYSTEM_PROMPT
+
     def test_no_data_dir_returns_core_skill_only(self) -> None:
         """Without data_dir, returns the core skill unchanged."""
         result = build_system_prompt(None)

@@ -1,159 +1,262 @@
 {
-  "verdict": "APPROVED",
-  "summary": "Go for Phase 1 execution after the repair pass. The plan now resolves the protocol/sync mismatch via a public async dispatcher, adds stale-current-state protection, cascades audit-access rows on session delete, fixes concurrency test identities and stale-race expectations, aligns CI testcontainer and mypy/ruff gates, extracts the shared state-envelope helper, and keeps the earlier advisory-lock, parentage, hydration, IntegrityError, and VAL repairs intact.",
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "Do not execute this Phase 1 plan as one large PR. A fresh review found concrete blockers in schema portability, schema-breaking write inventory, plan-authored tests, compose-turn transcript integrity, async cancellation semantics, audit-failure handling, and concurrency-test assertions. The plan now requires three risk-first schedules: schema/current-writer safety, compose-turn/audit semantics, and PostgreSQL/CI operational proof.",
   "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
   "related_plan_files": [
     "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
-    "/home/john/elspeth/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md"
+    "/home/john/elspeth/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md",
+    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
+    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md",
+    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md"
   ],
-  "reviewed_at": "2026-05-06T00:01:06Z",
+  "split_plan_files": [
+    {
+      "schedule": "1A",
+      "name": "Schema and current writer safety",
+      "path": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md"
+    },
+    {
+      "schedule": "1B",
+      "name": "Compose-turn primitive and audit semantics",
+      "path": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md"
+    },
+    {
+      "schedule": "1C",
+      "name": "PostgreSQL, CI, and operational proof",
+      "path": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md"
+    }
+  ],
+  "reviewed_at": "2026-05-06T00:41:22Z",
   "reviewers": [
     "reality",
     "architecture",
     "quality",
     "systems"
   ],
-  "blocking_issues": [],
-  "warnings": [],
-  "resolved_issues": [
+  "blocking_issues": [
     {
       "id": "B1",
-      "status": "RESOLVED",
-      "issue": "PostgreSQL advisory-lock SQL used an unsafe bigint-to-int cast.",
-      "resolution": "Task 7, Task 16, Task 19, and the PR summary now specify `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID, hashtext(session_id))`; stale `hashtextextended(... )::int` snippets are called out only as superseded/forbidden text."
+      "source": "systems",
+      "issue": "The planned PostgreSQL testcontainer lane is likely to fail before it proves the new concurrency contract because it initializes the full current session metadata, and current metadata includes SQLite-specific DDL.",
+      "evidence": [
+        "src/elspeth/web/sessions/models.py has a SQLite GLOB check on blob hashes.",
+        "src/elspeth/web/sessions/models.py defines the active-run partial unique index with sqlite_where only.",
+        "Task 16 calls initialize_session_schema(engine) against Postgres."
+      ],
+      "required_change": "Before relying on CL-PP-11, make the affected metadata dialect-portable or explicitly scope the PostgreSQL test schema to a compatible subset, then prove initialize_session_schema() succeeds on PostgreSQL."
     },
     {
       "id": "B2",
-      "status": "RESOLVED",
-      "issue": "Tool rows could reference assistant parents from another session.",
-      "resolution": "Task 1 now uses a composite self-FK `(parent_assistant_id, session_id) -> (chat_messages.id, chat_messages.session_id)`, adds `uq_chat_messages_id_session`, and requires a cross-session parent regression."
+      "source": "architecture",
+      "issue": "The plan adds NOT NULL/chat-message provenance fields but does not inventory every direct writer. Existing tests and service paths bypass add_message and composition-state helpers, so the schema cutover will break outside the planned edits.",
+      "evidence": [
+        "src/elspeth/web/sessions/service.py directly inserts into chat_messages_table and composition_states_table.",
+        "tests/unit/web/sessions/test_models.py inserts chat message rows directly.",
+        "tests/unit/web/blobs/test_service.py and tests/unit/web/composer/test_tools.py insert composition state rows directly."
+      ],
+      "required_change": "Add a preflight direct-write inventory for chat_messages and composition_states across src/ and tests, update direct writers or row factories, and make that inventory a merge gate for the schema half."
     },
     {
       "id": "B3",
-      "status": "RESOLVED",
-      "issue": "New tool-linkage fields were not hydrated back into `ChatMessageRecord`.",
-      "resolution": "Task 14 now extends `ChatMessageRecord`, populates `add_message` returns, requires `get_messages` hydration, and calls out `fork_session` return hydration for `tool_call_id` and rewritten `parent_assistant_id`."
+      "source": "quality",
+      "issue": "Several plan-authored tests and commands are currently incorrect enough to produce false reds or false greens.",
+      "evidence": [
+        "Task 1's test file imports insert but later uses select and delete.",
+        "Task 17 uses text() without a corresponding import in the shown snippet.",
+        "Task 8 tests call _reserve_sequence_range outside the helper's own required _session_write_lock precondition.",
+        "Task 16's dependency check uses '|| echo missing', which returns success even when the import fails."
+      ],
+      "required_change": "Fix the imports, wrap or mechanically guard sequence-reservation tests, add a negative precondition test, and make dependency/CI checks fail closed."
     },
     {
       "id": "B4",
-      "status": "RESOLVED",
-      "issue": "Planned IntegrityError tests failed for the wrong reasons.",
-      "resolution": "Task 2, Task 12, and Task 15 now match the SQLite/PostgreSQL partial-unique error shapes, and missing parent-state coverage is a separate RuntimeError/no-counter guard regression."
+      "source": "quality",
+      "issue": "persist_compose_turn can persist an internally inconsistent assistant/tool transcript because the plan does not require exact validation that assistant tool_call ids match the redacted tool rows before insertion.",
+      "evidence": [
+        "Task 11 validates stale expected_current_state_id but does not validate the assistant tool_calls set against redacted_tool_rows.",
+        "The planned tests do not cover missing, extra, mismatched, or duplicate tool_call_id rows with no partial database writes."
+      ],
+      "required_change": "Validate exact tool_call_id set equality and uniqueness before any insert, then add no-partial-write regressions for missing, extra, mismatched, and duplicate tool rows."
     },
     {
       "id": "B5",
-      "status": "RESOLVED",
-      "issue": "The overview promised a sync protocol persistence method, but Phase 1 did not plan a safe public async contract.",
-      "resolution": "Task 11 now keeps `SessionServiceImpl.persist_compose_turn` concrete-only, adds protocol-public `SessionServiceProtocol.persist_compose_turn_async`, and verifies the async dispatcher rather than direct `_run_sync` route coupling."
+      "source": "systems",
+      "issue": "The async dispatcher contract is underspecified for cancellation. The current run_sync_in_worker bridge shields the worker future, so a caller can observe cancellation while the worker continues and commits.",
+      "evidence": [
+        "src/elspeth/web/async_workers.py shields worker futures and drains late exceptions.",
+        "Task 11 introduces persist_compose_turn_async without a turn idempotency key or retry-after-cancel contract."
+      ],
+      "required_change": "Define cancellation/idempotency semantics before Phase 3 can call this safely, preferably with a compose-turn idempotency key and tests for retry after cancellation."
     },
     {
       "id": "B6",
-      "status": "RESOLVED",
-      "issue": "The VAL tracker gate pointed at a closed older evaluation ticket.",
-      "resolution": "The overview now binds VAL to `elspeth-90b4542b63` and the real `release:rc5` label."
-    },
-    {
-      "id": "W1",
-      "status": "RESOLVED",
-      "issue": "A separate testcontainer CI job might not be branch-protected.",
-      "resolution": "Task 16 now requires any standalone Docker/testcontainer job to be included in `ci-success.needs`, requires the aggregate `needs.<job>.result` check, and updates explicit non-Docker marker expressions to exclude `testcontainer`."
-    },
-    {
-      "id": "W2",
-      "status": "RESOLVED",
-      "issue": "Spec cleanup was late in the phase.",
-      "resolution": "Task 0 now marks stale spec snippets superseded before implementation begins, while Task 19 remains the final spec amendment task."
-    },
-    {
-      "id": "W3",
-      "status": "RESOLVED",
-      "issue": "Internal `audit` role filtering needed a direct route regression.",
-      "resolution": "Task 14 now requires the filtering regression to create or load a real `chat_messages.role='audit'` row through the service/database path before exercising route/helper behavior."
+      "source": "quality",
+      "issue": "Audit failure disposition is too narrow and under-severe for the intended audit-grade primitive.",
+      "evidence": [
+        "Task 13 handles OperationalError but not broader SQLAlchemyError or filesystem/OSError surfaces.",
+        "The planned warning log is not paired with privacy assertions for SQL parameters, secrets, or row payloads."
+      ],
+      "required_change": "Specify fail-closed behavior for broader persistence failures, use appropriate severity/audit telemetry, and add privacy assertions for emitted failure detail."
     },
     {
       "id": "B7",
-      "status": "RESOLVED",
-      "issue": "`persist_compose_turn` had contradictory public/private contracts across the overview and Phase 1 plan.",
-      "resolution": "The sync primitive remains concrete-only and async-loop guarded; the protocol exposes `persist_compose_turn_async`, and Phase 3 is instructed to call that dispatcher through `SessionServiceProtocol`."
+      "source": "quality",
+      "issue": "The threaded concurrency tests can hang or silently miss deadlocks because they join with a timeout but do not assert that all threads stopped.",
+      "evidence": [
+        "Task 16 joins worker threads with a timeout but does not assert not thread.is_alive() afterward."
+      ],
+      "required_change": "Assert every thread terminates, fail with useful diagnostics on timeout, and keep the test bounded."
     },
     {
       "id": "B8",
-      "status": "RESOLVED",
-      "issue": "The plan serialized version/sequence allocation but did not prevent stale compose results from overwriting an intervening revert or save.",
-      "resolution": "Task 10 documents the state-intent race, Task 11 adds `expected_current_state_id` plus `StaleComposeStateError`, and tests now cover stale rejection and matching-current acceptance."
+      "source": "reality",
+      "issue": "The plan contains stale or internally inconsistent review identifiers and code anchors that will mislead implementers during execution.",
+      "evidence": [
+        "The plan refers to advisory-lock remediation as B3 while the sibling review JSON previously used B1.",
+        "The plan says the testcontainer lane closes B4, but the previous review JSON used W1 for CI protection and B4 for IntegrityError behavior.",
+        "Several service.py, protocol.py, and routes.py line anchors no longer match the current files."
+      ],
+      "required_change": "Normalize blocker IDs and refresh line anchors before execution, or remove line anchors where grep-based instructions are safer."
     },
     {
       "id": "B9",
-      "status": "RESOLVED",
-      "issue": "`audit_access_log.session_id` lacked cascade behavior, which would break session archive/delete after audit-grade views exist.",
-      "resolution": "Task 4 now specifies `ForeignKey(\"sessions.id\", ondelete=\"CASCADE\")` and adds a session-delete cascade regression."
+      "source": "reality",
+      "issue": "The planned add_message signature uses ChatMessageRole but the import step does not add it to service.py.",
+      "evidence": [
+        "Task 14's planned SessionServiceImpl.add_message signature uses ChatMessageRole.",
+        "src/elspeth/web/sessions/service.py currently imports protocol types without ChatMessageRole.",
+        "ChatMessageRole is defined in src/elspeth/web/sessions/protocol.py."
+      ],
+      "required_change": "Add ChatMessageRole to the service.py protocol imports or revise the planned signature to avoid the undefined name."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "source": "architecture",
+      "issue": "Task 18's staging database recreation runbook is too late for a schema-breaking, destructive-bootstrap plan.",
+      "recommendation": "Move the runbook and live database dialect/path inspection before the schema half lands, and make it a deployment gate."
     },
     {
-      "id": "B10",
-      "status": "RESOLVED",
-      "issue": "Concurrency tests reused identical tool_call_id values across same-session writers.",
-      "resolution": "Task 16 workers now include a writer id in generated tool_call_id values; the deliberate duplicate-id tests remain isolated to IntegrityError coverage."
+      "id": "W2",
+      "source": "architecture",
+      "issue": "Sequence allocation is under-scoped across add_message, persist_compose_turn, and fork_session.",
+      "recommendation": "Create one shared internal locked chat-message allocation/insert path instead of duplicating reserve/insert behavior in multiple writers."
     },
     {
-      "id": "B11",
-      "status": "RESOLVED",
-      "issue": "The final CI instructions did not match current CI scope or explicit marker expressions.",
-      "resolution": "Task 16 now updates explicit CI marker expressions and `ci-success`; Task 20 now uses `uv run mypy src/ tests/` plus ruff check and format-check over the CI-scoped paths."
-    },
-    {
-      "id": "B12",
-      "status": "RESOLVED",
-      "issue": "`_insert_composition_state` called `_enveloped`, but live code only had method-local envelope helpers.",
-      "resolution": "Task 10 now extracts `_enveloped_state_column` at module scope and requires save/fork/helper call sites to use it."
+      "id": "W3",
+      "source": "systems",
+      "issue": "SQLite serialization is process-local and needs a mechanical deployment/runtime guard.",
+      "recommendation": "Add a startup assertion or deployment guard that makes the single-process assumption explicit for the SQLite-backed staging/runtime mode."
     },
     {
       "id": "W4",
-      "status": "RESOLVED",
-      "issue": "The plan assumed Python 3.13 only.",
-      "resolution": "Overview and Phase 1 tech-stack lines now state Python 3.12 and 3.13 to match supported CI."
+      "source": "quality",
+      "issue": "audit_access_log will store request/principal context; Phase 3 scrubbing is currently only a future promise.",
+      "recommendation": "Add a concrete allowlist/scrubbing test plan before any route starts writing audit-access rows."
     },
     {
       "id": "W5",
-      "status": "RESOLVED",
-      "issue": "The audit-role filtering requirement was too easy to satisfy in only one path.",
-      "resolution": "Task 14 now includes the explicit `role == \"audit\"` predicate and requires both public route response filtering and composer prompt-history filtering."
-    },
-    {
-      "id": "W6",
-      "status": "RESOLVED",
-      "issue": "The fake telemetry Counter signature was narrower than the real OpenTelemetry API.",
-      "resolution": "Task 5 now models `Counter.add(amount: int | float, attributes: Attributes | None, context: Context | None)` and records `(amount, attributes, context)`."
-    },
-    {
-      "id": "W7",
-      "status": "RESOLVED",
-      "issue": "SQLite serialization was described as process-local but implemented as service-instance-local.",
-      "resolution": "Task 7 now uses a module-level process-wide `(database_url, session_id)` RLock registry."
+      "source": "reality",
+      "issue": "Spec-drift handling is inconsistent: Task 0 says stale snippets are superseded before implementation, while later tasks still treat the spec amendment as deferred.",
+      "recommendation": "Refresh or explicitly supersede the stale design snippets before implementers begin the lock and PostgreSQL work."
     }
   ],
+  "split_recommendation": {
+    "should_split": true,
+    "minimum_parts": 3,
+    "preferred_parts": 3,
+    "risk_priority": "Prefer contained review gates over speed. Only one schedule should be active at a time; later-schedule blockers should not expand the active PR.",
+    "rationale": "The current plan couples a schema-breaking compatibility cutover with a new dormant compose-turn primitive, audit/unwind behavior, PostgreSQL concurrency proof, CI changes, and staging operations. Three schedules isolate destructive schema risk, primitive/audit correctness risk, and environment/CI proof risk.",
+    "required_three_schedule_split": [
+      {
+        "name": "Schedule A - schema and current writer safety",
+        "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
+        "risk_controlled": "Destructive schema changes, stale staging DB bootstrap, and regressions in existing message/state writers.",
+        "scope": [
+          "Task 0 spec supersession marker plus blocker-ID and stale-anchor cleanup",
+          "Preflight direct-write inventory for chat_messages and composition_states across src/ and tests",
+          "Schema columns, constraints, provenance, and audit-access table work required by current behavior",
+          "Shared write-lock and sequence helpers only where needed by existing writers",
+          "save_composition_state and set_active_state provenance/locking",
+          "add_message, get_messages ordering/filtering, fork_session, route call sites, protocol hydration, missing ChatMessageRole import, and all direct test fixture updates",
+          "Staging session-DB recreation runbook moved up as a schema merge/deploy gate"
+        ],
+        "must_not_include": [
+          "persist_compose_turn or persist_compose_turn_async",
+          "PostgreSQL concurrency claims beyond schema portability smoke checks",
+          "compose-turn telemetry/payload dataclasses unless current-writer compatibility proves they are required"
+        ],
+        "exit_gate": "No direct writer can violate the new required columns; the staging DB recreation runbook is reviewed before schema deploy; SQLite current-behavior tests pass."
+      },
+      {
+        "name": "Schedule B - compose-turn primitive and audit semantics",
+        "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md",
+        "risk_controlled": "Atomic compose-turn persistence, audit primacy, tool-call transcript consistency, and async cancellation/idempotency.",
+        "scope": [
+          "Telemetry/payload dataclasses for the dormant primitive",
+          "persist_compose_turn and persist_compose_turn_async",
+          "Exact assistant/tool-call transcript validation before any insert",
+          "audit failure and unwind behavior",
+          "cancellation/idempotency contract",
+          "Backward-direction INV-AUDIT-AHEAD proof where it can run without PostgreSQL/testcontainer infrastructure"
+        ],
+        "must_not_include": [
+          "Testcontainer PostgreSQL infrastructure and CI branch-protection changes",
+          "Compose-loop integration or user-visible route behavior",
+          "Frontend work"
+        ],
+        "exit_gate": "The primitive cannot persist inconsistent transcripts; persistence failures preserve primacy and privacy; cancellation/retry semantics are tested."
+      },
+      {
+        "name": "Schedule C - PostgreSQL, CI, and operational proof",
+        "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md",
+        "risk_controlled": "Dialect drift, Docker/testcontainer dependency drift, deadlock/hang detection, CI gating, and final handoff accuracy.",
+        "scope": [
+          "PostgreSQL/testcontainer lane after metadata is made portable or scope is explicitly constrained",
+          "Latency sanity tests with bounded timeout behavior",
+          "Final spec and OQ amendments",
+          "Final CI and release-handback steps adjusted to close Phase 1 after Schedules A and B"
+        ],
+        "must_not_include": [
+          "New schema or primitive behavior except fixes required by PostgreSQL proof",
+          "Speed-driven parallelization with Schedule A or B"
+        ],
+        "exit_gate": "initialize_session_schema(engine) succeeds on PostgreSQL; dependency checks fail closed; concurrency tests assert termination; CI success aggregation includes the Docker/testcontainer lane."
+      }
+    ],
+    "legacy_two_part_split": "Rejected for this execution preference. A two-part split still couples primitive correctness with PostgreSQL/CI proof, which is faster but carries more review risk."
+  },
   "reviewer_summaries": {
     "reality": {
-      "status": "APPROVED",
-      "blocking": 0,
-      "warnings": 0
+      "status": "CHANGES_REQUESTED",
+      "blocking": 2,
+      "warnings": 4
     },
     "architecture": {
-      "status": "APPROVED",
-      "blocking": 0,
-      "warnings": 0
+      "status": "CHANGES_REQUESTED",
+      "blocking": 2,
+      "warnings": 3
     },
     "quality": {
-      "status": "APPROVED",
-      "blocking": 0,
-      "warnings": 0
+      "status": "CHANGES_REQUESTED",
+      "blocking": 6,
+      "warnings": 3
     },
     "systems": {
-      "status": "APPROVED",
-      "blocking": 0,
-      "warnings": 0
+      "status": "CHANGES_REQUESTED",
+      "blocking": 3,
+      "warnings": 3
     }
   },
   "residual_risks": [
-    "Approval is for the repaired implementation plan, not for completed code. Phase 1 implementation still must prove the listed red/green tests, mypy checks, CI `ci-success` aggregation, and Filigree OQ follow-up during execution."
-  ]
+    "The existing plan is large enough that some stale line anchors may remain even after the known examples are corrected.",
+    "Approval should require a second review after the split plans are produced, because the correctness hinges on task ordering as much as code content.",
+    "No implementation tests were run for this review; the verdict is based on source/plan inspection and targeted local import checks."
+  ],
+  "supersedes": {
+    "previous_verdict": "APPROVED",
+    "previous_reviewed_at": "2026-05-06T00:01:06Z",
+    "reason": "Fresh review against the current tree found execution blockers not represented in the earlier sidecar."
+  }
 }

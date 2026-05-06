@@ -7,12 +7,15 @@ import contextlib
 import json
 import threading
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import StaticPool
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
@@ -41,6 +44,9 @@ from elspeth.web.composer.tools import execute_tool as _execute_tool
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.schema import initialize_session_schema
 
 
 @dataclass
@@ -166,6 +172,29 @@ def _make_settings(**overrides: Any) -> WebSettings:
     }
     defaults.update(overrides)
     return WebSettings(**defaults)
+
+
+def _session_engine_with_session() -> tuple[Any, str]:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="test-user",
+                auth_provider_type="local",
+                title="Test Session",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return engine, session_id
 
 
 @pytest.fixture(autouse=True)
@@ -327,6 +356,107 @@ class TestComposerSingleToolCall:
         assert "OPENROUTER_TOP_SECRET_VALUE" not in progress_text
         assert '"name"' not in progress_text
         assert "checking available secret references" in progress_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_inline_complete_pipeline_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
+        """Fake-model replay for simple inline-data builds stays provider-bounded."""
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        settings = _make_settings(data_dir=tmp_path)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        state = _empty_state()
+        output_path = tmp_path / "outputs" / "append.csv"
+        pipeline_args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "source_out",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "hello",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "append_world",
+                    "node_type": "transform",
+                    "plugin": "value_transform",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {
+                            "mode": "observed",
+                            "guaranteed_fields": ["text"],
+                            "required_fields": ["text"],
+                        },
+                        "operations": [{"target": "text", "expression": "row['text'] + ' world'"}],
+                    },
+                }
+            ],
+            "edges": [
+                {"id": "source_to_append", "from_node": "source", "to_node": "append_world", "edge_type": "on_success"},
+                {"id": "append_to_main", "from_node": "append_world", "to_node": "main", "edge_type": "on_success"},
+            ],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(output_path),
+                        "schema": {"mode": "observed", "required_fields": ["text"]},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+            "metadata": {"name": "Append literal text"},
+        }
+        build_turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_build",
+                    "name": "set_pipeline",
+                    "arguments": pipeline_args,
+                }
+            ],
+        )
+        preview_turn = _make_llm_response(tool_calls=[{"id": "call_preview", "name": "preview_pipeline", "arguments": {}}])
+        final_turn = _make_llm_response(content="Pipeline configured.")
+
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(
+                service,
+                "_cached_runtime_preflight",
+                new_callable=AsyncMock,
+                return_value=ValidationResult(is_valid=True, checks=[], errors=[]),
+            ),
+        ):
+            mock_llm.side_effect = [build_turn, preview_turn, final_turn]
+            result = await service.compose(
+                "I want a pipeline that takes the string 'hello' and appends ' world' to it.",
+                [],
+                state,
+                session_id=session_id,
+            )
+
+        assert result.message == "Pipeline configured."
+        assert mock_llm.call_count == 3
+        tool_names = [inv.tool_name for inv in result.tool_invocations]
+        assert tool_names == ["set_pipeline", "preview_pipeline"]
+        assert "create_blob" not in tool_names
+        assert "set_source_from_blob" not in tool_names
+        assert "upsert_node" not in tool_names
+        assert "set_output" not in tool_names
+        assert len(result.llm_calls) == 3
+        assert result.state.source is not None
+        assert "blob_ref" in result.state.source.options
 
 
 class TestComposerMultiTurnToolCalls:

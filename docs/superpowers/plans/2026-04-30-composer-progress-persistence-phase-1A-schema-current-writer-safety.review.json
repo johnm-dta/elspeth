@@ -1,0 +1,102 @@
+{
+  "verdict": "CHANGES_APPLIED_PENDING_REVIEW",
+  "go_no_go": "REVIEW_REQUIRED",
+  "summary": "Schedule 1A has been patched for the previous NO-GO findings. The plan now tightens the staging reset blast radius, file-backed SQLite concurrency proof, mechanical direct-writer and lock guards, protocol/fork prerequisites, final verification gates, schema-validation wording, audit_access_log privacy gate, and SQLite-vs-PostgreSQL proof boundary. This sidecar does not re-approve the plan; it records that fixes were applied and that a fresh plan review is required before execution.",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
+  "updated_at": "2026-05-06T03:06:53Z",
+  "updated_by": "codex",
+  "previous_review": {
+    "verdict": "CHANGES_REQUESTED",
+    "go_no_go": "NO-GO",
+    "reviewed_at": "2026-05-06T02:59:45Z"
+  },
+  "resolved_blocking_issues": [
+    {
+      "id": "B1",
+      "status": "patched",
+      "change": "Task 18 now lists session rows and encrypted user_secrets in the destructive scope, requires operator signoff or secret re-entry/reseed planning, verifies secret-dependent composer outcomes after reset, and notes rollback restores secrets with the archived DB."
+    },
+    {
+      "id": "B2",
+      "status": "patched",
+      "change": "Task 8 now requires a bounded concurrent file-backed SQLite test using independent connections; StaticPool coverage is explicitly fixture/reentrancy coverage only."
+    },
+    {
+      "id": "B3",
+      "status": "patched",
+      "change": "The direct-write inventory gate now specifies an AST/token scanner, semantic-site allowlist entries, self-pattern exclusion, raw SQL/canary classification, and failure on new sites inside already-allowed files."
+    },
+    {
+      "id": "B4",
+      "status": "patched",
+      "change": "Task 14 now preserves fast targeted checks but adds a merge gate for tests/unit/web/ plus tests/integration/web/ and ruff over every changed Python file."
+    },
+    {
+      "id": "B5",
+      "status": "patched",
+      "change": "Tasks 7, 8, and 10 now require a ContextVar-backed _session_write_lock token/assertion and public-writer/static proof that save_composition_state and set_active_state enter the lock before version allocation."
+    }
+  ],
+  "patched_warnings": [
+    {
+      "id": "W1",
+      "status": "patched",
+      "change": "Direct-write inventory now calls out raw corruption fixtures and OperationalError SQL canaries for explicit classification."
+    },
+    {
+      "id": "W2",
+      "status": "patched",
+      "change": "Task 14 now includes tests/unit/web/sessions/test_protocol.py in the file list, sweep, ruff command, and atomic staging list."
+    },
+    {
+      "id": "W3",
+      "status": "patched",
+      "change": "Task 1 fixture prose now states the parent conftest is a shared helper source for new/updated tests and does not override local engine fixtures."
+    },
+    {
+      "id": "W4",
+      "status": "patched",
+      "change": "Section 14.6 now makes protocol/dataclass/get_messages hydration an explicit prerequisite before the fork copy sweep uses tool_call_id and parent_assistant_id."
+    },
+    {
+      "id": "W5",
+      "status": "patched",
+      "change": "Task 18 path resolution now normalizes relative DB paths under PROJECT_ROOT and canonicalizes DB_PATH before containment checks."
+    },
+    {
+      "id": "W6",
+      "status": "patched",
+      "change": "Task 18 now says the schema validator is not a migration or stale-DB compatibility proof and that archive/delete/recreate is the only accepted cutover path."
+    },
+    {
+      "id": "W7",
+      "status": "patched",
+      "change": "Schedule 1A Done When now states 1A proves SQLite-current deployability only and that full PostgreSQL DDL/concurrency proof belongs to Schedule 1C."
+    },
+    {
+      "id": "W8",
+      "status": "patched",
+      "change": "Task 4 now adds a future-writer privacy gate for query-arg allowlisting, headers/body/secrets/token exclusion, and explicit IP retention policy."
+    },
+    {
+      "id": "W9",
+      "status": "patched",
+      "change": "Task 1 now adds a post-metadata constraint-isolation gate so missing-column failures do not count as proof of CHECK/FK/unique behaviour."
+    }
+  ],
+  "verification": [
+    "Patched the Schedule 1A markdown plan in place.",
+    "Review sidecar rewritten to record remediation instead of approval.",
+    "No implementation tests were run because this change only updates planning/review artifacts."
+  ],
+  "required_next_steps": [
+    "Run a fresh plan review of Schedule 1A before execution.",
+    "Only replace REVIEW_REQUIRED with GO if that follow-up review validates the patched plan against the live tree.",
+    "Review Schedules 1B and 1C separately after 1A reaches GO."
+  ],
+  "residual_risks": [
+    "The sibling 1B and 1C plans remain outside this remediation pass.",
+    "The direct-writer static guard allowlist must still be generated from the implementation branch that executes 1A.",
+    "The plan text was patched, but no code or runbook implementation has been executed yet."
+  ]
+}

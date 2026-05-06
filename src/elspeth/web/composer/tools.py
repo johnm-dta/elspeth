@@ -656,7 +656,10 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "source": {
                         "type": "object",
-                        "description": "Source configuration: {plugin, options, on_success, on_validation_failure?}",
+                        "description": (
+                            "Source configuration: {plugin, options, on_success, on_validation_failure?, inline_blob?}. "
+                            "Use inline_blob to materialize user-provided literal data while atomically setting the full pipeline."
+                        ),
                         "properties": {
                             "plugin": {"type": "string"},
                             "options": {"type": "object"},
@@ -665,6 +668,30 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                 "type": "string",
                                 "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
                                 "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                            },
+                            "inline_blob": {
+                                "type": "object",
+                                "description": (
+                                    "Optional inline source content to create as a session blob before binding the source. "
+                                    "Fields mirror create_blob: filename, mime_type, content, and optional description."
+                                ),
+                                "properties": {
+                                    "filename": {"type": "string"},
+                                    "mime_type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "text/plain",
+                                            "application/json",
+                                            "text/csv",
+                                            "application/x-jsonlines",
+                                            "application/jsonl",
+                                            "text/jsonl",
+                                        ],
+                                    },
+                                    "content": {"type": "string"},
+                                    "description": {"type": "string"},
+                                },
+                                "required": ["filename", "mime_type", "content"],
                             },
                         },
                         "required": ["plugin", "options", "on_success"],
@@ -1275,6 +1302,16 @@ class BlobToolRecord(TypedDict):
     created_by: str
     source_description: str | None
     status: str
+
+
+class BlobCreatePayload(TypedDict):
+    """Closed dict shape for the create_blob tool's success result data."""
+
+    blob_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    content_hash: str
 
 
 def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
@@ -1969,6 +2006,19 @@ _ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
 _BLOB_QUOTA_BYTES: int = 500 * 1024 * 1024
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedBlobCreate:
+    """Validated blob-create payload ready for filesystem/DB persistence."""
+
+    blob_id: str
+    filename: str
+    mime_type: str
+    content_bytes: bytes
+    content_hash: str
+    storage_path: Path
+    description: Any | None
+
+
 def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: str) -> Path:
     """Compute blob storage path matching BlobServiceImpl layout.
 
@@ -1992,6 +2042,128 @@ def _check_blob_quota(conn: Any, session_id: str, additional_bytes: int) -> str 
     return None
 
 
+def _prepare_blob_create(
+    arguments: Mapping[str, Any],
+    *,
+    data_dir: str,
+    session_id: str,
+) -> _PreparedBlobCreate:
+    """Validate a create_blob-style payload and allocate its storage path."""
+    filename = arguments["filename"]
+    mime_type = arguments["mime_type"]
+    content = arguments["content"]
+
+    if not isinstance(filename, str):
+        raise ToolArgumentError(
+            argument="filename",
+            expected="a string",
+            actual_type=type(filename).__name__,
+        )
+    if not isinstance(mime_type, str):
+        raise ToolArgumentError(
+            argument="mime_type",
+            expected="a string",
+            actual_type=type(mime_type).__name__,
+        )
+    if not isinstance(content, str):
+        raise ToolArgumentError(
+            argument="content",
+            expected="a string",
+            actual_type=type(content).__name__,
+        )
+
+    if mime_type not in _ALLOWED_BLOB_MIME_TYPES:
+        # Tier-3 boundary: the LLM-supplied mime_type is not in the
+        # operator-controlled allowlist. ToolArgumentError keeps the
+        # leak-prevention discipline (no value field) — only the
+        # allowlist itself appears in the LLM echo, never the rejected
+        # value. Composer exception-channel discipline (CEC1) requires
+        # ToolArgumentError here, not bare ValueError.
+        allowed = ", ".join(sorted(_ALLOWED_BLOB_MIME_TYPES))
+        raise ToolArgumentError(
+            argument="mime_type",
+            expected=f"one of: {allowed}",
+            actual_type="str",
+        )
+
+    try:
+        safe_filename = sanitize_filename(filename)
+    except ValueError as exc:
+        # Tier-3 boundary: filename failed sanitization (path traversal,
+        # empty after strip, etc.). The underlying ValueError message
+        # may echo the offending filename, so we wrap with
+        # ToolArgumentError (no value field) and preserve the original
+        # cause on __cause__ for auditors. CEC1 channel discipline.
+        raise ToolArgumentError(
+            argument="filename",
+            expected="a sanitizable filename (no path separators, non-empty after stripping)",
+            actual_type="str",
+        ) from exc
+
+    content_bytes = content.encode("utf-8")
+    file_hash = content_hash(content_bytes)
+    blob_id = str(uuid4())
+    return _PreparedBlobCreate(
+        blob_id=blob_id,
+        filename=safe_filename,
+        mime_type=mime_type,
+        content_bytes=content_bytes,
+        content_hash=file_hash,
+        storage_path=_blob_storage_path(data_dir, session_id, blob_id, safe_filename),
+        description=arguments.get("description"),
+    )
+
+
+def _persist_prepared_blob_create(
+    prepared: _PreparedBlobCreate,
+    *,
+    session_engine: Engine,
+    session_id: str,
+) -> str | None:
+    """Persist a prepared blob create payload, returning a quota error if any."""
+    prepared.storage_path.parent.mkdir(parents=True, exist_ok=True)
+    prepared.storage_path.write_bytes(prepared.content_bytes)
+
+    now = datetime.now(UTC)
+    try:
+        with session_engine.begin() as conn:
+            quota_error = _check_blob_quota(conn, session_id, len(prepared.content_bytes))
+            if quota_error is not None:
+                prepared.storage_path.unlink(missing_ok=True)
+                return quota_error
+
+            conn.execute(
+                blobs_table.insert().values(
+                    id=prepared.blob_id,
+                    session_id=session_id,
+                    filename=prepared.filename,
+                    mime_type=prepared.mime_type,
+                    size_bytes=len(prepared.content_bytes),
+                    content_hash=prepared.content_hash,
+                    storage_path=str(prepared.storage_path),
+                    created_at=now,
+                    created_by="assistant",
+                    source_description=prepared.description,
+                    status="ready",
+                )
+            )
+    except Exception:
+        prepared.storage_path.unlink(missing_ok=True)
+        raise
+    return None
+
+
+def _blob_create_payload(prepared: _PreparedBlobCreate) -> BlobCreatePayload:
+    """Return the LLM/audit-safe create_blob result payload."""
+    return {
+        "blob_id": prepared.blob_id,
+        "filename": prepared.filename,
+        "mime_type": prepared.mime_type,
+        "size_bytes": len(prepared.content_bytes),
+        "content_hash": prepared.content_hash,
+    }
+
+
 def _execute_create_blob(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -2012,92 +2184,18 @@ def _execute_create_blob(
     if data_dir is None:
         return _failure_result(state, "Blob tools require data_dir for storage.")
 
-    filename = arguments["filename"]
-    mime_type = arguments["mime_type"]
-    content = arguments["content"]
+    # _prepare_blob_create raises ToolArgumentError on invalid LLM
+    # arguments (CEC1 channel discipline). Letting it propagate routes
+    # the audit row to ARG_ERROR (which is the truthful classification:
+    # the LLM provided unusable input) rather than masking it as a
+    # SUCCESS-with-success=False ToolResult via _failure_result.
+    prepared = _prepare_blob_create(arguments, data_dir=data_dir, session_id=session_id)
 
-    # Tier 3 boundary: LLM can pass wrong types (e.g. int for content).
-    # Validate here so .encode() doesn't raise AttributeError, which is
-    # ambiguous (could also mean an internal bug). Raise ToolArgumentError
-    # (not TypeError) so the compose loop can distinguish this LLM-side
-    # error from plugin-internal type errors — see protocol.ToolArgumentError.
-    #
-    # IMPORTANT: this guard MUST remain BEFORE the `try: with session_engine.begin()`
-    # block below. The `except Exception: ... raise` cleanup guard inside that
-    # block catches any exception including ToolArgumentError; if this guard
-    # moved inside the try, the cleanup code would run on pure argument
-    # validation failures (no file has been written at that point — cleanup
-    # is a no-op but semantically wrong).
-    if not isinstance(content, str):
-        raise ToolArgumentError(
-            argument="content",
-            expected="a string",
-            actual_type=type(content).__name__,
-        )
+    quota_error = _persist_prepared_blob_create(prepared, session_engine=session_engine, session_id=session_id)
+    if quota_error is not None:
+        return _failure_result(state, quota_error)
 
-    if mime_type not in _ALLOWED_BLOB_MIME_TYPES:
-        return _failure_result(
-            state,
-            f"Unsupported MIME type '{mime_type}'. Allowed: {', '.join(sorted(_ALLOWED_BLOB_MIME_TYPES))}",
-        )
-
-    # Sanitize filename — strips path components, rejects dots/empty
-    try:
-        safe_filename = sanitize_filename(filename)
-    except ValueError as exc:
-        return _failure_result(state, f"Invalid filename: {exc}")
-
-    content_bytes = content.encode("utf-8")
-    file_hash = content_hash(content_bytes)
-    blob_id = str(uuid4())
-
-    # Storage path matches BlobServiceImpl: blobs/{session_id}/{blob_id}_{filename}
-    storage_path = _blob_storage_path(data_dir, session_id, blob_id, safe_filename)
-    storage_path.parent.mkdir(parents=True, exist_ok=True)
-    storage_path.write_bytes(content_bytes)
-
-    # Atomic quota check + insert (same pattern as BlobServiceImpl)
-    now = datetime.now(UTC)
-    try:
-        with session_engine.begin() as conn:
-            quota_error = _check_blob_quota(conn, session_id, len(content_bytes))
-            if quota_error is not None:
-                storage_path.unlink(missing_ok=True)
-                return _failure_result(state, quota_error)
-
-            conn.execute(
-                blobs_table.insert().values(
-                    id=blob_id,
-                    session_id=session_id,
-                    filename=safe_filename,
-                    mime_type=mime_type,
-                    size_bytes=len(content_bytes),
-                    content_hash=file_hash,
-                    storage_path=str(storage_path),
-                    created_at=now,
-                    created_by="assistant",
-                    source_description=arguments.get("description"),
-                    status="ready",
-                )
-            )
-    except Exception:
-        # Clean up file on any DB failure.  Exception (not BaseException)
-        # because SQLAlchemy errors are Exception subclasses; catching
-        # KeyboardInterrupt/SystemExit here is unnecessary and the unlink
-        # cleanup is safe but the broader catch is not justified.
-        storage_path.unlink(missing_ok=True)
-        raise
-
-    return _discovery_result(
-        state,
-        {
-            "blob_id": blob_id,
-            "filename": safe_filename,
-            "mime_type": mime_type,
-            "size_bytes": len(content_bytes),
-            "content_hash": file_hash,
-        },
-    )
+    return _discovery_result(state, _blob_create_payload(prepared))
 
 
 # Per-session mutex guarding blob-file/DB consistency.
@@ -2850,6 +2948,9 @@ def _execute_set_pipeline(
     state: CompositionState,
     catalog: CatalogService,
     data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
 ) -> ToolResult:
     """Atomically replace the entire pipeline composition state."""
     # 1. Validate source plugin
@@ -2859,8 +2960,51 @@ def _execute_set_pipeline(
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
 
-    # S2: Validate source path allowlist (same check as _execute_set_source)
+    # Inline user-provided source data can be materialised as a blob inside
+    # this same atomic pipeline mutation. The generated path/blob_ref are
+    # authoritative exactly as if create_blob + set_source_from_blob had been
+    # called, but the LLM gets one audited tool decision instead of a serial
+    # blob-then-source-then-pipeline conversation.
     src_options = src_args.get("options", {})
+    if not isinstance(src_options, dict):
+        raise ToolArgumentError(
+            argument="source.options",
+            expected="an object",
+            actual_type=type(src_options).__name__,
+        )
+    prepared_inline_blob: _PreparedBlobCreate | None = None
+    inline_blob = src_args.get("inline_blob")
+    if inline_blob is not None:
+        if session_engine is None or session_id is None:
+            return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
+        if data_dir is None:
+            return _failure_result(state, "set_pipeline source.inline_blob requires data_dir for storage.")
+        if not isinstance(inline_blob, dict):
+            raise ToolArgumentError(
+                argument="source.inline_blob",
+                expected="an object",
+                actual_type=type(inline_blob).__name__,
+            )
+        # _prepare_blob_create raises ToolArgumentError on invalid LLM
+        # arguments (CEC1 channel discipline) — propagate to the
+        # compose loop's ARG_ERROR branch rather than masking as
+        # SUCCESS-with-success=False.
+        prepared_inline_blob = _prepare_blob_create(inline_blob, data_dir=data_dir, session_id=session_id)
+
+        mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)
+        mime_options: dict[str, str] = {}
+        if mime_entry is not None:
+            inferred_plugin, inferred_options = mime_entry
+            if inferred_plugin == src_plugin:
+                mime_options = inferred_options
+        src_options = {
+            **src_options,
+            **mime_options,
+            "path": str(prepared_inline_blob.storage_path),
+            "blob_ref": prepared_inline_blob.blob_id,
+        }
+
+    # S2: Validate source path allowlist (same check as _execute_set_source)
     path_error = _validate_source_path(src_options, data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
@@ -2923,7 +3067,7 @@ def _execute_set_pipeline(
         source_spec = SourceSpec(
             plugin=src_plugin,
             on_success=src_args["on_success"],
-            options=src_args.get("options", {}),
+            options=src_options,
             on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
         )
 
@@ -3006,12 +3150,27 @@ def _execute_set_pipeline(
         version=state.version + 1,
     )
 
+    if prepared_inline_blob is not None:
+        if session_engine is None or session_id is None:
+            return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
+        quota_error = _persist_prepared_blob_create(
+            prepared_inline_blob,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        if quota_error is not None:
+            return _failure_result(state, quota_error)
+
     # 6. Report all nodes + source + outputs as affected
     affected = ("source", *(n.id for n in node_specs), *(o.name for o in output_specs))
+    data: dict[str, Any] | None = _vf_destination_note(new_state, src_on_vf)
+    if prepared_inline_blob is not None:
+        inline_payload = {"inline_blob": _blob_create_payload(prepared_inline_blob)}
+        data = inline_payload if data is None else {**data, **inline_payload}
     return _mutation_result(
         new_state,
         affected,
-        data=_vf_destination_note(new_state, src_on_vf),
+        data=data,
     )
 
 
@@ -3883,6 +4042,21 @@ def execute_tool(
             baseline=baseline,
             current_validation=prior_validation,
         )
+
+    # set_pipeline has the standard mutation shape for ordinary sources, but
+    # can also own source.inline_blob, which requires session context to create
+    # the backing blob before returning the new state.
+    if tool_name == "set_pipeline":
+        prior = prior_validation if prior_validation is not None else state.validate()
+        result = _execute_set_pipeline(
+            arguments,
+            state,
+            catalog,
+            data_dir,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        return _inject_prior_validation(result, prior)
 
     # Check standard tools first
     discovery_handler = _DISCOVERY_TOOLS.get(tool_name)

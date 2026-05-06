@@ -48,6 +48,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import rfc8785
+from pydantic import BaseModel
+
 from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolRecorder,
@@ -64,12 +67,113 @@ __all__ = [
     "audit_envelope",
     "begin_dispatch",
     "begin_dispatch_or_arg_error",
+    "build_canonicalization_sentinel",
     "dispatch_with_audit",
     "finish_arg_error",
     "finish_plugin_crash",
     "finish_success",
     "llm_call_audit_envelope",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Audit-payload normalization + sentinel-diagnostic helpers.
+#
+# Centralized at the audit ingress (consumed by ``finish_success`` /
+# ``finish_arg_error`` / ``begin_dispatch_or_arg_error``) so every audit
+# row goes through the same Pydantic-aware normalization and the same
+# sentinel-shape discipline. This is the single choke point on the
+# SUCCESS path: regular dispatch (via ``_result_to_audit_payload`` →
+# ``ToolResult.to_dict``) AND cache-hit replay (which hand-builds a
+# slim audit dict in ``service.py``) both flow through ``finish_success``.
+# Mirrors the working pattern already used by the standalone composer
+# MCP server (``composer_mcp/server.py:_ensure_serializable``).
+# ---------------------------------------------------------------------------
+
+
+def _normalize_audit_payload(value: Any) -> Any:
+    """Convert Pydantic ``BaseModel`` instances to plain dicts recursively.
+
+    The web composer audit path canonicalizes payloads via
+    :func:`elspeth.core.canonical.canonical_json`, which delegates to
+    :mod:`rfc8785` — a JCS implementation that rejects non-JSON types
+    including Pydantic ``BaseModel``. Discovery tools
+    (``list_sources`` / ``list_transforms`` / ``list_sinks`` /
+    ``get_plugin_schema``) carry ``PluginSummary`` /
+    ``PluginSchemaInfo`` instances through ``ToolResult.data``, so
+    without this normalization the audit canonicalization fails and
+    the sentinel-fallback obliterates the actual result body.
+
+    This is the same shape as
+    ``composer_mcp/server.py:_ensure_serializable``. The web composer
+    centralizes it at the audit ingress (rather than at the dispatch
+    boundary) because the SUCCESS path has two call sites — regular
+    dispatch via ``ToolResult.to_dict`` and cache-hit replay via a
+    hand-built audit dict — and only ``finish_success`` is downstream
+    of both.
+
+    Containers (``Mapping``, ``list``, ``tuple``) are walked
+    recursively. Scalars and opaque objects pass through unchanged
+    (rfc8785 will reject anything that survives this pass that it
+    can't serialize, and the sentinel-canonical fallback will fire).
+    """
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    if isinstance(value, Mapping):
+        return {k: _normalize_audit_payload(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_normalize_audit_payload(item) for item in value]
+    return value
+
+
+def build_canonicalization_sentinel(
+    exc: BaseException,
+    payload: Any,
+) -> dict[str, object]:
+    """Build the sentinel that replaces a non-canonicalizable audit payload.
+
+    The status-quo sentinel records only
+    ``{"_canonicalization_error": "<exc class>"}`` which makes a
+    recurrence opaque: an auditor reading
+    ``result_canonical='{"_canonicalization_error":"CanonicalizationError"}'``
+    cannot tell *what* failed without correlating with operational
+    logs. This helper enriches the sentinel with bounded, leak-safe
+    diagnostic metadata so the audit trail itself is sufficient
+    forensic evidence.
+
+    Sentinel shape:
+
+    - ``_canonicalization_error`` — exception class name (status quo).
+    - ``_canonicalization_detail`` — exception ``str(exc)`` only when
+      ``exc`` is an :class:`rfc8785.CanonicalizationError`. By spec
+      (verified empirically on rfc8785) those messages are
+      type-name or JCS-rule strings such as ``"unsupported type:
+      <class 'X'>"`` or ``"inf is not representable in JCS"`` — they
+      never echo payload values. Other ``ValueError`` / ``TypeError``
+      paths can echo Tier-3 data (e.g. ``core/canonical.py``'s Decimal
+      check interpolates the offending value into its message); for
+      those the detail field is omitted to prevent a Tier-3 leak into
+      the Tier-1 audit row.
+    - ``_payload_keys`` — sorted top-level keys of the failed payload
+      when it is a Mapping. Keys are schema metadata (names like
+      "data", "validation", "version"); values are NOT captured. This
+      lets an auditor identify the failure shape (discovery-tool
+      result vs compose-state mutation vs unparseable arguments)
+      without leaking content.
+
+    All captured metadata is bounded: no payload values, no exception
+    messages from non-allowlisted classes, no recursion into nested
+    structures.
+    """
+    sentinel: dict[str, object] = {"_canonicalization_error": type(exc).__name__}
+    if isinstance(exc, rfc8785.CanonicalizationError):
+        # Bounded by spec: rfc8785 messages are short and value-free.
+        # The 512-char cap is belt-and-braces against future rfc8785
+        # changes that might inline a longer schema fragment.
+        sentinel["_canonicalization_detail"] = str(exc)[:512]
+    if isinstance(payload, Mapping):
+        sentinel["_payload_keys"] = sorted(str(k) for k in payload)
+    return sentinel
 
 
 class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
@@ -254,7 +358,15 @@ def begin_dispatch_or_arg_error(
             None,
         )
     except (ValueError, TypeError) as exc:
-        sentinel = {"_canonicalization_error": type(exc).__name__}
+        # Pass ``arguments`` only when it is a Mapping — the raw-string
+        # path goes through ``begin_dispatch`` directly and never lands
+        # here, but typing-narrow the call so ``_payload_keys`` is only
+        # emitted when meaningful (sentinel for ``arguments`` that's a
+        # str would emit a noisy index-key list).
+        sentinel = build_canonicalization_sentinel(
+            exc,
+            arguments if isinstance(arguments, Mapping) else None,
+        )
         return (
             DispatchAudit(
                 tool_call_id=tool_call_id,
@@ -296,12 +408,36 @@ def finish_success(
     row still lands; the verifier can detect the sentinel by parsing
     ``result_canonical`` and noticing the ``_canonicalization_error``
     key.
+
+    Pydantic normalization (elspeth-281f259235 fix)
+    -----------------------------------------------
+    Before canonicalization, ``result_payload`` is run through
+    :func:`_normalize_audit_payload` which converts any nested Pydantic
+    ``BaseModel`` instances to plain dicts. Discovery tool results
+    (``list_sources``, ``list_transforms``, ``list_sinks``,
+    ``get_plugin_schema``) carry ``PluginSummary`` / ``PluginSchemaInfo``
+    instances on ``ToolResult.data``; without this step the
+    canonicalization-failure sentinel would obliterate the actual result
+    body that the LLM saw, breaking the attributability test (auditors
+    cannot reconstruct what data the LLM made its decision against).
+
+    Sentinel shape (elspeth-281f259235 fix)
+    ---------------------------------------
+    On the fallback path, :func:`build_canonicalization_sentinel`
+    enriches the sentinel with diagnostic metadata —
+    ``_canonicalization_detail`` (allowlisted to
+    :class:`rfc8785.CanonicalizationError` whose messages are
+    value-free by spec) and ``_payload_keys`` (top-level keys only;
+    no values, no leak risk). An auditor reading the sentinel can
+    fingerprint the failure shape (discovery-tool vs mutation vs
+    runtime-preflight) without correlating with operational logs.
     """
+    normalized = _normalize_audit_payload(result_payload)
     try:
-        canon = canonical_json(result_payload)
-        result_hash = stable_hash(result_payload)
+        canon = canonical_json(normalized)
+        result_hash = stable_hash(normalized)
     except (ValueError, TypeError) as canon_exc:
-        sentinel = {"_canonicalization_error": type(canon_exc).__name__}
+        sentinel = build_canonicalization_sentinel(canon_exc, result_payload)
         canon = canonical_json(sentinel)
         result_hash = stable_hash(sentinel)
     return ComposerToolInvocation(
@@ -348,13 +484,14 @@ def finish_arg_error(
     (``server.py:call_tool``) so a Tier-1 verifier can apply a single
     invariant: "version_after is None on paths that did not complete".
     """
+    normalized_error_payload = _normalize_audit_payload(error_payload) if error_payload is not None else None
     return ComposerToolInvocation(
         tool_call_id=audit.tool_call_id,
         tool_name=audit.tool_name,
         arguments_canonical=audit.arguments_canonical,
         arguments_hash=audit.arguments_hash,
-        result_canonical=canonical_json(error_payload) if error_payload is not None else None,
-        result_hash=stable_hash(error_payload) if error_payload is not None else None,
+        result_canonical=canonical_json(normalized_error_payload) if normalized_error_payload is not None else None,
+        result_hash=stable_hash(normalized_error_payload) if normalized_error_payload is not None else None,
         status=ComposerToolStatus.ARG_ERROR,
         error_class=error_class,
         error_message=error_message,

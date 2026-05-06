@@ -30,10 +30,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import rfc8785
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.audit import build_canonicalization_sentinel
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -402,7 +404,7 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
     # rebind still works, but ``to_dict()`` returns a payload that
     # canonical_json refuses (non-finite float).
     class _NonCanonicalizableResult(ToolResult):
-        def to_dict(self) -> dict[str, Any]:  # type: ignore[override]
+        def to_dict(self) -> dict[str, Any]:
             return {
                 "success": True,
                 "version": self.updated_state.version,
@@ -766,3 +768,526 @@ async def test_compose_loop_records_arg_error_for_non_finite_non_object_argument
     second_call_messages = mock_llm.call_args_list[1].args[0]
     tool_messages = [msg for msg in second_call_messages if msg["role"] == "tool"]
     assert tool_messages[-1]["tool_call_id"] == "call_non_finite_scalar"
+
+
+# ---------------------------------------------------------------------------
+# Discovery-tool audit-payload preservation (elspeth-281f259235).
+#
+# Pre-fix: ``ToolResult.data`` for the four catalog discovery tools
+# carries Pydantic ``PluginSummary`` / ``PluginSchemaInfo`` instances.
+# The web composer audit canonicalizes ``ToolResult.to_dict()`` directly
+# via :func:`elspeth.core.canonical.canonical_json` →
+# :mod:`rfc8785`, which rejects ``BaseModel`` with
+# ``CanonicalizationError``. The existing ``except (ValueError,
+# TypeError)`` substituted the sentinel, obliterating the result body
+# the LLM had just made a decision against — failing the
+# attributability test.
+#
+# Post-fix: :func:`finish_success` runs
+# :func:`_normalize_audit_payload` (Pydantic-aware recursion mirroring
+# the standalone-MCP ``_ensure_serializable`` pattern) before
+# canonicalization, so the audit row preserves the catalog data
+# verbatim. The sentinel-canonical fallback still fires for genuinely
+# non-canonicalizable payloads (acceptance criterion #3 — pinned by
+# ``test_compose_loop_records_success_when_canonical_json_fails``).
+#
+# Matrix: 4 discovery tools x {cache miss, cache hit} = 8 invocation
+# scenarios. The cache-hit path (`service.py:980-992`) hand-builds a
+# slim audit dict from raw ``cached_result.data`` — bypassing
+# ``ToolResult.to_dict()`` — so the only normalization site that
+# catches it is ``finish_success`` itself.
+# ---------------------------------------------------------------------------
+
+
+def _discovery_result(
+    tool_name: str,
+    state: CompositionState,
+    catalog: MagicMock,
+) -> ToolResult:
+    """Build a real ToolResult mirroring what _handle_list_*/get_plugin_schema produce.
+
+    This goes through the same construction path as the production
+    handlers (`tools.py:_discovery_result`) so the freeze-on-data
+    discipline (``__post_init__`` calls ``freeze_fields(self, "data")``)
+    runs identically and the test exercises the actual audit-ingress
+    shape rather than a hand-rolled payload.
+    """
+    if tool_name == "list_sources":
+        data: Any = catalog.list_sources()
+    elif tool_name == "list_transforms":
+        data = catalog.list_transforms()
+    elif tool_name == "list_sinks":
+        data = catalog.list_sinks()
+    elif tool_name == "get_plugin_schema":
+        data = catalog.get_schema("source", "csv")
+    else:
+        raise AssertionError(f"unexpected discovery tool: {tool_name}")
+    return ToolResult(
+        success=True,
+        updated_state=state,
+        validation=ValidationSummary(
+            is_valid=True,
+            errors=(),
+            warnings=(),
+            suggestions=(),
+            semantic_contracts=(),
+        ),
+        affected_nodes=(),
+        data=data,
+    )
+
+
+def _assert_payload_preserved(payload: dict[str, Any], tool_name: str) -> None:
+    """Common assertions for a discovery-tool audit payload.
+
+    Pinned invariants:
+
+    - The sentinel diagnostic key is absent (the actual data made it
+      through canonicalization).
+    - The payload carries the expected envelope keys for a successful
+      discovery (``success``, ``validation``, ``version``, ``data``).
+    - The catalog data inside ``payload["data"]`` matches what the
+      ``_mock_catalog()`` fixture configured.
+    """
+    assert "_canonicalization_error" not in payload, (
+        f"{tool_name}: sentinel landed where real data was expected — audit primacy violated. Payload: {payload}"
+    )
+    assert payload["success"] is True
+    assert "validation" in payload
+    assert "version" in payload
+    assert "data" in payload, f"{tool_name}: missing data key in audit payload: {payload}"
+
+    data = payload["data"]
+    if tool_name == "list_sources":
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["name"] == "csv"
+        assert data[0]["plugin_type"] == "source"
+    elif tool_name in ("list_transforms", "list_sinks"):
+        assert data == []
+    elif tool_name == "get_plugin_schema":
+        assert isinstance(data, dict)
+        assert data["name"] == "csv"
+        assert data["plugin_type"] == "source"
+        assert data["json_schema"] == {"title": "Config", "properties": {}}
+    else:
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+
+class TestComposerDiscoveryAuditPreservesResult:
+    """elspeth-281f259235: successful discovery rows preserve catalog payload.
+
+    Pre-fix the audit row carried the canonicalization sentinel; the
+    LLM saw the real data via the ``_pydantic_default`` callback in
+    ``_serialize_tool_result``, but the durable audit trail did not.
+    This class pins the invariant per discovery tool, on both the
+    cache-miss and cache-hit code paths.
+    """
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        [
+            ("list_sources", {}),
+            ("list_transforms", {}),
+            ("list_sinks", {}),
+            ("get_plugin_schema", {"plugin_type": "source", "name": "csv"}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_cache_miss_audit_preserves_pydantic_payload(self, tool_name: str, tool_args: dict[str, Any]) -> None:
+        """A first-time discovery dispatch records the real catalog data.
+
+        Cache miss exercises the regular dispatch path:
+        ``execute_tool`` → real ``ToolResult`` →
+        ``_result_to_audit_payload`` → ``ToolResult.to_dict()`` →
+        ``finish_success`` → ``_normalize_audit_payload`` →
+        ``canonical_json``.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        discovery_result = _discovery_result(tool_name, state, catalog)
+
+        turn1 = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": f"call_{tool_name}",
+                    "name": tool_name,
+                    "arguments": tool_args,
+                }
+            ],
+        )
+        turn2 = _make_llm_response(content="Discovery complete.")
+
+        # Empty state has no source/sinks; bypass the post-loop runtime
+        # preflight as in the existing B1 test (orthogonal to the audit
+        # invariant we're pinning).
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+            patch(
+                "elspeth.web.composer.service.execute_tool",
+                return_value=discovery_result,
+            ),
+        ):
+            mock_llm.side_effect = [turn1, turn2]
+            result = await service.compose(f"Run {tool_name}", [], state)
+
+        invocations = result.tool_invocations
+        assert len(invocations) == 1, f"{tool_name}: expected exactly one audit row"
+        inv = invocations[0]
+        assert inv.status == ComposerToolStatus.SUCCESS
+        assert inv.tool_call_id == f"call_{tool_name}"
+        assert inv.cache_hit is False
+        assert inv.result_canonical is not None
+
+        payload = json.loads(inv.result_canonical)
+        _assert_payload_preserved(payload, tool_name)
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_args"),
+        [
+            ("list_sources", {}),
+            ("list_transforms", {}),
+            ("list_sinks", {}),
+            ("get_plugin_schema", {"plugin_type": "source", "name": "csv"}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_cache_hit_audit_preserves_pydantic_payload(self, tool_name: str, tool_args: dict[str, Any]) -> None:
+        """Cache-hit replay records the cached catalog data, not the sentinel.
+
+        Cache hit exercises the second dispatch path:
+        ``cached_payload = {"success": ..., "data":
+        cached_result.data, "cache_hit": True}`` (hand-built in
+        ``service.py:980-992``, bypasses ``ToolResult.to_dict()``) →
+        ``finish_success`` → ``_normalize_audit_payload`` → ``canonical_json``.
+
+        ``finish_success`` is the single SUCCESS-path audit choke
+        point, so normalizing there catches both cache-miss and
+        cache-hit paths uniformly. This test pins that invariant
+        against any future refactor that might split the two paths.
+
+        Sequence: two compose loop turns each issuing the same
+        cacheable tool call, then a final text turn. The first call
+        populates ``discovery_cache``; the second hits it.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        discovery_result = _discovery_result(tool_name, state, catalog)
+
+        # Same arguments dict on both turns → identical cache key.
+        turn1 = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": f"call_{tool_name}_first",
+                    "name": tool_name,
+                    "arguments": tool_args,
+                }
+            ],
+        )
+        turn2 = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": f"call_{tool_name}_replay",
+                    "name": tool_name,
+                    "arguments": tool_args,
+                }
+            ],
+        )
+        turn3 = _make_llm_response(content="Cached discovery complete.")
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+            patch(
+                "elspeth.web.composer.service.execute_tool",
+                return_value=discovery_result,
+            ) as mock_execute_tool,
+        ):
+            mock_llm.side_effect = [turn1, turn2, turn3]
+            result = await service.compose(f"Cache {tool_name}", [], state)
+
+        # Cache hit means execute_tool was called only once across both
+        # turns — the second turn served the result from
+        # discovery_cache without re-dispatching to the handler.
+        assert mock_execute_tool.call_count == 1, (
+            f"{tool_name}: expected exactly one execute_tool call across "
+            f"both turns (second served from cache); got {mock_execute_tool.call_count}"
+        )
+
+        invocations = result.tool_invocations
+        assert len(invocations) == 2, f"{tool_name}: expected two audit rows (cache miss + hit)"
+
+        miss_inv, hit_inv = invocations
+        assert miss_inv.status == ComposerToolStatus.SUCCESS
+        assert miss_inv.cache_hit is False
+        assert hit_inv.status == ComposerToolStatus.SUCCESS
+        assert hit_inv.cache_hit is True
+
+        # Both audit rows must carry the real data — pre-fix the
+        # cache-hit row would have landed the sentinel because the
+        # hand-built payload bypassed any normalization.
+        assert miss_inv.result_canonical is not None
+        assert hit_inv.result_canonical is not None
+        miss_payload = json.loads(miss_inv.result_canonical)
+        hit_payload = json.loads(hit_inv.result_canonical)
+
+        # Cache-miss payload uses the full ToolResult.to_dict shape;
+        # cache-hit uses the slim hand-built shape. Both must contain
+        # the catalog data and neither must contain the sentinel.
+        _assert_payload_preserved(miss_payload, tool_name)
+        assert "_canonicalization_error" not in hit_payload, (
+            f"{tool_name}: cache-hit audit row carries sentinel — cache replay path bypassed normalization. Payload: {hit_payload}"
+        )
+        # Hand-built cache-hit shape has data + success + cache_hit.
+        assert hit_payload["success"] is True
+        assert hit_payload["cache_hit"] is True
+        assert "data" in hit_payload
+
+        if tool_name == "list_sources":
+            assert hit_payload["data"][0]["name"] == "csv"
+        elif tool_name == "get_plugin_schema":
+            assert hit_payload["data"]["name"] == "csv"
+            assert hit_payload["data"]["json_schema"] == {"title": "Config", "properties": {}}
+
+
+@pytest.mark.asyncio
+async def test_canonicalization_sentinel_carries_payload_keys_diagnostic() -> None:
+    """elspeth-281f259235 diagnostic upgrade: sentinel records payload top-level keys.
+
+    On the genuinely-non-canonicalizable fallback path (non-finite
+    floats, future unsupported types), the sentinel now includes
+    ``_payload_keys`` — a sorted list of the failed payload's
+    top-level keys. This is bounded, leak-safe schema metadata that
+    lets an auditor identify the failure shape (discovery-tool
+    result vs compose-state mutation vs malformed args) without
+    correlating with operational logs.
+
+    The companion test
+    ``test_compose_loop_records_success_when_canonical_json_fails``
+    above pins that the sentinel still fires for non-finite floats;
+    this test pins the new diagnostic shape on top of that.
+    """
+    catalog = _mock_catalog()
+    settings = _make_settings()
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    mutated_state = replace(state, version=2)
+
+    class _NonCanonicalizableResult(ToolResult):
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "success": True,
+                "version": self.updated_state.version,
+                "non_finite": float("inf"),
+            }
+
+    bad_result = _NonCanonicalizableResult(
+        success=True,
+        updated_state=mutated_state,
+        validation=ValidationSummary(
+            is_valid=True,
+            errors=(),
+            warnings=(),
+            suggestions=(),
+            semantic_contracts=(),
+        ),
+        affected_nodes=(),
+    )
+
+    turn1 = _make_llm_response(
+        tool_calls=[
+            {
+                "id": "call_with_non_finite",
+                "name": "set_metadata",
+                "arguments": {"patch": {"name": "Sentinel diagnostic"}},
+            }
+        ],
+    )
+    turn2 = _make_llm_response(content="Done.")
+
+    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        patch(
+            "elspeth.web.composer.service.execute_tool",
+            return_value=bad_result,
+        ),
+    ):
+        mock_llm.side_effect = [turn1, turn2]
+        await service.compose("Trigger diagnostic", [], state)
+
+    # No-arg gating to keep the structural assertions self-contained;
+    # the recorder is reachable via the result's tool_invocations
+    # attribute on the success path.
+    # (The compose() returned normally; sentinel landed in audit row.)
+    # Read the recorder buffer indirectly by re-running the flow with
+    # a SpyRecorder if needed; the simpler path is to read the
+    # ComposerResult.tool_invocations on success — which the
+    # async-with above didn't capture. Use the same SpyRecorder
+    # pattern as test_compose_loop_records_assertion_error_before_reraise.
+
+    # Re-run with recorder spy to read the buffered invocation directly
+    # (simpler than re-wiring the success-path return value).
+    captured_recorder: dict[str, Any] = {}
+    real_buffering_recorder = __import__("elspeth.web.composer.audit", fromlist=["BufferingRecorder"]).BufferingRecorder
+
+    class _SpyRecorder(real_buffering_recorder):  # type: ignore[misc, valid-type]
+        def __init__(self) -> None:
+            super().__init__()
+            captured_recorder["instance"] = self
+
+    service2 = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    state2 = _empty_state()
+
+    with (
+        patch.object(service2, "_call_llm", new_callable=AsyncMock) as mock_llm2,
+        patch.object(service2, "_runtime_preflight", return_value=passing_preflight),
+        patch(
+            "elspeth.web.composer.service.execute_tool",
+            return_value=bad_result,
+        ),
+        patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
+    ):
+        mock_llm2.side_effect = [turn1, turn2]
+        await service2.compose("Trigger diagnostic", [], state2)
+
+    spy = captured_recorder["instance"]
+    invocations = spy.invocations
+    assert len(invocations) == 1
+    inv = invocations[0]
+    assert inv.status == ComposerToolStatus.SUCCESS
+    assert inv.result_canonical is not None
+    payload = json.loads(inv.result_canonical)
+
+    # Sentinel still fires for genuine canonicalization failures.
+    assert "_canonicalization_error" in payload
+
+    # New diagnostic: top-level keys of the failed payload, sorted.
+    # Pinned exactly so a future regression that drops the diagnostic
+    # or echoes raw values fails this test loudly.
+    assert payload["_payload_keys"] == sorted(["success", "version", "non_finite"])
+
+    # Leak-prevention: the non-finite-float fail-closed path is caught
+    # *inside* :func:`elspeth.core.canonical._normalize_value` (the
+    # Tier-3 normalization stage that runs before rfc8785), which
+    # raises a plain ``ValueError`` whose message *interpolates the
+    # offending float value* (``f"Cannot canonicalize non-finite
+    # float: {obj}. Use None…"``). For arbitrary payloads ``{obj}``
+    # could be a Tier-3 row value (e.g. a Decimal carrying a
+    # user-controlled number), so the allowlist in
+    # :func:`build_canonicalization_sentinel` MUST exclude the detail
+    # field for non-rfc8785 ``ValueError``. This test pins that
+    # exclusion: ``_canonicalization_detail`` must be absent here.
+    #
+    # If a future change reclassifies non-finite-float detection
+    # downstream of ``_normalize_value`` (so rfc8785 sees the value
+    # and raises ``FloatDomainError`` — a ``CanonicalizationError``
+    # subclass), this assertion would correctly start to fail and
+    # signal the policy reconsideration.
+    assert payload["_canonicalization_error"] == "ValueError"
+    assert "_canonicalization_detail" not in payload, (
+        "Non-rfc8785 ValueError captured exception message — "
+        "potential Tier-3 leak into Tier-1 audit row. The float "
+        "non-finite ValueError from core/canonical.py interpolates "
+        "the offending value into its message; the audit sentinel "
+        "must NOT echo it."
+    )
+
+
+@pytest.mark.asyncio
+async def test_canonicalization_sentinel_omits_detail_for_non_rfc8785_errors() -> None:
+    """Leak prevention: sentinel detail is captured ONLY for rfc8785 errors.
+
+    Other ``ValueError`` paths (e.g. ``core/canonical.py`` Decimal
+    check) interpolate offending payload values into the exception
+    message. Echoing those into ``_canonicalization_detail`` would
+    leak Tier-3 data into the Tier-1 audit row. The allowlist in
+    :func:`build_canonicalization_sentinel` ensures detail capture
+    fires only when the exception is an
+    :class:`rfc8785.CanonicalizationError`.
+
+    This test calls the helper directly with a synthetic
+    ``ValueError`` carrying secret-shaped text and asserts the
+    detail field is absent.
+    """
+    sentinel = build_canonicalization_sentinel(
+        ValueError("Cannot canonicalize SECRET=hunter2 in field x"),
+        {"field_x": "value", "field_y": "value"},
+    )
+    assert sentinel["_canonicalization_error"] == "ValueError"
+    assert "_canonicalization_detail" not in sentinel, (
+        "Non-rfc8785 ValueError must not capture exception message — potential Tier-3 leak into Tier-1 audit row."
+    )
+    # Top-level keys are still safe to capture.
+    assert sentinel["_payload_keys"] == ["field_x", "field_y"]
+
+
+def test_canonicalization_sentinel_captures_detail_for_rfc8785_errors() -> None:
+    """rfc8785 errors are message-safe by spec — capture full detail.
+
+    :class:`rfc8785.CanonicalizationError` messages are bounded type
+    or rule strings (``"unsupported type: <class 'X'>"``,
+    ``"<value> is not representable in JCS"``) that never echo
+    arbitrary payload bytes. Capturing them in
+    ``_canonicalization_detail`` gives auditors the offending Python
+    type name without correlating to operational logs — exactly the
+    forensic value the diagnostic upgrade is for.
+
+    The 512-char cap is belt-and-braces: even if a future rfc8785
+    inlined a longer schema fragment, the detail field is bounded.
+    """
+    exc = rfc8785.CanonicalizationError("unsupported type: <class 'elspeth.web.catalog.schemas.PluginSummary'>")
+    sentinel = build_canonicalization_sentinel(exc, {"data": "x", "success": True, "validation": {}})
+    assert sentinel["_canonicalization_error"] == "CanonicalizationError"
+    detail = sentinel["_canonicalization_detail"]
+    assert isinstance(detail, str)
+    assert "PluginSummary" in detail
+    assert "unsupported type" in detail
+    assert sentinel["_payload_keys"] == ["data", "success", "validation"]
+
+
+def test_canonicalization_sentinel_caps_detail_at_512_chars() -> None:
+    """Belt-and-braces bound: detail capture is hard-capped at 512 chars.
+
+    If a future rfc8785 release inlines a multi-kilobyte schema
+    fragment into its exception message, the audit row stays
+    bounded.
+    """
+    long_message = "unsupported type: " + ("X" * 2000)
+    exc = rfc8785.CanonicalizationError(long_message)
+    sentinel = build_canonicalization_sentinel(exc, {"k": "v"})
+    detail = sentinel["_canonicalization_detail"]
+    assert isinstance(detail, str)
+    assert len(detail) == 512
+
+
+def test_canonicalization_sentinel_omits_payload_keys_for_non_mapping() -> None:
+    """Non-Mapping payloads (raw strings, lists) yield no key diagnostic.
+
+    The string-truncation path in ``begin_dispatch`` and any future
+    list-shaped audit payload would emit a noisy index-key list if
+    the helper used ``isinstance(payload, Iterable)`` — the
+    ``isinstance(payload, Mapping)`` guard keeps the diagnostic
+    schema-meaningful (key NAMES, not indices).
+    """
+    exc = rfc8785.CanonicalizationError("unsupported type: <class 'X'>")
+    sentinel = build_canonicalization_sentinel(exc, ["item1", "item2"])
+    assert "_payload_keys" not in sentinel
+    sentinel_str = build_canonicalization_sentinel(exc, "raw string")
+    assert "_payload_keys" not in sentinel_str
+    sentinel_none = build_canonicalization_sentinel(exc, None)
+    assert "_payload_keys" not in sentinel_none

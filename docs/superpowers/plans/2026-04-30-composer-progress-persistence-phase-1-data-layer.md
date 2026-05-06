@@ -12,6 +12,135 @@
 
 ---
 
+## Risk-First Execution Schedules
+
+**Review status:** CHANGES_REQUESTED. Do not execute this document as one
+large Phase 1 PR. The task bodies below remain the detailed
+implementation source, but execution is split into three schedules with
+separate review gates. The split optimizes for risk containment, not
+calendar speed.
+
+**Scheduling rule:** only one schedule is active at a time. Schedule B
+does not start until Schedule A has passed review and landed; Schedule C
+does not start until Schedule B has passed review and landed. If an
+implementer finds a blocker that belongs to a later schedule, they file
+it against that later schedule instead of broadening the active PR.
+
+**Canonical review files:**
+- Schedule A: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
+- Schedule B: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md`
+- Schedule C: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md`
+
+Use those files for agent review. This parent file remains the
+traceability source for the original full Phase 1 task numbering.
+
+### Schedule A: Schema and Current Writer Safety
+
+**Risk controlled:** destructive schema changes, stale staging DB
+bootstrap, and regressions in existing message/state writers.
+
+**Scope:**
+- Task 0 spec supersession marker, plus blocker-ID and stale-anchor
+  cleanup before code execution.
+- A new preflight direct-write inventory for every
+  `chat_messages_table` and `composition_states_table` writer across
+  `src/` and `tests/`; this inventory is a merge gate.
+- Task 1 through Task 4 schema work, after fixing plan-authored import
+  errors and PostgreSQL-incompatible metadata notes called out by the
+  review.
+- Task 7 through Task 10 only where needed for current writer safety:
+  `_session_write_lock`, sequence/version allocation helpers,
+  composition-state provenance, and stale-current-state guards.
+- Task 14 current writer cutover: `add_message`, `get_messages`
+  ordering/filtering, `fork_session`, route call sites, protocol record
+  hydration, direct test fixtures, and the missing `ChatMessageRole`
+  import.
+- Task 18 moved into this schedule before the schema PR lands:
+  staging session-DB recreation runbook plus live DB dialect/path
+  inspection.
+
+**Out of scope:**
+- `persist_compose_turn` and `persist_compose_turn_async`.
+- Compose-turn telemetry/payload dataclasses unless a current-writer
+  compatibility test proves they are required.
+- PostgreSQL concurrency claims beyond schema-portability smoke checks.
+
+**Exit gates:**
+- No direct writer can insert a chat message or composition state
+  without satisfying the new required columns.
+- The staging DB recreation runbook exists and is explicitly reviewed
+  before any schema-breaking deploy.
+- SQLite unit/integration tests for current behavior pass.
+- A follow-up review confirms B2, B3 import/precondition items, B8,
+  B9, W1, W2, W3, and W5 are either resolved or explicitly carried
+  into Schedule B/C with a non-blocking rationale.
+
+### Schedule B: Compose-Turn Primitive and Audit Semantics
+
+**Risk controlled:** atomic compose-turn persistence, audit primacy,
+tool-call transcript consistency, and async cancellation/idempotency
+before any production route depends on the primitive.
+
+**Scope:**
+- Task 5 and Task 6 telemetry/payload dataclasses, unless Schedule A
+  deliberately pulled a minimal subset forward.
+- Task 11 through Task 13: `persist_compose_turn`,
+  `persist_compose_turn_async`, `_AuditOutcome`, unwind behavior, and
+  failure disposition.
+- Exact validation that assistant `tool_calls` match redacted tool rows
+  before any insert, including missing, extra, mismatched, and duplicate
+  ID regressions with no partial writes.
+- A cancellation/idempotency contract for the shielded worker bridge,
+  including retry-after-cancel behavior.
+- Task 15 backward-direction INV-AUDIT-AHEAD proof where it can be
+  exercised without relying on PostgreSQL/testcontainer infrastructure.
+
+**Out of scope:**
+- Testcontainer PostgreSQL infrastructure and CI branch-protection
+  changes.
+- Any compose-loop integration or user-visible route behavior from
+  later phases.
+- Frontend work.
+
+**Exit gates:**
+- The primitive cannot persist an inconsistent assistant/tool
+  transcript.
+- Generic SQLAlchemy and filesystem persistence failures preserve the
+  primary plugin failure, emit allowed telemetry/audit fields only, and
+  do not leak SQL params, row payloads, raw exception text, or secrets.
+- Cancellation tests prove the documented retry/idempotency behavior.
+- A follow-up review confirms B4, B5, B6, and W4 are resolved.
+
+### Schedule C: PostgreSQL, CI, and Operational Proof
+
+**Risk controlled:** dialect drift, Docker/testcontainer dependency
+drift, deadlock/hang detection, CI gating, and final handoff accuracy.
+
+**Scope:**
+- Task 16 PostgreSQL/testcontainer lane after current metadata is made
+  PostgreSQL-portable or the test scope is explicitly constrained.
+- Task 17 latency sanity tests with bounded timeout behavior.
+- Task 19 final spec/OQ amendments.
+- Task 20 final CI and release-handback steps, adjusted to represent
+  Schedule C as the final Phase 1 closure PR rather than a monolithic
+  all-in-one PR.
+
+**Out of scope:**
+- New schema or primitive behavior except for fixes required by the
+  PostgreSQL proof.
+- Any speed-driven parallelization with Schedule A or B.
+
+**Exit gates:**
+- `initialize_session_schema(engine)` succeeds on PostgreSQL for the
+  schema actually used by the testcontainer lane.
+- The dependency check fails closed when `testcontainers.postgres` is
+  missing.
+- Concurrency tests assert all worker threads/futures terminate and
+  fail with useful diagnostics on timeout.
+- CI success aggregation includes the Docker/testcontainer lane.
+- Final plan/spec anchors and blocker IDs are current enough for a
+  future implementer to follow without relying on stale review JSON.
+
 ## File Structure
 
 ### Files to modify
@@ -6923,7 +7052,7 @@ handled by the doc amendments above, not by observation-only notes.
 
 ---
 
-## Task 20: Final Phase 1 CI run
+## Task 20: Final Schedule C / Phase 1 closure CI run
 
 - [ ] **Step 1: Run the full sessions test suite**
 
@@ -7006,21 +7135,30 @@ Expected: clean.
 ```
 Expected: both green. The new files (`telemetry.py`, `_persist_payload.py`) live in L3 and should not introduce any upward imports. The new `src/elspeth/contracts/advisory_locks.py` is L0 (contracts layer); the import from L3 (`src/elspeth/web/sessions/service.py`) is downward and tier-model-clean — this is the canonical shape for a contracts-layer constant consumed by an L3 plugin (see CLAUDE.md "Layer Dependency Rules").
 
-- [ ] **Step 6: Open the PR**
+- [ ] **Step 6: Open the Schedule C closure PR**
 
 ```bash
-gh pr create --title "feat(composer): progress persistence phase 1 — data layer + sync primitive" --body "$(cat <<'EOF'
+gh pr create --title "test(composer): progress persistence phase 1C — PostgreSQL and CI proof" --body "$(cat <<'EOF'
 ## Summary
 
-Phase 1 of composer-progress-persistence (spec §11):
-- Adds `writer_principal`, internal `audit` chat-message role, `provenance` discriminator, `audit_access_log` table
-- Adds concrete `SessionServiceImpl.persist_compose_turn` synchronous primitive plus protocol-public `SessionServiceProtocol.persist_compose_turn_async` dispatcher
-- Adds session write-lock + sequence-reservation helpers (PostgreSQL two-argument form `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID, hashtext(session_id))`; SQLite process-wide `(database_url, session_id)` lock for the current single-process deployment)
-- Adds `src/elspeth/contracts/advisory_locks.py` registering `ELSPETH_SESSIONS_LOCK_CLASSID = 0x454C5350` as the on-the-wire-ABI classid namespace for the sessions DB lock — closes B3 from the Phase 1 plan-review synthesis (single-argument advisory locks share one cluster-wide namespace and were unsafe in shared-cluster deployments)
-- Adds telemetry counters
-- Updates all six existing `add_message` route/helper callers to pass `writer_principal` and use parented `tool` rows or unparented internal `audit` rows as appropriate (BREAKING)
-- Keeps `save_composition_state` / `set_active_state` inline with provenance + session-write-lock additions; refactors `fork_session` through `_insert_composition_state`
-- Removes the `version` field from `_StatePayload`; `_insert_composition_state` allocates `composition_states.version` under `_session_write_lock` via `SELECT COALESCE(MAX(version), 0) + 1 WHERE session_id = :sid`; `persist_compose_turn(expected_current_state_id=...)` rejects stale compose results before allocation — closes B1/B3 and the compose-vs-revert stale-state race from the Phase 1 plan-review synthesis (the dual-allocator race could fabricate Tier-1 audit-integrity violations from contention losses; SLO threshold is 0; under ELSPETH's auditability standard fabricated Tier-1 alerts are evidence-tampering-class harm)
+Schedule C closes Phase 1 of composer-progress-persistence after the
+Schedule A schema/current-writer safety PR and Schedule B compose-turn
+primitive/audit semantics PR have merged.
+
+- Proves `initialize_session_schema(engine)` succeeds on the PostgreSQL
+  schema exercised by the testcontainer lane.
+- Adds or fixes the Docker-enabled `pytest -m testcontainer
+  tests/integration/web/ -v` CI lane and `ci-success` gating.
+- Verifies CL-PP-11, advisory-lock acquisition, cross-allocator
+  serialization, stale compose-turn rejection, and latency sanity.
+- Confirms dependency checks fail closed when `testcontainers.postgres`
+  is unavailable.
+- Amends final spec/OQ handoff text and records the Phase 1 checkpoint.
+
+## Prior Schedule PRs
+
+- Schedule A: schema and current writer safety PR
+- Schedule B: compose-turn primitive and audit semantics PR
 
 ## Spec
 
@@ -7071,7 +7209,8 @@ that child instead and link it from the feature comment.
 
 ## Phase 1 Done When
 
-Task 0 and Tasks 1-20 above are complete. Specifically:
+Schedules A, B, and C have each landed through their own review gate,
+and Task 0 plus Tasks 1-20 above are complete. Specifically:
 
 1. [ ] All new tests pass against in-memory SQLite.
 2. [ ] CL-PP-11 + the B3 cross-allocator test (`test_cross_allocator_save_state_serialises_with_persist_turn`) + the B1/stale dual-`persist_compose_turn` test (`test_concurrent_persist_compose_turn_same_state_stale_rejects_without_integrity_alert`) pass against testcontainer PostgreSQL **via Task 20 Step 1b explicitly** — passing tests in the Docker-free `pytest tests/ -x` run does NOT count for this gate (the marker deselect silently skips them; B4 from the plan-review synthesis). The B1 regression closes the helper-contract-level fabricated-Tier-1-violation vector and proves stale same-state compose rejects do not increment the integrity counter.
@@ -7083,7 +7222,9 @@ Task 0 and Tasks 1-20 above are complete. Specifically:
 8. [ ] OQ-1 retention CLI follow-up Filigree ticket filed.
 9. [ ] Design/spec and overview handoff text amended so downstream phases do not copy stale Phase 1 snippets.
 
-Phase 2 begins after this PR merges. Phase 2 builds on the schema delivered here but does not require the compose loop to be wired (Phase 3) or the frontend (Phase 4).
+Phase 2 begins only after the Schedule C closure PR merges. Phase 2
+builds on the schema and primitive delivered here but does not require
+the compose loop to be wired (Phase 3) or the frontend (Phase 4).
 
 ---
 
@@ -7107,16 +7248,16 @@ is also Phase 3 (the `include_tool_rows=true` route extension).
 The redaction primitives that produce the `summarizer_errors` and
 `unknown_response_key` telemetry are Phase 2.
 
-**Why ship dormant infrastructure now.** The schema, the sync
-primitive, and the audit-primacy disposition are load-bearing for
-Phases 2-4. Splitting them across phases would require each
-subsequent phase to amend the schema (extra recreation steps in
-the staging runbook), re-derive the persist primitive's contract,
-and re-establish the `_AuditOutcome` shape. Bundling them in
-Phase 1 lets Phase 2 introduce redaction against a stable
-persistence contract, Phase 3 wire the compose loop without
-schema work, and Phase 4 surface the recovery panel against an
-already-tested data layer.
+**Why stage dormant infrastructure through three schedules.** The
+schema, the sync primitive, and the audit-primacy disposition are
+load-bearing for Phases 2-4, but the review found that landing them in
+one PR hides too much risk. Schedule A proves the schema can coexist
+with every current writer before any dormant primitive exists. Schedule
+B proves the primitive's transcript, audit, and cancellation semantics
+before PostgreSQL/CI infrastructure becomes the dominant concern.
+Schedule C proves the same contract across PostgreSQL and CI before
+Phase 1 is declared complete. This keeps later phases on a stable
+persistence contract without forcing one high-blast-radius merge.
 
 **Stall criterion (event-based).** ELSPETH does not commit to
 calendar dates for Phase 2-4 (per project policy: ADR-level SLAs

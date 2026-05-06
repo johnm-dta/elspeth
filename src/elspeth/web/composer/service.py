@@ -46,10 +46,6 @@ from elspeth.web.composer.audit import (
     finish_plugin_crash,
     finish_success,
 )
-from elspeth.web.composer.empty_state_recovery import (
-    _RECOVERY_NUDGE_CONTENT,
-    EmptyStateRecoveryTracker,
-)
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressSink,
@@ -542,24 +538,6 @@ def _find_missing_required_paths(
 _TOOL_REQUIRED_PATHS: dict[str, tuple[_CompiledRequiredPath, ...]] = _build_tool_required_paths_index()
 
 
-def _has_prior_mutation_attempt(
-    invocations: tuple[ComposerToolInvocation, ...],
-) -> bool:
-    """Return True if any non-discovery tool was invoked in this compose call.
-
-    Used by the §7.6 Option C recovery-nudge trigger to suppress the
-    false-positive where the operator asked a pure information question:
-    if no mutation tool has been attempted, the empty state is the
-    natural answer to the question, not a failed build attempt, and a
-    "fall back to a minimal pipeline" nudge would be tone-deaf.
-
-    Counts ANY non-discovery invocation — successful, failed, or
-    arg-error. The signal is "did the model ever try to build?", not
-    "did the build succeed?".
-    """
-    return any(not is_discovery_tool(inv.tool_name) for inv in invocations)
-
-
 def _state_is_structurally_empty(state: CompositionState) -> bool:
     """Return True when no composition tools have produced visible state.
 
@@ -798,39 +776,6 @@ class ComposerServiceImpl:
         if failed_checks:
             return f"I cannot mark this pipeline complete yet because runtime preflight failed: {failed_checks[0].detail}."
         return "I cannot mark this pipeline complete yet because runtime preflight failed."
-
-    def _should_fire_recovery_nudge(
-        self,
-        *,
-        state: CompositionState,
-        tracker: EmptyStateRecoveryTracker,
-        invocations: tuple[ComposerToolInvocation, ...],
-        composition_turns_used: int,
-        discovery_turns_used: int,
-    ) -> bool:
-        """§7.6 Option C trigger predicate — all conditions must hold.
-
-        The pure-Q&A guard (``_has_prior_mutation_attempt``) prevents the
-        false-positive where the operator asked an informational question
-        the model answered honestly without ever attempting a build —
-        nudging "fall back to a minimal pipeline" there is tone-deaf.
-
-        The remaining-budget check prevents re-entering the loop after
-        the budgets are exhausted. The bonus-call path at line ~1760
-        does not reach this predicate; that path is the only no-tool-call
-        site reached after budget exhaustion, and it must finalize
-        directly per the bonus-call contract.
-        """
-        if tracker.has_fired():
-            return False
-        if not _state_is_structurally_empty(state):
-            return False
-        if not _has_prior_mutation_attempt(invocations):
-            return False
-        budget_remaining = (
-            self._max_composition_turns + self._max_discovery_turns
-        ) - (composition_turns_used + discovery_turns_used)
-        return budget_remaining >= 1
 
     async def _finalize_no_tool_response(
         self,
@@ -1157,13 +1102,6 @@ class ComposerServiceImpl:
         # shared across requests.
         anti_anchor = AntiAnchorTracker()
 
-        # §7.6 Option C empty-state recovery tracker: single-fire-per-compose
-        # nudge that triggers ONLY at the primary no-tool-call branch when
-        # the model surrendered on a structurally-empty state. NOT injected
-        # from the budget-exhaustion bonus-call path (re-entering the loop
-        # there would violate the bonus-call contract).
-        empty_state_recovery = EmptyStateRecoveryTracker()
-
         while True:
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -1176,39 +1114,8 @@ class ComposerServiceImpl:
             )
             assistant_message = response.choices[0].message
 
-            # If no tool calls, the LLM is done — apply the final gate and return.
-            # §7.6 Option C divergence: if the model surrendered on a
-            # structurally-empty state AFTER attempting at least one mutation,
-            # inject a single recovery nudge and re-enter the loop. The nudge
-            # is bounded by single-fire-per-compose AND a remaining-budget
-            # check; second arrival here falls through to the existing
-            # empty-state passthrough.
+            # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
-                if self._should_fire_recovery_nudge(
-                    state=state,
-                    tracker=empty_state_recovery,
-                    invocations=recorder.invocations,
-                    composition_turns_used=composition_turns_used,
-                    discovery_turns_used=discovery_turns_used,
-                ):
-                    empty_state_recovery.record_fire()
-                    llm_messages.append(
-                        {"role": "user", "content": _RECOVERY_NUDGE_CONTENT}
-                    )
-                    composition_turns_used += 1
-                    await _emit_progress(
-                        progress,
-                        ComposerProgressEvent(
-                            phase="using_tools",
-                            headline="ELSPETH detected an empty-state surrender.",
-                            evidence=(
-                                "The model produced prose only and the pipeline state is still empty.",
-                                "A recovery nudge was injected suggesting a minimal-shape pipeline.",
-                            ),
-                            likely_next="The model will see the nudge and try a minimal build.",
-                        ),
-                    )
-                    continue
                 await _emit_progress(
                     progress,
                     ComposerProgressEvent(

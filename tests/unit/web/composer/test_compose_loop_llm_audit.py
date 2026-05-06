@@ -177,10 +177,6 @@ async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
         request_id="chatcmpl-tool",
     )
     final_turn = _make_llm_response(content="Pipeline updated.", request_id="chatcmpl-final")
-    # §7.6 Option C: set_metadata mutates only the metadata field, so
-    # state is still structurally empty after the SUCCESS → recovery
-    # nudge fires; provide one more text turn for the post-nudge call.
-    nudge_turn = _make_llm_response(content="Still empty after nudge.", request_id="chatcmpl-postnudge")
     mutated_state = replace(state, metadata=PipelineMetadata(name="After tool"), version=2)
     tool_result = ToolResult(
         success=True,
@@ -190,7 +186,7 @@ async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
     )
 
     with (
-        patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, side_effect=[tool_turn, final_turn, nudge_turn]),
+        patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, side_effect=[tool_turn, final_turn]),
         patch("elspeth.web.composer.service.execute_tool", return_value=tool_result),
         patch.object(
             service, "_cached_runtime_preflight", new_callable=AsyncMock, return_value=ValidationResult(is_valid=True, checks=[], errors=[])
@@ -198,8 +194,9 @@ async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
     ):
         result = await service.compose("Set a name", [], state)
 
-    assert [call.provider_request_id for call in result.llm_calls] == ["chatcmpl-tool", "chatcmpl-final", "chatcmpl-postnudge"]
-    assert [call.status for call in result.llm_calls] == [ComposerLLMCallStatus.SUCCESS, ComposerLLMCallStatus.SUCCESS, ComposerLLMCallStatus.SUCCESS]
+    assert result.message == "Pipeline updated."
+    assert [call.provider_request_id for call in result.llm_calls] == ["chatcmpl-tool", "chatcmpl-final"]
+    assert [call.status for call in result.llm_calls] == [ComposerLLMCallStatus.SUCCESS, ComposerLLMCallStatus.SUCCESS]
     assert len(result.tool_invocations) == 1
 
 

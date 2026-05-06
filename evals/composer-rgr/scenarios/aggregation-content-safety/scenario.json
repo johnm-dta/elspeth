@@ -1,0 +1,33 @@
+{
+  "scenario_id": "aggregation_content_safety",
+  "summary": "User asks composer to load text rows, run each through Azure content safety with a threshold, and aggregate approved rows into a single output. Exercises both the content-safety transform's options block and a batch-aggregation transform's trigger config. Authored 2026-05-06 as part of Tier 1.5 Step B fan-out — content-safety + aggregation were not exercised by the URL-download-line-explode RGR scenario.",
+  "opening_prompt": "Please create a pipeline that loads /tmp/messages.csv (one column 'text' per row), runs each row through Azure content safety, drops rows whose hate or violence severity is at or above 4, and writes the approved rows into a single JSON output file at /tmp/approved.json.",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i ",
+      "let me know if"
+    ],
+    "passivity_phrases_note": "Same passivity catch-list as url-download-line-explode.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "build_failure_note": "Server-injected on completion-claim with failed preflight.",
+    "must_be_valid": true,
+    "must_be_valid_note": "Final state must have is_valid=true."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["azure_content_safety"]
+    ],
+    "must_have_node_kinds_substring_any_of_note": "Content-safety transform must be wired in. The aggregation/threshold piece may be expressed via gate + threshold or aggregation transform; we don't pin the specific shape — only that the safety check fired.",
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  }
+}

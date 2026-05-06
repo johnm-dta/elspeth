@@ -3,7 +3,7 @@
 #
 # One scenario, one turn, one judgment. Drives the staging composer with a
 # fixed opening prompt, captures every assistant turn (including in-loop
-# tool-call assistant messages), and scores against scenario.json's
+# tool-call assistant messages), and scores against the scenario's
 # red_criteria / green_criteria.
 #
 # Usage:
@@ -12,15 +12,24 @@
 #   ELSPETH_EVAL_PASS=dta_pass \
 #   ./run_scenario.sh [run_label]
 #
+# Selecting a scenario:
+#   By default the harness uses scenarios/url-download-line-explode/scenario.json.
+#   Override via ELSPETH_RGR_SCENARIO=<path-to-scenario.json>. Run dirs land
+#   under runs/<utc-ts>-<scenario-basename>-<label>/ when a non-default
+#   scenario is selected, so per-scenario verdicts don't muddle.
+#
 # Output:
 #   runs/<utc-ts>-<run_label>/
 #     login.json  session.json  send.json  messages.json  scoring.json
 set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCENARIO_FILE="${ELSPETH_RGR_SCENARIO:-$HERE/scenarios/url-download-line-explode/scenario.json}"
+[[ -f "$SCENARIO_FILE" ]] || { echo "ERROR: scenario file not found: $SCENARIO_FILE" >&2; exit 64; }
+SCENARIO_NAME="$(basename "$(dirname "$SCENARIO_FILE")")"
 LABEL="${1:-rgr}"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN_DIR="$HERE/runs/$TS-$LABEL"
+RUN_DIR="$HERE/runs/$TS-$SCENARIO_NAME-$LABEL"
 mkdir -p "$RUN_DIR"
 
 : "${ELSPETH_EVAL_BASE_URL:?set ELSPETH_EVAL_BASE_URL}"
@@ -46,7 +55,7 @@ curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions" \
 SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUN_DIR/session.json")"
 log "session id: $SID"
 
-PROMPT="$(python3 -c 'import json; print(json.load(open("'$HERE'/scenario.json"))["opening_prompt"])')"
+PROMPT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["opening_prompt"])' "$SCENARIO_FILE")"
 PAYLOAD="$(python3 -c "import json,sys; print(json.dumps({'content': sys.argv[1]}))" "$PROMPT")"
 
 log "send opening prompt (may take 30-180s for the composer to converge)"
@@ -72,7 +81,7 @@ curl -sS -H "Authorization: Bearer $JWT" \
     -o "$RUN_DIR/state.json"
 
 log "score against scenario criteria"
-python3 "$HERE/score.py" "$HERE/scenario.json" "$RUN_DIR/messages.json" "$RUN_DIR/state.json" \
+python3 "$HERE/score.py" "$SCENARIO_FILE" "$RUN_DIR/messages.json" "$RUN_DIR/state.json" \
     | tee "$RUN_DIR/scoring.json"
 
 # echo session URL for inspection

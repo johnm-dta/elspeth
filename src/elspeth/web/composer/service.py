@@ -1247,7 +1247,12 @@ class ComposerServiceImpl:
                                 cache_hit=True,
                             )
                         )
-                        anti_anchor.record_success()
+                        # Cache hits are exclusively for discovery tools
+                        # (`is_cacheable_discovery_tool` gates above). A
+                        # discovery success is an *observation* — the model
+                        # gained schema knowledge but did not change state.
+                        # The §7.7 anchor is broken only by mutation
+                        # progress, so tracker stays untouched here.
                         llm_messages.append(
                             {
                                 "role": "tool",
@@ -1577,8 +1582,18 @@ class ComposerServiceImpl:
                 # validation-rejected state is the dominant anchor pattern
                 # observed in the Tier 1 RED, and indistinguishable from a
                 # ToolArgumentError as far as the LLM's retry loop is concerned.
+                #
+                # Successes only break the anchor when they are MUTATION
+                # successes. Discovery successes (get_plugin_schema, list_*,
+                # get_pipeline_state) are observations — empirically the model
+                # interleaves them between failed mutation retries (see the
+                # smoke session 55895523-... where 4 set_pipeline failures
+                # were broken up by 1 get_pipeline_state and 1 get_plugin_schema,
+                # both successful, both irrelevant to whether the model has
+                # progressed on the anchored mutation).
                 if result.success:
-                    anti_anchor.record_success()
+                    if not is_discovery_tool(tool_name):
+                        anti_anchor.record_success()
                 else:
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                 result_json = _serialize_tool_result(result)

@@ -145,17 +145,11 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
     def turn_with_failure(call_id: str) -> _FakeLLMResponse:
         return _make_response_with_tool(call_id, "set_metadata", identical_args)
 
-    # §7.6 Option C interaction: after the 3 anchored failures and the
-    # text-only "I give up", state is structurally empty AND a mutation
-    # was attempted, so the recovery nudge fires and the loop runs one
-    # more LLM call. The post-nudge turn produces text again and falls
-    # through to the empty-state passthrough.
     turns = [
         turn_with_failure("call_1"),
         turn_with_failure("call_2"),
         turn_with_failure("call_3"),
         _make_text_only_response("I give up."),
-        _make_text_only_response("Still empty after nudge."),
     ]
 
     arg_error = ToolArgumentError(argument="patch", expected="non-anchored payload", actual_type="dict")
@@ -171,8 +165,8 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
         await service.compose("Build something", [], state)
 
     # The fourth LLM call is the post-hint LLM call. Inspect its messages
-    # argument and find the system-injected hint. (Fifth call is post-nudge.)
-    assert mock_llm.call_count == 5, f"expected 5 LLM calls (3 mutating + final + post-nudge), got {mock_llm.call_count}"
+    # argument and find the system-injected hint.
+    assert mock_llm.call_count == 4, f"expected 4 LLM calls (3 mutating + final), got {mock_llm.call_count}"
     fourth_call_messages = mock_llm.call_args_list[3].args[0]
 
     hint_messages = [
@@ -216,10 +210,6 @@ async def test_discovery_success_between_mutation_failures_does_not_break_anchor
 
     identical_args = {"patch": {"name": "Anchored Across Discoveries"}}
     discovery_args = {"name": "csv", "plugin_type": "source"}
-    # §7.6 Option C: state remains structurally empty across all the
-    # failed mutations + cache-hit discoveries; after the surrender prose,
-    # the recovery nudge fires and one more text turn is needed before
-    # the empty-state passthrough finalizes.
     turns = [
         _make_response_with_tool("c1", "set_metadata", identical_args),
         _make_response_with_tool("d1", "get_plugin_schema", discovery_args),
@@ -227,7 +217,6 @@ async def test_discovery_success_between_mutation_failures_does_not_break_anchor
         _make_response_with_tool("d2", "get_plugin_schema", discovery_args),
         _make_response_with_tool("c3", "set_metadata", identical_args),
         _make_text_only_response("Either the hint will help me or I give up."),
-        _make_text_only_response("Still empty after nudge."),
     ]
 
     arg_error = ToolArgumentError(argument="patch", expected="x", actual_type="dict")
@@ -275,9 +264,8 @@ async def test_discovery_success_between_mutation_failures_does_not_break_anchor
         mock_llm.side_effect = turns
         await service.compose("Build something", [], state)
 
-    # 6th LLM call should see the hint after the 3rd identical mutation failure;
-    # 7th LLM call is the post-nudge turn (Option C).
-    assert mock_llm.call_count == 7, f"expected 7 LLM calls, got {mock_llm.call_count}"
+    # 6th LLM call should see the hint after the 3rd identical mutation failure.
+    assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
     sixth_call_messages = mock_llm.call_args_list[5].args[0]
     hint_messages = [m for m in sixth_call_messages if isinstance(m, dict) and "[ELSPETH-SYSTEM-HINT]" in str(m.get("content", ""))]
     assert len(hint_messages) == 1, (
@@ -299,10 +287,6 @@ async def test_mutation_success_breaks_anchor() -> None:
     state = _empty_state()
 
     args = {"patch": {"name": "Two-Then-Reset"}}
-    # §7.6 Option C: state is still structurally empty even after the
-    # mutation_success bumps version (no source/nodes/outputs added),
-    # so the recovery nudge fires after the surrender prose; one more
-    # text turn finalizes via the empty-state passthrough.
     turns = [
         _make_response_with_tool("c1", "set_metadata", args),
         _make_response_with_tool("c2", "set_metadata", args),
@@ -310,7 +294,6 @@ async def test_mutation_success_breaks_anchor() -> None:
         _make_response_with_tool("c4", "set_metadata", args),
         _make_response_with_tool("c5", "set_metadata", args),
         _make_text_only_response("Below threshold post-reset."),
-        _make_text_only_response("Still empty after nudge."),
     ]
 
     arg_error = ToolArgumentError(argument="patch", expected="x", actual_type="dict")
@@ -343,12 +326,8 @@ async def test_mutation_success_breaks_anchor() -> None:
         mock_llm.side_effect = turns
         await service.compose("Build something", [], state)
 
-    # The pre-nudge surrender turn (the 6th LLM call) is the one whose
-    # input messages should be inspected for the hint — that is the call
-    # AFTER the 5th tool turn finished. Use index -2 (the post-nudge
-    # 7th call comes after).
-    pre_nudge_call_messages = mock_llm.call_args_list[-2].args[0]
-    hint_messages = [m for m in pre_nudge_call_messages if isinstance(m, dict) and "[ELSPETH-SYSTEM-HINT]" in str(m.get("content", ""))]
+    sixth_call_messages = mock_llm.call_args_list[-1].args[0]
+    hint_messages = [m for m in sixth_call_messages if isinstance(m, dict) and "[ELSPETH-SYSTEM-HINT]" in str(m.get("content", ""))]
     assert hint_messages == [], (
         "mutation success between failure pairs must reset the tracker — two post-success failures alone are below threshold"
     )
@@ -362,13 +341,10 @@ async def test_two_identical_failures_do_not_inject_hint() -> None:
     state = _empty_state()
 
     args = {"patch": {"name": "Two Strikes"}}
-    # §7.6 Option C: 2 failed mutations + empty state + surrender prose
-    # → recovery nudge fires; one more text turn falls through.
     turns = [
         _make_response_with_tool("c1", "set_metadata", args),
         _make_response_with_tool("c2", "set_metadata", args),
         _make_text_only_response("not stuck yet"),
-        _make_text_only_response("still empty"),
     ]
     arg_error = ToolArgumentError(argument="patch", expected="x", actual_type="dict")
 
@@ -382,8 +358,7 @@ async def test_two_identical_failures_do_not_inject_hint() -> None:
         mock_llm.side_effect = turns
         await service.compose("Build something", [], state)
 
-    # Inspect the THIRD LLM call (pre-nudge surrender turn) — should
-    # contain no anti-anchor hint.
+    # Inspect the THIRD (final) LLM call — should contain no hint.
     third_call_messages = mock_llm.call_args_list[2].args[0]
     hint_messages = [m for m in third_call_messages if isinstance(m, dict) and "[ELSPETH-SYSTEM-HINT]" in str(m.get("content", ""))]
     assert hint_messages == [], "hint must not fire below the 3-failure threshold"

@@ -1,0 +1,43 @@
+source:
+  plugin: csv
+  on_success: profile_in
+  options:
+    path: examples/statistical_batch_plugins/distribution_scores.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'variant: str'
+      - 'latency_ms: float'
+      - 'quality_score: float'
+    on_validation_failure: discard
+aggregations:
+- name: latency_profile
+  plugin: batch_distribution_profile
+  input: profile_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'variant: str'
+      - 'latency_ms: float'
+      - 'quality_score: float'
+    value_field: latency_ms
+    group_by: variant
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/distribution_profile.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/distribution_profile.db

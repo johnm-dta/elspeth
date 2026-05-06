@@ -1,0 +1,9 @@
+id,prompt_variant,latency_ms
+1,control,610
+2,control,625
+3,control,590
+4,treatment,605
+5,treatment,615
+6,treatment,630
+7,treatment,600
+8,treatment,1320

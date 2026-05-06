@@ -1,0 +1,42 @@
+source:
+  plugin: csv
+  on_success: classifier_in
+  options:
+    path: examples/statistical_batch_plugins/classifier_labels.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'actual_label: str'
+      - 'predicted_label: str'
+    on_validation_failure: discard
+aggregations:
+- name: classification_summary
+  plugin: batch_classifier_metrics
+  input: classifier_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'actual_label: str'
+      - 'predicted_label: str'
+    actual_field: actual_label
+    predicted_field: predicted_label
+    positive_label: pass
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/classifier_metrics.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/classifier_metrics.db

@@ -1,0 +1,9 @@
+case_id,variant,preference_score
+case-001,control,0.60
+case-001,treatment,0.72
+case-002,control,0.68
+case-002,treatment,0.65
+case-003,control,0.55
+case-003,treatment,0.74
+case-004,control,0.70
+case-004,treatment,0.70

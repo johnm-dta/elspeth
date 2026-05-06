@@ -1,0 +1,43 @@
+source:
+  plugin: csv
+  on_success: outlier_in
+  options:
+    path: examples/statistical_batch_plugins/outlier_scores.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'prompt_variant: str'
+      - 'latency_ms: float'
+    on_validation_failure: discard
+aggregations:
+- name: latency_outliers
+  plugin: batch_outlier_annotator
+  input: outlier_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'prompt_variant: str'
+      - 'latency_ms: float'
+    value_field: latency_ms
+    output_prefix: outlier
+    z_threshold: 3.0
+    robust_z_threshold: 3.5
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/outlier_annotator.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/outlier_annotator.db

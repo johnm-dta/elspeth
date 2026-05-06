@@ -1,0 +1,9 @@
+id,source,score_text,label
+1,judge_a,0.92,accepted
+2,judge_a,0.87,accepted
+3,judge_b,0.51,rejected
+4,judge_b,0.51,rejected
+5,judge_c,0.73,needs_review
+6,judge_c,0.73,needs_review
+7,judge_d,0.44,rejected
+8,judge_d,0.95,accepted

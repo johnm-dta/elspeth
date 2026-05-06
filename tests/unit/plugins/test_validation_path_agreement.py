@@ -60,6 +60,118 @@ _TRANSFORM_REJECTION_CASES = [
         "group_by.*collides",
         id="batch_stats-group_by-sum-collision",
     ),
+    # ── batch_distribution_profile ───────────────────────────────────────
+    pytest.param(
+        "batch_distribution_profile",
+        {
+            "schema": _make_observed_schema(),
+            "value_field": "score",
+            "group_by": "mean",  # collides with profile output key
+        },
+        "group_by.*collides",
+        id="batch_distribution_profile-group_by-collision",
+    ),
+    # ── batch_experiment_compare ─────────────────────────────────────────
+    pytest.param(
+        "batch_experiment_compare",
+        {
+            "schema": _make_observed_schema(),
+            "variant_field": "score",
+            "score_field": "score",  # input and score fields must be distinct
+        },
+        "variant_field and score_field must differ",
+        id="batch_experiment_compare-field-collision",
+    ),
+    # ── batch_classifier_metrics ─────────────────────────────────────────
+    pytest.param(
+        "batch_classifier_metrics",
+        {
+            "schema": _make_observed_schema(),
+            "actual_field": "label",
+            "predicted_field": "label",  # actual and predicted fields must be distinct
+        },
+        "actual_field and predicted_field must differ",
+        id="batch_classifier_metrics-field-collision",
+    ),
+    # ── batch_paired_preference ──────────────────────────────────────────
+    pytest.param(
+        "batch_paired_preference",
+        {
+            "schema": _make_observed_schema(),
+            "pair_field": "case_id",
+            "variant_field": "score",
+            "score_field": "score",  # pair, variant, and score fields must be distinct
+        },
+        "pair_field, variant_field, and score_field must be distinct",
+        id="batch_paired_preference-field-collision",
+    ),
+    # ── batch_drift_compare ──────────────────────────────────────────────
+    pytest.param(
+        "batch_drift_compare",
+        {
+            "schema": _make_observed_schema(),
+            "cohort_field": "cohort",
+            "value_field": "cohort",  # cohort and value fields must be distinct
+        },
+        "cohort_field and value_field must differ",
+        id="batch_drift_compare-field-collision",
+    ),
+    # ── batch_outlier_annotator ──────────────────────────────────────────
+    pytest.param(
+        "batch_outlier_annotator",
+        {
+            "schema": _make_observed_schema(),
+            "value_field": "outlier_is_outlier",  # value field would be overwritten by annotation output
+        },
+        "collides with outlier annotation output key",
+        id="batch_outlier_annotator-value-field-collision",
+    ),
+    # ── batch_data_quality_report ────────────────────────────────────────
+    pytest.param(
+        "batch_data_quality_report",
+        {
+            "schema": _make_observed_schema(),
+            "inspect_fields": ["score", "score"],
+        },
+        "Duplicate inspect_fields",
+        id="batch_data_quality_report-duplicate-inspect-fields",
+    ),
+    # ── batch_top_k ──────────────────────────────────────────────────────
+    pytest.param(
+        "batch_top_k",
+        {
+            "schema": _make_observed_schema(),
+            "field": "label",
+            "group_by": "label",
+        },
+        "group_by and field must differ",
+        id="batch_top_k-field-collision",
+    ),
+    # ── batch_threshold_summary ──────────────────────────────────────────
+    pytest.param(
+        "batch_threshold_summary",
+        {
+            "schema": _make_observed_schema(),
+            "value_field": "score",
+            "thresholds": [
+                {"name": "good", "operator": ">=", "value": 0.8},
+                {"name": "good", "operator": "<", "value": 0.5},
+            ],
+        },
+        "Duplicate threshold names",
+        id="batch_threshold_summary-duplicate-threshold-names",
+    ),
+    # ── batch_effect_size ────────────────────────────────────────────────
+    pytest.param(
+        "batch_effect_size",
+        {
+            "schema": _make_observed_schema(),
+            "variant_field": "score",
+            "score_field": "score",
+        },
+        "variant_field and score_field must differ",
+        id="batch_effect_size-field-collision",
+    ),
     # ── field_mapper ──────────────────────────────────────────────────────
     pytest.param(
         "field_mapper",

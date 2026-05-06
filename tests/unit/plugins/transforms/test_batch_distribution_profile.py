@@ -1,0 +1,247 @@
+"""Tests for BatchDistributionProfile aggregation transform."""
+
+from typing import Any
+
+import pytest
+
+from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.testing import make_field, make_row
+from tests.fixtures.factories import make_context
+
+DYNAMIC_SCHEMA = {"mode": "observed"}
+
+
+def _make_row(data: dict[str, Any]):
+    """Create a PipelineRow with OBSERVED contract for testing."""
+    fields = tuple(
+        make_field(key, type(value) if value is not None else object, original_name=key, required=False, source="inferred")
+        for key, value in data.items()
+    )
+    contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
+    return make_row(data, contract=contract)
+
+
+class TestBatchDistributionProfile:
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_context()
+
+    def test_has_required_attributes(self) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        assert BatchDistributionProfile.name == "batch_distribution_profile"
+        assert BatchDistributionProfile.is_batch_aware is True
+
+    def test_computes_distribution_summary_for_single_field(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        rows = [
+            _make_row({"id": 1, "score": 1.0}),
+            _make_row({"id": 2, "score": 2.0}),
+            _make_row({"id": 3, "score": 3.0}),
+            _make_row({"id": 4, "score": 4.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["field"] == "score"
+        assert result.row["count"] == 4
+        assert result.row["batch_size"] == 4
+        assert result.row["missing_count"] == 0
+        assert result.row["non_finite_count"] == 0
+        assert result.row["min"] == 1.0
+        assert result.row["max"] == 4.0
+        assert result.row["mean"] == 2.5
+        assert result.row["median"] == 2.5
+        assert result.row["p25"] == 1.75
+        assert result.row["p75"] == 3.25
+        assert result.row["stdev"] == pytest.approx(1.2909944487358056)
+
+    def test_missing_values_are_skipped_and_reported(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        rows = [
+            _make_row({"id": 1, "score": 10.0}),
+            _make_row({"id": 2, "score": None}),
+            _make_row({"id": 3, "score": 20.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["count"] == 2
+        assert result.row["batch_size"] == 3
+        assert result.row["missing_count"] == 1
+        assert result.row["missing_indices"] == (1,)
+        assert result.row["mean"] == 15.0
+
+    def test_non_finite_values_are_skipped_and_reported(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        rows = [
+            _make_row({"id": 1, "score": 10.0}),
+            _make_row({"id": 2, "score": float("nan")}),
+            _make_row({"id": 3, "score": float("inf")}),
+            _make_row({"id": 4, "score": 30.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["count"] == 2
+        assert result.row["batch_size"] == 4
+        assert result.row["non_finite_count"] == 2
+        assert result.row["non_finite_indices"] == (1, 2)
+        assert result.row["mean"] == 20.0
+
+    def test_all_non_finite_or_missing_returns_error(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        rows = [
+            _make_row({"id": 1, "score": None}),
+            _make_row({"id": 2, "score": float("nan")}),
+            _make_row({"id": 3, "score": float("-inf")}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "no_finite_values"
+        assert result.reason["batch_size"] == 3
+        assert result.reason["valid_count"] == 0
+        assert result.reason["skipped_count"] == 3
+        assert result.reason["row_errors"] == [
+            {"row_index": 0, "reason": "missing_value"},
+            {"row_index": 1, "reason": "non_finite_value"},
+            {"row_index": 2, "reason": "non_finite_value"},
+        ]
+
+    def test_non_numeric_values_raise_type_error(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        rows = [
+            _make_row({"id": 1, "score": 10.0}),
+            _make_row({"id": 2, "score": "not_a_number"}),
+        ]
+
+        with pytest.raises(TypeError, match="must be numeric"):
+            transform.process(rows, ctx)
+
+    def test_group_by_emits_one_profile_per_group(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": "variant"})
+
+        rows = [
+            _make_row({"id": 1, "variant": "A", "score": 1.0}),
+            _make_row({"id": 2, "variant": "B", "score": 10.0}),
+            _make_row({"id": 3, "variant": "A", "score": 3.0}),
+            _make_row({"id": 4, "variant": "B", "score": 30.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.is_multi_row
+        assert result.rows is not None
+        assert [row["variant"] for row in result.rows] == ["A", "B"]
+
+        profiles = {row["variant"]: row for row in result.rows}
+        assert profiles["A"]["count"] == 2
+        assert profiles["A"]["mean"] == 2.0
+        assert profiles["A"]["median"] == 2.0
+        assert profiles["B"]["count"] == 2
+        assert profiles["B"]["mean"] == 20.0
+        assert profiles["B"]["median"] == 20.0
+
+    def test_empty_batch_returns_error(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        result = transform.process([], ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "empty_batch"
+        assert not result.retryable
+
+
+class TestBatchDistributionProfileConfig:
+    @pytest.mark.parametrize("blank_value_field", ["", "   "])
+    def test_blank_value_field_rejected_at_config_boundary(self, blank_value_field: str) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        with pytest.raises(PluginConfigError, match="value_field must not be empty"):
+            BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": blank_value_field})
+
+    @pytest.mark.parametrize("blank_group_by", ["", "   "])
+    def test_blank_group_by_rejected_at_config_boundary(self, blank_group_by: str) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        with pytest.raises(PluginConfigError, match="group_by must not be empty"):
+            BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": blank_group_by})
+
+    @pytest.mark.parametrize("colliding_group_by", ["field", "count", "mean", "p25", "missing_count"])
+    def test_group_by_collisions_rejected_at_config_boundary(self, colliding_group_by: str) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        with pytest.raises(PluginConfigError, match="collides with profile output key"):
+            BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": colliding_group_by})
+
+    def test_output_schema_config_guarantees_profile_fields_and_group_by(self) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["id: int", "variant: str", "score: float", "upstream_only: str"],
+                    "required_fields": ["score"],
+                    "guaranteed_fields": ["upstream_only"],
+                },
+                "value_field": "score",
+                "group_by": "variant",
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        assert cfg.fields is None
+        assert cfg.required_fields is None
+        assert "upstream_only" not in (cfg.guaranteed_fields or ())
+        assert frozenset(cfg.guaranteed_fields or ()) == frozenset(
+            {
+                "batch_size",
+                "count",
+                "field",
+                "max",
+                "mean",
+                "median",
+                "min",
+                "missing_count",
+                "non_finite_count",
+                "p25",
+                "p75",
+                "stdev",
+                "variant",
+            }
+        )

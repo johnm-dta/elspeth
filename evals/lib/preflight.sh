@@ -60,9 +60,14 @@ else
   evals_log INFO "JWT exp: ${remaining}s remaining"
 fi
 
-step "post-login API call (/api/catalog)"
+step "post-login API call (/api/catalog/sources)"
+# /api/catalog is mounted as a *prefix* with sub-routes only (/sources,
+# /transforms, /sinks, /{plugin_type}/{name}/schema — see web/app.py:336
+# and web/catalog/routes.py); a bare GET /api/catalog returns 404. One
+# sub-route exercises the host + auth + plugin-loader path, which is
+# sufficient for the doctor's purpose.
 EVALS_JWT_FILE="$TMP_JWT" _evals_http_get \
-  "$ELSPETH_EVAL_BASE_URL/api/catalog" \
+  "$ELSPETH_EVAL_BASE_URL/api/catalog/sources" \
   /dev/null
 
 evals_log INFO "all preflight checks passed"

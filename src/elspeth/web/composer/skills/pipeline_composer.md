@@ -630,6 +630,7 @@ Gotchas:
 
 **line_explode** — Split one string field into multiple rows, one per line.
 Gotchas:
+- **`line_explode` consumes line-framed text that is ALREADY in the row. It is NOT a downloader.** If the user wants you to "download a URL and split into lines," the source plugin alone is not enough — you MUST chain `text source → web_scrape (format: "text", text_separator: "\n") → line_explode`. A `text` source pointing at a blob containing a URL string emits the URL itself, not the file's contents — `line_explode` on that produces nonsense and the validator rejects it with `line_explode.source_field.line_framed_text`. See Pattern 1b under "Common Pipeline Patterns" for the full chain.
 - Set `source_field` to the string field to split and choose `output_field`/`index_field` names that do not collide with existing fields.
 - When `web_scrape` feeds `line_explode` and validation reports a `semantic_contracts` violation with `requirement_code: line_explode.source_field.line_framed_text`, call `get_plugin_assistance(plugin_name="line_explode", issue_code="line_explode.source_field.line_framed_text")` for the structured fix prose and before/after examples. The plugin owns the guidance; the skill no longer mirrors it.
 
@@ -747,7 +748,11 @@ For incremental source-only edits to an existing pipeline, call `create_blob` wi
 This is the canonical way to handle inline/literal data. There is no separate "inline source" plugin — the blob system handles it.
 
 **Examples:**
-- User says "use this URL: https://example.com" → `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")` then `set_source_from_blob({blob_id, on_success, options: {column: "url", schema: {mode: "observed"}}})`
+- User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:
+  1. `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")`
+  2. `set_source_from_blob({blob_id, on_success: "fetch", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
+  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "main", on_success: <next-step-or-sink>, options: {format: "text", text_separator: "\n"}})`
+  ⚠ Skipping step 3 means the pipeline emits the URL string itself, not the URL's content. Downstream transforms like `line_explode` or `llm` will see the URL text instead of what was at the URL, and the validator will reject the pipeline. See Pattern 1 (`URL → Scrape → Extract → JSON`) and Pattern 1b (`URL → Download → Split into Lines → JSON`) under "Common Pipeline Patterns" for full chains.
 - User provides JSON data → `create_blob(filename="data.json", mime_type="application/json", content='[{"id": 1, "name": "test"}]')` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`
 - User provides CSV rows → `create_blob(filename="data.csv", mime_type="text/csv", content="name,age\nAlice,30\nBob,25")` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`
 
@@ -794,6 +799,19 @@ Never ask the user to upload a file when the data is already in the conversation
 **Ask exactly:** "What URL should I fetch?", "What information should I extract?", "What fields/columns do you want in the output?"
 **Safe defaults:** schema mode `fixed` with `url: str`, `web_scrape` format `markdown` for line-oriented/page-structure tasks, LLM temperature `0.0`, json sink with indent 2
 **Caveats:** LLM returns a string — if you need structured JSON fields downstream, the template must instruct the model to return JSON and you may need `json_explode` after the LLM step.
+
+### 1b. URL → Download → Split into Lines → JSON/CSV
+
+**Trigger phrases:** "download this file and split each line", "fetch the URL and explode into rows", "give me one record per line of <url>", "download <url> and explode into a json file", "convert the lines of this URL into JSONL"
+
+**Structure:** `text` source (URL as column value) → `web_scrape` transform (downloads the URL) → `line_explode` transform (one row per line) → `json`/`csv` sink
+
+**Critical:** A `text` source by itself does NOT download the URL. Without `web_scrape` between the source and `line_explode`, the source emits one row whose `url` field IS the URL string itself, and the validator rejects the pipeline with `line_explode.source_field.line_framed_text` because the source declares `url`, not line-framed text. See the "use this URL" rule under "Inline data" above for the canonical 3-step source setup.
+
+**Required inputs:** URL (the user usually provides it in the prompt), output sink format (JSONL or CSV), per-line field name
+**Ask exactly:** "What URL should I download?", "Should each line be its own JSON record (JSONL) or a CSV row?"
+**Safe defaults:** schema mode `fixed` with `url: str` on source; `web_scrape` `format: "text"` with `text_separator: "\n"` (preserves original line structure — produces `web_scrape.content.newline_framed_text` which satisfies `line_explode.source_field.line_framed_text`); `line_explode` `source_field: "content"` (web_scrape's output field), `output_field: "line"`, `include_index: true`; json sink `format: "jsonl"`.
+**Caveats:** Use `web_scrape` `format: "text"` here, NOT `markdown` — markdown collapses whitespace and may merge lines. Pattern 1 uses `markdown` because LLM extraction does not need exact line fidelity; this pattern does.
 
 ### 2. Search → Fetch → Extract → CSV
 

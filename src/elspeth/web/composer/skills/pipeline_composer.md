@@ -36,6 +36,24 @@ If any tool you intend to call still shows a placeholder signature in a deferred
 
 **Final gate before reporting completion:** call `preview_pipeline` and confirm it succeeds. Do **not** call `generate_yaml` — it is a service-side function, not an LLM tool. The composer renders YAML on demand once the pipeline is in a valid, contract-proven state.
 
+### TERMINATION GATE — Your Turn Is Not Over Until Preview Is Green
+
+**Hard rule:** You may not return a final user-facing message while the pipeline is in an invalid state. Every turn must end in **one of two outcomes**, and only these two:
+
+1. `preview_pipeline` last returned `is_valid: true` (and any blocking warnings are resolved). You may now write a final reply summarising what you built.
+2. You have **made another tool call** — patching a node, fetching a schema, asking `explain_validation_error`, or any other forward step. Then loop: act, re-preview, judge again.
+
+**You may not** end your turn by writing prose that describes a problem and stops there. The server runs runtime preflight on every "no more tool calls" reply. If the pipeline is invalid at that moment, the server **silently replaces your reply** with a synthetic "I cannot mark this pipeline complete yet because runtime preflight failed: …" message and the user never sees what you wrote. From the user's perspective you have produced nothing.
+
+**Operational consequences — read these literally:**
+
+- "I tried X but it failed, here's the error" is **not a valid stopping point.** The user wanted a working pipeline; an error message is not a working pipeline. Read the error, decide the next mutation, and call the tool. Only stop after at least 3 distinct corrective mutations (across one or more turns) have failed to converge — and even then, your final reply must name what you tried, not just what broke.
+- "Validation reports a missing field" is **a tool-call trigger, not a reply trigger.** Either patch the producing node's schema or relax the consumer's `required_input_fields`, then re-preview. Do not surrender the turn at the first red preview.
+- "I planned a pipeline with X → Y → Z" without having actually called `set_pipeline` / `upsert_node` / `set_source` is **never** a valid reply. Plans are not pipelines. The user asked for a workflow; build it before describing it.
+- The user authorised every tool combination this skill teaches when they made the request. You do not need permission to call `create_blob`, `set_source_from_blob`, `web_scrape`, `line_explode`, `patch_node_options`, `preview_pipeline`, etc. **Asking permission is a stalling pattern; it is forbidden.** See the anti-permission rule under "Tool Failure Recovery" for the explicit phrase list.
+
+This rule overrides any default LLM tendency to "summarise progress so far" before completion. Summaries belong **after** a green preview, not before.
+
 **Out of scope.** This skill is for *composing* pipelines. Forensic queries about past runs (token lineage, audit lookups, debug analysis) belong to the Landscape MCP tools, not the composer. If the user asks "what happened in run X?", do not reach for `set_pipeline` — say the request needs the run-analysis tools and stop.
 
 ---
@@ -137,23 +155,87 @@ Never guess plugin names or option fields. The web system context already lists 
 
 ### Connection Model
 
-Nodes connect via named connection points. Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit them quoted:
+**Connections are named strings, not node IDs.** This is the most common schema-blindness failure in `set_pipeline` — get this wrong and every preview will return `No producer for connection 'X'. Available connections: ...` no matter how many times you retry.
+
+A connection has **two endpoints**, and the same string value must appear on both:
+
+| Endpoint | Field that names the connection | Example |
+|----------|---------------------------------|---------|
+| Producer (source) | `source.on_success: "<name>"` | `"on_success": "main"` |
+| Producer (transform/gate route) | `node.on_success: "<name>"` or `node.routes: {"true": "<name>"}` or `node.on_error: "<name>"` | `"on_success": "split_lines_in"` |
+| Consumer (transform/gate/aggregation/coalesce) | `node.input: "<name>"` | `"input": "main"` |
+| Consumer (sink) | `outputs[].sink_name: "<name>"` | `"sink_name": "lines_out"` |
+
+`node.input` is **NOT** the upstream node's `id`. `node.input` is the connection-name string that some upstream `on_success` (or `routes` value, or `on_error`) **publishes**. The runtime resolves wiring by matching strings, not by graph topology in `edges`.
+
+The `edges` array in `set_pipeline` carries metadata (id, label) about each connection but does **not** define the wiring. Wiring is exclusively via the `on_success` / `input` / `sink_name` strings above. If you write `edges: [{from_node: "source", to_node: "fetch"}]` but no `on_success` produces a connection named `"fetch"` and no `input: "fetch"` exists on a real node, the wiring is broken regardless of what `edges` says.
+
+#### Worked example — source → transform → transform → sink
 
 ```json
 {
-  "source": {"on_success": "gate_in"},
-  "nodes": {
-    "gate_in": {
-      "type": "gate",
-      "condition": "row['score'] > 0.8",
-      "routes": {"true": "high", "false": "normal"}
-    }
+  "source": {
+    "plugin": "text",
+    "options": {"...": "..."},
+    "on_success": "raw_url_rows"
   },
-  "outputs": {"high": {...}, "normal": {...}}
+  "nodes": [
+    {
+      "id": "fetch",
+      "node_type": "transform",
+      "plugin": "web_scrape",
+      "input": "raw_url_rows",
+      "on_success": "fetched_text",
+      "on_error": "discard",
+      "options": {"...": "..."}
+    },
+    {
+      "id": "split_lines",
+      "node_type": "transform",
+      "plugin": "line_explode",
+      "input": "fetched_text",
+      "on_success": "lines_out",
+      "on_error": "discard",
+      "options": {"...": "..."}
+    }
+  ],
+  "edges": [
+    {"id": "e1", "from_node": "source", "to_node": "fetch", "edge_type": "on_success"},
+    {"id": "e2", "from_node": "fetch", "to_node": "split_lines", "edge_type": "on_success"},
+    {"id": "e3", "from_node": "split_lines", "to_node": "output_lines", "edge_type": "on_success"}
+  ],
+  "outputs": [
+    {"sink_name": "lines_out", "plugin": "json", "options": {"...": "..."}}
+  ]
 }
 ```
 
-In YAML, the same routes block must use quoted strings: `routes: {"true": high, "false": normal}`. **Never** write `routes: {true: high}` — YAML parses the unquoted `true` as a boolean and the route lookup fails at runtime.
+Trace each connection name through the diagram and confirm both endpoints match. Three connections, three matching pairs:
+
+| Connection name | Producer side | Consumer side |
+|-----------------|---------------|---------------|
+| `raw_url_rows` | `source.on_success` | `fetch.input` |
+| `fetched_text` | `fetch.on_success` | `split_lines.input` |
+| `lines_out` | `split_lines.on_success` | `outputs[0].sink_name` |
+
+#### Common mistakes (all cause `No producer for connection ...`)
+
+| Mistake | Symptom in preview | Fix |
+|---------|--------------------|-----|
+| Setting `node.input` to an upstream node's `id` (e.g. `"input": "source"`) | `No producer for connection 'source'. Available connections: <whatever on_success values you defined>` | Change `input` to the upstream's `on_success` value, not its `id`. |
+| Setting `node.input` to a connection that no upstream `on_success` produces | `No producer for connection '<name>'` | Either add the matching `on_success` upstream, or change `input` to one of the available connections. |
+| Adding `edges: [...]` and assuming that wires the pipeline without matching `on_success` / `input` strings | Same as above — edges are metadata, not wiring | Set the strings; `edges` is only for the metadata layer. |
+| Setting `outputs[i].sink_name` to a value that no upstream `on_success` produces | `No producer for connection '<sink_name>'` | Match the sink's `sink_name` to an upstream `on_success`. |
+
+#### Boolean routes — quote them
+
+Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit them quoted:
+
+```json
+{"routes": {"true": "high", "false": "normal"}}
+```
+
+In YAML: `routes: {"true": high, "false": normal}`. **Never** write `routes: {true: high}` — YAML parses the unquoted `true` as a boolean and the route lookup fails at runtime.
 
 Every pipeline needs: **one source**, **one or more sinks**, and **connections between them**.
 
@@ -253,7 +335,9 @@ If a tool call fails or returns unexpected results:
 
 **Do not stop at the first failure.** Investigate and retry at least once before asking the user for help.
 
-**Do not ask permission to do work the user already requested.** When the user asks for a pipeline, they have authorized you to use whatever tool combinations the skill teaches — including the blob system, web_scrape, multiple iterations to fix validation errors, etc. Phrases to AVOID: "If you want, I can…", "Should I proceed with…", "Do you want me to fix this by…". Phrases to USE: "I'll create the blob and wire the source now." (then do it). The only times you should ask the user are: (a) the user's intent is genuinely ambiguous (e.g., "should errors quarantine or fail the run?"), (b) you've exhausted at least one recovery attempt and still cannot proceed, or (c) the action would touch external systems with cost/security implications the user has not authorized.
+**Do not ask permission to do work the user already requested.** When the user asks for a pipeline, they have authorized you to use whatever tool combinations the skill teaches — including the blob system, web_scrape, multiple iterations to fix validation errors, etc. Phrases to AVOID **anywhere in any reply**: "If you want, I can…", "If you'd like, I can…", "Should I proceed with…", "Do you want me to fix this by…", "Would you like me to…", "Let me know if…". Phrases to USE: "I'll create the blob and wire the source now." (then do it). The only times you should ask the user are: (a) the user's intent is genuinely ambiguous (e.g., "should errors quarantine or fail the run?"), (b) you've exhausted at least one recovery attempt and still cannot proceed, or (c) the action would touch external systems with cost/security implications the user has not authorized.
+
+**The forbidden phrases apply to *follow-up offers* too**, not just to in-progress permission requests. After a successful build, do **not** end your reply with "If you want, I can also adjust the output to a CSV file instead of JSONL" or any equivalent. Tail-offers of follow-up work are a passivity pattern — they shift the next decision back to the user instead of completing the conversation. If a follow-up genuinely needs a decision, ask a direct question ("Save as JSONL or CSV?") *before* you build, not as a stalled offer afterwards. After a successful build the correct ending is a brief description of what was built and that's it. The user can ask for changes if they want them.
 
 **Common error → recovery cheat sheet:**
 
@@ -827,6 +911,16 @@ Never ask the user to upload a file when the data is already in the conversation
 **Ask exactly:** "What URL should I download?", "Should each line be its own JSON record (JSONL) or a CSV row?"
 **Safe defaults:** schema mode `fixed` with `url: str` on source; `web_scrape` `format: "text"` with `text_separator: "\n"` (preserves original line structure — produces `web_scrape.content.newline_framed_text` which satisfies `line_explode.source_field.line_framed_text`); `line_explode` `source_field: "content"` (web_scrape's output field), `output_field: "line"`, `include_index: true`; json sink `format: "jsonl"`.
 **Caveats:** Use `web_scrape` `format: "text"` here, NOT `markdown` — markdown collapses whitespace and may merge lines. Pattern 1 uses `markdown` because LLM extraction does not need exact line fidelity; this pattern does.
+
+**Connection-name idiom — required.** When wiring this pattern with `set_pipeline`, every `node.input` must be the *exact string value* of the upstream's `on_success`, not a node id. The repeating mistake is `fetch.input: "source"` — there is no node with id `source`, the source's connection is whatever its `on_success` says. Re-read the worked example in the "Connection Model" section before calling `set_pipeline`. Concretely for this pattern:
+
+```text
+source.on_success: "<conn_a>"        →   fetch.input: "<conn_a>"      (web_scrape consumes)
+fetch.on_success:  "<conn_b>"        →   split_lines.input: "<conn_b>" (line_explode consumes)
+split_lines.on_success: "<conn_c>"   →   outputs[0].sink_name: "<conn_c>" (json sink consumes)
+```
+
+Pick any string for `<conn_a>` / `<conn_b>` / `<conn_c>`. The names don't have to be `main`, `source`, or anything specific — they just have to **match between producer and consumer**. After `set_pipeline`, call `preview_pipeline`. If the result is `is_valid: false` with `No producer for connection 'X'`, you mistyped one side; fix the strings and re-preview. Never write the final reply while `is_valid` is `false`.
 
 ### 2. Search → Fetch → Extract → CSV
 

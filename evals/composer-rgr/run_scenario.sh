@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Minimal RGR harness for the pipeline_composer skill.
+#
+# One scenario, one turn, one judgment. Drives the staging composer with a
+# fixed opening prompt, captures every assistant turn (including in-loop
+# tool-call assistant messages), and scores against scenario.json's
+# red_criteria / green_criteria.
+#
+# Usage:
+#   ELSPETH_EVAL_BASE_URL=https://elspeth.foundryside.dev \
+#   ELSPETH_EVAL_USER=dta_user \
+#   ELSPETH_EVAL_PASS=dta_pass \
+#   ./run_scenario.sh [run_label]
+#
+# Output:
+#   runs/<utc-ts>-<run_label>/
+#     login.json  session.json  send.json  messages.json  scoring.json
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LABEL="${1:-rgr}"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_DIR="$HERE/runs/$TS-$LABEL"
+mkdir -p "$RUN_DIR"
+
+: "${ELSPETH_EVAL_BASE_URL:?set ELSPETH_EVAL_BASE_URL}"
+: "${ELSPETH_EVAL_USER:?set ELSPETH_EVAL_USER}"
+: "${ELSPETH_EVAL_PASS:?set ELSPETH_EVAL_PASS}"
+
+log() { echo "[$(date -u +%FT%TZ)] $*" >&2; }
+
+log "login as $ELSPETH_EVAL_USER"
+curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"$ELSPETH_EVAL_USER\",\"password\":\"$ELSPETH_EVAL_PASS\"}" \
+    -o "$RUN_DIR/login.json"
+JWT="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("access_token") or d.get("token") or "")' "$RUN_DIR/login.json")"
+[[ -n "$JWT" ]] || { echo "ERROR: empty JWT" >&2; cat "$RUN_DIR/login.json" >&2; exit 1; }
+
+log "create session"
+curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions" \
+    -H "Authorization: Bearer $JWT" \
+    -H "Content-Type: application/json" \
+    -d "{\"title\":\"composer-rgr $LABEL $TS\"}" \
+    -o "$RUN_DIR/session.json"
+SID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUN_DIR/session.json")"
+log "session id: $SID"
+
+PROMPT="$(python3 -c 'import json; print(json.load(open("'$HERE'/scenario.json"))["opening_prompt"])')"
+PAYLOAD="$(python3 -c "import json,sys; print(json.dumps({'content': sys.argv[1]}))" "$PROMPT")"
+
+log "send opening prompt (may take 30-180s for the composer to converge)"
+START=$(date +%s)
+HTTP_CODE=$(curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/messages" \
+    -H "Authorization: Bearer $JWT" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" \
+    --max-time 240 \
+    -w "%{http_code}" \
+    -o "$RUN_DIR/send.json")
+END=$(date +%s)
+log "POST /messages -> HTTP $HTTP_CODE (elapsed: $((END-START))s)"
+
+log "fetch full message history"
+curl -sS -H "Authorization: Bearer $JWT" \
+    "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/messages" \
+    -o "$RUN_DIR/messages.json"
+
+log "fetch final composition state"
+curl -sS -H "Authorization: Bearer $JWT" \
+    "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/state" \
+    -o "$RUN_DIR/state.json"
+
+log "score against scenario criteria"
+python3 "$HERE/score.py" "$HERE/scenario.json" "$RUN_DIR/messages.json" "$RUN_DIR/state.json" \
+    | tee "$RUN_DIR/scoring.json"
+
+# echo session URL for inspection
+echo "session URL: $ELSPETH_EVAL_BASE_URL/#/$SID/spec" >&2
+echo "$SID" > "$RUN_DIR/session_id.txt"

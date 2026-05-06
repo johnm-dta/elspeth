@@ -38,6 +38,7 @@ from elspeth.contracts.types import (
 )
 from elspeth.core.dag.models import (
     BranchInfo,
+    EdgeContractError,
     GraphValidationError,
     GraphValidationWarning,
     NodeConfig,
@@ -1400,11 +1401,21 @@ class ExecutionGraph:
         # Rule 2: Full compatibility check (missing fields, type mismatches, extra fields)
         result = check_compatibility(producer_schema, consumer_schema)
         if not result.compatible:
-            raise GraphValidationError(
+            # Raise the structured subclass so downstream layers (composer
+            # runtime preflight error formatter at
+            # web/execution/validation.py) can build LLM-actionable
+            # suggestions without re-parsing the prose form. The prose
+            # message remains backwards-compatible for legacy str(exc)
+            # consumers.
+            raise EdgeContractError(
                 f"Edge from '{from_node_id}' to '{to_node_id}' invalid: "
                 f"producer schema '{producer_schema.__name__}' incompatible with "
                 f"consumer schema '{consumer_schema.__name__}': {result.error_message}",
-                component_id=str(to_node_id),
+                from_node_id=str(from_node_id),
+                to_node_id=str(to_node_id),
+                producer_schema_name=producer_schema.__name__,
+                consumer_schema_name=consumer_schema.__name__,
+                compatibility_result=result,
                 component_type=to_info.node_type.value,
             )
 

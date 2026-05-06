@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
@@ -46,6 +47,60 @@ class GraphValidationError(ValueError):
         super().__init__(message)
         self.component_id: str | None = component_id
         self.component_type: str | None = component_type
+
+
+class EdgeContractError(GraphValidationError):
+    """Raised when graph edge schema compatibility fails.
+
+    Subclass of ``GraphValidationError`` carrying the structured
+    ``CompatibilityResult`` plus producer/consumer identity, so downstream
+    layers (composer runtime preflight error formatting) can build LLM-
+    actionable suggestions without re-parsing the prose form.
+
+    Why a subclass and not a separate exception:
+      - All existing callers that catch ``GraphValidationError`` keep working
+        without change (subclass IS-A parent).
+      - The downstream catch site can opportunistically narrow with
+        ``isinstance(exc, EdgeContractError)`` to access structured fields,
+        falling back to the prose ``str(exc)`` when other graph validation
+        paths raise the parent class.
+
+    Attributes:
+        from_node_id: Producer node ID (e.g. ``'web_scrape_a1b2c3'``).
+        to_node_id: Consumer node ID (e.g. ``'line_explode_d4e5f6'``).
+        producer_schema_name: Pydantic schema class name (e.g.
+            ``'WebScrapeOutput'``) — useful for naming the contract surface
+            to the LLM, but the per-field detail lives in
+            ``compatibility_result``.
+        consumer_schema_name: Pydantic schema class name (e.g.
+            ``'LineExplodeInput'``).
+        compatibility_result: The full structured incompatibility detail —
+            ``missing_fields``, ``type_mismatches[(field, expected, actual)]``,
+            ``extra_fields``, and ``constraint_mismatches``. The error-message
+            formatter walks this to produce actionable per-field guidance.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        from_node_id: str,
+        to_node_id: str,
+        producer_schema_name: str,
+        consumer_schema_name: str,
+        compatibility_result: CompatibilityResult,
+        component_type: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            component_id=to_node_id,
+            component_type=component_type,
+        )
+        self.from_node_id: str = from_node_id
+        self.to_node_id: str = to_node_id
+        self.producer_schema_name: str = producer_schema_name
+        self.consumer_schema_name: str = consumer_schema_name
+        self.compatibility_result: CompatibilityResult = compatibility_result
 
 
 @dataclass(frozen=True, slots=True)

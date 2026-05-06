@@ -2100,7 +2100,7 @@ class TestPartialStatePreservation:
 
 
 class TestComposerSamplingDeterminism:
-    """Composer LLM calls must use temperature=0.0 and seed=42.
+    """Composer LLM calls must use temperature=0.0 and supported deterministic seed.
 
     RGR investigation 2026-05-06 §4.4: uncontrolled sampling at the
     LiteLLM/OpenRouter default (~1.0) was the largest single explanation
@@ -2114,8 +2114,15 @@ class TestComposerSamplingDeterminism:
     """
 
     @pytest.mark.asyncio
-    async def test_call_llm_passes_temperature_zero_and_seed_42(self) -> None:
-        """The tool-loop LLM call site sends temperature=0.0 and seed=42."""
+    async def test_call_llm_passes_temperature_zero_and_seed_42(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The tool-loop LLM call site sends temperature=0.0 and seed=42 when supported."""
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature", "tools", "seed"],
+        )
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -2142,13 +2149,46 @@ class TestComposerSamplingDeterminism:
         assert first_call_kwargs["seed"] == 42, f"composer must send seed=42, got {first_call_kwargs.get('seed')!r}"
 
     @pytest.mark.asyncio
-    async def test_call_text_llm_passes_temperature_zero_and_seed_42(self) -> None:
-        """The diagnostics text-LLM call site also sends temperature=0.0 and seed=42.
+    async def test_call_llm_omits_seed_when_provider_does_not_support_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Direct Anthropic-style adapters reject OpenAI seed; omit it when unsupported."""
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature", "tools"],
+        )
+        catalog = _mock_catalog()
+        settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        completion = _make_llm_response(content="acknowledged")
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=completion,
+        ) as mock_acomp:
+            await service._call_llm([{"role": "user", "content": "Hello"}], [])
+
+        kwargs = mock_acomp.call_args_list[0].kwargs
+        assert kwargs["temperature"] == 0.0
+        assert "seed" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_call_text_llm_passes_temperature_zero_and_seed_42(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The diagnostics text-LLM call site also sends temperature=0.0 and seed=42 when supported.
 
         run-diagnostics text generation goes through _call_text_llm. Since the
         skill prescribes determinism for the user's LLM transforms, the host
         composer should be at least as deterministic.
         """
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature", "seed"],
+        )
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -2166,6 +2206,32 @@ class TestComposerSamplingDeterminism:
         kwargs = mock_acomp.call_args_list[0].kwargs
         assert kwargs["temperature"] == 0.0
         assert kwargs["seed"] == 42
+
+    @pytest.mark.asyncio
+    async def test_call_text_llm_omits_seed_when_provider_does_not_support_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Diagnostics must share the same provider-parameter gate as composition."""
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature"],
+        )
+        catalog = _mock_catalog()
+        settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        completion = _make_llm_response(content="diagnostic text")
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=completion,
+        ) as mock_acomp:
+            await service._call_text_llm([{"role": "user", "content": "explain"}])
+
+        kwargs = mock_acomp.call_args_list[0].kwargs
+        assert kwargs["temperature"] == 0.0
+        assert "seed" not in kwargs
 
 
 class TestEmptyChoicesValidation:
@@ -4016,11 +4082,13 @@ class TestEmptyStateFinalizePassthrough:
 
     def test_state_is_structurally_empty_returns_true_for_empty_state(self) -> None:
         from elspeth.web.composer.service import _state_is_structurally_empty
+
         state = _empty_state()
         assert _state_is_structurally_empty(state) is True
 
     def test_state_is_structurally_empty_false_with_source(self) -> None:
         from elspeth.web.composer.service import _state_is_structurally_empty
+
         state = _empty_state().with_source(
             SourceSpec(plugin="csv", on_success="t1", options={"path": "/tmp/x.csv"}, on_validation_failure="discard")
         )
@@ -4028,13 +4096,17 @@ class TestEmptyStateFinalizePassthrough:
 
     def test_state_is_structurally_empty_false_with_output(self) -> None:
         from elspeth.web.composer.service import _state_is_structurally_empty
+
         state = _empty_state().with_output(
-            OutputSpec(name="main", plugin="csv", options={"path": "/tmp/y.csv", "schema": {"mode": "observed"}}, on_write_failure="discard")
+            OutputSpec(
+                name="main", plugin="csv", options={"path": "/tmp/y.csv", "schema": {"mode": "observed"}}, on_write_failure="discard"
+            )
         )
         assert _state_is_structurally_empty(state) is False
 
     def test_compose_empty_state_message_appends_system_suffix(self) -> None:
         from elspeth.web.composer.service import _compose_empty_state_message
+
         content = "I tried to build the pipeline but couldn't converge."
         msg = _compose_empty_state_message(content)
         # Original content preserved (model's prose is the truthful part).
@@ -4048,6 +4120,7 @@ class TestEmptyStateFinalizePassthrough:
         """Edge case: model produced no content at all. Suffix becomes the
         whole message (better than silence)."""
         from elspeth.web.composer.service import _compose_empty_state_message
+
         msg = _compose_empty_state_message("")
         assert "[ELSPETH-SYSTEM]" in msg
         assert msg.startswith("[ELSPETH-SYSTEM]") or msg.lstrip().startswith("[ELSPETH-SYSTEM]")
@@ -4160,19 +4233,23 @@ class TestEmptyStateFinalizePassthrough:
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
-        state = _empty_state().with_source(
-            SourceSpec(
-                plugin="csv",
-                on_success="t1",
-                options={"path": "/data/inputs/in.csv"},
-                on_validation_failure="discard",
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="t1",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="discard",
+                )
             )
-        ).with_output(
-            OutputSpec(
-                name="main",
-                plugin="csv",
-                options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
-                on_write_failure="discard",
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
             )
         )
         bumped_state = replace(state, version=state.version + 1)
@@ -4290,13 +4367,9 @@ class TestOptionCRecoveryNudge:
         nudge_messages = [
             m
             for m in third_call_messages
-            if isinstance(m, dict)
-            and m.get("role") == "user"
-            and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+            if isinstance(m, dict) and m.get("role") == "user" and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
         ]
-        assert len(nudge_messages) == 1, (
-            f"expected exactly one [ELSPETH-RECOVERY-NUDGE] in third-turn messages; got {len(nudge_messages)}"
-        )
+        assert len(nudge_messages) == 1, f"expected exactly one [ELSPETH-RECOVERY-NUDGE] in third-turn messages; got {len(nudge_messages)}"
 
     @pytest.mark.asyncio
     async def test_nudge_does_not_fire_without_prior_mutation_attempt(self) -> None:
@@ -4321,10 +4394,9 @@ class TestOptionCRecoveryNudge:
         assert mock_llm.call_count == 2
         for call in mock_llm.call_args_list:
             messages = call.args[0]
-            assert not any(
-                isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
-                for m in messages
-            ), "nudge fired even though no prior mutation attempt was made"
+            assert not any(isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", "")) for m in messages), (
+                "nudge fired even though no prior mutation attempt was made"
+            )
 
     @pytest.mark.asyncio
     async def test_nudge_does_not_fire_when_state_is_non_empty(self) -> None:
@@ -4364,10 +4436,9 @@ class TestOptionCRecoveryNudge:
         assert mock_llm.call_count == 2
         for call in mock_llm.call_args_list:
             messages = call.args[0]
-            assert not any(
-                isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
-                for m in messages
-            ), "nudge fired on a non-empty state"
+            assert not any(isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", "")) for m in messages), (
+                "nudge fired on a non-empty state"
+            )
 
     @pytest.mark.asyncio
     async def test_nudge_fires_only_once_per_compose(self) -> None:
@@ -4404,10 +4475,7 @@ class TestOptionCRecoveryNudge:
         for call in mock_llm.call_args_list:
             messages = call.args[0]
             all_nudge_messages.extend(
-                m
-                for m in messages
-                if isinstance(m, dict)
-                and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
+                m for m in messages if isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
             )
         # The nudge is appended once and persists across both subsequent
         # call inputs; counting unique appearances within the FINAL call's
@@ -4415,11 +4483,7 @@ class TestOptionCRecoveryNudge:
         # in earlier-call inputs only if it was already appended, which
         # would imply two distinct nudges if call_count > 3).
         final_call_messages = mock_llm.call_args_list[-1].args[0]
-        final_nudges = [
-            m
-            for m in final_call_messages
-            if isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
-        ]
+        final_nudges = [m for m in final_call_messages if isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))]
         assert len(final_nudges) == 1, (
             f"expected exactly one [ELSPETH-RECOVERY-NUDGE] in the final messages even after a 2nd surrender; got {len(final_nudges)}"
         )
@@ -4472,7 +4536,6 @@ class TestOptionCRecoveryNudge:
         assert mock_llm.call_count == 2
         for call in mock_llm.call_args_list:
             messages = call.args[0]
-            assert not any(
-                isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", ""))
-                for m in messages
-            ), "nudge injected from bonus-call path — budget contract violated"
+            assert not any(isinstance(m, dict) and "[ELSPETH-RECOVERY-NUDGE]" in str(m.get("content", "")) for m in messages), (
+                "nudge injected from bonus-call path — budget contract violated"
+            )

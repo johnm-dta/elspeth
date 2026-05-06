@@ -98,13 +98,15 @@ _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 # than "creative writing" in the LLM-debugging-skill temperature guide;
 # 0.0 is the right point for tool-construction tasks.
 #
-# Both values are recorded on every audit row via ComposerLLMCall so a
-# reviewer can detect drift if the constants are ever changed and tie
-# individual failures to the precise sampling regime that produced them.
+# The temperature value is recorded on every audit row via ComposerLLMCall.
+# The seed is recorded when LiteLLM advertises support for the configured
+# provider/model, otherwise it is omitted from the provider request and
+# recorded as ``None`` so the audit row mirrors the actual request shape.
 #
 # Configurability is Tier 2 — do not read from settings/env without an ADR.
 _COMPOSER_LLM_TEMPERATURE: Final[float] = 0.0
 _COMPOSER_LLM_SEED: Final[int] = 42
+_COMPOSER_LLM_SEED_PARAM: Final[str] = "seed"
 
 type RequiredPath = tuple[str, ...]
 
@@ -146,6 +148,21 @@ async def _litellm_acompletion(**kwargs: Any) -> Any:
     import litellm
 
     return await litellm.acompletion(**kwargs)
+
+
+def _litellm_completion_supports_param(model: str, param: str) -> bool:
+    """Return whether LiteLLM advertises chat-completion support for ``param``."""
+    import litellm
+
+    supported_params = litellm.get_supported_openai_params(model=model)
+    return isinstance(supported_params, list) and param in supported_params
+
+
+def _composer_llm_seed_for_model(model: str) -> int | None:
+    """Seed value to send to LiteLLM, or ``None`` when the provider rejects it."""
+    if _litellm_completion_supports_param(model, _COMPOSER_LLM_SEED_PARAM):
+        return _COMPOSER_LLM_SEED
+    return None
 
 
 def _token_usage_from_response(response: Any | None) -> TokenUsage:
@@ -246,7 +263,7 @@ def _build_llm_call_record(
     started_at: datetime,
     started_ns: int,
     temperature: float,
-    seed: int,
+    seed: int | None,
     response: Any | None = None,
     error_class: str | None = None,
     error_message: str | None = None,
@@ -827,9 +844,7 @@ class ComposerServiceImpl:
             return False
         if not _has_prior_mutation_attempt(invocations):
             return False
-        budget_remaining = (
-            self._max_composition_turns + self._max_discovery_turns
-        ) - (composition_turns_used + discovery_turns_used)
+        budget_remaining = (self._max_composition_turns + self._max_discovery_turns) - (composition_turns_used + discovery_turns_used)
         return budget_remaining >= 1
 
     async def _finalize_no_tool_response(
@@ -1192,9 +1207,7 @@ class ComposerServiceImpl:
                     discovery_turns_used=discovery_turns_used,
                 ):
                     empty_state_recovery.record_fire()
-                    llm_messages.append(
-                        {"role": "user", "content": _RECOVERY_NUDGE_CONTENT}
-                    )
+                    llm_messages.append({"role": "user", "content": _RECOVERY_NUDGE_CONTENT})
                     composition_turns_used += 1
                     await _emit_progress(
                         progress,
@@ -1981,12 +1994,17 @@ class ComposerServiceImpl:
         from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
         try:
+            seed = _composer_llm_seed_for_model(self._model)
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "tools": tools,
+                "temperature": _COMPOSER_LLM_TEMPERATURE,
+            }
+            if seed is not None:
+                kwargs[_COMPOSER_LLM_SEED_PARAM] = seed
             response = await _litellm_acompletion(
-                model=self._model,
-                messages=messages,
-                tools=tools,
-                temperature=_COMPOSER_LLM_TEMPERATURE,
-                seed=_COMPOSER_LLM_SEED,
+                **kwargs,
             )
         except LiteLLMBadRequestError as exc:
             raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
@@ -2005,11 +2023,16 @@ class ComposerServiceImpl:
         from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
         try:
+            seed = _composer_llm_seed_for_model(self._model)
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "temperature": _COMPOSER_LLM_TEMPERATURE,
+            }
+            if seed is not None:
+                kwargs[_COMPOSER_LLM_SEED_PARAM] = seed
             response = await _litellm_acompletion(
-                model=self._model,
-                messages=messages,
-                temperature=_COMPOSER_LLM_TEMPERATURE,
-                seed=_COMPOSER_LLM_SEED,
+                **kwargs,
             )
         except LiteLLMBadRequestError as exc:
             raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
@@ -2102,7 +2125,7 @@ class ComposerServiceImpl:
                         started_at=started_at,
                         started_ns=started_ns,
                         temperature=_COMPOSER_LLM_TEMPERATURE,
-                        seed=_COMPOSER_LLM_SEED,
+                        seed=_composer_llm_seed_for_model(self._model),
                         response=response,
                         error_class=error_class,
                         error_message=error_message,

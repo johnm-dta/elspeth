@@ -139,7 +139,10 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
             raise RuntimeError(f"Completed run {current.run_id} has no landscape_run_id — Tier 1 anomaly (audit trail incomplete)")
         try:
             payload: CompletedData | FailedData | CancelledData = CompletedData(
-                status=current.status,
+                # Narrowing is sound because the guard above admits only the
+                # operator-completion subset. Pydantic still re-validates the
+                # Literal at construction.
+                status=cast(Literal["completed", "completed_with_failures", "empty"], current.status),
                 rows_processed=current.rows_processed,
                 rows_succeeded=current.rows_succeeded,
                 rows_failed=current.rows_failed,

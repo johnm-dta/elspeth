@@ -1,5 +1,7 @@
 """Tests for TokenUsage frozen dataclass."""
 
+import pytest
+
 from elspeth.contracts.token_usage import TokenUsage
 
 
@@ -349,6 +351,20 @@ class TestTokenUsageProviderCacheFields:
         assert usage.cache_read_input_tokens == 1100
         # OpenAI-shape field stays None when only Anthropic shape is present.
         assert usage.cached_prompt_tokens is None
+
+    @pytest.mark.parametrize(
+        ("field_name", "expected_payload"),
+        [
+            ("cached_prompt_tokens", {"cached_prompt_tokens": 1024}),
+            ("cache_creation_input_tokens", {"cache_creation_input_tokens": 7000}),
+            ("cache_read_input_tokens", {"cache_read_input_tokens": 1100}),
+        ],
+    )
+    def test_cache_only_usage_has_data(self, field_name: str, expected_payload: dict[str, int]) -> None:
+        usage = TokenUsage(**{field_name: next(iter(expected_payload.values()))})
+
+        assert usage.has_data is True
+        assert usage.to_dict() == expected_payload
 
     def test_canonical_top_level_cached_prompt_tokens_round_trip(self) -> None:
         """``to_dict`` emits ``cached_prompt_tokens`` at top level — round-trip preserves it."""

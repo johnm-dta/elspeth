@@ -105,7 +105,7 @@ The `edges` array in `set_pipeline` carries metadata (id, label) about each conn
   "edges": [
     {"id": "e1", "from_node": "source", "to_node": "fetch", "edge_type": "on_success"},
     {"id": "e2", "from_node": "fetch", "to_node": "split_lines", "edge_type": "on_success"},
-    {"id": "e3", "from_node": "split_lines", "to_node": "output_lines", "edge_type": "on_success"}
+    {"id": "e3", "from_node": "split_lines", "to_node": "lines_out", "edge_type": "on_success"}
   ],
   "outputs": [
     {"sink_name": "lines_out", "plugin": "json", "options": {"...": "..."}}
@@ -784,7 +784,7 @@ Required options (all must appear in the `set_pipeline` payload — `url_field` 
 - `url_field`: name of the row field containing the URL to fetch (no default).
 - `content_field`: name of the field where scraped content lands (canonical default: `"content"`).
 - `fingerprint_field`: name of the field where the content hash lands (canonical default: `"content_fingerprint"`).
-- `format`: extraction format — `"text"` (preserves whitespace, use for line-framed pipelines), `"markdown"` (default for LLM extraction), or `"html"`.
+- `format`: extraction format — `"text"` (preserves whitespace, use for line-framed pipelines), `"markdown"` (default for LLM extraction), or `"raw"` (raw HTML bytes as text).
 - `text_separator`: required when `format: "text"` and downstream is `line_explode`. Canonical default: `"\n"`.
 - `http`: nested object with three required keys:
   - `abuse_contact`: a contact email for abuse reports (e.g., `"compliance@example.com"` for testing — operator overrides for production).
@@ -953,8 +953,8 @@ The very first tool call for a URL-input pipeline must be `create_blob` with the
 **Examples:**
 - User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:
   1. `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")`
-  2. `set_source_from_blob({blob_id, on_success: "fetch", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
-  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "main", on_success: <next-step-or-sink>, options: {format: "text", text_separator: "\n"}})`
+  2. `set_source_from_blob({blob_id, on_success: "url_rows", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
+  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "url_rows", on_success: "scraped_content", options: {schema: {mode: "fixed", fields: ["url: str"]}, url_field: "url", content_field: "content", fingerprint_field: "content_fingerprint", format: "text", text_separator: "\n", http: {abuse_contact: "compliance@example.com", scraping_reason: "Download a public URL and process its content", allowed_hosts: "public_only"}}})`
   ⚠ Skipping step 3 means the pipeline emits the URL string itself, not the URL's content. Downstream transforms like `line_explode` or `llm` will see the URL text instead of what was at the URL, and the validator will reject the pipeline. See Pattern 1 (`URL → Scrape → Extract → JSON`) and Pattern 1b (`URL → Download → Split into Lines → JSON`) under "Common Pipeline Patterns" for full chains.
 - User provides JSON data → `create_blob(filename="data.json", mime_type="application/json", content='[{"id": 1, "name": "test"}]')` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`
 - User provides CSV rows → `create_blob(filename="data.csv", mime_type="text/csv", content="name,age\nAlice,30\nBob,25")` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`

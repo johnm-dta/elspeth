@@ -65,6 +65,15 @@ def _extract_backtick_names(text: str, section_header: str) -> set[str]:
     return names
 
 
+def _section_between(text: str, start_anchor: str, end_anchor: str) -> str:
+    """Extract a bounded markdown section; fail loudly if anchors drift."""
+    start = text.find(start_anchor)
+    end = text.find(end_anchor, start)
+    if start == -1 or end == -1:
+        raise AssertionError(f"Could not locate skill anchors: {start_anchor!r} ... {end_anchor!r}")
+    return text[start:end]
+
+
 class TestPluginNameDrift:
     """Verify skill files list all registered plugins."""
 
@@ -319,6 +328,43 @@ class TestComposerToolNameDrift:
             f"from the skill — the LLM cannot call a tool that isn't in "
             f"get_tool_definitions(), and the bullet sets a false expectation."
         )
+
+
+class TestRunnableComposerSkillExamples:
+    """Focused runnable-example checks for guidance that models often copy verbatim."""
+
+    def test_worked_set_pipeline_edge_targets_the_real_sink_connection(self) -> None:
+        example = _section_between(
+            _WEB_SKILL_CONTENT,
+            '  "edges": [\n',
+            "Trace each connection name through the diagram",
+        )
+
+        assert '"from_node": "split_lines", "to_node": "lines_out"' in example
+        assert '"from_node": "split_lines", "to_node": "output_lines"' not in example
+
+    def test_web_scrape_format_guidance_uses_config_literal_raw_for_html_output(self) -> None:
+        web_scrape_guidance = _section_between(
+            _WEB_SKILL_CONTENT,
+            "**web_scrape** — Fetch and extract content from a URL in each row.",
+            "**Canonical full options block:**",
+        )
+
+        format_line = next(line for line in web_scrape_guidance.splitlines() if line.startswith("- `format`:"))
+        assert '"raw"' in format_line
+        assert '"html"' not in format_line
+
+    def test_url_input_recipe_uses_matching_connection_and_full_web_scrape_options(self) -> None:
+        recipe = _section_between(
+            _WEB_SKILL_CONTENT,
+            '- User says "use this URL: https://example.com"',
+            "- User provides JSON data",
+        )
+
+        assert 'on_success: "url_rows"' in recipe
+        assert 'input: "url_rows"' in recipe
+        for required_option in ("schema", "url_field", "content_field", "fingerprint_field", "http"):
+            assert required_option in recipe
 
 
 class TestTwoFileDivergence:

@@ -143,9 +143,7 @@ def _format_edge_contract_failure(exc: EdgeContractError) -> tuple[str, str]:
     if result.type_mismatches:
         issue_lines.append("Type mismatches:")
         for field_name, expected, actual in result.type_mismatches:
-            issue_lines.append(
-                f"  - field '{field_name}': consumer requires '{expected}', producer emits '{actual}'"
-            )
+            issue_lines.append(f"  - field '{field_name}': consumer requires '{expected}', producer emits '{actual}'")
     if result.constraint_mismatches:
         issue_lines.append("Constraint mismatches:")
         for field_name, reason in result.constraint_mismatches:
@@ -183,22 +181,13 @@ def _build_edge_contract_suggestion(exc: EdgeContractError) -> str:
     has_extras = bool(result.extra_fields)
 
     parts: list[str] = []
-    parts.append(
-        f"Most edge-contract failures come from the consumer over-declaring fields it doesn't operate on. "
-        f"Try option (a) first."
-    )
+    parts.append("Most edge-contract failures come from the consumer over-declaring fields it doesn't operate on. Try option (a) first.")
     parts.append("")
-    parts.append(
-        f"  (a) Relax the consumer's input schema on node '{exc.to_node_id}'. Either:"
-    )
+    parts.append(f"  (a) Relax the consumer's input schema on node '{exc.to_node_id}'. Either:")
     if has_type_mismatch:
-        parts.append(
-            "      - Change the declared field type(s) to match what the producer emits (see Type mismatches above)."
-        )
+        parts.append("      - Change the declared field type(s) to match what the producer emits (see Type mismatches above).")
     if has_missing:
-        parts.append(
-            "      - Drop missing required fields from the consumer's required_fields if the consumer doesn't actually need them."
-        )
+        parts.append("      - Drop missing required fields from the consumer's required_fields if the consumer doesn't actually need them.")
     if has_extras:
         parts.append(
             "      - Switch the consumer's input schema mode to 'flexible' or 'observed' so it accepts the producer's extra fields."
@@ -206,18 +195,14 @@ def _build_edge_contract_suggestion(exc: EdgeContractError) -> str:
     parts.append(
         "      - Or switch the consumer's input schema mode to 'flexible' so it accepts the producer's full output without redeclaring every field."
     )
-    parts.append(
-        f"      Tool: patch_node_options(node_id='{exc.to_node_id}', patch={{'schema': {{...}}}})"
-    )
+    parts.append(f"      Tool: patch_node_options(node_id='{exc.to_node_id}', patch={{'schema': {{...}}}})")
     parts.append("")
     parts.append(
         f"  (b) Patch the producer node '{exc.from_node_id}'. Note: plugin output schemas are largely baked-in by the plugin's contract — "
         f"this option only works if you mis-declared the producer's schema in your initial set_pipeline / upsert_node call. "
         f"If the producer is using its plugin's default output contract, option (a) is the only fix."
     )
-    parts.append(
-        f"      Tool: patch_node_options(node_id='{exc.from_node_id}', patch={{'schema': {{...}}}})"
-    )
+    parts.append(f"      Tool: patch_node_options(node_id='{exc.from_node_id}', patch={{'schema': {{...}}}})")
 
     return "\n".join(parts)
 

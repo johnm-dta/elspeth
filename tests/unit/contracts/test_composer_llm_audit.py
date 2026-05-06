@@ -37,6 +37,8 @@ def _make_call(**overrides: object) -> ComposerLLMCall:
         "finished_at": t,
         "error_class": None,
         "error_message": None,
+        "temperature": 0.0,
+        "seed": 42,
     }
     defaults.update(overrides)
     return ComposerLLMCall(**defaults)  # type: ignore[arg-type]
@@ -165,6 +167,27 @@ def test_cache_token_fields_round_trip_when_known() -> None:
     assert payload["cached_prompt_tokens"] == 1024
     assert payload["cache_creation_input_tokens"] == 500
     assert payload["cache_read_input_tokens"] == 900
+
+
+def test_composer_llm_call_records_temperature_and_seed() -> None:
+    """temperature and seed are required audit fields and round-trip through to_dict().
+
+    The composer hardcodes ``temperature=0.0`` and ``seed=42`` on every outbound
+    LLM call (RGR investigation 2026-05-06 §4.4 — uncontrolled sampling at
+    LiteLLM/OpenRouter default ~1.0 was the largest single explanation for
+    schema-construction nondeterminism). The audit row records the values
+    actually sent so a reviewer can correlate any individual failure with
+    the precise sampling regime that produced it, and detect drift if the
+    constants are ever changed.
+    """
+    call = _make_call(temperature=0.0, seed=42)
+
+    payload = call.to_dict()
+
+    assert call.temperature == 0.0
+    assert call.seed == 42
+    assert payload["temperature"] == 0.0
+    assert payload["seed"] == 42
 
 
 def test_recorder_protocol_runtime_check() -> None:

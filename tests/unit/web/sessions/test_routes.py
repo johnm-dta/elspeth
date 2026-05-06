@@ -105,6 +105,8 @@ def _llm_call(**overrides: Any) -> ComposerLLMCall:
         "finished_at": datetime.now(UTC),
         "error_class": None,
         "error_message": None,
+        "temperature": 0.0,
+        "seed": 42,
     }
     defaults.update(overrides)
     return ComposerLLMCall(**defaults)

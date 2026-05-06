@@ -22,7 +22,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, NoReturn, cast
+from typing import Any, Final, NoReturn, cast
 
 import structlog
 from opentelemetry import metrics
@@ -85,6 +85,22 @@ slog = structlog.get_logger()
 _ARRAY_ITEM_SEGMENT = "[]"
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
+
+# Composer LLM sampling constants. Hardcoded for deterministic tool-call
+# construction (RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
+# ceiling on URL→download→line-explode primarily to LiteLLM/OpenRouter
+# default sampling at ~1.0). Pipeline composition is closer to "extraction"
+# than "creative writing" in the LLM-debugging-skill temperature guide;
+# 0.0 is the right point for tool-construction tasks.
+#
+# Both values are recorded on every audit row via ComposerLLMCall so a
+# reviewer can detect drift if the constants are ever changed and tie
+# individual failures to the precise sampling regime that produced them.
+#
+# Configurability is Tier 2 — do not read from settings/env without an ADR.
+_COMPOSER_LLM_TEMPERATURE: Final[float] = 0.0
+_COMPOSER_LLM_SEED: Final[int] = 42
+
 type RequiredPath = tuple[str, ...]
 
 # Bounded set of exception class names emitted as `exception_class` attribute on
@@ -140,6 +156,27 @@ def _token_usage_from_response(response: Any | None) -> TokenUsage:
     All cache fields are read defensively: a non-Mapping ``usage`` whose
     attributes are missing yields ``None`` rather than a fabricated zero.
     See elspeth-4e79436719 §Bug C.
+
+    LiteLLM-shape deduplication: for Anthropic-family responses (direct
+    Anthropic, Bedrock-Claude, Vertex-Claude/Gemini), LiteLLM's transformation
+    layer populates ``prompt_tokens_details.cached_tokens`` as a synthetic
+    copy of the Anthropic sibling ``cache_read_input_tokens`` (and uses ``0``
+    when no read occurred). Treating both as independent signals would
+    double-record the same provider counter into ``cached_prompt_tokens`` and
+    ``cache_read_input_tokens`` — and, for creation-only responses, fabricate
+    a zero into ``cached_prompt_tokens`` that the provider never asserted.
+    When *either* Anthropic sibling is present we therefore drop the nested
+    OpenAI shape: presence of a sibling is the provenance signal that the
+    nested view is LiteLLM-derived, not provider-native.
+
+    Primary-source evidence (LiteLLM transformations):
+    - ``litellm/llms/anthropic/chat/transformation.py`` (Anthropic direct)
+    - ``litellm/llms/bedrock/chat/converse_transformation.py`` (Bedrock Claude)
+    - ``litellm/llms/vertex_ai/gemini/vertex_and_google_ai_studio_gemini.py``
+      (Vertex Gemini / Claude)
+
+    Each constructs ``PromptTokensDetailsWrapper(cached_tokens=cache_read_input_tokens)``
+    and emits both fields on the returned ``Usage`` object.
     """
     if response is None:
         return TokenUsage.unknown()
@@ -171,6 +208,8 @@ def _token_usage_from_response(response: Any | None) -> TokenUsage:
             "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
             "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
         }
+    if usage_data["cache_read_input_tokens"] is not None or usage_data["cache_creation_input_tokens"] is not None:
+        usage_data["prompt_tokens_details"] = None
     return TokenUsage.from_dict(usage_data)
 
 
@@ -201,6 +240,8 @@ def _build_llm_call_record(
     status: ComposerLLMCallStatus,
     started_at: datetime,
     started_ns: int,
+    temperature: float,
+    seed: int,
     response: Any | None = None,
     error_class: str | None = None,
     error_message: str | None = None,
@@ -224,6 +265,8 @@ def _build_llm_call_record(
         finished_at=datetime.now(UTC),
         error_class=error_class,
         error_message=error_message,
+        temperature=temperature,
+        seed=seed,
     )
 
 
@@ -1705,6 +1748,8 @@ class ComposerServiceImpl:
                 model=self._model,
                 messages=messages,
                 tools=tools,
+                temperature=_COMPOSER_LLM_TEMPERATURE,
+                seed=_COMPOSER_LLM_SEED,
             )
         except LiteLLMBadRequestError as exc:
             raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
@@ -1726,6 +1771,8 @@ class ComposerServiceImpl:
             response = await _litellm_acompletion(
                 model=self._model,
                 messages=messages,
+                temperature=_COMPOSER_LLM_TEMPERATURE,
+                seed=_COMPOSER_LLM_SEED,
             )
         except LiteLLMBadRequestError as exc:
             raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
@@ -1817,6 +1864,8 @@ class ComposerServiceImpl:
                         status=status,
                         started_at=started_at,
                         started_ns=started_ns,
+                        temperature=_COMPOSER_LLM_TEMPERATURE,
+                        seed=_COMPOSER_LLM_SEED,
                         response=response,
                         error_class=error_class,
                         error_message=error_message,

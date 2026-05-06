@@ -1241,6 +1241,18 @@ class TestProviderCacheTokenAudit:
     canonical names, so the audit DB records what the provider actually
     reported. A missing field must remain ``None`` per the
     "absence as evidence" rule from CLAUDE.md.
+
+    LiteLLM-shape deduplication: when LiteLLM is the wire to an
+    Anthropic-family provider (Anthropic direct, Bedrock-Claude,
+    Vertex-Claude/Gemini), it populates BOTH the nested OpenAI shape and
+    the Anthropic siblings on the same response, deriving
+    ``prompt_tokens_details.cached_tokens`` from the sibling
+    ``cache_read_input_tokens``. The two are aliases, not independent
+    signals — recording both would double-count cache hits in the audit
+    sidecar, and creation-only responses (which carry ``cached_tokens=0``
+    by LiteLLM default) would fabricate a zero into ``cached_prompt_tokens``
+    that the provider never asserted. Presence of an Anthropic sibling is
+    the provenance signal that the nested shape is LiteLLM-synthesized.
     """
 
     @staticmethod
@@ -1293,6 +1305,107 @@ class TestProviderCacheTokenAudit:
             }
         )
         usage = _token_usage_from_response(response)
+        assert usage.cache_creation_input_tokens == 7000
+        assert usage.cache_read_input_tokens == 1100
+        assert usage.cached_prompt_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_litellm_normalized_anthropic_does_not_double_record_cache_hit(self) -> None:
+        """LiteLLM-normalized Anthropic-family response: nested shape is suppressed.
+
+        Mirrors the wire shape produced by
+        ``litellm/llms/anthropic/chat/transformation.py:1294-1317`` —
+        ``prompt_tokens_details.cached_tokens`` and ``cache_read_input_tokens``
+        carry the SAME value because LiteLLM derives the former from the
+        latter. The audit row must record only the Anthropic-shape signal.
+        """
+        from elspeth.web.composer.service import _token_usage_from_response
+
+        response = self._response_with_usage(
+            {
+                "prompt_tokens": 8200,
+                "completion_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 1100},
+                "cache_creation_input_tokens": 7000,
+                "cache_read_input_tokens": 1100,
+            }
+        )
+        usage = _token_usage_from_response(response)
+        assert usage.cache_creation_input_tokens == 7000
+        assert usage.cache_read_input_tokens == 1100
+        assert usage.cached_prompt_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_litellm_creation_only_does_not_leak_zero_into_cached_prompt_tokens(self) -> None:
+        """LiteLLM creation-only Anthropic response: nested cached_tokens=0 is suppressed.
+
+        ``PromptTokensDetailsWrapper`` preserves ``cached_tokens=0`` (verified
+        empirically), so a cache-creation-only Anthropic call still emits a
+        nested shape with ``cached_tokens=0``. Without dedup, the audit row
+        would carry ``cached_prompt_tokens=0`` — a fabricated zero that
+        misleads the auditor into thinking the provider reported a zero-hit
+        cache read, when in fact the provider only reported cache creation.
+        """
+        from elspeth.web.composer.service import _token_usage_from_response
+
+        response = self._response_with_usage(
+            {
+                "prompt_tokens": 7000,
+                "completion_tokens": 80,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "cache_creation_input_tokens": 7000,
+                "cache_read_input_tokens": 0,
+            }
+        )
+        usage = _token_usage_from_response(response)
+        assert usage.cache_creation_input_tokens == 7000
+        assert usage.cache_read_input_tokens == 0
+        assert usage.cached_prompt_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_litellm_normalized_dual_shape_is_deduped_on_attribute_branch(self) -> None:
+        """Pydantic-shaped (attribute) usage object also dedups when siblings present.
+
+        Real LiteLLM responses are Pydantic ``Usage`` objects, not Mappings.
+        Verifies the elif branch in ``_token_usage_from_response`` honors the
+        same dedup rule: nested ``prompt_tokens_details.cached_tokens`` is
+        dropped when an Anthropic sibling is present on the attribute object.
+        """
+        from elspeth.web.composer.service import _token_usage_from_response
+
+        @dataclass
+        class FakePromptTokensDetails:
+            cached_tokens: int | None
+
+        @dataclass
+        class FakePydanticUsage:
+            prompt_tokens: int
+            completion_tokens: int
+            total_tokens: int
+            prompt_tokens_details: FakePromptTokensDetails
+            cache_creation_input_tokens: int | None
+            cache_read_input_tokens: int | None
+
+        @dataclass
+        class FakeResponseWithPydanticUsage:
+            choices: list[FakeChoice]
+            usage: FakePydanticUsage
+            model: str = "anthropic/claude-3-5-sonnet"
+            id: str = "msg_test"
+
+        text = _make_llm_response(content="Done.")
+        response = FakeResponseWithPydanticUsage(
+            choices=text.choices,
+            usage=FakePydanticUsage(
+                prompt_tokens=8200,
+                completion_tokens=120,
+                total_tokens=8320,
+                prompt_tokens_details=FakePromptTokensDetails(cached_tokens=1100),
+                cache_creation_input_tokens=7000,
+                cache_read_input_tokens=1100,
+            ),
+        )
+        usage = _token_usage_from_response(response)  # type: ignore[arg-type]
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1955,6 +2068,75 @@ class TestPartialStatePreservation:
                 await service.compose("Just looking", [], state)
 
             assert exc_info.value.partial_state is None
+
+
+class TestComposerSamplingDeterminism:
+    """Composer LLM calls must use temperature=0.0 and seed=42.
+
+    RGR investigation 2026-05-06 §4.4: uncontrolled sampling at the
+    LiteLLM/OpenRouter default (~1.0) was the largest single explanation
+    for schema-construction nondeterminism. Pipeline composition is an
+    extraction task, not a creative one — temperature 0 is the right
+    setpoint per the LLM-debugging-skill temperature guide.
+
+    Audit primacy: the values that flow to LiteLLM are also recorded on
+    each ComposerLLMCall, so a reviewer can correlate any individual
+    failure with the precise sampling regime that produced it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_call_llm_passes_temperature_zero_and_seed_42(self) -> None:
+        """The tool-loop LLM call site sends temperature=0.0 and seed=42."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+
+        # Single text-only response converges the loop immediately.
+        completion = _make_llm_response(content="acknowledged")
+
+        # Service may reject because no pipeline was built; we only
+        # care about what reached LiteLLM on the first (and possibly only) call.
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                return_value=completion,
+            ) as mock_acomp,
+            contextlib.suppress(ComposerServiceError),
+        ):
+            await service.compose("Hello", [], state)
+
+        assert mock_acomp.call_count >= 1
+        first_call_kwargs = mock_acomp.call_args_list[0].kwargs
+        assert first_call_kwargs["temperature"] == 0.0, f"composer must send temperature=0.0, got {first_call_kwargs.get('temperature')!r}"
+        assert first_call_kwargs["seed"] == 42, f"composer must send seed=42, got {first_call_kwargs.get('seed')!r}"
+
+    @pytest.mark.asyncio
+    async def test_call_text_llm_passes_temperature_zero_and_seed_42(self) -> None:
+        """The diagnostics text-LLM call site also sends temperature=0.0 and seed=42.
+
+        run-diagnostics text generation goes through _call_text_llm. Since the
+        skill prescribes determinism for the user's LLM transforms, the host
+        composer should be at least as deterministic.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+
+        completion = _make_llm_response(content="diagnostic text")
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=completion,
+        ) as mock_acomp:
+            await service._call_text_llm([{"role": "user", "content": "explain"}])
+
+        assert mock_acomp.call_count == 1
+        kwargs = mock_acomp.call_args_list[0].kwargs
+        assert kwargs["temperature"] == 0.0
+        assert kwargs["seed"] == 42
 
 
 class TestEmptyChoicesValidation:

@@ -51,6 +51,17 @@ class ComposerLLMCall:
     absent cache field stays ``None`` rather than coerced to zero — an
     auditor can then distinguish "no cache reported" from "cache reported
     zero hits."
+
+    ``temperature`` and ``seed`` capture the deterministic-sampling
+    parameters set on every composer LLM request. Both are constant in
+    the current implementation (``0.0`` / ``42`` — see service.py module
+    constants ``_COMPOSER_LLM_TEMPERATURE`` / ``_COMPOSER_LLM_SEED``),
+    but the audit row records the value actually sent so a reviewer
+    can detect drift if the constants are ever changed and correlate
+    individual failures with the precise sampling regime that produced
+    them. RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
+    ceiling on the URL→download→line-explode scenario primarily to
+    uncontrolled default sampling (~1.0) on the previous code path.
     """
 
     model_requested: str
@@ -67,6 +78,8 @@ class ComposerLLMCall:
     finished_at: datetime
     error_class: str | None
     error_message: str | None
+    temperature: float
+    seed: int
     cached_prompt_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None

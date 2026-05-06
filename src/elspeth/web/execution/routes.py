@@ -58,6 +58,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.protocol import (
+    OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     RunRecord,
     SessionServiceProtocol,
     TerminalSessionRunStatus,
@@ -166,7 +167,7 @@ async def _load_run_status_snapshot_with_accounting(
         raise _RunStatusNotFoundError from exc
 
     accounting = None
-    if run_record.landscape_run_id:
+    if run_record.landscape_run_id and run_record.status in OPERATOR_COMPLETION_RUN_STATUS_VALUES:
         try:
             accounting_by_run_id = await run_sync_in_worker(
                 load_run_accounting_for_settings,

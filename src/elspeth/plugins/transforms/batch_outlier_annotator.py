@@ -42,6 +42,7 @@ _ANNOTATION_FIELD_SUFFIXES = (
     "z_score",
     "z_threshold",
 )
+_BACKWARD_INVARIANT_DROPPED_FIELD = "batch_outlier_annotator_dropped_probe_field"
 
 
 def _annotation_fields(output_prefix: str) -> frozenset[str]:
@@ -138,7 +139,7 @@ class BatchOutlierAnnotator(BaseTransform):
 
     name = "batch_outlier_annotator"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e77694e6695a0b43"
+    source_file_hash: str | None = "sha256:21b26c9879a4481d"
     config_model = BatchOutlierAnnotatorConfig
     is_batch_aware = True
     passes_through_input = False
@@ -207,13 +208,23 @@ class BatchOutlierAnnotator(BaseTransform):
         )
 
     def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
-        """Exercise the annotation output path for the backward invariant."""
+        """Exercise the skipped-row path for the backward invariant."""
+        dropped_row = self._augment_invariant_probe_row(
+            probe,
+            field_name=_BACKWARD_INVARIANT_DROPPED_FIELD,
+            value=True,
+        )
         return [
             self._augment_invariant_probe_row(
                 probe,
                 field_name=self._value_field,
                 value=1.0,
-            )
+            ),
+            self._augment_invariant_probe_row(
+                dropped_row,
+                field_name=self._value_field,
+                value=None,
+            ),
         ]
 
     def _reject_runtime_output_field_collision(self, rows: list[PipelineRow]) -> None:

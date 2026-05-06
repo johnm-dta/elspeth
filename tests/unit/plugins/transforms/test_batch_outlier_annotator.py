@@ -98,6 +98,23 @@ class TestBatchOutlierAnnotator:
             assert row["outlier_missing_indices"] == (1,)
             assert row["outlier_non_finite_indices"] == (2,)
 
+    def test_backward_invariant_probe_exercises_dropped_row_shape(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
+
+        transform = BatchOutlierAnnotator(BatchOutlierAnnotator.probe_config())
+        probe = _make_row({"id": 1, "keep": "yes"})
+
+        probe_rows = transform.backward_invariant_probe_rows(probe)
+        result = transform.execute_backward_invariant_probe(probe_rows, ctx)
+
+        assert result.status == "success"
+        emitted_rows = result.rows if result.rows is not None else [result.row]
+        assert all(row is not None for row in emitted_rows)
+        input_fields = frozenset(field for row in probe_rows for field in row)
+        emitted_fields = frozenset(field for row in emitted_rows if row is not None for field in row)
+        assert "batch_outlier_annotator_dropped_probe_field" in input_fields
+        assert "batch_outlier_annotator_dropped_probe_field" not in emitted_fields
+
     def test_all_missing_or_non_finite_values_return_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
 

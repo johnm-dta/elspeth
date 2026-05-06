@@ -59,7 +59,7 @@ class TestEndToEndPipelineExecution:
         3. Save CompositionState programmatically (bypass LLM composer)
         4. Execute via REST -> get run_id
         5. Poll status -> eventually 'completed'
-        6. Verify results: rows_processed > 0, rows_failed == 0
+        6. Verify results: accounting.source.rows_processed > 0 and accounting.tokens.failed == 0
         7. Verify landscape_run_id links to audit trail
         """
         from elspeth.web.app import create_app
@@ -188,8 +188,10 @@ class TestEndToEndPipelineExecution:
 
             # 5. Verify results
             assert status["status"] == "completed", f"Pipeline failed: {status.get('error')}"
-            assert status["rows_processed"] > 0
-            assert status["rows_failed"] == 0
+            accounting = status["accounting"]
+            assert accounting is not None
+            assert accounting["source"]["rows_processed"] > 0
+            assert accounting["tokens"]["failed"] == 0
 
             # 6. Verify landscape_run_id links to real audit trail
             assert status["landscape_run_id"] is not None
@@ -209,7 +211,7 @@ class TestEndToEndPipelineExecution:
             )
             assert resp.status_code == 200
             results = resp.json()
-            assert results["rows_processed"] > 0
+            assert results["accounting"]["source"]["rows_processed"] > 0
             assert results["landscape_run_id"] is not None
 
 
@@ -241,7 +243,7 @@ class TestGateRoutedPipelineExecution:
         Pre-PR (commit cc895589): /api/runs/{run_id} returns status='failed'
         with the synthetic structural error. Post-PR: returns
         status='completed' with routed successes represented as both lifecycle
-        successes and the rows_routed_success subset counter.
+        token successes and the accounting.routing.routed_success subset counter.
         """
         from elspeth.web.app import create_app
         from elspeth.web.composer.state import (
@@ -416,11 +418,13 @@ class TestGateRoutedPipelineExecution:
                 "Gate-routed pipeline misclassified — expected 'completed', "
                 f"got {status['status']!r}; error={status.get('error')!r}. "
                 "Pre-fix structural-failure message would be 'No row reached "
-                "the success path' or similar — the rows_routed counter split "
-                "is supposed to fix this end-to-end."
+                "the success path' or similar — the routed accounting split is "
+                "supposed to fix this end-to-end."
             )
-            assert status["rows_processed"] > 0
-            assert status["rows_succeeded"] >= status["rows_routed_success"]
-            assert status["rows_routed_success"] > 0
-            assert status["rows_routed_failure"] == 0
+            accounting = status["accounting"]
+            assert accounting is not None
+            assert accounting["source"]["rows_processed"] > 0
+            assert accounting["tokens"]["succeeded"] >= accounting["routing"]["routed_success"]
+            assert accounting["routing"]["routed_success"] > 0
+            assert accounting["routing"]["routed_failure"] == 0
             assert status["error"] is None

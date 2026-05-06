@@ -337,7 +337,13 @@ class TestRunDiagnosticsEndpoint:
         svc = MagicMock()
         svc.get_status = AsyncMock(side_effect=fake_get_status)
         app = _create_test_app(execution_service=svc)
-        app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=session_id, landscape_run_id=str(run_id)))
+        app.state.session_service.get_run = AsyncMock(
+            return_value=MagicMock(
+                session_id=session_id,
+                status="completed",
+                landscape_run_id=str(run_id),
+            )
+        )
 
         monkeypatch.setattr(
             "elspeth.web.execution.routes.load_run_accounting_for_settings",
@@ -402,7 +408,13 @@ class TestRunDiagnosticsEndpoint:
         svc = MagicMock()
         svc.get_status = AsyncMock(side_effect=fake_get_status)
         app = _create_test_app(execution_service=svc)
-        app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=session_id, landscape_run_id=str(run_id)))
+        app.state.session_service.get_run = AsyncMock(
+            return_value=MagicMock(
+                session_id=session_id,
+                status="completed",
+                landscape_run_id=str(run_id),
+            )
+        )
         monkeypatch.setattr(
             "elspeth.web.execution.routes.load_run_accounting_for_settings",
             lambda settings, run_ids: {str(run_id): accounting},
@@ -1008,6 +1020,12 @@ class TestRunStatusEndpoint:
     ) -> None:
         """Running status must not inspect an audit DB that may still be initializing."""
         run_id = uuid4()
+        run_record = MagicMock(
+            id=run_id,
+            session_id=uuid4(),
+            status="running",
+            landscape_run_id=str(run_id),
+        )
         svc = MagicMock()
         svc.get_status = AsyncMock(
             return_value=RunStatusResponse(
@@ -1023,12 +1041,20 @@ class TestRunStatusEndpoint:
         def fail_if_called(*args: object, **kwargs: object) -> dict[str, DiscardSummary]:
             raise AssertionError("discard summary lookup should not run for non-terminal status")
 
+        def fail_accounting_if_called(*args: object, **kwargs: object) -> dict[str, RunAccounting]:
+            raise AssertionError("accounting lookup should not run for non-terminal status")
+
         monkeypatch.setattr(
             "elspeth.web.execution.discard_summary.load_discard_summaries_for_settings",
             fail_if_called,
         )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_accounting_for_settings",
+            fail_accounting_if_called,
+        )
 
         app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_run = AsyncMock(return_value=run_record)
         transport = ASGITransport(app=app, raise_app_exceptions=False)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(f"/api/runs/{run_id}")

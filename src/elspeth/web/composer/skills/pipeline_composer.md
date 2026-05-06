@@ -253,6 +253,17 @@ If a tool call fails or returns unexpected results:
 
 **Do not stop at the first failure.** Investigate and retry at least once before asking the user for help.
 
+**Do not ask permission to do work the user already requested.** When the user asks for a pipeline, they have authorized you to use whatever tool combinations the skill teaches — including the blob system, web_scrape, multiple iterations to fix validation errors, etc. Phrases to AVOID: "If you want, I can…", "Should I proceed with…", "Do you want me to fix this by…". Phrases to USE: "I'll create the blob and wire the source now." (then do it). The only times you should ask the user are: (a) the user's intent is genuinely ambiguous (e.g., "should errors quarantine or fail the run?"), (b) you've exhausted at least one recovery attempt and still cannot proceed, or (c) the action would touch external systems with cost/security implications the user has not authorized.
+
+**Common error → recovery cheat sheet:**
+
+| Error | Trigger | Recovery |
+|---|---|---|
+| `Path violation (S2): '<url>' is outside the allowed directories` | You passed a URL as the `path` option on a source. | URLs are never paths. Call `create_blob(filename="input.txt", mime_type="text/plain", content="<the URL>")`, then `set_source_from_blob` with the blob_id (not `set_source` with the URL). Then add a `web_scrape` transform after the source to actually fetch the URL. See "HARD RULE — URL inputs" under "Inline data" and Pattern 1b. |
+| `Path violation (S2): '<path>' is outside the allowed directories. Source file paths must be under <data_dir>/blobs/` | You passed a literal local path that's not under the blob root. | Either (a) the user uploaded a file — use `set_source_from_blob` with the existing blob_id (call `list_blobs` if you don't have it), or (b) the user gave inline content — `create_blob` first, then `set_source_from_blob`. |
+| `set_source must not be called with 'blob_ref' in options` | You tried to wire a blob via the wrong tool. | Drop `set_source` and use `set_source_from_blob({blob_id, on_success, options: {…}})` instead. The blob_ref + path pair is set authoritatively by `set_source_from_blob`. |
+| `line_explode.source_field.line_framed_text` (semantic contract) | The upstream producer doesn't emit newline-framed text — typically a `text` source whose value is a URL string, not file contents. | Insert a `web_scrape` transform with `format: "text"` and `text_separator: "\n"` between the source and `line_explode`. See Pattern 1b. |
+
 #### Fixing Schema Contract Violations
 
 When `preview_pipeline` returns an unsatisfied edge contract, follow this sequence. **Name the concept first** (see "Schema Vocabulary — Five Distinct Concepts" near the top of this skill) — *which* of the five concepts is at fault dictates which tool to call.
@@ -746,6 +757,10 @@ For a complete new pipeline, prefer one `set_pipeline` call with `source.inline_
 For incremental source-only edits to an existing pipeline, call `create_blob` with the content and appropriate MIME type, then call `set_source_from_blob` with the returned `blob_id`.
 
 This is the canonical way to handle inline/literal data. There is no separate "inline source" plugin — the blob system handles it.
+
+**HARD RULE — URL inputs:** If the user gives you a URL, do NOT call `set_source` or `set_pipeline` with the URL as the `path` field. The path validator rejects any path that is not under `<data_dir>/blobs/` with `Path violation (S2)`. URLs are never paths. The URL is *content* that goes into a blob; the blob's storage path is what becomes the source path.
+
+The very first tool call for a URL-input pipeline must be `create_blob` with the URL string as the blob's content. Then `set_source_from_blob` (or use `set_pipeline` with `source.inline_blob`) — never `set_source` with `path: "<the URL>"`. The user has already authorized this work by asking for the pipeline; you do NOT need to ask permission to use the blob system. Just do it.
 
 **Examples:**
 - User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:

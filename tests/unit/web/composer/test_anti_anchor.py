@@ -140,3 +140,33 @@ def test_n_or_more_consecutive_identical_all_trigger(count: int) -> None:
     for _ in range(count):
         failures.append(("set_pipeline", "h"))
     assert should_inject_hint(failures) is True
+
+
+def test_captured_tier1_red_drift_pattern_does_not_trigger() -> None:
+    """The captured Tier 1 RED `53bc3cf2-ab90-4940-9679-1b5e7d474650` had
+    three `set_pipeline` failures with three DISTINCT argument hashes
+    (verified against the audit DB on 2026-05-07; observation
+    `elspeth-obs-9dfff9b571`). Earlier write-ups described this as
+    "byte-identical retry / anchor" by visual inspection of top-level
+    fields, but the model actually drifted on `web_scrape.schema` between
+    attempts #2 and #3. So the failure mode was drift-without-convergence-
+    then-self-surrender, NOT an anchored loop.
+
+    This test pins the predicate's correct (non-firing) response to the
+    captured RED's actual deque shape, so the next agent doesn't re-misread
+    "0 hint-fires across the cohort" as a bug. The actual fix path for the
+    captured failure mode is §7.6 (broader runtime-preflight error rewrite),
+    not a §7.7 threshold change.
+    """
+    # The three actual `arguments_hash` prefixes from the captured session
+    # (full SHA-256 in the audit DB; truncated here to keep the test tight).
+    failures: deque[tuple[str, str]] = deque(
+        [
+            ("set_pipeline", "664367f12b8a986f"),  # attempt #1 — bad source schema
+            ("set_pipeline", "02b0023e2e6f90ae"),  # attempt #2 — drift, web_scrape options error
+            ("set_pipeline", "32e13b6cacf28378"),  # attempt #3 — drift, schema mode change, surrender
+        ],
+        maxlen=5,
+    )
+    # Drift, not anchor — predicate correctly does not fire.
+    assert should_inject_hint(failures) is False

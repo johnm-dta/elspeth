@@ -339,7 +339,9 @@ evals_validate() {
            '{}' \
            "$out")
   if [[ "$http" != 2* ]]; then
-    evals_log WARN "validate returned HTTP $http (body preserved)"
+    local snippet
+    snippet=$(head -c 500 "$out" 2>/dev/null || true)
+    evals_die 74 "validate failed (HTTP $http): $snippet"
   fi
 }
 

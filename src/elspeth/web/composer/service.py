@@ -36,6 +36,7 @@ from elspeth.core.canonical import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
+from elspeth.web.composer.anti_anchor import AntiAnchorTracker
 from elspeth.web.composer.audit import (
     BufferingRecorder,
     begin_dispatch,
@@ -1015,6 +1016,13 @@ class ComposerServiceImpl:
         last_runtime_preflight: ValidationResult | None = None
         session_scope = f"session:{session_id}" if session_id is not None else "session:unsaved"
 
+        # §7.7 anti-anchor tracker: detects 3-in-a-row identical failed tool
+        # calls and injects a STRUCTURAL HINT before the next LLM turn so the
+        # model breaks out of the anchored-loop pattern observed in the Tier 1
+        # final cohort's residual RED. Per-compose-call instance — never
+        # shared across requests.
+        anti_anchor = AntiAnchorTracker()
+
         while True:
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -1112,6 +1120,7 @@ class ComposerServiceImpl:
                             error_payload=error_payload,
                         )
                     )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
                             "role": "tool",
@@ -1154,6 +1163,7 @@ class ComposerServiceImpl:
                             error_payload=error_payload,
                         )
                     )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
                             "role": "tool",
@@ -1192,6 +1202,7 @@ class ComposerServiceImpl:
                             error_payload=error_payload,
                         )
                     )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
                             "role": "tool",
@@ -1236,6 +1247,7 @@ class ComposerServiceImpl:
                                 cache_hit=True,
                             )
                         )
+                        anti_anchor.record_success()
                         llm_messages.append(
                             {
                                 "role": "tool",
@@ -1274,6 +1286,7 @@ class ComposerServiceImpl:
                             error_payload=error_payload,
                         )
                     )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
                             "role": "tool",
@@ -1448,6 +1461,7 @@ class ComposerServiceImpl:
                         ),
                     )
                     arg_error_payload = _arg_error_payload(exc)
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
                             "role": "tool",
@@ -1556,6 +1570,17 @@ class ComposerServiceImpl:
                 state = result.updated_state
                 last_validation = result.validation
                 last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
+                # §7.7 anchor tracking. ``finish_success`` records the audit
+                # invocation regardless of ``result.success`` — the dispatch
+                # itself ran without raising. But for anchor purposes we look
+                # at ToolResult.success: a set_pipeline that returned a
+                # validation-rejected state is the dominant anchor pattern
+                # observed in the Tier 1 RED, and indistinguishable from a
+                # ToolArgumentError as far as the LLM's retry loop is concerned.
+                if result.success:
+                    anti_anchor.record_success()
+                else:
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
                 result_json = _serialize_tool_result(result)
                 await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
 
@@ -1574,6 +1599,31 @@ class ComposerServiceImpl:
 
                 if not is_discovery_tool(tool_name):
                     turn_has_mutation = True
+
+            # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
+            # same (tool_name, arguments_hash), the model has stopped reading
+            # validator feedback. Inject a synthetic role="user" hint before
+            # the next LLM turn so the model breaks the anchor. consume_fire()
+            # clears the deque so the hint cannot re-fire on the same anchor.
+            # Persisted via the normal llm_messages → chat_messages path; the
+            # operator-visible audit row carries the [ELSPETH-SYSTEM-HINT]
+            # marker so its system origin is unambiguous.
+            if anti_anchor.should_fire():
+                hint_text = anti_anchor.build_hint()
+                anti_anchor.consume_fire()
+                llm_messages.append({"role": "user", "content": hint_text})
+                await _emit_progress(
+                    progress,
+                    ComposerProgressEvent(
+                        phase="using_tools",
+                        headline="ELSPETH detected an anchored retry pattern.",
+                        evidence=(
+                            "The last 3 tool calls used identical arguments and produced the same error.",
+                            "A structural hint was injected to help the model converge.",
+                        ),
+                        likely_next="The model will see the hint and try a different argument shape.",
+                    ),
+                )
 
             # If ALL tool calls in this turn were cache hits, no budget
             # charge — continue to next turn without incrementing.

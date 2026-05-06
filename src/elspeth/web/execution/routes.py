@@ -55,11 +55,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.paths import allowed_sink_directories
-from elspeth.web.sessions.protocol import (
-    OperatorCompletionSessionRunStatus,
-    SessionServiceProtocol,
-    TerminalSessionRunStatus,
-)
+from elspeth.web.sessions.protocol import SessionServiceProtocol, TerminalSessionRunStatus
 
 slog = structlog.get_logger()
 
@@ -138,14 +134,9 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
     if current.status in ("completed", "completed_with_failures", "empty"):
         if current.landscape_run_id is None:
             raise RuntimeError(f"Completed run {current.run_id} has no landscape_run_id — Tier 1 anomaly (audit trail incomplete)")
-        # mypy can't narrow current.status (a wider Literal union) through
-        # tuple membership — the cast is safe because the membership test
-        # above is the exact set of OperatorCompletionSessionRunStatus.
-        # Same pattern as line 602 (TerminalSessionRunStatus narrowing).
-        completed_status = cast(OperatorCompletionSessionRunStatus, current.status)
         try:
             payload: CompletedData | FailedData | CancelledData = CompletedData(
-                status=completed_status,
+                status=current.status,
                 rows_processed=current.rows_processed,
                 rows_succeeded=current.rows_succeeded,
                 rows_failed=current.rows_failed,

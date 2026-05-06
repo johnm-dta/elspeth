@@ -203,7 +203,14 @@ class TestToolListOrderIsCacheKeyContract:
 
     def test_litellm_tools_preserves_definition_order(self) -> None:
         """``_get_litellm_tools`` is a list comprehension over ``get_tool_definitions``;
-        order must be preserved.
+        order must be preserved (modulo the advisor-toggle filter, which is
+        allowed to drop ``request_advisor_hint`` when disabled but must never
+        reorder the remaining tools).
+
+        The cache-key invariant is "the relative order of tools that DO appear
+        in ``_get_litellm_tools`` matches the relative order in
+        ``get_tool_definitions``." Set inequality (one filtered out) is fine;
+        order swap (cache-invalidating reorder) is not.
         """
         from elspeth.web.composer.service import ComposerServiceImpl
         from elspeth.web.composer.tools import get_tool_definitions
@@ -215,7 +222,19 @@ class TestToolListOrderIsCacheKeyContract:
 
         defn_names = [d["name"] for d in get_tool_definitions()]
         tool_names = [t["function"]["name"] for t in service._get_litellm_tools()]
-        assert defn_names == tool_names
+
+        # Subsequence-order invariant: every tool emitted is in the definition
+        # list, and the indices form a strictly increasing sequence (i.e., no
+        # reordering relative to definitions).
+        defn_index = {name: i for i, name in enumerate(defn_names)}
+        emitted_positions = [defn_index[name] for name in tool_names]
+        assert emitted_positions == sorted(emitted_positions), (
+            f"_get_litellm_tools reordered tools relative to get_tool_definitions; "
+            f"emitted positions={emitted_positions}, names={tool_names}"
+        )
+        # Every emitted name must come from definitions (no tool fabricated
+        # by the filter).
+        assert set(tool_names).issubset(set(defn_names))
 
     def test_trailing_tool_name_is_locked(self) -> None:
         """Lock the trailing tool's NAME so a reorder of ``get_tool_definitions()``

@@ -265,7 +265,7 @@ try:
         configure_azure_monitor,
     )
 except ImportError:
-    configure_azure_monitor = None  # type: ignore[assignment]
+    configure_azure_monitor = None
 
 # Module-level idempotency guard — Azure Monitor is process-global.
 _azure_monitor_configured: bool = False

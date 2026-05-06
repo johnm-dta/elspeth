@@ -4,7 +4,7 @@ allow_hits:
   reason: Tier 3 boundary — plugin_type from URL path parameter, lookup in constant dict
   safety: Returns None on miss, handled by 404 response
   expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=77eb34d5d32d10e3
+- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=5ce2ec68a4826f8e
   owner: architecture
   reason: Pydantic before-validator at Tier 3 config boundary — isinstance(v, str) distinguishes raw YAML string input (which
     may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str→Path coercion
@@ -881,12 +881,76 @@ allow_hits:
     via the general PLUGIN_CRASH path, so the audit row still lands recording "the dispatch produced an unrecordable
     result" — rather than the alternative of silently writing zero into the audit trail.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=5193d238c6af7e0a
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=b1d36650ff7b5c32
   owner: bugfix
   reason: Tier 3 boundary - LiteLLM tool-call arguments can decode to JSON arrays, nulls, or scalars; the composer must reject
     non-object arguments before cache lookup or tool dispatch
   safety: Emits a tool error back to the LLM, does not call execute_tool, marks mutation intent for budget accounting, and
     preserves current state
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=6a602586c5afdb0e
+  owner: composer-advisor
+  reason: Tier 3 boundary — outbound LiteLLM call to advisor (frontier) model. The inner method
+    _call_advisor_with_audit catches and re-raises specific known LiteLLM exception classes
+    (TimeoutError, AuthenticationError, BadRequestError, APIError, MalformedResponse, CancelledError)
+    AND has its own catch-all that classifies unknown exceptions as API_ERROR before re-raise (F5
+    fix — guarantees an inner ComposerLLMCall record always lands). The lifecycle exceptions
+    (CancelledError, KeyboardInterrupt, SystemExit) are deliberately re-raised in this caller
+    before the broad except, and deadline-limited TimeoutError raises ComposerConvergenceError
+    instead of being laundered into tool feedback. The remaining catch absorbs any unknown
+    LiteLLM/network/codec failure and converts to a structured ADVISOR_ERROR tool result, which
+    is the correct trust-boundary response for an external LLM service that may surface novel
+    error shapes across versions.
+  safety: Inner ComposerLLMCall record is unconditionally fired by _call_advisor_with_audit's
+    finally block before any exception propagates (F5 fix — catch-all in the inner method sets
+    status=API_ERROR for unclassified exceptions, so the finally guard never skips). The outer
+    ComposerToolInvocation record is closed with finish_success and an ADVISOR_ERROR
+    result_payload; no silent suppression. Budget is consumed BEFORE the call (F2 fix), so failed
+    outbound calls count against composer_advisor_max_calls_per_compose. When the remaining
+    compose deadline is tighter than the advisor timeout, the outer invocation closes with a
+    COMPOSE_TIMEOUT payload and convergence captures the buffered audit records. Anti-anchor
+    failure tracker is incremented so repeated identical failed advisor calls trigger the §7.7 hint.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=7c9498711e89207e
+  owner: composer-advisor
+  reason: Tier 3 boundary (F3 fix) — validate problem_summary type from LLM-provided tool-call
+    arguments. The compose-loop's _TOOL_REQUIRED_PATHS upstream check guarantees presence but
+    not value type. Without isinstance the LLM could send a non-string (int, dict, list) and
+    the f-string formatting would either crash or produce a corrupt prompt at full provider cost.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call is made when the type
+    check fails. Anti-anchor counts the failure for §7.7 tracking.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2375bd1ba69b79dc
+  owner: composer-advisor
+  reason: Tier 3 boundary (F3 fix) — validate recent_errors is a list. Without this check the
+    LLM could send a string and Python would silently iterate it character-by-character,
+    producing a corrupt prompt sent at full provider cost.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9550021d85f34282
+  owner: composer-advisor
+  reason: Tier 3 boundary (F3 fix) — validate every recent_errors element is a string. Without
+    this check, non-string elements would format incorrectly in the prompt template
+    (f"- {e}" with arbitrary types) and could crash on len() in the size cap.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=6083f6e5004e1167
+  owner: composer-advisor
+  reason: Tier 3 boundary (F3 fix) — validate attempted_actions is a list. Same rationale as
+    recent_errors list check.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=8503e8465a8f9ce8
+  owner: composer-advisor
+  reason: Tier 3 boundary (F3 fix) — validate every attempted_actions element is a string. Same
+    rationale as recent_errors element check.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=8f820d08dbe3dc35
+  owner: composer-advisor
+  reason: Tier 3 boundary (F3 fix) — validate optional schema_excerpt is a string when present.
+    Without this check a non-string would format incorrectly in the prompt and break the size
+    cap calculation.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
   expires: null
 - key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=cb07245ac5811d09
   owner: web-composer

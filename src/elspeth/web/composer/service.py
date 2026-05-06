@@ -51,7 +51,7 @@ from elspeth.web.composer.progress import (
     ComposerProgressSink,
     convergence_progress_event,
 )
-from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages
+from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, build_system_prompt
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -1023,6 +1023,17 @@ class ComposerServiceImpl:
         # shared across requests.
         anti_anchor = AntiAnchorTracker()
 
+        # Advisor escape-hatch budget. Local to this compose() call —
+        # each fresh user request starts with the full configured budget.
+        # Per-compose-request scope (matching the setting name
+        # ``composer_advisor_max_calls_per_compose``) is the useful budget:
+        # an LLM that breaks out of an anchored loop in one request should
+        # not have its budget penalised in the next. There is intentionally
+        # no session-lifetime cap; ``composer_rate_limit_per_minute`` and
+        # the per-compose budget together bound advisor cost. When the
+        # toggle is disabled the counter is never read.
+        advisor_calls_used = 0
+
         while True:
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -1302,6 +1313,287 @@ class ComposerServiceImpl:
                     continue
 
                 await _emit_progress(progress, _tool_started_progress_event(tool_name))
+
+                # Advisor escape-hatch interception. The request_advisor_hint
+                # tool is intercepted here BEFORE execute_tool() because the
+                # action is an async LiteLLM call to a frontier model rather
+                # than a sync state mutation. The tool is not registered in
+                # _DISCOVERY_TOOLS or _MUTATION_TOOLS, so execute_tool() would
+                # return "Unknown tool" if this branch did not handle it.
+                #
+                # Audit envelope was already opened above by
+                # begin_dispatch_or_arg_error; this branch closes it with the
+                # truthful dispatch status: ARG_ERROR for local advisor-argument
+                # rejection, SUCCESS for completed policy/provider outcomes
+                # whose semantic status is encoded in result_payload. The inner
+                # LLM call is recorded separately via _call_advisor_with_audit
+                # firing a ComposerLLMCall record.
+                if tool_name == "request_advisor_hint":
+                    if not self._settings.composer_advisor_enabled:
+                        # Defense-in-depth: the tool was filtered out of
+                        # _get_litellm_tools() but the LLM somehow named it
+                        # anyway (replayed transcript, stale state, prompt
+                        # injection). Fail without making any outbound call.
+                        error_payload = {
+                            "error": "request_advisor_hint is disabled on this deployment.",
+                        }
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=error_payload,
+                                version_after=state.version,
+                            )
+                        )
+                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                        llm_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(error_payload),
+                            }
+                        )
+                        continue
+
+                    budget = self._settings.composer_advisor_max_calls_per_compose
+                    if advisor_calls_used >= budget:
+                        budget_payload = {
+                            "status": "BUDGET_EXHAUSTED",
+                            "budget_used": advisor_calls_used,
+                            "budget_remaining": 0,
+                            "guidance": (
+                                f"Advisor budget exhausted ({advisor_calls_used}/{budget} calls "
+                                "used this compose request). Return to the validator output and "
+                                "the recovery cheat sheet — no more frontier hints are available "
+                                "until the operator raises the budget or the next compose request."
+                            ),
+                        }
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=budget_payload,
+                                version_after=state.version,
+                            )
+                        )
+                        # Budget exhaustion is a structural signal back to
+                        # the LLM, not a tool-failure pattern — do NOT count
+                        # it for §7.7 anchor tracking, since the issue isn't
+                        # the LLM repeating an identical request, it's the
+                        # operator's policy refusing further hints.
+                        llm_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(budget_payload),
+                            }
+                        )
+                        continue
+
+                    # F3: validate argument types and total prompt size at the
+                    # Tier-3 trust boundary. _TOOL_REQUIRED_PATHS only checks
+                    # key presence, not value shape. Without this check the
+                    # LLM could send a non-list (silently iterated char-by-
+                    # char) or a megabyte-scale value (unbounded provider
+                    # cost). ARG_ERRORs do NOT consume advisor budget — no
+                    # outbound call is made — but anti-anchor counts them
+                    # so repeated identical bad-arg calls trigger the §7.7
+                    # structural hint.
+                    advisor_arg_error = self._validate_advisor_arguments(arguments)
+                    if advisor_arg_error is not None:
+                        recorder.record(
+                            finish_arg_error(
+                                audit,
+                                error_class=str(advisor_arg_error["error_class"]),
+                                error_message=str(advisor_arg_error["error"]),
+                                error_payload=advisor_arg_error,
+                            )
+                        )
+                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                        llm_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(advisor_arg_error),
+                            }
+                        )
+                        continue
+
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        timeout_payload: dict[str, Any] = {
+                            "status": "COMPOSE_TIMEOUT",
+                            "error": "Advisor call exceeded the remaining compose deadline.",
+                            "error_class": "TimeoutError",
+                            "budget_used": advisor_calls_used,
+                            "budget_remaining": budget - advisor_calls_used,
+                        }
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=timeout_payload,
+                                version_after=state.version,
+                            )
+                        )
+                        raise ComposerConvergenceError.capture(
+                            max_turns=0,
+                            budget_exhausted="timeout",
+                            state=state,
+                            initial_version=initial_version,
+                            tool_invocations=recorder.invocations,
+                            llm_calls=recorder.llm_calls,
+                        )
+
+                    advisor_timeout = self._settings.composer_advisor_timeout_seconds
+                    effective_advisor_timeout = min(advisor_timeout, remaining)
+                    advisor_deadline_limited = remaining <= advisor_timeout
+
+                    # F2: consume budget BEFORE the outbound call, not after.
+                    # The cost guard's purpose is to bound outbound LiteLLM
+                    # calls regardless of outcome. Counting only successes
+                    # would let a flaky provider rack up unlimited failed
+                    # outbound calls until anti-anchor or the discovery-
+                    # turn limit fired. ARG_ERROR (above) and pre-call compose
+                    # timeout (above) do NOT consume advisor budget because no
+                    # outbound advisor call is made.
+                    advisor_calls_used += 1
+
+                    try:
+                        guidance, advisor_meta = await self._call_advisor_with_audit(
+                            arguments,
+                            recorder=recorder,
+                            timeout=effective_advisor_timeout,
+                        )
+                    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                        # Lifecycle exceptions: do not absorb. Propagate so
+                        # cancellation and shutdown work normally; the inner
+                        # ComposerLLMCall record was already fired by the
+                        # advisor method's finally block, so the audit trail
+                        # captures the cancelled call regardless.
+                        raise
+                    except TimeoutError as advisor_exc:
+                        if advisor_deadline_limited:
+                            timeout_payload = {
+                                "status": "COMPOSE_TIMEOUT",
+                                "error": "Advisor call exceeded the remaining compose deadline.",
+                                "error_class": "TimeoutError",
+                                "budget_used": advisor_calls_used,
+                                "budget_remaining": budget - advisor_calls_used,
+                            }
+                            recorder.record(
+                                finish_success(
+                                    audit,
+                                    result_payload=timeout_payload,
+                                    version_after=state.version,
+                                )
+                            )
+                            raise ComposerConvergenceError.capture(
+                                max_turns=0,
+                                budget_exhausted="timeout",
+                                state=state,
+                                initial_version=initial_version,
+                                tool_invocations=recorder.invocations,
+                                llm_calls=recorder.llm_calls,
+                            ) from None
+                        # Advisor-specific timeout with compose budget still
+                        # remaining: return structured tool feedback so the
+                        # composer can continue within its global deadline.
+                        advisor_error_payload = {
+                            "status": "ADVISOR_ERROR",
+                            "error": "Advisor call failed; no guidance returned.",
+                            "error_class": type(advisor_exc).__name__,
+                            "budget_used": advisor_calls_used,
+                            "budget_remaining": budget - advisor_calls_used,
+                        }
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=advisor_error_payload,
+                                version_after=state.version,
+                            )
+                        )
+                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                        llm_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(advisor_error_payload),
+                            }
+                        )
+                        continue
+                    except Exception as advisor_exc:
+                        # Tier 3 boundary: outbound LLM call failed. Convert
+                        # to a structured tool-result error so the composer
+                        # LLM gets feedback rather than a silent stall. The
+                        # inner ComposerLLMCall record was already fired by
+                        # _call_advisor_with_audit's finally block, so the
+                        # audit trail captures the failure mode regardless.
+                        # Budget was already consumed above (F2) — the
+                        # outbound call attempt counts whether or not it
+                        # produced guidance.
+                        advisor_error_payload = {
+                            "status": "ADVISOR_ERROR",
+                            "error": "Advisor call failed; no guidance returned.",
+                            "error_class": type(advisor_exc).__name__,
+                            "budget_used": advisor_calls_used,
+                            "budget_remaining": budget - advisor_calls_used,
+                        }
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=advisor_error_payload,
+                                version_after=state.version,
+                            )
+                        )
+                        # Advisor failure IS counted for §7.7 anchor
+                        # tracking — repeated identical failed advisor
+                        # calls indicate the LLM is spamming a broken
+                        # prompt, exactly the pattern the tracker exists
+                        # to break.
+                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                        llm_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(advisor_error_payload),
+                            }
+                        )
+                        continue
+
+                    success_payload = {
+                        "status": "SUCCESS",
+                        "guidance": guidance,
+                        "model": advisor_meta["model"],
+                        "prompt_tokens": advisor_meta["prompt_tokens"],
+                        "completion_tokens": advisor_meta["completion_tokens"],
+                        "cached_prompt_tokens": advisor_meta["cached_prompt_tokens"],
+                        "advisor_latency_ms": advisor_meta["latency_ms"],
+                        "budget_used": advisor_calls_used,
+                        "budget_remaining": budget - advisor_calls_used,
+                        "note": (
+                            "ADVICE only — call the appropriate mutation tool to "
+                            "apply any change. Do not echo this guidance back as "
+                            "configuration without verifying it against the schema."
+                        ),
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=success_payload,
+                            version_after=state.version,
+                        )
+                    )
+                    # Successful advisor call is progress, not a failure —
+                    # the §7.7 tracker is reset for this tool name so a
+                    # subsequent set_pipeline failure does not inherit a
+                    # stale advisor anchor count.
+                    anti_anchor.record_success()
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(success_payload),
+                        }
+                    )
+                    continue
 
                 # Precompute runtime preflight for preview_pipeline outside
                 # the general side-effectful tool worker. This keeps
@@ -1781,13 +2073,24 @@ class ComposerServiceImpl:
                 user_message=user_message,
                 catalog=self._catalog,
                 data_dir=self._data_dir,
+                advisor_enabled=self._settings.composer_advisor_enabled,
             )
         except OSError as exc:
             raise ComposerServiceError(f"Failed to load deployment skill ({type(exc).__name__})") from exc
 
     def _get_litellm_tools(self) -> list[dict[str, Any]]:
-        """Convert tool definitions to LiteLLM function format."""
+        """Convert tool definitions to LiteLLM function format.
+
+        When ``composer_advisor_enabled`` is False (the default), the
+        ``request_advisor_hint`` tool is filtered out of the LLM-visible
+        list. This is the strongest off-switch available — the composer
+        LLM never sees the tool name or description, so it cannot call
+        it even if instructed to. The CLI MCP server (composer_mcp/) is
+        not affected; advisor is web-composer only by design.
+        """
         definitions = get_tool_definitions()
+        if not self._settings.composer_advisor_enabled:
+            definitions = [defn for defn in definitions if defn["name"] != "request_advisor_hint"]
         return [
             {
                 "type": "function",
@@ -1844,6 +2147,252 @@ class ComposerServiceImpl:
         if not response.choices:
             raise _MalformedLLMResponseError("LLM returned empty choices array — cannot explain run diagnostics", response=response)
         return response
+
+    def _validate_advisor_arguments(self, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        """Validate advisor tool arguments at the Tier-3 trust boundary.
+
+        Returns ``None`` if valid; otherwise returns an ARG_ERROR payload
+        ready to embed in the outer tool-result envelope.
+
+        The compose-loop's ``_TOOL_REQUIRED_PATHS`` check upstream guarantees
+        ``problem_summary``, ``recent_errors``, and ``attempted_actions`` are
+        present in ``arguments`` — but only their *presence*, not their
+        type or size. Without this validator:
+
+        - A non-list ``recent_errors`` would be silently iterated by Python
+          (string → char-by-char, int → TypeError, dict → keys), producing
+          a corrupt prompt that we would still pay full provider cost for.
+        - A megabyte-scale value would be sent verbatim to LiteLLM,
+          rendering ``composer_advisor_max_prompt_tokens`` (declared as a
+          cap) into dead config — operators would believe they had a cap
+          and they would not.
+
+        Both are Tier-3 trust-boundary failures: the LLM is providing
+        external input, and CLAUDE.md's tier model permits ``isinstance``
+        checks (and other defensive validation) at this boundary. Anti-
+        anchor tracking on the caller side ensures repeated identical
+        ARG_ERRORs surface the §7.7 structural hint.
+        """
+        if not isinstance(arguments["problem_summary"], str):
+            return {
+                "status": "ARG_ERROR",
+                "error": "problem_summary must be a string",
+                "error_class": "TypeError",
+            }
+
+        recent = arguments["recent_errors"]
+        if not isinstance(recent, list) or not all(isinstance(e, str) for e in recent):
+            return {
+                "status": "ARG_ERROR",
+                "error": "recent_errors must be a list of strings",
+                "error_class": "TypeError",
+            }
+
+        attempted = arguments["attempted_actions"]
+        if not isinstance(attempted, list) or not all(isinstance(a, str) for a in attempted):
+            return {
+                "status": "ARG_ERROR",
+                "error": "attempted_actions must be a list of strings",
+                "error_class": "TypeError",
+            }
+
+        if "schema_excerpt" in arguments and arguments["schema_excerpt"] is not None:
+            candidate = arguments["schema_excerpt"]
+            if not isinstance(candidate, str):
+                return {
+                    "status": "ARG_ERROR",
+                    "error": "schema_excerpt must be a string when provided",
+                    "error_class": "TypeError",
+                }
+
+        # Approximate provider cost cap: rough 4 chars / token. Compute the
+        # exact formatted user-message char count we would emit if the call
+        # proceeded, including section labels, bullets, and newlines. The
+        # fixed system side is bounded separately by the packaged skill plus
+        # load_deployment_skill's byte cap; this setting bounds the
+        # LLM-controlled variable part.
+        total_chars = len(_build_advisor_user_message(arguments))
+        char_cap = self._settings.composer_advisor_max_prompt_tokens * 4
+        if total_chars > char_cap:
+            return {
+                "status": "ARG_ERROR",
+                "error": (
+                    f"prompt size {total_chars} chars exceeds cap {char_cap} chars "
+                    f"(composer_advisor_max_prompt_tokens={self._settings.composer_advisor_max_prompt_tokens}). "
+                    "Truncate your error/action lists or schema excerpt and retry."
+                ),
+                "error_class": "ValueError",
+            }
+
+        return None
+
+    async def _call_advisor_with_audit(
+        self,
+        arguments: dict[str, Any],
+        *,
+        recorder: BufferingRecorder | None,
+        timeout: float | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Phone the configured advisor (frontier) model for a hint.
+
+        Builds a structured prompt from the composer LLM's stuck-message
+        arguments (``problem_summary``, ``recent_errors``, ``attempted_actions``,
+        optional ``schema_excerpt``), forwards it to ``composer_advisor_model``
+        via LiteLLM as a text-only completion (no tools), and returns
+        ``(guidance_text, metadata)``. The caller may pass ``timeout`` to
+        bound the advisor-specific timeout by the compose-loop deadline. The
+        metadata dict carries inner-LLM accounting (model returned,
+        prompt/completion tokens, cached prompt tokens, latency) so the outer
+        tool-result envelope can embed it for audit-trail completeness.
+
+        A :class:`ComposerLLMCall` record is fired into ``recorder`` in
+        the ``finally`` block so the audit captures failure modes
+        (timeouts, auth errors, malformed responses) just as cleanly as
+        the success path. The outer ``ComposerToolInvocation`` record is
+        the caller's responsibility — the compose-loop interception
+        wraps this call with ``finish_success`` either way.
+
+        Anthropic prompt-cache markers are deliberately NOT applied here.
+        Advisor calls now include the same composer skill stack as normal
+        composer requests, but their model and accounting are independent
+        from the primary composer path. If advisor prompt caching becomes
+        required, add it with focused usage-accounting tests rather than
+        inheriting the primary-composer marker placement by accident.
+        """
+        from litellm.exceptions import APIError as LiteLLMAPIError
+        from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        advisor_model = self._settings.composer_advisor_model
+        configured_timeout = self._settings.composer_advisor_timeout_seconds
+        effective_timeout = configured_timeout if timeout is None else min(configured_timeout, timeout)
+        max_completion = self._settings.composer_advisor_max_completion_tokens
+
+        system_msg = build_system_prompt(self._data_dir, advisor_enabled=True) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
+        # Required fields (problem_summary, recent_errors, attempted_actions)
+        # are validated by _TOOL_REQUIRED_PATHS before this method runs, so
+        # direct dict access is sound. schema_excerpt is the only optional
+        # field — we test "in arguments" rather than .get() to keep the
+        # Tier-3 trust-boundary rules clean.
+        user_msg = _build_advisor_user_message(arguments)
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        status: ComposerLLMCallStatus | None = None
+        response: Any = None
+        error_class: str | None = None
+        error_message: str | None = None
+        try:
+            response = await asyncio.wait_for(
+                _litellm_acompletion(
+                    model=advisor_model,
+                    messages=messages,
+                    temperature=_COMPOSER_LLM_TEMPERATURE,
+                    seed=_COMPOSER_LLM_SEED,
+                    max_tokens=max_completion,
+                ),
+                timeout=effective_timeout,
+            )
+            if not response.choices:
+                raise _MalformedLLMResponseError(
+                    "Advisor returned empty choices array",
+                    response=response,
+                )
+            # F4: validate content BEFORE marking SUCCESS. None / empty /
+            # whitespace-only content (content-filter triggered, malformed
+            # provider output, tool-call-only response) must classify as
+            # MALFORMED_RESPONSE rather than fall through to SUCCESS-with-
+            # empty-guidance. Empty success would consume budget and tell
+            # the composer LLM "you got advice" while no information was
+            # actually produced.
+            raw_content = response.choices[0].message.content
+            if raw_content is None or not str(raw_content).strip():
+                raise _MalformedLLMResponseError(
+                    "Advisor returned empty or whitespace-only content",
+                    response=response,
+                )
+            guidance = raw_content
+            status = ComposerLLMCallStatus.SUCCESS
+            usage = _token_usage_from_response(response)
+            metadata = {
+                "model": _safe_response_model(response) or advisor_model,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "cached_prompt_tokens": usage.cached_prompt_tokens,
+                "latency_ms": (time.monotonic_ns() - started_ns) // 1_000_000,
+            }
+            return guidance, metadata
+        except TimeoutError:
+            status = ComposerLLMCallStatus.TIMEOUT
+            error_class = "TimeoutError"
+            error_message = "TimeoutError"
+            raise
+        except asyncio.CancelledError as exc:
+            status = ComposerLLMCallStatus.CANCELLED
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAuthError as exc:
+            status = ComposerLLMCallStatus.AUTH_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMBadRequestError as exc:
+            status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAPIError as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except _MalformedLLMResponseError as exc:
+            status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+            response = exc.response
+            error_class = type(exc).__name__
+            error_message = "malformed_response"
+            raise
+        except Exception as exc:
+            # F5: catch-all so the inner ComposerLLMCall record always
+            # lands in the audit trail, even for exception classes not
+            # in the typed clauses above (httpx ConnectionError, codec
+            # ValueError, etc.). Without this, ``status`` would stay
+            # ``None`` and the finally block would skip
+            # ``record_llm_call``, leaving an audit gap for exactly the
+            # broad-except failure path the compose-loop interception
+            # relies on. API_ERROR is the closest semantic for "unknown
+            # provider-side / transport failure"; the exception class
+            # name is preserved in ``error_class`` for forensic detail.
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        finally:
+            if recorder is not None and status is not None:
+                recorder.record_llm_call(
+                    _build_llm_call_record(
+                        model_requested=advisor_model,
+                        messages=messages,
+                        tools=None,
+                        status=status,
+                        started_at=started_at,
+                        started_ns=started_ns,
+                        temperature=_COMPOSER_LLM_TEMPERATURE,
+                        seed=_COMPOSER_LLM_SEED,
+                        response=response,
+                        error_class=error_class,
+                        error_message=error_message,
+                    )
+                )
+                current_exc = sys.exc_info()[1]
+                if current_exc is not None:
+                    _attach_llm_calls(current_exc, recorder)
 
     async def _call_llm_with_audit(
         self,
@@ -2257,3 +2806,36 @@ def _make_cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
     # Sort keys for determinism. Arguments are simple JSON-serializable
     # dicts from the LLM — no MappingProxyType or frozen containers.
     return f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+
+
+_ADVISOR_SYSTEM_INSTRUCTIONS: Final[str] = (
+    "Advisor mode:\n"
+    "- You are advising another LLM (a pipeline composer) that is stuck while building an ELSPETH pipeline.\n"
+    "- Use the composer skill context and any deployment overlay above as binding local policy.\n"
+    "- Read the problem summary, the verbatim validator errors, and the actions already attempted.\n"
+    "- Return ONE concrete actionable hint: name specific fields, suggest values, and point at schema sections if provided.\n"
+    "- Do not write YAML, do not produce final configuration, do not claim authority.\n"
+    "- Your response is ADVICE; the composer LLM will decide what to apply.\n"
+    "- Be specific and brief: under 250 words."
+)
+
+
+def _build_advisor_user_message(arguments: Mapping[str, Any]) -> str:
+    """Build the exact variable user message sent to the advisor LLM.
+
+    The validation path uses this same helper for prompt-size accounting, so
+    bullets, section labels, and newlines cannot drift from the wire payload.
+    Callers validate the Tier-3 argument shapes before invoking this helper.
+    """
+    user_msg_parts: list[str] = [f"Problem: {arguments['problem_summary']}"]
+    recent = cast(list[str], arguments["recent_errors"])
+    if recent:
+        joined = "\n".join(f"- {e}" for e in recent)
+        user_msg_parts.append(f"\nRecent validator errors (most recent first):\n{joined}")
+    attempted = cast(list[str], arguments["attempted_actions"])
+    if attempted:
+        joined = "\n".join(f"- {a}" for a in attempted)
+        user_msg_parts.append(f"\nAlready attempted:\n{joined}")
+    if "schema_excerpt" in arguments and arguments["schema_excerpt"]:
+        user_msg_parts.append(f"\nRelevant schema excerpt:\n{cast(str, arguments['schema_excerpt'])}")
+    return "\n".join(user_msg_parts)

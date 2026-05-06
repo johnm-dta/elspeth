@@ -16,6 +16,12 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import (
+    ScalarBucketKey,
+    append_unique_bucket_value,
+    same_scalar_bucket_value,
+    scalar_bucket_key,
+)
 
 type BatchDriftCompareRow = dict[str, object]
 type CategoricalValue = str | int | bool
@@ -118,7 +124,7 @@ class BatchDriftCompare(BaseTransform):
 
     name = "batch_drift_compare"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a04c68b970a4ff3d"
+    source_file_hash: str | None = "sha256:9ccbfc6148453519"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
 
@@ -185,7 +191,7 @@ class BatchDriftCompare(BaseTransform):
         for row in rows:
             cohort_value = row[self._cohort_field]
             for existing_cohort, cohort_rows in cohorts:
-                if cohort_value == existing_cohort:
+                if same_scalar_bucket_value(cohort_value, existing_cohort):
                     cohort_rows.append(row)
                     break
             else:
@@ -277,20 +283,20 @@ class BatchDriftCompare(BaseTransform):
 
     @staticmethod
     def _categorical_shifts(baseline: _CohortValues, cohort: _CohortValues) -> tuple[list[dict[str, object]], float, float, list[object]]:
-        baseline_counts: Counter[object] = Counter(baseline.values)
-        cohort_counts: Counter[object] = Counter(cohort.values)
+        baseline_counts: Counter[ScalarBucketKey] = Counter(scalar_bucket_key(value) for value in baseline.values)
+        cohort_counts: Counter[ScalarBucketKey] = Counter(scalar_bucket_key(value) for value in cohort.values)
         values: list[object] = []
         for value in baseline.values + cohort.values:
-            if value not in values:
-                values.append(value)
+            append_unique_bucket_value(values, value)
 
         shifts: list[dict[str, object]] = []
         total_variation_sum = 0.0
         chi_square = 0.0
         new_categories: list[object] = []
         for value in values:
-            baseline_count = baseline_counts[value]
-            cohort_count = cohort_counts[value]
+            value_key = scalar_bucket_key(value)
+            baseline_count = baseline_counts[value_key]
+            cohort_count = cohort_counts[value_key]
             baseline_prop = baseline_count / baseline.count
             cohort_prop = cohort_count / cohort.count
             total_variation_sum += abs(baseline_prop - cohort_prop)
@@ -403,7 +409,7 @@ class BatchDriftCompare(BaseTransform):
         baseline_cohort = self._baseline_cohort if self._baseline_cohort is not None else cohort_values[0][0]
         baseline = None
         for cohort, values in cohort_values:
-            if cohort == baseline_cohort:
+            if same_scalar_bucket_value(cohort, baseline_cohort):
                 baseline = values
                 break
         if baseline is None:
@@ -417,7 +423,7 @@ class BatchDriftCompare(BaseTransform):
                 retryable=False,
             )
 
-        candidates = [(cohort, values) for cohort, values in cohort_values if cohort != baseline_cohort]
+        candidates = [(cohort, values) for cohort, values in cohort_values if not same_scalar_bucket_value(cohort, baseline_cohort)]
         if not candidates:
             return TransformResult.error(
                 {

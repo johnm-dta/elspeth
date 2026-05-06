@@ -70,6 +70,26 @@ class TestBatchDataQualityReport:
         assert label["duplicate_count"] == 1
         assert label["observed_type_counts"] == {"str": 4}
 
+    def test_distinct_count_preserves_bool_and_int_buckets(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_data_quality_report import BatchDataQualityReport
+
+        transform = BatchDataQualityReport({"schema": DYNAMIC_SCHEMA, "inspect_fields": ["flag"]})
+        rows = [
+            _make_row({"flag": True}),
+            _make_row({"flag": 1}),
+            _make_row({"flag": True}),
+            _make_row({"flag": 1}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["valid_count"] == 4
+        assert result.row["distinct_count"] == 2
+        assert result.row["duplicate_count"] == 2
+        assert result.row["observed_type_counts"] == {"bool": 2, "int": 2}
+
     def test_empty_batch_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_data_quality_report import BatchDataQualityReport
 

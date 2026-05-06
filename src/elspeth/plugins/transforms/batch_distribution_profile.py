@@ -20,6 +20,7 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
 
 type BatchDistributionProfileRow = dict[str, object]
 
@@ -92,7 +93,7 @@ class BatchDistributionProfile(BaseTransform):
 
     name = "batch_distribution_profile"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2a612894008f3673"
+    source_file_hash: str | None = "sha256:7ec124ec354dd2a3"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
 
@@ -169,7 +170,7 @@ class BatchDistributionProfile(BaseTransform):
         for row_index, row in enumerate(rows):
             group_value = row[self._group_by]
             for existing_value, grouped_rows in groups:
-                if group_value == existing_value:
+                if same_scalar_bucket_value(group_value, existing_value):
                     grouped_rows.append((row_index, row))
                     break
             else:

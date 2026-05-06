@@ -89,6 +89,25 @@ class TestBatchTopK:
         assert deep_thaw(result.rows[0]["top_values"]) == [{"value": "x", "count": 2, "rate": pytest.approx(2 / 3)}]
         assert deep_thaw(result.rows[1]["top_values"]) == [{"value": "z", "count": 2, "rate": 1.0}]
 
+    def test_group_by_preserves_bool_and_int_buckets(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "label", "group_by": "cohort", "k": 1})
+        rows = [
+            _make_row({"cohort": True, "label": "bool"}),
+            _make_row({"cohort": 1, "label": "int"}),
+            _make_row({"cohort": True, "label": "bool"}),
+            _make_row({"cohort": 1, "label": "int"}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.is_multi_row
+        assert result.rows is not None
+        assert [(type(row["group_value"]).__name__, row["group_value"]) for row in result.rows] == [("bool", True), ("int", 1)]
+        assert [row["batch_size"] for row in result.rows] == [2, 2]
+
     def test_non_scalar_value_raises_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_top_k import BatchTopK
 

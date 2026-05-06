@@ -22,6 +22,7 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
 
 type BatchExperimentComparisonRow = dict[str, object]
 
@@ -118,7 +119,7 @@ class BatchExperimentCompare(BaseTransform):
 
     name = "batch_experiment_compare"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7c2a22bad3213db7"
+    source_file_hash: str | None = "sha256:ee786901f9827487"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 
@@ -201,7 +202,7 @@ class BatchExperimentCompare(BaseTransform):
         for row_index, row in enumerate(rows):
             variant_value = row[self._variant_field]
             for existing_value, grouped_rows in groups:
-                if variant_value == existing_value:
+                if same_scalar_bucket_value(variant_value, existing_value):
                     grouped_rows.append((row_index, row))
                     break
             else:
@@ -376,7 +377,9 @@ class BatchExperimentCompare(BaseTransform):
             self._stats_for_group(variant_value, grouped_rows) for variant_value, grouped_rows in grouped
         ]
 
-        if self._baseline_variant is not None and not any(stats.value == self._baseline_variant for stats in stats_by_variant):
+        if self._baseline_variant is not None and not any(
+            same_scalar_bucket_value(stats.value, self._baseline_variant) for stats in stats_by_variant
+        ):
             return TransformResult.error(
                 {
                     "reason": "validation_failed",
@@ -399,7 +402,7 @@ class BatchExperimentCompare(BaseTransform):
             )
 
         baseline_value = self._baseline_variant if self._baseline_variant is not None else stats_by_variant[0].value
-        baseline = next((stats for stats in stats_by_variant if stats.value == baseline_value), None)
+        baseline = next((stats for stats in stats_by_variant if same_scalar_bucket_value(stats.value, baseline_value)), None)
         if baseline is None:
             return TransformResult.error(
                 {
@@ -416,7 +419,7 @@ class BatchExperimentCompare(BaseTransform):
 
         results: list[BatchExperimentComparisonRow] = []
         for variant in stats_by_variant:
-            if variant.value == baseline.value:
+            if same_scalar_bucket_value(variant.value, baseline.value):
                 continue
             if variant.count == 0:
                 return self._no_finite_score_error(variant, baseline=False)

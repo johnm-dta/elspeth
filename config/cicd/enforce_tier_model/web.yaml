@@ -419,12 +419,12 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=2c70dbd8c0fc7293
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=73df7210bd40f605
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=37c5139edbc2ddd9
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=9e4725587f0f86dd
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
     rollback expected; programmer bugs still propagate
@@ -432,28 +432,28 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=7dc6d8fde234ee0c
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=53fae70b72c95671
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
     primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=c1342fe430c75fb3
+- key: web/execution/validation.py:R5:validate_pipeline:fp=42f95987cf1d45c8
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to extract plugin_name attribute
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=72eee09a997f074c
+- key: web/execution/validation.py:R5:validate_pipeline:fp=0eeb56a6fe738400
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to prefer cause detail over generic str(exc)
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=9c93496c189561ba
+- key: web/execution/validation.py:R1:validate_pipeline:fp=cc7646f8545442c1
   owner: web-execution
   reason: Validation checks optional source path/file keys supplied by composition state
   safety: Absent keys are treated honestly as 'no path provided' and the check is recorded as skipped/passed
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=748e1c9af8952265
+- key: web/execution/validation.py:R1:validate_pipeline:fp=194f96776ab63b19
   owner: web-execution
   reason: Validation checks optional output path/file keys supplied by composition state
   safety: Absent keys treated as 'no path provided'; check recorded as skipped/passed
@@ -579,65 +579,65 @@ allow_hits:
 
     '
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=8c351149d206a191
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=610cbc29f4b0fb63
   owner: web-execution
   reason: Tree-walk — isinstance(Mapping) dispatches dict/list/scalar branches in recursive config traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=1c0538835f4b555b
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=05a762ffc5978bb9
   owner: web-execution
   reason: Tree-walk — isinstance(ref, str) validates secret_ref marker value type
   safety: Non-string ref is silently skipped (malformed marker); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=c00d514ff8cb45d5
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=7a556be625d846c3
   owner: web-execution
   reason: Tree-walk — isinstance() dispatches list/tuple branch in recursive config traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=96e9437fe5133a00
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=b089eb896e20eea6
   owner: web-execution
   reason: isinstance(value, Mapping) on user-supplied YAML option value to recognise a wired secret_ref marker (issue elspeth-72d1dccd44
     fabrication check)
   safety: Non-mapping values fall through to the literal-string branch; no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=b382eb93687a92ea
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=2fdf925ff42ddc16
   owner: web-execution
   reason: isinstance(value['secret_ref'], str) validates the marker payload type before accepting a value as wired
   safety: Non-string secret_ref payload is treated as un-wired (rejected by fabrication check); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=191cd4b8cc1b34eb
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=de71dfa594b17cb7
   owner: web-execution
   reason: isinstance(value, str) gates the env-marker shape check on user-supplied YAML option values
   safety: Non-string values fall through and are not treated as env markers; no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=ba26e4ef894b8ccf
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=138d6bb627ffa4ae
   owner: web-execution
   reason: Tree-walk — isinstance(options, Mapping) dispatches recursive descent through user-supplied YAML option dicts
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=5215e2c08a23974c
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=e3ae59e428fad9ba
   owner: web-execution
   reason: isinstance(key, str) before applying is_secret_field — defensive against non-string keys produced by YAML edge cases
   safety: Non-string keys are skipped (no false positives); recursion continues
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=8aaf7ebcd75ce1ca
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=b1cd240ee14a43bc
   owner: web-execution
   reason: isinstance(value, str) discriminates literal-placeholder credential values from non-string types (which Pydantic
     rejects later with a precise schema error)
   safety: Non-string values in credential fields are deferred to settings_load — no double-reporting, no contract masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=42a7a7ce6347db44
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=e8ef0cbab617cc9b
   owner: web-execution
   reason: Tree-walk — isinstance() dispatches list/tuple branch in recursive option traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=e6df607ba6e110ec
+- key: web/execution/validation.py:R5:validate_pipeline:fp=af3b7735e3c8f667
   owner: web-execution
   reason: isinstance(config_dict, dict) validates YAML parse output before resolve_secret_refs — yaml.safe_load can return
     non-dict for malformed input
   safety: Raises TypeError with diagnostic message; no error suppression
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=b5640f0dd35b1713
+- key: web/execution/validation.py:R5:validate_pipeline:fp=380e3ce9ccee149d
   owner: web-execution
   reason: EdgeContractError is the schema-validation subtype carrying component attribution and LLM repair suggestion data.
   safety: Type dispatch only selects richer error formatting; all GraphValidationError cases still append a failed validation
@@ -938,7 +938,16 @@ allow_hits:
     COMPOSE_TIMEOUT payload and convergence captures the buffered audit records. Anti-anchor
     failure tracker is incremented so repeated identical failed advisor calls trigger the §7.7 hint.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=d31cbb5403390087
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2b10657936533201
+  owner: composer-advisor
+  reason: Tier 3 boundary — validate request_advisor_hint trigger type from LLM-provided
+    tool-call arguments before spending advisor budget or prompting the frontier helper.
+    _TOOL_REQUIRED_PATHS guarantees presence only; without this check a non-string trigger
+    could bypass the mechanical call-criteria contract or corrupt the advisor prompt.
+  safety: Returns ARG_ERROR payload to the caller; no outbound LLM call is made when the
+    type check fails. Anti-anchor counts the failure for §7.7 tracking.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=ca67ced70e9e3f6f
   owner: composer-advisor
   reason: Tier 3 boundary (F3 fix) — validate problem_summary type from LLM-provided tool-call
     arguments. The compose-loop's _TOOL_REQUIRED_PATHS upstream check guarantees presence but
@@ -947,33 +956,33 @@ allow_hits:
   safety: Returns ARG_ERROR payload to the caller; no outbound LLM call is made when the type
     check fails. Anti-anchor counts the failure for §7.7 tracking.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=23217ca74f92684c
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=4e28827550f1ff9f
   owner: composer-advisor
   reason: Tier 3 boundary (F3 fix) — validate recent_errors is a list. Without this check the
     LLM could send a string and Python would silently iterate it character-by-character,
     producing a corrupt prompt sent at full provider cost.
   safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=3aca12181601533b
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=baccf6a785d2102f
   owner: composer-advisor
   reason: Tier 3 boundary (F3 fix) — validate every recent_errors element is a string. Without
     this check, non-string elements would format incorrectly in the prompt template
     (f"- {e}" with arbitrary types) and could crash on len() in the size cap.
   safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=ec116a6a320b5e48
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=59a7a8246ee53dd9
   owner: composer-advisor
   reason: Tier 3 boundary (F3 fix) — validate attempted_actions is a list. Same rationale as
     recent_errors list check.
   safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=751e0c636c6a3e8d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=3c498d36a32236b1
   owner: composer-advisor
   reason: Tier 3 boundary (F3 fix) — validate every attempted_actions element is a string. Same
     rationale as recent_errors element check.
   safety: Returns ARG_ERROR payload to the caller; no outbound LLM call.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=24aaf1e0871af8a5
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=c8f6a3da1dcfc8dd
   owner: composer-advisor
   reason: Tier 3 boundary (F3 fix) — validate optional schema_excerpt is a string when present.
     Without this check a non-string would format incorrectly in the prompt and break the size
@@ -1341,7 +1350,7 @@ allow_hits:
     and ValidationResult must be distinguished to record pass/fail vs exception metrics correctly.
   safety: Read-only dispatch for telemetry emission; no state mutation
   expires: null
-- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=381b81d86d526c89
+- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=f0cc44f1d6c44627
   owner: web-validation
   reason: Union type dispatch — function receives PluginNotFoundError | PluginConfigError, isinstance needed to read component_type
     attribute only present on PluginConfigError

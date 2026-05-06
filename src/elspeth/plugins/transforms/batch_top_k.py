@@ -14,6 +14,7 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
 
 type TopKValue = str | int | float | bool | None
 type BatchTopKRow = dict[str, object]
@@ -74,7 +75,7 @@ class BatchTopK(BaseTransform):
 
     name = "batch_top_k"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8e4eae5cb568af97"
+    source_file_hash: str | None = "sha256:6cbc512eaedbf136"
     config_model = BatchTopKConfig
     is_batch_aware = True
 
@@ -148,7 +149,7 @@ class BatchTopK(BaseTransform):
         for row_index, row in enumerate(rows):
             group_value = row[self._group_by]
             for existing_value, grouped_rows in groups:
-                if group_value == existing_value:
+                if same_scalar_bucket_value(group_value, existing_value):
                     grouped_rows.append((row_index, row))
                     break
             else:
@@ -172,14 +173,10 @@ class BatchTopK(BaseTransform):
     @staticmethod
     def _increment_frequency(entries: list[_FrequencyEntry], value: TopKValue) -> None:
         # Type-identity gate: Python's value equality treats True/1, 1/1.0, and
-        # 0/False as equal (and hashes them identically), which would merge
-        # type-distinct scalars from the configured TopKValue union into one
-        # bucket. The audit trail must preserve the representational identity
-        # the upstream emitted, so use `type(...) is type(...)` (NOT
-        # isinstance — bool is a subclass of int) before the equality check.
-        value_type = type(value)
+        # 0/False as equal. The shared helper preserves the runtime scalar type
+        # before equality so bool values never collapse into int buckets.
         for entry in entries:
-            if type(entry.value) is value_type and entry.value == value:
+            if same_scalar_bucket_value(entry.value, value):
                 entry.count += 1
                 return
         entries.append(_FrequencyEntry(value=value, count=1))

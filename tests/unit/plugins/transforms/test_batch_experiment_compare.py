@@ -113,6 +113,26 @@ class TestBatchExperimentCompare:
         assert [row["variant"] for row in result.rows] == ["B", "C"]
         assert [row["baseline_variant"] for row in result.rows] == ["A", "A"]
 
+    def test_variant_buckets_preserve_bool_and_int_identity(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": True, "score": 1.0}),
+            _make_row({"variant": 1, "score": 3.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert type(result.row["baseline_variant"]) is bool
+        assert result.row["baseline_variant"] is True
+        assert type(result.row["variant"]) is int
+        assert result.row["variant"] == 1
+        assert result.row["baseline_count"] == 1
+        assert result.row["variant_count"] == 1
+
     def test_missing_and_non_finite_scores_are_skipped_and_reported(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
 

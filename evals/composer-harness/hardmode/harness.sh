@@ -27,7 +27,7 @@
 
 set -euo pipefail
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EVALS_SCRIPT_DIR="$HARNESS_DIR"
+export EVALS_SCRIPT_DIR="$HARNESS_DIR"
 HARNESS_ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 LIB_DIR="$(cd "$HARNESS_ROOT/../lib" && pwd)"
 # shellcheck source=../../lib/common.sh

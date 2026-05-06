@@ -2032,6 +2032,89 @@ class TestEdgeContractFailureFormatting:
         # Steers toward (a) — most failures are consumer over-declaration.
         assert "Try option (a) first" in suggestion or "option (a) first" in suggestion
 
+    def test_suggestion_maps_dag_transform_ids_to_composer_node_ids(self) -> None:
+        exc = self._make_edge_error(
+            from_node_id="source_csv_a1b2c3",
+            to_node_id="transform_split_lines_d4e5f6",
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        state = _make_state(
+            source_options={"schema": {"mode": "observed"}},
+            nodes=(
+                NodeSpec(
+                    id="split_lines",
+                    node_type="transform",
+                    plugin="line_explode",
+                    input="source_out",
+                    on_success="results",
+                    on_error="discard",
+                    options={},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        graph = MagicMock()
+        graph.get_source.return_value = "source_csv_a1b2c3"
+        graph.get_transform_id_map.return_value = {0: "transform_split_lines_d4e5f6"}
+        graph.get_config_gate_id_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        graph.get_coalesce_id_map.return_value = {}
+        graph.get_sink_id_map.return_value = {"results": "sink_results_f7g8h9"}
+
+        suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
+
+        assert "patch_node_options(node_id='split_lines'" in suggestion
+        assert "patch_node_options(node_id='transform_split_lines_d4e5f6'" not in suggestion
+        assert "patch_source_options(patch={'schema': {...}})" in suggestion
+        assert "patch_node_options(node_id='source_csv_a1b2c3'" not in suggestion
+
+    def test_suggestion_maps_dag_sink_ids_to_output_patch_tool(self) -> None:
+        exc = self._make_edge_error(
+            from_node_id="transform_clean_text_a1b2c3",
+            to_node_id="sink_results_d4e5f6",
+            missing_fields=("content",),
+        )
+        state = _make_state(
+            source_options={"schema": {"mode": "observed"}},
+            nodes=(
+                NodeSpec(
+                    id="clean_text",
+                    node_type="transform",
+                    plugin="field_mapper",
+                    input="source_out",
+                    on_success="results",
+                    on_error="discard",
+                    options={},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        graph = MagicMock()
+        graph.get_source.return_value = "source_csv_z9y8x7"
+        graph.get_transform_id_map.return_value = {0: "transform_clean_text_a1b2c3"}
+        graph.get_config_gate_id_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        graph.get_coalesce_id_map.return_value = {}
+        graph.get_sink_id_map.return_value = {"results": "sink_results_d4e5f6"}
+
+        suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
+
+        assert "patch_output_options(sink_name='results'" in suggestion
+        assert "patch_node_options(node_id='sink_results_d4e5f6'" not in suggestion
+        assert "patch_node_options(node_id='clean_text'" in suggestion
+
     def test_suggestion_for_type_mismatch_mentions_changing_declared_type(self) -> None:
         exc = self._make_edge_error(
             type_mismatches=(("fetch_status", "str | None", "int"),),

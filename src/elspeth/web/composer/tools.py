@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, Final, TypedDict, cast
 from uuid import uuid4
 
 from opentelemetry import metrics
@@ -342,6 +342,16 @@ def get_expression_grammar() -> str:
 
 
 # --- Tool Definitions for LLM ---
+
+
+ADVISOR_TRIGGER_REACTIVE: Final[str] = "reactive_validation_loop"
+ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
+ADVISOR_TRIGGER_PROACTIVE_RED_LISTED: Final[str] = "proactive_red_listed_plugin"
+ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
+    ADVISOR_TRIGGER_REACTIVE,
+    ADVISOR_TRIGGER_PROACTIVE_SECURITY,
+    ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
+)
 
 
 def get_tool_definitions() -> list[dict[str, Any]]:
@@ -864,11 +874,14 @@ def get_tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "request_advisor_hint",
             "description": (
-                "ESCAPE HATCH — call ONLY when stuck for two or more turns on the "
-                "same validator error after consulting `explain_validation_error` "
-                "and `get_plugin_assistance` and re-reading the relevant plugin "
-                "schema. Forwards your problem statement and context to a frontier "
-                "model and returns guidance text. The reply is ADVICE, not "
+                "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
+                "reactive validation-loop recovery after two or more unchanged failures, "
+                "proactive security/safety wiring review before `set_pipeline`, or "
+                "proactive red-listed plugin review before `set_pipeline`. The proactive "
+                "security trigger covers content moderation, prompt-injection defence, "
+                "secret routing, PII/regulatory sinks, and externally fetched content "
+                "flowing toward LLMs. Forwards your problem statement and context to a "
+                "frontier model and returns guidance text. The reply is ADVICE, not "
                 "configuration — you must still call the appropriate mutation tool "
                 "yourself to apply any change. Budget is finite (sized per compose "
                 "request, not per session lifetime) and exhausting it returns a "
@@ -880,6 +893,19 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "trigger": {
+                        "type": "string",
+                        "enum": list(ADVISOR_TRIGGER_VALUES),
+                        "description": (
+                            "Why this advisor call is allowed. Use reactive_validation_loop "
+                            "only after the recovery sequence and at least two unchanged "
+                            "validator failures. Use proactive_security_safety before "
+                            "set_pipeline for security/safety-sensitive flows. Use "
+                            "proactive_red_listed_plugin before set_pipeline when the plan "
+                            "uses a red-listed plugin such as llm, database, dataverse, "
+                            "Azure safety transforms, RAG retrieval, or Chroma sinks."
+                        ),
+                    },
                     "problem_summary": {
                         "type": "string",
                         "description": (
@@ -916,7 +942,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                         ),
                     },
                 },
-                "required": ["problem_summary", "recent_errors", "attempted_actions"],
+                "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
             },
         },
         {

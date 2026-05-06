@@ -21,6 +21,7 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import append_unique_bucket_value
 
 type BatchDataQualityReportRow = dict[str, object]
 
@@ -90,7 +91,7 @@ class BatchDataQualityReport(BaseTransform):
 
     name = "batch_data_quality_report"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e10079ecfdafbf60"
+    source_file_hash: str | None = "sha256:732ed1d012c5f982"
     config_model = BatchDataQualityReportConfig
     is_batch_aware = True
 
@@ -162,8 +163,7 @@ class BatchDataQualityReport(BaseTransform):
     def _distinct_count(values: tuple[object, ...]) -> int:
         distinct_values: list[object] = []
         for value in values:
-            if value not in distinct_values:
-                distinct_values.append(value)
+            append_unique_bucket_value(distinct_values, value)
         return len(distinct_values)
 
     def _stats_for_field(self, rows: list[PipelineRow], field_name: str) -> _QualityStats:

@@ -400,8 +400,11 @@ evals_resolve_scenario() {
   local dir=$1 scenario_id=$2
   local matches=()
   shopt -s nullglob
-  matches=( "$dir"/"$scenario_id"_*.json "$dir"/"$scenario_id".json )
+  matches=( "$dir"/"$scenario_id"_*.json )
   shopt -u nullglob
+  if [[ -f "$dir/$scenario_id.json" ]]; then
+    matches+=( "$dir/$scenario_id.json" )
+  fi
   if (( ${#matches[@]} == 0 )); then
     evals_die 65 "scenario not found: $scenario_id (looked in $dir)"
   fi

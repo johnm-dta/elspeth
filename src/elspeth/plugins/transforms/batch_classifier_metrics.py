@@ -15,6 +15,13 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import (
+    ScalarBucketKey,
+    append_unique_bucket_value,
+    same_scalar_bucket_value,
+    scalar_bucket_contains,
+    scalar_bucket_key,
+)
 
 type LabelValue = str | int | bool
 type BatchClassifierMetricsRow = dict[str, object]
@@ -128,7 +135,7 @@ class BatchClassifierMetrics(BaseTransform):
 
     name = "batch_classifier_metrics"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:43959bb865f55a8d"
+    source_file_hash: str | None = "sha256:4eb57aba8182b96d"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
 
@@ -230,10 +237,8 @@ class BatchClassifierMetrics(BaseTransform):
     def _labels_for(pairs: list[_LabelPair]) -> list[LabelValue]:
         labels: list[LabelValue] = []
         for pair in pairs:
-            if pair.actual not in labels:
-                labels.append(pair.actual)
-            if pair.predicted not in labels:
-                labels.append(pair.predicted)
+            append_unique_bucket_value(labels, pair.actual)
+            append_unique_bucket_value(labels, pair.predicted)
         return labels
 
     @staticmethod
@@ -251,14 +256,15 @@ class BatchClassifierMetrics(BaseTransform):
         *,
         labels: list[LabelValue],
         pairs: list[_LabelPair],
-        confusion: Counter[tuple[LabelValue, LabelValue]],
+        confusion: Counter[tuple[ScalarBucketKey, ScalarBucketKey]],
     ) -> list[_PerLabelStats]:
         metrics: list[_PerLabelStats] = []
         total_count = len(pairs)
         for label in labels:
-            tp = confusion[(label, label)]
-            fp = sum(count for (actual, predicted), count in confusion.items() if actual != label and predicted == label)
-            fn = sum(count for (actual, predicted), count in confusion.items() if actual == label and predicted != label)
+            label_key = scalar_bucket_key(label)
+            tp = confusion[(label_key, label_key)]
+            fp = sum(count for (actual, predicted), count in confusion.items() if actual != label_key and predicted == label_key)
+            fn = sum(count for (actual, predicted), count in confusion.items() if actual == label_key and predicted != label_key)
             tn = total_count - tp - fp - fn
             precision = self._safe_ratio(tp, tp + fp)
             recall = self._safe_ratio(tp, tp + fn)
@@ -281,12 +287,12 @@ class BatchClassifierMetrics(BaseTransform):
     def _confusion_matrix_rows(
         *,
         labels: list[LabelValue],
-        confusion: Counter[tuple[LabelValue, LabelValue]],
+        confusion: Counter[tuple[ScalarBucketKey, ScalarBucketKey]],
     ) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
         for actual in labels:
             for predicted in labels:
-                count = confusion[(actual, predicted)]
+                count = confusion[(scalar_bucket_key(actual), scalar_bucket_key(predicted))]
                 if count:
                     rows.append({"actual": actual, "predicted": predicted, "count": count})
         return rows
@@ -299,7 +305,7 @@ class BatchClassifierMetrics(BaseTransform):
         missing_indices: list[int],
     ) -> tuple[BatchClassifierMetricsRow, TransformResult | None]:
         labels = self._labels_for(pairs)
-        if self._positive_label is not None and self._positive_label not in labels:
+        if self._positive_label is not None and not scalar_bucket_contains(labels, self._positive_label):
             reason: TransformErrorReason = {
                 "reason": "validation_failed",
                 "cause": "positive_label_missing",
@@ -308,13 +314,13 @@ class BatchClassifierMetrics(BaseTransform):
             }
             return {}, TransformResult.error(reason, retryable=False)
 
-        confusion: Counter[tuple[LabelValue, LabelValue]] = Counter()
+        confusion: Counter[tuple[ScalarBucketKey, ScalarBucketKey]] = Counter()
         for pair in pairs:
-            key = (pair.actual, pair.predicted)
+            key = (scalar_bucket_key(pair.actual), scalar_bucket_key(pair.predicted))
             confusion[key] += 1
 
         count = len(pairs)
-        correct = sum(1 for pair in pairs if pair.actual == pair.predicted)
+        correct = sum(1 for pair in pairs if same_scalar_bucket_value(pair.actual, pair.predicted))
         accuracy = self._safe_ratio(correct, count)
         per_label = self._per_label_metrics(labels=labels, pairs=pairs, confusion=confusion)
 
@@ -353,7 +359,7 @@ class BatchClassifierMetrics(BaseTransform):
             result["missing_indices"] = missing_indices
 
         if self._positive_label is not None:
-            positive_metrics = next(entry for entry in per_label if entry.label == self._positive_label)
+            positive_metrics = next(entry for entry in per_label if same_scalar_bucket_value(entry.label, self._positive_label))
             result.update(
                 {
                     "positive_label": self._positive_label,

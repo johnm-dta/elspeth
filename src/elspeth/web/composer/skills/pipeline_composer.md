@@ -444,6 +444,14 @@ If a tool call fails or returns unexpected results:
 
    Call `request_advisor_hint` *before* `set_pipeline` and describe both the user's task and the wiring shape you intend; ask for a sanity check on plugin choice and option-block content.
 
+Every `request_advisor_hint` call must declare exactly one `trigger` value:
+
+| `trigger` | Use when |
+|-----------|----------|
+| `reactive_validation_loop` | You completed the recovery sequence and have at least two unchanged validator failures plus two attempted corrective actions. |
+| `proactive_security_safety` | You are escalating before `set_pipeline` for content moderation, prompt-injection defence, secret routing, PII/regulatory sinks, or externally fetched content flowing toward an LLM. |
+| `proactive_red_listed_plugin` | You are escalating before `set_pipeline` because the proposed wiring uses one of the red-listed plugins above. |
+
 **Do NOT call it when:**
 - It is your first or second turn AND none of the proactive triggers above fire — the cheat sheet plus a careful read of `get_plugin_schema` resolves the vast majority of routine validation failures.
 - You are merely uncertain about a design choice for a routine task. The advisor is for the high-stakes triggers above and for breaking validation deadlocks, not for design opinions on simple pipelines.
@@ -461,6 +469,7 @@ If a tool call fails or returns unexpected results:
 
 ```text
 GOOD:
+  trigger:           "reactive_validation_loop"
   problem_summary: "I cannot get the llm transform to validate. I chose
                     provider=azure, but set_pipeline keeps rejecting the
                     options with a missing-field error I do not recognise."
@@ -475,6 +484,7 @@ GOOD:
   schema_excerpt:  "<the snippet from get_plugin_schema>"
 
 BAD:
+  trigger:         "reactive_validation_loop"
   problem_summary: "help"
   recent_errors:   []
   attempted_actions: []

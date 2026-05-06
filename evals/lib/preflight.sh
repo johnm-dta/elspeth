@@ -24,7 +24,7 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EVALS_SCRIPT_DIR="$SCRIPT_DIR"
+EVALS_SCRIPT_DIR="${EVALS_SCRIPT_DIR:-$SCRIPT_DIR}"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 

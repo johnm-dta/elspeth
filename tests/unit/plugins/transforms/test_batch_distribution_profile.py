@@ -172,6 +172,25 @@ class TestBatchDistributionProfile:
         assert profiles["B"]["mean"] == 20.0
         assert profiles["B"]["median"] == 20.0
 
+    def test_group_by_preserves_bool_and_int_buckets(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": "variant"})
+        rows = [
+            _make_row({"variant": True, "score": 1.0}),
+            _make_row({"variant": 1, "score": 10.0}),
+            _make_row({"variant": True, "score": 3.0}),
+            _make_row({"variant": 1, "score": 30.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.is_multi_row
+        assert result.rows is not None
+        assert [(type(row["variant"]).__name__, row["variant"]) for row in result.rows] == [("bool", True), ("int", 1)]
+        assert [row["mean"] for row in result.rows] == [2.0, 20.0]
+
     def test_empty_batch_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
 

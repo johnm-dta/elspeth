@@ -134,11 +134,17 @@ def _make_settings(
     )
 
 
-def _make_advisor_tool_call(call_id: str, *, problem: str = "stuck on llm config") -> _FakeLLMResponse:
+def _make_advisor_tool_call(
+    call_id: str,
+    *,
+    problem: str = "stuck on llm config",
+    trigger: str = "reactive_validation_loop",
+) -> _FakeLLMResponse:
     args = {
+        "trigger": trigger,
         "problem_summary": problem,
         "recent_errors": ["error A", "error A"],
-        "attempted_actions": ["set_pipeline with options={}"],
+        "attempted_actions": ["set_pipeline with options={}", "checked relevant schema"],
     }
     return _FakeLLMResponse(
         choices=[
@@ -211,6 +217,31 @@ def test_advisor_tool_exposed_when_enabled() -> None:
     assert "ADVICE" in advisor["function"]["description"], "description must steer the LLM that the reply is advice not config"
 
 
+def test_advisor_tool_schema_requires_trigger_and_mentions_proactive_criteria() -> None:
+    """The tool contract must make the call criteria mechanical enough for
+    the LLM to declare why it is escalating.
+
+    The skill allows proactive calls for safety/security and red-listed
+    plugins; the tool description must not contradict that by describing
+    only the reactive validation-loop path.
+    """
+    advisor = next(defn for defn in get_tool_definitions() if defn["name"] == "request_advisor_hint")
+    parameters = advisor["parameters"]
+    assert "trigger" in parameters["required"]
+
+    trigger_schema = parameters["properties"]["trigger"]
+    assert trigger_schema["enum"] == [
+        "reactive_validation_loop",
+        "proactive_security_safety",
+        "proactive_red_listed_plugin",
+    ]
+
+    description = advisor["description"]
+    assert "security" in description
+    assert "red-listed" in description
+    assert "before `set_pipeline`" in description
+
+
 # --- 2. CLI MCP allowlist excludes the advisor by design ---
 
 
@@ -246,6 +277,19 @@ def test_skill_step0_includes_request_advisor_hint() -> None:
     skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
     # Find the Diagnostics line in Step-0
     assert "`request_advisor_hint`" in skill_text, "skill does not mention the advisor tool in its Step-0 enumeration"
+
+
+def test_skill_advisor_examples_include_required_trigger_values() -> None:
+    """The static skill examples must not teach a payload that the runtime
+    tool schema now rejects.
+    """
+    from importlib.resources import files
+
+    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
+    assert "trigger:" in skill_text
+    assert "reactive_validation_loop" in skill_text
+    assert "proactive_security_safety" in skill_text
+    assert "proactive_red_listed_plugin" in skill_text
 
 
 # --- 4. Compose-loop happy path (advisor returns guidance) ---
@@ -333,6 +377,7 @@ async def test_advisor_call_includes_core_and_deployment_skill_context(tmp_path:
     )
     recorder = BufferingRecorder()
     args = {
+        "trigger": "proactive_security_safety",
         "problem_summary": "stuck",
         "recent_errors": ["validator rejected provider"],
         "attempted_actions": ["set_pipeline once"],
@@ -350,6 +395,41 @@ async def test_advisor_call_includes_core_and_deployment_skill_context(tmp_path:
     assert SYSTEM_PROMPT in system_content
     assert "DEPLOYMENT_PROVIDER_MAPPING_SENTINEL" in system_content
     assert "You are advising another LLM" in system_content
+
+
+@pytest.mark.asyncio
+async def test_advisor_omits_seed_when_advisor_model_does_not_support_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The advisor model has its own provider surface; direct Anthropic
+    defaults must share the same seed-support gate as the primary composer.
+    """
+    import litellm
+
+    monkeypatch.setattr(
+        litellm,
+        "get_supported_openai_params",
+        lambda model: ["temperature", "max_tokens"],
+    )
+    catalog = _mock_catalog()
+    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings(advisor_enabled=True))
+    recorder = BufferingRecorder()
+    args = {
+        "trigger": "reactive_validation_loop",
+        "problem_summary": "stuck",
+        "recent_errors": ["validator rejected provider", "validator rejected provider"],
+        "attempted_actions": ["set_pipeline once", "checked schema"],
+    }
+
+    with patch(
+        "elspeth.web.composer.service._litellm_acompletion",
+        new_callable=AsyncMock,
+        return_value=_make_advisor_response(),
+    ) as mock_acompletion:
+        await service._call_advisor_with_audit(args, recorder=recorder)
+
+    kwargs = mock_acompletion.call_args.kwargs
+    assert "seed" not in kwargs
+    assert len(recorder.llm_calls) == 1
+    assert recorder.llm_calls[0].seed is None
 
 
 # --- 5. Budget exhaustion ---
@@ -650,6 +730,57 @@ async def test_disabled_advisor_returns_disabled_error_no_llm_call() -> None:
     assert "disabled" in invs[0].result_canonical
 
 
+@pytest.mark.asyncio
+async def test_missing_advisor_trigger_rejects_without_outbound_call() -> None:
+    """A call without the call-criteria trigger is locally invalid and
+    must not spend an advisor call.
+    """
+    catalog = _mock_catalog()
+    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings(advisor_enabled=True, budget=3))
+    state = _empty_state()
+
+    args = {
+        "problem_summary": "stuck",
+        "recent_errors": ["error A", "error A"],
+        "attempted_actions": ["set_pipeline once", "checked schema"],
+    }
+    missing_trigger_response = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(
+                            id="missing_trigger",
+                            function=_FakeFunction(
+                                name="request_advisor_hint",
+                                arguments=json.dumps(args),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_make_advisor_response(),
+        ) as mock_acompletion,
+    ):
+        mock_llm.side_effect = [missing_trigger_response, _make_text_only_response("done")]
+        result = await service.compose("help", [], state)
+
+    assert mock_acompletion.call_count == 0
+    invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
+    assert len(invs) == 1
+    assert invs[0].status.name == "ARG_ERROR"
+    assert "trigger" in invs[0].result_canonical
+
+
 # --- Post-review fixes (P2 findings) ---
 
 
@@ -780,6 +911,7 @@ async def test_f3a_advisor_rejects_non_list_recent_errors() -> None:
     state = _empty_state()
 
     bad_args = {
+        "trigger": "proactive_security_safety",
         "problem_summary": "stuck",
         "recent_errors": "single error string not list",  # WRONG TYPE
         "attempted_actions": ["x"],
@@ -846,6 +978,7 @@ async def test_f3b_advisor_rejects_oversized_prompt() -> None:
 
     huge_string = "X" * 50_000
     big_args = {
+        "trigger": "proactive_security_safety",
         "problem_summary": "stuck",
         "recent_errors": [huge_string],
         "attempted_actions": ["x"],
@@ -910,6 +1043,7 @@ async def test_f3c_advisor_prompt_size_counts_formatting_overhead() -> None:
     state = _empty_state()
 
     overhead_args = {
+        "trigger": "proactive_security_safety",
         "problem_summary": "x",
         "recent_errors": [""] * 60,
         "attempted_actions": [""] * 60,
@@ -1002,6 +1136,7 @@ async def test_advisor_cancelled_error_carries_buffered_llm_calls() -> None:
     service = ComposerServiceImpl(catalog=catalog, settings=_make_settings(advisor_enabled=True, budget=3))
     recorder = BufferingRecorder()
     args = {
+        "trigger": "proactive_security_safety",
         "problem_summary": "stuck",
         "recent_errors": ["error A"],
         "attempted_actions": ["set_pipeline once"],

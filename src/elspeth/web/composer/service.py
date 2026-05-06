@@ -63,6 +63,8 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.state import CompositionState, ValidationSummary
 from elspeth.web.composer.tools import (
+    ADVISOR_TRIGGER_REACTIVE,
+    ADVISOR_TRIGGER_VALUES,
     RuntimePreflight,
     ToolResult,
     execute_tool,
@@ -2261,8 +2263,9 @@ class ComposerServiceImpl:
         ready to embed in the outer tool-result envelope.
 
         The compose-loop's ``_TOOL_REQUIRED_PATHS`` check upstream guarantees
-        ``problem_summary``, ``recent_errors``, and ``attempted_actions`` are
-        present in ``arguments`` — but only their *presence*, not their
+        ``trigger``, ``problem_summary``, ``recent_errors``, and
+        ``attempted_actions`` are present in ``arguments`` — but only their
+        *presence*, not their
         type or size. Without this validator:
 
         - A non-list ``recent_errors`` would be silently iterated by Python
@@ -2279,6 +2282,20 @@ class ComposerServiceImpl:
         anchor tracking on the caller side ensures repeated identical
         ARG_ERRORs surface the §7.7 structural hint.
         """
+        trigger = arguments["trigger"]
+        if not isinstance(trigger, str):
+            return {
+                "status": "ARG_ERROR",
+                "error": "trigger must be a string",
+                "error_class": "TypeError",
+            }
+        if trigger not in ADVISOR_TRIGGER_VALUES:
+            return {
+                "status": "ARG_ERROR",
+                "error": f"trigger must be one of: {', '.join(ADVISOR_TRIGGER_VALUES)}",
+                "error_class": "ValueError",
+            }
+
         if not isinstance(arguments["problem_summary"], str):
             return {
                 "status": "ARG_ERROR",
@@ -2300,6 +2317,16 @@ class ComposerServiceImpl:
                 "status": "ARG_ERROR",
                 "error": "attempted_actions must be a list of strings",
                 "error_class": "TypeError",
+            }
+
+        if trigger == ADVISOR_TRIGGER_REACTIVE and (len(recent) < 2 or len(attempted) < 2):
+            return {
+                "status": "ARG_ERROR",
+                "error": (
+                    "reactive_validation_loop trigger requires at least two recent_errors "
+                    "and two attempted_actions showing the unchanged validation loop"
+                ),
+                "error_class": "ValueError",
             }
 
         if "schema_excerpt" in arguments and arguments["schema_excerpt"] is not None:
@@ -2375,11 +2402,11 @@ class ComposerServiceImpl:
         max_completion = self._settings.composer_advisor_max_completion_tokens
 
         system_msg = build_system_prompt(self._data_dir, advisor_enabled=True) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
-        # Required fields (problem_summary, recent_errors, attempted_actions)
-        # are validated by _TOOL_REQUIRED_PATHS before this method runs, so
-        # direct dict access is sound. schema_excerpt is the only optional
-        # field — we test "in arguments" rather than .get() to keep the
-        # Tier-3 trust-boundary rules clean.
+        # Required fields (trigger, problem_summary, recent_errors,
+        # attempted_actions) are validated by _TOOL_REQUIRED_PATHS before this
+        # method runs, so direct dict access is sound. schema_excerpt is the
+        # only optional field — we test "in arguments" rather than .get() to
+        # keep the Tier-3 trust-boundary rules clean.
         user_msg = _build_advisor_user_message(arguments)
 
         messages: list[dict[str, Any]] = [
@@ -2393,15 +2420,18 @@ class ComposerServiceImpl:
         response: Any = None
         error_class: str | None = None
         error_message: str | None = None
+        advisor_seed = _composer_llm_seed_for_model(advisor_model)
+        kwargs: dict[str, Any] = {
+            "model": advisor_model,
+            "messages": messages,
+            "temperature": _COMPOSER_LLM_TEMPERATURE,
+            "max_tokens": max_completion,
+        }
+        if advisor_seed is not None:
+            kwargs[_COMPOSER_LLM_SEED_PARAM] = advisor_seed
         try:
             response = await asyncio.wait_for(
-                _litellm_acompletion(
-                    model=advisor_model,
-                    messages=messages,
-                    temperature=_COMPOSER_LLM_TEMPERATURE,
-                    seed=_COMPOSER_LLM_SEED,
-                    max_tokens=max_completion,
-                ),
+                _litellm_acompletion(**kwargs),
                 timeout=effective_timeout,
             )
             if not response.choices:
@@ -2490,7 +2520,7 @@ class ComposerServiceImpl:
                         started_at=started_at,
                         started_ns=started_ns,
                         temperature=_COMPOSER_LLM_TEMPERATURE,
-                        seed=_COMPOSER_LLM_SEED,
+                        seed=advisor_seed,
                         response=response,
                         error_class=error_class,
                         error_message=error_message,
@@ -2933,7 +2963,10 @@ def _build_advisor_user_message(arguments: Mapping[str, Any]) -> str:
     bullets, section labels, and newlines cannot drift from the wire payload.
     Callers validate the Tier-3 argument shapes before invoking this helper.
     """
-    user_msg_parts: list[str] = [f"Problem: {arguments['problem_summary']}"]
+    user_msg_parts: list[str] = [
+        f"Advisor trigger: {arguments['trigger']}",
+        f"Problem: {arguments['problem_summary']}",
+    ]
     recent = cast(list[str], arguments["recent_errors"])
     if recent:
         joined = "\n".join(f"- {e}" for e in recent)

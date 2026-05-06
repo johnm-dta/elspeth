@@ -16,6 +16,11 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import (
+    append_unique_bucket_value,
+    same_scalar_bucket_value,
+    scalar_bucket_contains,
+)
 
 type BatchPairedPreferenceRow = dict[str, object]
 
@@ -108,7 +113,7 @@ class BatchPairedPreference(BaseTransform):
 
     name = "batch_paired_preference"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d4388c6142dd51c0"
+    source_file_hash: str | None = "sha256:cdcf28d6c99848d9"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -200,11 +205,10 @@ class BatchPairedPreference(BaseTransform):
             pair_id = row[self._pair_field]
             entry = self._score_entry_for(row, row_index=row_index)
 
-            if entry.variant not in variants:
-                variants.append(entry.variant)
+            append_unique_bucket_value(variants, entry.variant)
 
             for existing_pair, entries in pairs:
-                if pair_id == existing_pair:
+                if same_scalar_bucket_value(pair_id, existing_pair):
                     entries.append(entry)
                     break
             else:
@@ -215,7 +219,7 @@ class BatchPairedPreference(BaseTransform):
     @staticmethod
     def _find_variant_entry(entries: list[_ScoreEntry], variant: Any) -> _ScoreEntry | None:
         for entry in entries:
-            if entry.variant == variant:
+            if same_scalar_bucket_value(entry.variant, variant):
                 return entry
         return None
 
@@ -342,7 +346,7 @@ class BatchPairedPreference(BaseTransform):
 
         pairs, variants = self._collect_pairs(rows)
         baseline_variant = self._baseline_variant if self._baseline_variant is not None else variants[0]
-        if baseline_variant not in variants:
+        if not scalar_bucket_contains(variants, baseline_variant):
             return TransformResult.error(
                 {
                     "reason": "validation_failed",
@@ -353,7 +357,7 @@ class BatchPairedPreference(BaseTransform):
                 retryable=False,
             )
 
-        candidates = [variant for variant in variants if variant != baseline_variant]
+        candidates = [variant for variant in variants if not same_scalar_bucket_value(variant, baseline_variant)]
         if not candidates:
             return TransformResult.error(
                 {

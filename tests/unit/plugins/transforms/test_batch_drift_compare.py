@@ -166,6 +166,30 @@ class TestBatchDriftCompare:
         assert shifts["c"]["baseline_proportion"] == 0.0
         assert shifts["c"]["cohort_proportion"] == 0.25
 
+    def test_categorical_drift_preserves_bool_and_int_buckets(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+        transform = BatchDriftCompare(
+            {"schema": DYNAMIC_SCHEMA, "cohort_field": "cohort", "value_field": "label", "value_type": "categorical"}
+        )
+        rows = [
+            _make_row({"cohort": "baseline", "label": True}),
+            _make_row({"cohort": "current", "label": 1}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["total_variation"] == 1.0
+        assert result.row["new_category_count"] == 1
+        assert [(type(value).__name__, value) for value in result.row["new_categories"]] == [("int", 1)]
+        shifts = {(type(entry["value"]).__name__, entry["value"]): entry for entry in result.row["category_shifts"]}
+        assert shifts[("bool", True)]["baseline_count"] == 1
+        assert shifts[("bool", True)]["cohort_count"] == 0
+        assert shifts[("int", 1)]["baseline_count"] == 0
+        assert shifts[("int", 1)]["cohort_count"] == 1
+
     def test_numeric_non_numeric_values_raise_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
 

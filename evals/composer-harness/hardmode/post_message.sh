@@ -62,7 +62,13 @@ sid=$(cat "$out/sid.txt")
 evals_log INFO "post_message scenario=$scenario_id turn=$turn sid=$sid"
 
 # Snapshot the user-side message for audit (separate from the JSON envelope).
-cp "$msg_file" "$out/turn${turn}.user.txt"
+# When the caller already wrote the message into the run dir at this exact
+# path (the RUNBOOK shows this idiom for turn 1), skip the cp — copying a
+# file onto itself is a fatal error under set -e.
+target_user_txt="$out/turn${turn}.user.txt"
+if [[ "$(readlink -f "$msg_file")" != "$(readlink -f "$target_user_txt")" ]]; then
+  cp "$msg_file" "$target_user_txt"
+fi
 
 # State before
 evals_get_state "$sid" "$out/state.before.t${turn}.json" 2>/dev/null || \

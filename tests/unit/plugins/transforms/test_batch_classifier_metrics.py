@@ -103,6 +103,31 @@ class TestBatchClassifierMetrics:
         assert result.row["binary_recall"] == 0.5
         assert result.row["binary_f1"] == 0.5
 
+    def test_bool_and_int_labels_do_not_collide(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics
+
+        transform = BatchClassifierMetrics({"schema": DYNAMIC_SCHEMA, "actual_field": "actual", "predicted_field": "predicted"})
+        rows = [
+            _make_row({"actual": True, "predicted": True}),
+            _make_row({"actual": 1, "predicted": 1}),
+            _make_row({"actual": True, "predicted": 1}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert [(type(label).__name__, label) for label in result.row["labels"]] == [("bool", True), ("int", 1)]
+        cells = {
+            (type(entry["actual"]).__name__, entry["actual"], type(entry["predicted"]).__name__, entry["predicted"]): entry["count"]
+            for entry in result.row["confusion_matrix"]
+        }
+        assert cells == {
+            ("bool", True, "bool", True): 1,
+            ("bool", True, "int", 1): 1,
+            ("int", 1, "int", 1): 1,
+        }
+
     def test_missing_labels_are_skipped_and_reported(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics
 

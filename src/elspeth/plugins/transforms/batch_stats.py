@@ -19,6 +19,7 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
 
 type BatchStatsAggregateRow = dict[str, object]
 
@@ -111,7 +112,7 @@ class BatchStats(BaseTransform):
 
     name = "batch_stats"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:697f5d855566950f"
+    source_file_hash: str | None = "sha256:4d7ff4cc4c61ba64"
     config_model = BatchStatsConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 
@@ -233,7 +234,7 @@ class BatchStats(BaseTransform):
         for row_index, row in enumerate(rows):
             group_value = row[self._group_by]
             for existing_value, grouped_rows in groups:
-                if group_value == existing_value:
+                if same_scalar_bucket_value(group_value, existing_value):
                     grouped_rows.append((row_index, row))
                     break
             else:

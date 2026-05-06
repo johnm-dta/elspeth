@@ -24,6 +24,7 @@ only to be rejected pre-token at /execute.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -93,6 +94,111 @@ _ALL_CHECKS = [
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class _EdgePatchTarget:
+    component_id: str
+    component_type: str | None
+    display_name: str
+    schema_patch_tool_call: str
+
+
+def _node_schema_patch_target(component_id: str, component_type: str | None) -> _EdgePatchTarget:
+    return _EdgePatchTarget(
+        component_id=component_id,
+        component_type=component_type,
+        display_name=f"{component_type or 'node'} '{component_id}'",
+        schema_patch_tool_call=f"patch_node_options(node_id='{component_id}', patch={{'schema': {{...}}}})",
+    )
+
+
+def _source_schema_patch_target(plugin_name: str | None) -> _EdgePatchTarget:
+    display = "source" if plugin_name is None else f"source '{plugin_name}'"
+    return _EdgePatchTarget(
+        component_id="source",
+        component_type="source",
+        display_name=display,
+        schema_patch_tool_call="patch_source_options(patch={'schema': {...}})",
+    )
+
+
+def _output_schema_patch_target(sink_name: str) -> _EdgePatchTarget:
+    return _EdgePatchTarget(
+        component_id=sink_name,
+        component_type="sink",
+        display_name=f"output '{sink_name}'",
+        schema_patch_tool_call=f"patch_output_options(sink_name='{sink_name}', patch={{'schema': {{...}}}})",
+    )
+
+
+def _unmapped_schema_patch_target(dag_node_id: str, component_type: str | None) -> _EdgePatchTarget:
+    return _EdgePatchTarget(
+        component_id=dag_node_id,
+        component_type=component_type,
+        display_name=f"unmapped DAG node '{dag_node_id}'",
+        schema_patch_tool_call="get_pipeline_state(component='all')  # inspect composer IDs before patching this DAG node",
+    )
+
+
+def _edge_patch_targets_by_dag_id(state: CompositionState, graph: Any) -> dict[str, _EdgePatchTarget]:
+    """Map runtime DAG node IDs back to composer patch-tool targets."""
+    targets: dict[str, _EdgePatchTarget] = {}
+    nodes_by_id = {node.id: node for node in state.nodes}
+
+    if state.source is not None:
+        targets[str(graph.get_source())] = _source_schema_patch_target(state.source.plugin)
+
+    transform_nodes = [node for node in state.nodes if node.node_type == "transform"]
+    transform_id_map = graph.get_transform_id_map()
+    for sequence, dag_node_id in transform_id_map.items():
+        if sequence >= len(transform_nodes):
+            continue
+        node = transform_nodes[sequence]
+        targets[str(dag_node_id)] = _node_schema_patch_target(node.id, node.node_type)
+
+    config_gate_id_map = graph.get_config_gate_id_map()
+    for gate_name, dag_node_id in config_gate_id_map.items():
+        component_id = str(gate_name)
+        node_type = nodes_by_id[component_id].node_type if component_id in nodes_by_id else "gate"
+        targets[str(dag_node_id)] = _node_schema_patch_target(component_id, node_type)
+
+    aggregation_id_map = graph.get_aggregation_id_map()
+    for aggregation_name, dag_node_id in aggregation_id_map.items():
+        component_id = str(aggregation_name)
+        node_type = nodes_by_id[component_id].node_type if component_id in nodes_by_id else "aggregation"
+        targets[str(dag_node_id)] = _node_schema_patch_target(component_id, node_type)
+
+    coalesce_id_map = graph.get_coalesce_id_map()
+    for coalesce_name, dag_node_id in coalesce_id_map.items():
+        component_id = str(coalesce_name)
+        node_type = nodes_by_id[component_id].node_type if component_id in nodes_by_id else "coalesce"
+        targets[str(dag_node_id)] = _node_schema_patch_target(component_id, node_type)
+
+    sink_id_map = graph.get_sink_id_map()
+    for sink_name, dag_node_id in sink_id_map.items():
+        targets[str(dag_node_id)] = _output_schema_patch_target(str(sink_name))
+
+    return targets
+
+
+def _edge_patch_target_for_node_id(
+    dag_node_id: str,
+    *,
+    state: CompositionState | None = None,
+    graph: Any | None = None,
+    component_type: str | None = None,
+) -> _EdgePatchTarget:
+    """Resolve a DAG node ID to the composer component/tool that can patch it."""
+    if state is None or graph is None:
+        return _node_schema_patch_target(dag_node_id, component_type)
+
+    targets = _edge_patch_targets_by_dag_id(state, graph)
+    if not targets:
+        return _node_schema_patch_target(dag_node_id, component_type)
+    if dag_node_id in targets:
+        return targets[dag_node_id]
+    return _unmapped_schema_patch_target(dag_node_id, component_type)
+
+
 def _infer_component_type_from_plugin_error(
     exc: PluginNotFoundError | PluginConfigError,
 ) -> str | None:
@@ -107,7 +213,12 @@ def _infer_component_type_from_plugin_error(
     return None
 
 
-def _format_edge_contract_failure(exc: EdgeContractError) -> tuple[str, str]:
+def _format_edge_contract_failure(
+    exc: EdgeContractError,
+    *,
+    state: CompositionState | None = None,
+    graph: Any | None = None,
+) -> tuple[str, str]:
     """Build LLM-actionable (message, suggestion) pair from a structured edge-contract error.
 
     The composer surfaces both fields verbatim into the assistant's reply when
@@ -162,11 +273,16 @@ def _format_edge_contract_failure(exc: EdgeContractError) -> tuple[str, str]:
         f"{issues_block}"
     )
 
-    suggestion = _build_edge_contract_suggestion(exc)
+    suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
     return message, suggestion
 
 
-def _build_edge_contract_suggestion(exc: EdgeContractError) -> str:
+def _build_edge_contract_suggestion(
+    exc: EdgeContractError,
+    *,
+    state: CompositionState | None = None,
+    graph: Any | None = None,
+) -> str:
     """Compose the action-oriented suggestion text for an edge-contract failure.
 
     Split out from ``_format_edge_contract_failure`` so the suggestion text
@@ -179,11 +295,23 @@ def _build_edge_contract_suggestion(exc: EdgeContractError) -> str:
     has_type_mismatch = bool(result.type_mismatches)
     has_missing = bool(result.missing_fields)
     has_extras = bool(result.extra_fields)
+    consumer = _edge_patch_target_for_node_id(
+        exc.to_node_id,
+        state=state,
+        graph=graph,
+        component_type=exc.component_type,
+    )
+    producer = _edge_patch_target_for_node_id(
+        exc.from_node_id,
+        state=state,
+        graph=graph,
+        component_type=None,
+    )
 
     parts: list[str] = []
     parts.append("Most edge-contract failures come from the consumer over-declaring fields it doesn't operate on. Try option (a) first.")
     parts.append("")
-    parts.append(f"  (a) Relax the consumer's input schema on node '{exc.to_node_id}'. Either:")
+    parts.append(f"  (a) Relax the consumer's input schema on {consumer.display_name}. Either:")
     if has_type_mismatch:
         parts.append("      - Change the declared field type(s) to match what the producer emits (see Type mismatches above).")
     if has_missing:
@@ -195,14 +323,14 @@ def _build_edge_contract_suggestion(exc: EdgeContractError) -> str:
     parts.append(
         "      - Or switch the consumer's input schema mode to 'flexible' so it accepts the producer's full output without redeclaring every field."
     )
-    parts.append(f"      Tool: patch_node_options(node_id='{exc.to_node_id}', patch={{'schema': {{...}}}})")
+    parts.append(f"      Tool: {consumer.schema_patch_tool_call}")
     parts.append("")
     parts.append(
-        f"  (b) Patch the producer node '{exc.from_node_id}'. Note: plugin output schemas are largely baked-in by the plugin's contract — "
+        f"  (b) Patch the producer {producer.display_name}. Note: plugin output schemas are largely baked-in by the plugin's contract — "
         f"this option only works if you mis-declared the producer's schema in your initial set_pipeline / upsert_node call. "
         f"If the producer is using its plugin's default output contract, option (a) is the only fix."
     )
-    parts.append(f"      Tool: patch_node_options(node_id='{exc.from_node_id}', patch={{'schema': {{...}}}})")
+    parts.append(f"      Tool: {producer.schema_patch_tool_call}")
 
     return "\n".join(parts)
 
@@ -939,11 +1067,17 @@ def validate_pipeline(
             )
         )
         if isinstance(exc, EdgeContractError):
-            edge_message, edge_suggestion = _format_edge_contract_failure(exc)
+            consumer_target = _edge_patch_target_for_node_id(
+                exc.to_node_id,
+                state=state,
+                graph=graph,
+                component_type=exc.component_type,
+            )
+            edge_message, edge_suggestion = _format_edge_contract_failure(exc, state=state, graph=graph)
             errors.append(
                 ValidationError(
-                    component_id=exc.component_id,
-                    component_type=exc.component_type,
+                    component_id=consumer_target.component_id,
+                    component_type=consumer_target.component_type,
                     message=edge_message,
                     suggestion=edge_suggestion,
                 )

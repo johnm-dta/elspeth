@@ -92,9 +92,10 @@ curl -fsS -H "Authorization: Bearer $J" \
 jq -r '.artifacts[]? | "\(.artifact_id)\t\(.path_or_uri | sub("^file://"; "") | split("/") | .[-1])"' \
   "$out/outputs/MANIFEST.json" | while IFS=$'\t' read -r aid name; do
   [ -z "$aid" ] && continue
+  safe_name="${aid}__${name}"
   curl -fsS -H "Authorization: Bearer $J" \
     "$API/api/runs/$rid/outputs/$aid/content" \
-    -o "$out/outputs/$name" 2>/dev/null \
+    -o "$out/outputs/$safe_name" 2>/dev/null \
     || echo "[$scenario_id] failed to fetch artifact $aid" >&2
 done
 

@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -25,6 +25,11 @@ from starlette.routing import Route
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.execution.schemas import (
     DiscardSummary,
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
     RunDiagnosticsResponse,
     RunDiagnosticSummary,
     RunStatusResponse,
@@ -75,7 +80,7 @@ def _create_test_app(
     mock_session.user_id = _TEST_USER_ID
     mock_session.auth_provider_type = "local"
     mock_session_service.get_session = AsyncMock(return_value=mock_session)
-    mock_session_service.get_run = AsyncMock(return_value=MagicMock(session_id=uuid4()))
+    mock_session_service.get_run = AsyncMock(return_value=MagicMock(session_id=uuid4(), landscape_run_id=None))
     app.state.session_service = mock_session_service
 
     # Mock settings for ownership checks
@@ -106,6 +111,46 @@ def _create_test_app(
         )
 
     return app
+
+
+def _accounting(
+    *,
+    source_rows: int = 1,
+    succeeded: int = 1,
+    failed: int = 0,
+    structural: int = 0,
+    pending: int = 0,
+    routed_success: int = 0,
+    routed_failure: int = 0,
+    quarantined: int = 0,
+    discarded: int = 0,
+    closure: Literal["closed", "open", "unknown"] = "closed",
+    missing: int = 0,
+    duplicate: int = 0,
+) -> RunAccounting:
+    terminal = succeeded + failed + structural
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=source_rows),
+        tokens=RunAccountingTokens(
+            emitted=terminal + pending,
+            terminal=terminal,
+            succeeded=succeeded,
+            failed=failed,
+            structural=structural,
+            pending=pending,
+        ),
+        routing=RunAccountingRouting(
+            routed_success=routed_success,
+            routed_failure=routed_failure,
+            quarantined=quarantined,
+            discarded=discarded,
+        ),
+        integrity=RunAccountingIntegrity(
+            closure=closure,
+            missing_terminal_outcomes=missing,
+            duplicate_terminal_outcomes=duplicate,
+        ),
+    )
 
 
 # ── REST Endpoint Tests ───────────────────────────────────────────────
@@ -267,6 +312,110 @@ class TestRunDiagnosticsEndpoint:
     """GET/POST /api/runs/{run_id}/diagnostics."""
 
     @pytest.mark.asyncio
+    async def test_run_diagnostics_accepts_fanout_accounting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        run_id = UUID("a2a7354a-5732-475b-a4ac-ed166a9e0f25")
+        session_id = UUID("a95eb527-fc07-4169-bb44-9366b0d84d1f")
+        accounting = _accounting(source_rows=1, succeeded=9323, structural=1)
+
+        async def fake_get_status(
+            status_run_id: UUID,
+            *,
+            accounting: RunAccounting | None = None,
+            run_record: object | None = None,
+        ) -> RunStatusResponse:
+            del run_record
+            return RunStatusResponse(
+                run_id=str(status_run_id),
+                status="completed",
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                accounting=accounting,
+                error=None,
+                landscape_run_id=str(run_id),
+            )
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(side_effect=fake_get_status)
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=session_id, landscape_run_id=str(run_id)))
+
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {str(run_id): accounting},
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: RunDiagnosticsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                run_status="completed",
+                summary=RunDiagnosticSummary(
+                    token_count=9324,
+                    preview_limit=50,
+                    preview_truncated=True,
+                    state_counts={},
+                    operation_counts={},
+                    latest_activity_at=None,
+                ),
+                tokens=[],
+                operations=[],
+                artifacts=[],
+            ),
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/diagnostics")
+
+        assert response.status_code == 200
+        assert response.json()["summary"]["token_count"] == 9324
+        assert svc.get_status.call_args.kwargs["accounting"] == accounting
+
+    @pytest.mark.asyncio
+    async def test_internal_status_validation_error_is_not_fake_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        run_id = UUID("11111111-1111-4111-8111-111111111111")
+        session_id = UUID("22222222-2222-4222-8222-222222222222")
+        accounting = _accounting(
+            source_rows=1,
+            succeeded=0,
+            pending=1,
+            closure="open",
+            missing=1,
+        )
+
+        async def fake_get_status(
+            status_run_id: UUID,
+            *,
+            accounting: RunAccounting | None = None,
+            run_record: object | None = None,
+        ) -> RunStatusResponse:
+            del run_record
+            return RunStatusResponse(
+                run_id=str(status_run_id),
+                status="completed",
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                accounting=accounting,
+                error=None,
+                landscape_run_id=str(run_id),
+            )
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(side_effect=fake_get_status)
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=session_id, landscape_run_id=str(run_id)))
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {str(run_id): accounting},
+        )
+
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}")
+
+        assert response.status_code == 500
+        assert response.json()["detail"]["code"] == "run_integrity_error"
+
+    @pytest.mark.asyncio
     async def test_running_run_uses_web_run_id_as_landscape_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         run_id = uuid4()
         svc = MagicMock()
@@ -276,12 +425,6 @@ class TestRunDiagnosticsEndpoint:
                 status="running",
                 started_at=datetime.now(UTC),
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
             )
@@ -338,12 +481,6 @@ class TestRunDiagnosticsEndpoint:
                 status="running",
                 started_at=datetime.now(UTC),
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
             )
@@ -418,12 +555,6 @@ class TestRunDiagnosticsEndpoint:
                 status="running",
                 started_at=datetime.now(UTC),
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
             )
@@ -620,19 +751,17 @@ class TestWebSocketReconnectTier1Guards:
             _build_terminal_run_event(status_response)
 
     @pytest.mark.parametrize(
-        ("terminal_status", "rows_processed", "rows_succeeded", "rows_failed"),
+        ("terminal_status", "accounting"),
         [
-            ("completed", 1, 1, 0),
-            ("completed_with_failures", 2, 1, 1),
-            ("empty", 0, 0, 0),
+            ("completed", _accounting(source_rows=1, succeeded=1)),
+            ("completed_with_failures", _accounting(source_rows=2, succeeded=1, failed=1)),
+            ("empty", _accounting(source_rows=0, succeeded=0)),
         ],
     )
     def test_operator_completion_statuses_build_completed_terminal_event(
         self,
         terminal_status: str,
-        rows_processed: int,
-        rows_succeeded: int,
-        rows_failed: int,
+        accounting: RunAccounting,
     ) -> None:
         """Reconnect/idle replay preserves the widened operator-completion status."""
         from elspeth.web.execution.routes import _build_terminal_run_event
@@ -644,12 +773,7 @@ class TestWebSocketReconnectTier1Guards:
                 status=terminal_status,  # type: ignore[arg-type]
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=rows_processed,
-                rows_succeeded=rows_succeeded,
-                rows_failed=rows_failed,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=accounting,
                 error=None,
                 landscape_run_id="land-1",
             )
@@ -669,12 +793,7 @@ class TestWebSocketReconnectTier1Guards:
                 status="completed",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=10, succeeded=10),
                 error=None,
                 landscape_run_id=None,
             ),
@@ -690,12 +809,6 @@ class TestWebSocketReconnectTier1Guards:
                 status="failed",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=5,
-                rows_succeeded=0,
-                rows_failed=5,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
             ),
@@ -711,56 +824,151 @@ class TestWebSocketReconnectTier1Guards:
                 status="cancelled",
                 started_at=None,
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=0, succeeded=0),
                 error=None,
                 landscape_run_id=None,
             ),
             "both finished_at and started_at are NULL",
         )
 
-    def test_completed_run_with_overcounted_row_counts_raises(self) -> None:
-        """Tier 1 anomaly: row count over-counting in completed run.
-
-        Defence-in-depth: even if a session service bypasses the
-        RunStatusResponse validator (e.g., via ``model_construct`` on a
-        hot path), the WebSocket seeding handler must still fail with a
-        coherent Tier 1 anomaly message rather than an unhandled
-        ``pydantic.ValidationError`` that leaves the client disconnected
-        without explanation (routes.py close code 1011).
-
-        Under the narrow inequality invariant (elspeth-31d53c7493), only
-        over-counting (sum > processed) trips the catch.  Under-counting
-        is the legitimate aggregation-pipeline shape and must pass.
-        Full DAG-aware balance is tracked in elspeth-cf84eb1b52 (P0).
-        """
+    def test_completed_run_without_accounting_raises(self) -> None:
+        """Tier 1 anomaly: completed run with no Landscape accounting."""
         run_id = uuid4()
-        # Bypass the RunStatusResponse validator to simulate a bad DB read
-        # reaching the WebSocket seeding path.  Real callers never do this
-        # — the test is proving the catch in routes.py is armed.
         bad_status = RunStatusResponse.model_construct(
             run_id=str(run_id),
             status="completed",
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
-            rows_processed=100,
-            rows_succeeded=80,
-            rows_failed=20,
-            rows_routed_success=10,
-            rows_routed_failure=0,
-            rows_quarantined=10,  # 80+20+10+10 = 120 > 100 — over-counting Tier 1 bug
+            accounting=None,
             error=None,
             landscape_run_id="lscape-1",
         )
-        self._assert_terminal_event_build_raises(bad_status, r"Tier 1 anomaly.*audit trail inconsistent")
+        self._assert_terminal_event_build_raises(bad_status, r"Tier 1 anomaly.*audit trail incomplete")
+
+    def test_cancelled_run_without_accounting_replays_stored_counters(self) -> None:
+        """Early-cancel replay can use the authoritative session RunRecord counters."""
+        from elspeth.web.execution.routes import _build_terminal_run_event
+        from elspeth.web.sessions.protocol import RunRecord
+
+        run_id = uuid4()
+        session_id = uuid4()
+        state_id = uuid4()
+        now = datetime.now(tz=UTC)
+        status_response = RunStatusResponse(
+            run_id=str(run_id),
+            status="cancelled",
+            started_at=now,
+            finished_at=now,
+            accounting=None,
+            error=None,
+            landscape_run_id=None,
+        )
+        run_record = RunRecord(
+            id=run_id,
+            session_id=session_id,
+            state_id=state_id,
+            status="cancelled",
+            started_at=now,
+            finished_at=now,
+            rows_processed=2,
+            rows_succeeded=3,
+            rows_failed=4,
+            rows_routed_success=5,
+            rows_routed_failure=6,
+            rows_quarantined=7,
+            error=None,
+            landscape_run_id=None,
+            pipeline_yaml=None,
+        )
+
+        event = _build_terminal_run_event(status_response, cancelled_run_record=run_record)
+
+        payload = event.model_dump(mode="json")
+        assert payload["event_type"] == "cancelled"
+        assert payload["data"]["source_rows_processed"] == 2
+        assert payload["data"]["tokens_succeeded"] == 3
+        assert payload["data"]["tokens_failed"] == 4
+        assert payload["data"]["tokens_routed_success"] == 5
+        assert payload["data"]["tokens_routed_failure"] == 6
+        assert payload["data"]["tokens_quarantined"] == 7
 
 
 class TestRunStatusEndpoint:
     """GET /api/runs/{run_id}"""
+
+    @pytest.mark.asyncio
+    async def test_status_uses_same_run_snapshot_when_run_completes_between_reads(self) -> None:
+        """A running first read must not pair stale accounting with a later terminal reread."""
+        from elspeth.web.sessions.protocol import RunRecord
+
+        run_id = uuid4()
+        session_id = uuid4()
+        state_id = uuid4()
+        started_at = datetime.now(tz=UTC)
+        running_record = RunRecord(
+            id=run_id,
+            session_id=session_id,
+            state_id=state_id,
+            status="running",
+            started_at=started_at,
+            finished_at=None,
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            error=None,
+            landscape_run_id=None,
+            pipeline_yaml=None,
+        )
+        completed_record = RunRecord(
+            id=run_id,
+            session_id=session_id,
+            state_id=state_id,
+            status="completed",
+            started_at=started_at,
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=1,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            error=None,
+            landscape_run_id="land-race",
+            pipeline_yaml=None,
+        )
+
+        async def fake_get_status(
+            status_run_id: UUID,
+            *,
+            accounting: RunAccounting | None = None,
+            run_record: RunRecord | None = None,
+        ) -> RunStatusResponse:
+            record = run_record or completed_record
+            return RunStatusResponse(
+                run_id=str(status_run_id),
+                status=record.status,
+                started_at=record.started_at,
+                finished_at=record.finished_at,
+                accounting=accounting,
+                error=record.error,
+                landscape_run_id=record.landscape_run_id,
+            )
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(side_effect=fake_get_status)
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_run = AsyncMock(return_value=running_record)
+
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(f"/api/runs/{run_id}")
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "running"
+        assert svc.get_status.call_args.kwargs["run_record"] is running_record
 
     @pytest.mark.asyncio
     async def test_status_returns_200(self) -> None:
@@ -776,14 +984,10 @@ class TestRunStatusEndpoint:
                 status="completed_with_failures",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=10,
-                rows_succeeded=7,
-                rows_failed=1,
-                rows_routed_success=1,
-                rows_routed_failure=0,
-                rows_quarantined=1,
+                accounting=_accounting(source_rows=10, succeeded=7, failed=1, routed_success=1, quarantined=1),
                 error=None,
                 landscape_run_id="lscape-1",
+                discard_summary=DiscardSummary(total=0, validation_errors=0, transform_errors=0, sink_discards=0),
             )
         )
         app = _create_test_app(execution_service=svc)
@@ -792,9 +996,10 @@ class TestRunStatusEndpoint:
             assert resp.status_code == 200
             body = resp.json()
             assert body["status"] == "completed_with_failures"
-            assert body["rows_processed"] == 10
-            assert body["rows_routed_success"] == 1
-            assert body["rows_routed_failure"] == 0
+            assert "rows_processed" not in body
+            assert body["accounting"]["source"]["rows_processed"] == 10
+            assert body["accounting"]["routing"]["routed_success"] == 1
+            assert body["accounting"]["routing"]["routed_failure"] == 0
 
     @pytest.mark.asyncio
     async def test_running_status_with_landscape_id_skips_discard_summary_lookup(
@@ -810,12 +1015,6 @@ class TestRunStatusEndpoint:
                 status="running",
                 started_at=datetime.now(tz=UTC),
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
             )
@@ -868,10 +1067,7 @@ class TestCancelEndpoint:
                 status="cancelled",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=5,
-                rows_succeeded=5,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=5, succeeded=5),
                 error=None,
                 landscape_run_id="lscape-1",
             )
@@ -912,14 +1108,10 @@ class TestResultsEndpoint:
                 status="completed_with_failures",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=10,
-                rows_succeeded=7,
-                rows_failed=1,
-                rows_routed_success=1,
-                rows_routed_failure=0,
-                rows_quarantined=1,
+                accounting=_accounting(source_rows=10, succeeded=7, failed=1, routed_success=1, quarantined=1),
                 error=None,
                 landscape_run_id="lscape-1",
+                discard_summary=DiscardSummary(total=0, validation_errors=0, transform_errors=0, sink_discards=0),
             )
         )
         app = _create_test_app(execution_service=svc)
@@ -927,9 +1119,10 @@ class TestResultsEndpoint:
             resp = await client.get(f"/api/runs/{run_id}/results")
             assert resp.status_code == 200
             body = resp.json()
-            assert body["rows_processed"] == 10
-            assert body["rows_routed_success"] == 1
-            assert body["rows_routed_failure"] == 0
+            assert "rows_processed" not in body
+            assert body["accounting"]["source"]["rows_processed"] == 10
+            assert body["accounting"]["routing"]["routed_success"] == 1
+            assert body["accounting"]["routing"]["routed_failure"] == 0
             assert body["landscape_run_id"] == "lscape-1"
 
     @pytest.mark.asyncio
@@ -943,12 +1136,7 @@ class TestResultsEndpoint:
                 status="completed_with_failures",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=10,
-                rows_succeeded=7,
-                rows_failed=1,
-                rows_routed_success=1,
-                rows_routed_failure=0,
-                rows_quarantined=1,
+                accounting=_accounting(source_rows=10, succeeded=7, failed=1, routed_success=1, quarantined=1),
                 error=None,
                 landscape_run_id="lscape-1",
                 discard_summary=DiscardSummary(
@@ -994,10 +1182,6 @@ class TestResultsEndpoint:
                 status="running",
                 started_at=datetime.now(tz=UTC),
                 finished_at=None,
-                rows_processed=5,
-                rows_succeeded=5,
-                rows_failed=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
             )
@@ -1020,10 +1204,6 @@ class TestResultsEndpoint:
                 status="running",
                 started_at=datetime.now(tz=UTC),
                 finished_at=None,
-                rows_processed=5,
-                rows_succeeded=5,
-                rows_failed=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
             )
@@ -1055,10 +1235,6 @@ class TestResultsEndpoint:
                 status="pending",
                 started_at=None,
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
             )
@@ -1088,10 +1264,6 @@ class TestResultsEndpoint:
                     status=non_terminal,  # type: ignore[arg-type]
                     started_at=None,
                     finished_at=None,
-                    rows_processed=0,
-                    rows_succeeded=0,
-                    rows_failed=0,
-                    rows_quarantined=0,
                     error=None,
                     landscape_run_id=None,
                 )

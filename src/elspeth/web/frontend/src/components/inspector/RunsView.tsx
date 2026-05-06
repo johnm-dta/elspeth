@@ -3,7 +3,7 @@
 //
 // List of runs for the current session. Each run entry shows:
 // - Status badge (colour + text label, not colour alone)
-// - Row counts (rows_processed, rows_failed)
+// - Explicit source/token accounting
 // - Duration (elapsed time or "running..." for active runs)
 // - Composition state version
 //
@@ -17,7 +17,7 @@ import { useEffect, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { ProgressView } from "@/components/execution/ProgressView";
-import type { RunDiagnostics, RunDiagnosticsWorkingView, RunStatus } from "@/types/index";
+import type { RunAccounting, RunDiagnostics, RunDiagnosticsWorkingView, RunProgress, RunStatus } from "@/types/index";
 
 // ── Status badge CSS class mapping ───────────────────────────────────────────
 // Uses .status-badge + .status-badge-{status} classes from App.css.
@@ -65,7 +65,7 @@ function formatDuration(startedAt: string, finishedAt: string | null): string {
 }
 
 function counted(label: string, count: number): string {
-  return count === 1 ? `1 ${label}` : `${count} ${label}s`;
+  return count === 1 ? `1 ${label}` : `${count.toLocaleString()} ${label}s`;
 }
 
 function summarizeCounts(prefix: string, counts: Record<string, number>): string | null {
@@ -112,6 +112,43 @@ function buildPendingWorkingView(diagnostics: RunDiagnostics): RunDiagnosticsWor
     evidence: buildVisibleEvidence(diagnostics),
     meaning: "The LLM is reading the same run records shown here and preparing a plain-English explanation.",
     next_steps: [],
+  };
+}
+
+interface VisibleRunAccounting {
+  sourceRowsProcessed: number | null;
+  tokensEmitted: number | null;
+  tokensSucceeded: number | null;
+  tokensFailed: number | null;
+  tokensStructural: number | null;
+  tokensPending: number | null;
+  tokensQuarantined: number;
+  tokensRoutedSuccess: number;
+  tokensRoutedFailure: number;
+  tokensDiscarded: number;
+}
+
+function visibleRunAccounting(
+  accounting: RunAccounting | null,
+  progress: RunProgress | null,
+): VisibleRunAccounting {
+  return {
+    sourceRowsProcessed:
+      accounting?.source.rows_processed ?? progress?.source_rows_processed ?? null,
+    tokensEmitted: accounting?.tokens.emitted ?? null,
+    tokensSucceeded:
+      accounting?.tokens.succeeded ?? progress?.tokens_succeeded ?? null,
+    tokensFailed:
+      accounting?.tokens.failed ?? progress?.tokens_failed ?? null,
+    tokensStructural: accounting?.tokens.structural ?? null,
+    tokensPending: accounting?.tokens.pending ?? null,
+    tokensQuarantined:
+      accounting?.routing.quarantined ?? progress?.tokens_quarantined ?? 0,
+    tokensRoutedSuccess:
+      accounting?.routing.routed_success ?? progress?.tokens_routed_success ?? 0,
+    tokensRoutedFailure:
+      accounting?.routing.routed_failure ?? progress?.tokens_routed_failure ?? 0,
+    tokensDiscarded: accounting?.routing.discarded ?? 0,
   };
 }
 
@@ -183,6 +220,8 @@ export function RunsView() {
       {runs.map((run) => {
         const isActive =
           run.id === activeRunId && progress?.status === "running";
+        const activeProgress = run.id === activeRunId ? progress : null;
+        const accounting = visibleRunAccounting(run.accounting, activeProgress);
         const discardTotal = run.discard_summary?.total ?? 0;
         const discardTitle = run.discard_summary
           ? [
@@ -228,7 +267,7 @@ export function RunsView() {
                 </span>
               </div>
 
-              {/* Row counts + duration */}
+              {/* Source/token accounting + duration */}
               <div
                 style={{
                   display: "flex",
@@ -238,45 +277,66 @@ export function RunsView() {
                   color: "var(--color-text-muted)",
                 }}
               >
-                <span>
-                  {run.rows_processed.toLocaleString()} rows
-                  {run.rows_failed > 0 && (
+                {accounting.sourceRowsProcessed === null ? (
+                  <span>Accounting pending</span>
+                ) : (
+                  <span>{counted("source row", accounting.sourceRowsProcessed)}</span>
+                )}
+                {accounting.tokensEmitted !== null && (
+                  <span>{counted("token", accounting.tokensEmitted)} emitted</span>
+                )}
+                {accounting.tokensSucceeded !== null && accounting.tokensSucceeded > 0 && (
+                  <span title="Tokens that reached a successful terminal disposition">
+                    {counted("token", accounting.tokensSucceeded)} succeeded
+                  </span>
+                )}
+                {accounting.tokensFailed !== null && accounting.tokensFailed > 0 && (
+                  <span title="Tokens that reached a failure terminal disposition">
                     <span style={{ color: "var(--color-error)" }}>
-                      {" "}
-                      ({run.rows_failed.toLocaleString()} failed)
+                      {counted("token", accounting.tokensFailed)} failed
                     </span>
-                  )}
-                </span>
-                {/* S-8 (rows_succeeded / rows_quarantined visibility) — mid-run
-                    operators must be able to distinguish a clean-success run
-                    from a quarantine-heavy run; the wire payload now carries
-                    both counters on every progress / completed / cancelled
-                    event. */}
-                {run.rows_succeeded > 0 && (
-                  <span title="Rows that completed via the success-sink path">
-                    {run.rows_succeeded.toLocaleString()} succeeded
                   </span>
                 )}
-                {run.rows_quarantined > 0 && (
+                {accounting.tokensStructural !== null && accounting.tokensStructural > 0 && (
+                  <span title="Closed structural parent/delegation tokens">
+                    {counted("structural token", accounting.tokensStructural)}
+                  </span>
+                )}
+                {accounting.tokensPending !== null && accounting.tokensPending > 0 && (
                   <span
-                    title="Rows quarantined for investigation"
+                    title="Tokens without a completed terminal disposition"
                     style={{ color: "var(--color-warning)" }}
                   >
-                    {run.rows_quarantined.toLocaleString()} quarantined
+                    {counted("pending token", accounting.tokensPending)}
                   </span>
                 )}
-                {/* elspeth-5069612f3c (ADR-018) — rows_routed split. */}
-                {run.rows_routed_success > 0 && (
-                  <span title="Gate route_to_sink MOVE rows (intentional success-path routing)">
-                    {run.rows_routed_success.toLocaleString()} routed (success)
-                  </span>
-                )}
-                {run.rows_routed_failure > 0 && (
+                {accounting.tokensQuarantined > 0 && (
                   <span
-                    title="Transform on_error DIVERT rows (failure-path routing)"
+                    title="Tokens quarantined for investigation"
                     style={{ color: "var(--color-warning)" }}
                   >
-                    {run.rows_routed_failure.toLocaleString()} routed (failure)
+                    {counted("token", accounting.tokensQuarantined)} quarantined
+                  </span>
+                )}
+                {accounting.tokensRoutedSuccess > 0 && (
+                  <span title="Gate route_to_sink MOVE tokens (intentional success-path routing)">
+                    {accounting.tokensRoutedSuccess.toLocaleString()} routed (success)
+                  </span>
+                )}
+                {accounting.tokensRoutedFailure > 0 && (
+                  <span
+                    title="Transform on_error DIVERT tokens (failure-path routing)"
+                    style={{ color: "var(--color-warning)" }}
+                  >
+                    {accounting.tokensRoutedFailure.toLocaleString()} routed (failure)
+                  </span>
+                )}
+                {accounting.tokensDiscarded > 0 && (
+                  <span
+                    title="Tokens discarded by sink or validation disposition"
+                    style={{ color: "var(--color-warning)" }}
+                  >
+                    {counted("token", accounting.tokensDiscarded)} discarded
                   </span>
                 )}
                 {discardTotal > 0 && (
@@ -320,15 +380,15 @@ export function RunsView() {
 
                 Phase 2.2 (elspeth-0de989c56d): the gate uses the backend's
                 authoritative status classification rather than re-deriving
-                from row counts.  The backend always populates `error` for
+                from accounting counts.  The backend always populates `error` for
                 failure-like terminal runs:
-                  - FAILED  → _structural_failure_message (no rows succeeded)
+                  - FAILED  → structural failure message
                   - COMPLETED_WITH_FAILURES → _partial_completion_message
-                    (count summary; per-row detail lives behind "Inspect")
+                    (count summary; per-token detail lives behind "Inspect")
                 A count-based predicate would duplicate the L0
                 `failure_indicator` invariant (web/execution/schemas.py)
                 and would also miss FAILED-with-zero-counts (engine crash
-                before any rows processed).
+                before any accounting was available).
               */}
               {(run.status === "failed" || run.status === "completed_with_failures") &&
                 run.error && (

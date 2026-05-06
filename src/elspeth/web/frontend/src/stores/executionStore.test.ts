@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useExecutionStore } from "./executionStore";
 import { connectToRun } from "@/api/websocket";
-import type { Run, RunDiagnostics, RunEvent, ValidationResult } from "@/types/index";
+import type { Run, RunAccounting, RunDiagnostics, RunEvent, ValidationResult } from "@/types/index";
 
 // Mock the API client
 vi.mock("@/api/client", () => ({
@@ -90,17 +90,38 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
     id: "run-1",
     session_id: "session-1",
     status: "running",
-    rows_processed: 0,
-    rows_succeeded: 0,
-    rows_failed: 0,
-    rows_quarantined: 0,
-    rows_routed_success: 0,
-    rows_routed_failure: 0,
+    accounting: null,
     started_at: "2026-04-26T05:31:57.000Z",
     finished_at: null,
     composition_version: 1,
     ...overrides,
   } as Run;
+}
+
+function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
+  return {
+    source: { rows_processed: 1 },
+    tokens: {
+      emitted: 9_324,
+      terminal: 9_324,
+      succeeded: 9_323,
+      failed: 0,
+      structural: 1,
+      pending: 0,
+    },
+    routing: {
+      routed_success: 0,
+      routed_failure: 0,
+      quarantined: 0,
+      discarded: 0,
+    },
+    integrity: {
+      closure: "closed",
+      missing_terminal_outcomes: 0,
+      duplicate_terminal_outcomes: 0,
+    },
+    ...overrides,
+  };
 }
 
 function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
@@ -164,12 +185,13 @@ describe("executionStore failed run events", () => {
       runs: [makeRun()],
       activeRunId: "run-1",
       progress: {
-        rows_processed: 0,
-        rows_succeeded: 0,
-        rows_failed: 0,
-        rows_quarantined: 0,
-        rows_routed_success: 0,
-        rows_routed_failure: 0,
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
         recent_errors: [],
         status: "running",
       },
@@ -204,29 +226,29 @@ describe("executionStore failed run events", () => {
   });
 });
 
-describe("executionStore progress events advance runs list", () => {
-  // elspeth-0c076ad374 — pre-CR-3 the runs-list row counters froze at the
-  // REST snapshot until the terminal event arrived, while the live
-  // ProgressView ticked from state.progress. The fix patches state.runs[i]
-  // on `progress` events too, so both surfaces advance in lockstep.
+describe("executionStore progress events advance live accounting", () => {
+  // The API run record no longer carries best-known live counters. Progress
+  // events update state.progress, while completed events attach closed
+  // accounting to the matching run record.
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
   });
 
-  it("advances state.runs[i] row counters on progress events", () => {
+  it("advances live source/token counters without reintroducing legacy run rows", () => {
     const close = vi.fn();
     (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
     useExecutionStore.setState({
       runs: [makeRun()],
       activeRunId: "run-1",
       progress: {
-        rows_processed: 0,
-        rows_succeeded: 0,
-        rows_failed: 0,
-        rows_quarantined: 0,
-        rows_routed_success: 0,
-        rows_routed_failure: 0,
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
         recent_errors: [],
         status: "running",
       },
@@ -240,32 +262,30 @@ describe("executionStore progress events advance runs list", () => {
       timestamp: "2026-04-26T05:32:00.000Z",
       event_type: "progress",
       data: {
-        rows_processed: 50,
-        rows_succeeded: 40,
-        rows_failed: 1,
-        rows_quarantined: 0,
-        rows_routed_success: 7,
-        rows_routed_failure: 2,
+        source_rows_processed: 50,
+        tokens_succeeded: 40,
+        tokens_failed: 1,
+        tokens_quarantined: 0,
+        tokens_routed_success: 7,
+        tokens_routed_failure: 2,
       },
     };
     handlers.onProgress(firstProgress, firstProgress.data);
 
     let state = useExecutionStore.getState();
+    expect(state.runs[0]).not.toHaveProperty("rows_processed");
     expect(state.runs[0]).toMatchObject({
       id: "run-1",
       status: "running",
-      rows_processed: 50,
-      rows_failed: 1,
-      rows_routed_success: 7,
-      rows_routed_failure: 2,
+      accounting: null,
       finished_at: null,
     });
-    // ProgressView slot must continue to mirror the same counts.
     expect(state.progress).toMatchObject({
-      rows_processed: 50,
-      rows_failed: 1,
-      rows_routed_success: 7,
-      rows_routed_failure: 2,
+      source_rows_processed: 50,
+      tokens_succeeded: 40,
+      tokens_failed: 1,
+      tokens_routed_success: 7,
+      tokens_routed_failure: 2,
     });
 
     const secondProgress: RunEvent = {
@@ -273,23 +293,23 @@ describe("executionStore progress events advance runs list", () => {
       timestamp: "2026-04-26T05:32:05.000Z",
       event_type: "progress",
       data: {
-        rows_processed: 120,
-        rows_succeeded: 95,
-        rows_failed: 3,
-        rows_quarantined: 0,
-        rows_routed_success: 18,
-        rows_routed_failure: 4,
+        source_rows_processed: 120,
+        tokens_succeeded: 95,
+        tokens_failed: 3,
+        tokens_quarantined: 0,
+        tokens_routed_success: 18,
+        tokens_routed_failure: 4,
       },
     };
     handlers.onProgress(secondProgress, secondProgress.data);
 
     state = useExecutionStore.getState();
-    expect(state.runs[0]).toMatchObject({
-      rows_processed: 120,
-      rows_failed: 3,
-      rows_routed_success: 18,
-      rows_routed_failure: 4,
-      finished_at: null,
+    expect(state.progress).toMatchObject({
+      source_rows_processed: 120,
+      tokens_succeeded: 95,
+      tokens_failed: 3,
+      tokens_routed_success: 18,
+      tokens_routed_failure: 4,
     });
   });
 
@@ -298,21 +318,18 @@ describe("executionStore progress events advance runs list", () => {
     (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
     const otherRun = makeRun({
       id: "run-other",
-      rows_processed: 42,
-      rows_failed: 1,
-      rows_routed_success: 3,
-      rows_routed_failure: 0,
     });
     useExecutionStore.setState({
       runs: [otherRun],
       activeRunId: "run-1",
       progress: {
-        rows_processed: 0,
-        rows_succeeded: 0,
-        rows_failed: 0,
-        rows_quarantined: 0,
-        rows_routed_success: 0,
-        rows_routed_failure: 0,
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
         recent_errors: [],
         status: "running",
       },
@@ -326,12 +343,12 @@ describe("executionStore progress events advance runs list", () => {
       timestamp: "2026-04-26T05:32:00.000Z",
       event_type: "progress",
       data: {
-        rows_processed: 99,
-        rows_succeeded: 72,
-        rows_failed: 9,
-        rows_quarantined: 0,
-        rows_routed_success: 9,
-        rows_routed_failure: 9,
+        source_rows_processed: 99,
+        tokens_succeeded: 72,
+        tokens_failed: 9,
+        tokens_quarantined: 0,
+        tokens_routed_success: 9,
+        tokens_routed_failure: 9,
       },
     };
     handlers.onProgress(event, event.data);
@@ -342,20 +359,11 @@ describe("executionStore progress events advance runs list", () => {
   });
 
   it("does not zero state.runs[i] counters on error events with null progress", () => {
-    // Locks in a deliberate divergence from the issue's wording
-    // (elspeth-0c076ad374). RunEventError carries no row counters; if
-    // applyRunEvent patched runs[] on error events too, it would fall back
-    // to `state.progress?.* ?? 0` and clobber a real REST snapshot in the
-    // reconnect-before-first-progress case. Progress events are the only
-    // safe surface for live runs[] updates.
+    // RunEventError carries no accounting. The store must preserve the REST
+    // snapshot instead of fabricating zeros during reconnect-before-progress.
     const close = vi.fn();
     (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
-    const restSnapshot = makeRun({
-      rows_processed: 100,
-      rows_failed: 5,
-      rows_routed_success: 12,
-      rows_routed_failure: 3,
-    });
+    const restSnapshot = makeRun({ accounting: makeAccounting() });
     useExecutionStore.setState({
       runs: [restSnapshot],
       activeRunId: "run-1",
@@ -379,10 +387,57 @@ describe("executionStore progress events advance runs list", () => {
 
     const state = useExecutionStore.getState();
     expect(state.runs[0]).toMatchObject({
-      rows_processed: 100,
-      rows_failed: 5,
-      rows_routed_success: 12,
-      rows_routed_failure: 3,
+      accounting: makeAccounting(),
+    });
+  });
+
+  it("stores completed event accounting on progress and matching run", () => {
+    const close = vi.fn();
+    const accounting = makeAccounting();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 1,
+        tokens_succeeded: 9_000,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    const completedEvent: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:08.000Z",
+      event_type: "completed",
+      data: {
+        status: "completed",
+        accounting,
+        landscape_run_id: "landscape-run-1",
+      },
+    };
+    handlers.onComplete(completedEvent, completedEvent.data);
+
+    const state = useExecutionStore.getState();
+    expect(state.progress).toMatchObject({
+      source_rows_processed: 1,
+      tokens_succeeded: 9_323,
+      tokens_failed: 0,
+      accounting,
+      status: "completed",
+    });
+    expect(state.runs[0]).toMatchObject({
+      status: "completed",
+      accounting,
+      finished_at: "2026-04-26T05:32:08.000Z",
     });
   });
 });

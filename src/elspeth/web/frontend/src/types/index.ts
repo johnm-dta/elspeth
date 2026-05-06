@@ -389,27 +389,52 @@ type _AssertTerminalSubset = TerminalRunStatus extends RunStatus ? true : never;
 const _terminalSubsetCheck: _AssertTerminalSubset = true;
 void _terminalSubsetCheck;
 
+export interface RunAccountingSource {
+  rows_processed: number;
+}
+
+export interface RunAccountingTokens {
+  emitted: number;
+  terminal: number;
+  succeeded: number;
+  failed: number;
+  structural: number;
+  pending: number;
+}
+
+export interface RunAccountingRouting {
+  routed_success: number;
+  routed_failure: number;
+  quarantined: number;
+  discarded: number;
+}
+
+export interface RunAccountingIntegrity {
+  closure: "closed" | "open" | "unknown";
+  missing_terminal_outcomes: number;
+  duplicate_terminal_outcomes: number;
+}
+
+export interface RunAccounting {
+  source: RunAccountingSource;
+  tokens: RunAccountingTokens;
+  routing: RunAccountingRouting;
+  integrity: RunAccountingIntegrity;
+}
+
 /** An execution run.
  *
  * Mirrors ``RunStatusResponse`` / ``RunResultsResponse`` at
- * ``web/execution/schemas.py``.  All six row counters are required —
- * the wire already serves them, and the same fabrication-test rationale
- * that drives ``ProgressData`` applies here: an operator inspecting a
- * historical run record must be able to distinguish "no rows succeeded"
- * from "the field is missing".
+ * ``web/execution/schemas.py``. Accounting is explicit about its unit of
+ * account: source rows are ingestion records, while token counts are emitted
+ * materialized work. Non-terminal and early-failed runs may not have a
+ * Landscape accounting projection yet.
  */
 export interface Run {
   id: string;
   session_id: string;
   status: RunStatus;
-  rows_processed: number;
-  rows_succeeded: number;
-  rows_failed: number;
-  rows_quarantined: number;
-  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
-  rows_routed_success: number;
-  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
-  rows_routed_failure: number;
+  accounting: RunAccounting | null;
   error: string | null;
   started_at: string;
   finished_at: string | null;
@@ -440,24 +465,12 @@ export interface RunEvent {
 }
 
 export interface RunEventProgress {
-  rows_processed: number;
-  /**
-   * Required wire field.  Defaulting to 0 would fabricate "we don't know
-   * how many rows succeeded" as "zero rows succeeded" — violating the
-   * CLAUDE.md fabrication test.  Backend ProgressData requires this.
-   */
-  rows_succeeded: number;
-  rows_failed: number;
-  /**
-   * Required wire field — same fabrication-test rationale as
-   * ``rows_succeeded``.  An operator mid-run must be able to distinguish
-   * "0% quarantined" from "the field is missing".
-   */
-  rows_quarantined: number;
-  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
-  rows_routed_success: number;
-  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
-  rows_routed_failure: number;
+  source_rows_processed: number;
+  tokens_succeeded: number;
+  tokens_failed: number;
+  tokens_quarantined: number;
+  tokens_routed_success: number;
+  tokens_routed_failure: number;
 }
 
 export interface RunEventError {
@@ -471,42 +484,23 @@ export interface RunEventCompleted {
    * Phase 2.2 (elspeth-0de989c56d): backend-supplied operator-completion
    * status. The SSE `event_type="completed"` envelope covers all three
    * operator-completion values; the frontend MUST consume `data.status`
-   * verbatim rather than re-deriving from row counts (that would duplicate
+   * verbatim rather than re-deriving from accounting counts (that would duplicate
    * the L0 `failure_indicator` predicate and create dual-source-of-truth
    * drift). Mirrors `CompletedData.status` at `web/execution/schemas.py`.
-   */
+  */
   status: "completed" | "completed_with_failures" | "empty";
-  rows_processed: number;
-  rows_succeeded: number;
-  rows_failed: number;
-  rows_quarantined: number;
-  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
-  rows_routed_success: number;
-  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
-  rows_routed_failure: number;
+  accounting: RunAccounting;
   landscape_run_id: string;
 }
 
 export interface RunEventCancelled {
   status: "cancelled";
-  rows_processed: number;
-  /**
-   * Required wire field — same fabrication-test rationale as
-   * ``RunEventProgress.rows_succeeded``.  An operator inspecting a
-   * cancelled run must be able to distinguish "no rows succeeded
-   * before cancellation" from "the field is missing".
-   */
-  rows_succeeded: number;
-  rows_failed: number;
-  /**
-   * Required wire field — same fabrication-test rationale as
-   * ``RunEventProgress.rows_quarantined``.
-   */
-  rows_quarantined: number;
-  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
-  rows_routed_success: number;
-  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
-  rows_routed_failure: number;
+  source_rows_processed: number;
+  tokens_succeeded: number;
+  tokens_failed: number;
+  tokens_quarantined: number;
+  tokens_routed_success: number;
+  tokens_routed_failure: number;
 }
 
 export interface RunEventFailed {
@@ -517,21 +511,18 @@ export interface RunEventFailed {
 
 /** Live progress state derived from RunEvents.
  *
- * Mirrors the wire shape of ``RunEventProgress`` plus the recent-error
- * ring buffer.  ``rows_succeeded`` and ``rows_quarantined`` are required
- * because the wire payload now requires them — the reducer cannot
- * fabricate a 0 default without violating the same fabrication-test
- * rationale that drives the backend schema.
+ * Mirrors the explicit source/token counters from ``RunEventProgress`` plus
+ * the recent-error ring buffer. Completed events additionally attach the
+ * closed Landscape accounting projection.
  */
 export interface RunProgress {
-  rows_processed: number;
-  rows_succeeded: number;
-  rows_failed: number;
-  rows_quarantined: number;
-  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
-  rows_routed_success: number;
-  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
-  rows_routed_failure: number;
+  source_rows_processed: number;
+  tokens_succeeded: number;
+  tokens_failed: number;
+  tokens_quarantined: number;
+  tokens_routed_success: number;
+  tokens_routed_failure: number;
+  accounting: RunAccounting | null;
   recent_errors: RunEventError[];
   status: RunStatus;
 }

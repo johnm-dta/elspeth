@@ -20,6 +20,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from httpx import ASGITransport, AsyncClient
 from starlette.routing import Route
 
@@ -57,7 +58,9 @@ def _create_test_app(
     mock_session.user_id = _TEST_USER_ID
     mock_session.auth_provider_type = "local"
     mock_session_service.get_session = AsyncMock(return_value=mock_session)
-    mock_session_service.get_run = AsyncMock(return_value=MagicMock(session_id=uuid4()))
+    mock_run = MagicMock(session_id=uuid4())
+    mock_run.landscape_run_id = None
+    mock_session_service.get_run = AsyncMock(return_value=mock_run)
     app.state.session_service = mock_session_service
 
     if settings is None:
@@ -81,12 +84,7 @@ def _running_status(run_id: uuid4) -> RunStatusResponse:
         status="running",
         started_at=datetime.now(UTC),
         finished_at=None,
-        rows_processed=0,
-        rows_succeeded=0,
-        rows_failed=0,
-        rows_routed_success=0,
-        rows_routed_failure=0,
-        rows_quarantined=0,
+        accounting=None,
         error=None,
         landscape_run_id=None,
     )
@@ -129,7 +127,7 @@ class TestRunOutputsManifestEndpoint:
             return func(*args, **kwargs)
 
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
-        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -191,18 +189,27 @@ class TestRunOutputContentEndpoint:
             return func(*args, **kwargs)
 
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
-        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
         settings = MagicMock()
         settings.auth_provider = "local"
         settings.data_dir = str(tmp_path)
 
         app = _create_test_app(execution_service=svc, settings=settings)
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/content")
+        endpoint = _route_endpoint(app, "get_run_output_content")
+        request = MagicMock()
+        request.app = app
+        response = await endpoint(
+            run_id=run_id,
+            artifact_id="art-1",
+            request=request,
+            user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+            service=svc,
+        )
 
-        assert response.status_code == 200
-        assert response.content == b'{"interaction_id":"INT-1001"}\n'
+        assert isinstance(response, FileResponse)
+        assert response.path == sink_file
+        assert sink_file.read_bytes() == b'{"interaction_id":"INT-1001"}\n'
 
     @pytest.mark.asyncio
     async def test_403_when_path_outside_sink_allowlist(self, monkeypatch, tmp_path) -> None:
@@ -238,7 +245,7 @@ class TestRunOutputContentEndpoint:
             return func(*args, **kwargs)
 
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
-        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
         settings = MagicMock()
         settings.auth_provider = "local"
@@ -270,7 +277,7 @@ class TestRunOutputContentEndpoint:
             return func(*args, **kwargs)
 
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
-        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
         settings = MagicMock()
         settings.auth_provider = "local"
@@ -317,7 +324,7 @@ class TestRunOutputContentEndpoint:
             return func(*args, **kwargs)
 
         monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
-        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
         settings = MagicMock()
         settings.auth_provider = "local"

@@ -117,6 +117,8 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("validation_errors", "ix_validation_errors_run_row"),
 )
 
+_ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
+
 
 def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
     """Return required columns missing from existing tables."""
@@ -206,6 +208,7 @@ class LandscapeDB:
         self._setup_engine()
         self._validate_schema()  # Check BEFORE create_tables
         self._create_tables()
+        self._create_additive_indexes()
         self._sync_sqlite_schema_epoch()
 
     def _setup_engine(self) -> None:
@@ -357,6 +360,13 @@ class LandscapeDB:
     def _create_tables(self) -> None:
         """Create all tables if they don't exist."""
         metadata.create_all(self.engine)
+
+    def _create_additive_indexes(self) -> None:
+        """Create non-gating performance indexes for existing schemas."""
+        for table in metadata.tables.values():
+            for index in table.indexes:
+                if index.name in _ADDITIVE_INDEX_NAMES:
+                    index.create(self.engine, checkfirst=True)
 
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
@@ -722,6 +732,7 @@ class LandscapeDB:
 
         if create_tables:
             metadata.create_all(engine)
+            instance._create_additive_indexes()
             instance._sync_sqlite_schema_epoch()
         return instance
 

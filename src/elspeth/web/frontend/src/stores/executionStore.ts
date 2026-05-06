@@ -71,9 +71,9 @@ let wsConnection: WebSocketConnection | null = null;
  *
  * Phase 2.2 (elspeth-0de989c56d): for terminal events the backend now
  * supplies an explicit `data.status` discriminator on each terminal payload.
- * The frontend MUST consume it verbatim — re-deriving from row counts would
+ * The frontend MUST consume it verbatim — re-deriving from accounting counts would
  * duplicate the L0 `failure_indicator` predicate
- * (`web/execution/schemas.py:_check_status_row_count_invariant`) and create
+ * (`web/execution/schemas.py:_check_status_accounting_invariant`) and create
  * dual-source-of-truth drift between backend and frontend classification.
  *
  * The exhaustiveness `assertNever` guard makes a future Phase 2.3 widening
@@ -99,11 +99,17 @@ function deriveStatus(event: RunEvent): RunStatus {
   }
 }
 
+function hasLiveCounters(
+  data: RunEvent["data"],
+): data is RunEventProgress | RunEventCancelled {
+  return "source_rows_processed" in data;
+}
+
 /**
  * Apply a RunEvent to the current progress state.
  * Accumulates exceptions (keeping the most recent N) and updates
- * row counters. Terminal events ("completed", "cancelled", "failed") update
- * the run status in the runs list.
+ * explicit source/token counters. Terminal events update run status; completed
+ * events also attach the backend's closed Landscape accounting projection.
  */
 function applyRunEvent(
   state: ExecutionState,
@@ -131,83 +137,80 @@ function applyRunEvent(
       : [...(state.progress?.recent_errors ?? [])];
   const recentErrors = newErrors.slice(0, MAX_RECENT_ERRORS);
 
-  // Extract row counts from data payload.  Progress / completed / cancelled
-  // events all now carry the full six-counter taxonomy; error / failed
-  // events do not, so those branches preserve the prior progress state via
-  // the `?? 0` fallback (a legitimate event-discriminant fallback, NOT a
-  // producer-drift fabrication shim — the wire payload either carries the
-  // field or the event-type contract says it cannot).
-  const rowsProcessed =
-    "rows_processed" in data ? (data as RunEventProgress).rows_processed : (state.progress?.rows_processed ?? 0);
-  const rowsSucceeded =
-    "rows_succeeded" in data ? (data as RunEventProgress).rows_succeeded : (state.progress?.rows_succeeded ?? 0);
-  const rowsFailed =
-    "rows_failed" in data ? (data as RunEventProgress).rows_failed : (state.progress?.rows_failed ?? 0);
-  const rowsQuarantined =
-    "rows_quarantined" in data
-      ? (data as RunEventProgress).rows_quarantined
-      : (state.progress?.rows_quarantined ?? 0);
-  // elspeth-5069612f3c — preserve the rows_routed split from progress /
-  // completed / cancelled payloads (failed terminal events do not carry
-  // these counters today, so the previous progress values are kept on
-  // failure-side terminal events).
-  const rowsRoutedSuccess =
-    "rows_routed_success" in data
-      ? (data as RunEventProgress).rows_routed_success
-      : (state.progress?.rows_routed_success ?? 0);
-  const rowsRoutedFailure =
-    "rows_routed_failure" in data
-      ? (data as RunEventProgress).rows_routed_failure
-      : (state.progress?.rows_routed_failure ?? 0);
+  const liveCounters = hasLiveCounters(data) ? data : null;
+  const completedAccounting =
+    event.event_type === "completed"
+      ? (data as RunEventCompleted).accounting
+      : null;
+  const accounting = completedAccounting ?? state.progress?.accounting ?? null;
+
+  // Progress and cancelled events carry best-known live counters. Completed
+  // events carry the canonical Landscape accounting projection instead.
+  // Error/failed events carry no counters, so they preserve the previous
+  // progress snapshot through the event-type contract.
+  const sourceRowsProcessed =
+    liveCounters?.source_rows_processed ??
+    completedAccounting?.source.rows_processed ??
+    state.progress?.source_rows_processed ??
+    0;
+  const tokensSucceeded =
+    liveCounters?.tokens_succeeded ??
+    completedAccounting?.tokens.succeeded ??
+    state.progress?.tokens_succeeded ??
+    0;
+  const tokensFailed =
+    liveCounters?.tokens_failed ??
+    completedAccounting?.tokens.failed ??
+    state.progress?.tokens_failed ??
+    0;
+  const tokensQuarantined =
+    liveCounters?.tokens_quarantined ??
+    completedAccounting?.routing.quarantined ??
+    state.progress?.tokens_quarantined ??
+    0;
+  const tokensRoutedSuccess =
+    liveCounters?.tokens_routed_success ??
+    completedAccounting?.routing.routed_success ??
+    state.progress?.tokens_routed_success ??
+    0;
+  const tokensRoutedFailure =
+    liveCounters?.tokens_routed_failure ??
+    completedAccounting?.routing.routed_failure ??
+    state.progress?.tokens_routed_failure ??
+    0;
 
   const newProgress: RunProgress = {
-    rows_processed: rowsProcessed,
-    rows_succeeded: rowsSucceeded,
-    rows_failed: rowsFailed,
-    rows_quarantined: rowsQuarantined,
-    rows_routed_success: rowsRoutedSuccess,
-    rows_routed_failure: rowsRoutedFailure,
+    source_rows_processed: sourceRowsProcessed,
+    tokens_succeeded: tokensSucceeded,
+    tokens_failed: tokensFailed,
+    tokens_quarantined: tokensQuarantined,
+    tokens_routed_success: tokensRoutedSuccess,
+    tokens_routed_failure: tokensRoutedFailure,
+    accounting,
     recent_errors: recentErrors,
     status: deriveStatus(event),
   };
 
-  // Update the run in the list on every event that carries fresh row counts.
-  //
-  // elspeth-0c076ad374 — `progress` events also patch the four row counters
-  // so the runs-list row stays in lockstep with the live ProgressView slot.
-  // `error` events are deliberately excluded: RunEventError carries no row
-  // counters, so the rowsProcessed/etc. above fall back to
-  // `state.progress?.* ?? 0`, which would clobber a real REST snapshot in
-  // the reconnect-before-first-progress case. Status / error detail /
-  // finished_at remain gated on terminal events to avoid out-of-order
-  // progress downgrading a `failed`/`completed` run back to `running`.
+  // Run records mirror the REST shape: terminal completed runs receive
+  // accounting; in-flight counters stay in `progress` rather than being
+  // reintroduced as legacy rows_* fields on Run.
   const isTerminal =
     event.event_type === "completed" ||
     event.event_type === "cancelled" ||
     event.event_type === "failed";
-  const isProgress = event.event_type === "progress";
   let updatedRuns = state.runs;
-  if (isTerminal || isProgress) {
+  if (isTerminal) {
     updatedRuns = state.runs.map((r) =>
       r.id === event.run_id
         ? {
             ...r,
-            rows_processed: rowsProcessed,
-            rows_succeeded: rowsSucceeded,
-            rows_failed: rowsFailed,
-            rows_quarantined: rowsQuarantined,
-            rows_routed_success: rowsRoutedSuccess,
-            rows_routed_failure: rowsRoutedFailure,
-            ...(isTerminal
-              ? {
-                  status: newProgress.status,
-                  error:
-                    event.event_type === "failed"
-                      ? (data as RunEventFailed).detail
-                      : r.error,
-                  finished_at: event.timestamp,
-                }
-              : {}),
+            status: newProgress.status,
+            accounting: completedAccounting ?? r.accounting,
+            error:
+              event.event_type === "failed"
+                ? (data as RunEventFailed).detail
+                : r.error,
+            finished_at: event.timestamp,
           }
         : r,
     );
@@ -266,12 +269,13 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         activeRunId: run_id,
         isExecuting: false,
         progress: {
-          rows_processed: 0,
-          rows_succeeded: 0,
-          rows_failed: 0,
-          rows_quarantined: 0,
-          rows_routed_success: 0,
-          rows_routed_failure: 0,
+          source_rows_processed: 0,
+          tokens_succeeded: 0,
+          tokens_failed: 0,
+          tokens_quarantined: 0,
+          tokens_routed_success: 0,
+          tokens_routed_failure: 0,
+          accounting: null,
           recent_errors: [],
           status: "running",
         },

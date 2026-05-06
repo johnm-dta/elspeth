@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -20,7 +20,16 @@ from fastapi.routing import APIWebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 from elspeth.web.auth.models import AuthenticationError
-from elspeth.web.execution.schemas import ProgressData, RunEvent, RunStatusResponse
+from elspeth.web.execution.schemas import (
+    ProgressData,
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
+    RunEvent,
+    RunStatusResponse,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -78,9 +87,41 @@ def _create_ws_test_app(
     app.state.auth_provider = auth_provider or MagicMock()
     app.state.execution_service = execution_service or MagicMock()
     app.state.broadcaster = broadcaster or MagicMock()
+    app.state.session_service = MagicMock()
+    app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=uuid4(), landscape_run_id=None))
+    app.state.settings = MagicMock()
 
     app.include_router(create_execution_router())
     return app
+
+
+def _accounting(
+    *,
+    source_rows: int = 1,
+    succeeded: int = 1,
+    failed: int = 0,
+    structural: int = 0,
+    pending: int = 0,
+    closure: Literal["closed", "open", "unknown"] = "closed",
+) -> RunAccounting:
+    terminal = succeeded + failed + structural
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=source_rows),
+        tokens=RunAccountingTokens(
+            emitted=terminal + pending,
+            terminal=terminal,
+            succeeded=succeeded,
+            failed=failed,
+            structural=structural,
+            pending=pending,
+        ),
+        routing=RunAccountingRouting(routed_success=0, routed_failure=0, quarantined=0, discarded=0),
+        integrity=RunAccountingIntegrity(
+            closure=closure,
+            missing_terminal_outcomes=0,
+            duplicate_terminal_outcomes=0,
+        ),
+    )
 
 
 def _make_broadcaster() -> MagicMock:
@@ -199,12 +240,6 @@ class TestWebSocketTimeoutRecovery:
                     status="running",
                     started_at=datetime.now(tz=UTC),
                     finished_at=None,
-                    rows_processed=1,
-                    rows_succeeded=1,
-                    rows_failed=0,
-                    rows_routed_success=0,
-                    rows_routed_failure=0,
-                    rows_quarantined=0,
                     error=None,
                     landscape_run_id=None,
                 ),
@@ -213,12 +248,6 @@ class TestWebSocketTimeoutRecovery:
                     status="running",
                     started_at=datetime.now(tz=UTC),
                     finished_at=None,
-                    rows_processed=1,
-                    rows_succeeded=1,
-                    rows_failed=0,
-                    rows_routed_success=0,
-                    rows_routed_failure=0,
-                    rows_quarantined=0,
                     error=None,
                     landscape_run_id=None,
                 ),
@@ -235,12 +264,12 @@ class TestWebSocketTimeoutRecovery:
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
             data=ProgressData(
-                rows_processed=2,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
-                rows_routed_success=3,
-                rows_routed_failure=1,
+                source_rows_processed=2,
+                tokens_succeeded=0,
+                tokens_failed=0,
+                tokens_quarantined=0,
+                tokens_routed_success=3,
+                tokens_routed_failure=1,
             ),
         )
 
@@ -252,9 +281,9 @@ class TestWebSocketTimeoutRecovery:
         payload = websocket.sent_json[0]
 
         assert payload["event_type"] == "progress"
-        assert payload["data"]["rows_processed"] == 2
-        assert payload["data"]["rows_routed_success"] == 3
-        assert payload["data"]["rows_routed_failure"] == 1
+        assert payload["data"]["source_rows_processed"] == 2
+        assert payload["data"]["tokens_routed_success"] == 3
+        assert payload["data"]["tokens_routed_failure"] == 1
         assert "type" not in payload
 
     @pytest.mark.asyncio
@@ -270,12 +299,6 @@ class TestWebSocketTimeoutRecovery:
                     status="running",
                     started_at=datetime.now(tz=UTC),
                     finished_at=None,
-                    rows_processed=1,
-                    rows_succeeded=1,
-                    rows_failed=0,
-                    rows_routed_success=0,
-                    rows_routed_failure=0,
-                    rows_quarantined=0,
                     error=None,
                     landscape_run_id=None,
                 ),
@@ -284,12 +307,7 @@ class TestWebSocketTimeoutRecovery:
                     status="completed",
                     started_at=datetime.now(tz=UTC),
                     finished_at=datetime.now(tz=UTC),
-                    rows_processed=1,
-                    rows_succeeded=1,
-                    rows_failed=0,
-                    rows_routed_success=0,
-                    rows_routed_failure=0,
-                    rows_quarantined=0,
+                    accounting=_accounting(source_rows=1, succeeded=1),
                     error=None,
                     landscape_run_id="land-1",
                 ),

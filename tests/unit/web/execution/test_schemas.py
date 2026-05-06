@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 import pydantic
 import pytest
@@ -17,6 +18,11 @@ from elspeth.web.execution.schemas import (
     ErrorData,
     FailedData,
     ProgressData,
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
     RunEvent,
     RunResultsResponse,
     RunStatusResponse,
@@ -24,6 +30,87 @@ from elspeth.web.execution.schemas import (
     ValidationError,
     ValidationResult,
 )
+
+
+def _accounting(
+    *,
+    source_rows: int = 10,
+    succeeded: int = 10,
+    failed: int = 0,
+    structural: int = 0,
+    pending: int = 0,
+    emitted: int | None = None,
+    closure: Literal["closed", "open", "unknown"] = "closed",
+    missing_terminal_outcomes: int = 0,
+    duplicate_terminal_outcomes: int = 0,
+    routed_success: int = 0,
+    routed_failure: int = 0,
+    quarantined: int = 0,
+    discarded: int = 0,
+) -> RunAccounting:
+    terminal = succeeded + failed + structural
+    if emitted is None:
+        emitted = terminal + pending
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=source_rows),
+        tokens=RunAccountingTokens(
+            emitted=emitted,
+            terminal=terminal,
+            succeeded=succeeded,
+            failed=failed,
+            structural=structural,
+            pending=pending,
+        ),
+        routing=RunAccountingRouting(
+            routed_success=routed_success,
+            routed_failure=routed_failure,
+            quarantined=quarantined,
+            discarded=discarded,
+        ),
+        integrity=RunAccountingIntegrity(
+            closure=closure,
+            missing_terminal_outcomes=missing_terminal_outcomes,
+            duplicate_terminal_outcomes=duplicate_terminal_outcomes,
+        ),
+    )
+
+
+def _progress_data(
+    *,
+    source_rows_processed: int = 10,
+    tokens_succeeded: int = 10,
+    tokens_failed: int = 0,
+    tokens_quarantined: int = 0,
+    tokens_routed_success: int = 0,
+    tokens_routed_failure: int = 0,
+) -> ProgressData:
+    return ProgressData(
+        source_rows_processed=source_rows_processed,
+        tokens_succeeded=tokens_succeeded,
+        tokens_failed=tokens_failed,
+        tokens_quarantined=tokens_quarantined,
+        tokens_routed_success=tokens_routed_success,
+        tokens_routed_failure=tokens_routed_failure,
+    )
+
+
+def _cancelled_data(
+    *,
+    source_rows_processed: int = 10,
+    tokens_succeeded: int = 10,
+    tokens_failed: int = 0,
+    tokens_quarantined: int = 0,
+    tokens_routed_success: int = 0,
+    tokens_routed_failure: int = 0,
+) -> CancelledData:
+    return CancelledData(
+        source_rows_processed=source_rows_processed,
+        tokens_succeeded=tokens_succeeded,
+        tokens_failed=tokens_failed,
+        tokens_quarantined=tokens_quarantined,
+        tokens_routed_success=tokens_routed_success,
+        tokens_routed_failure=tokens_routed_failure,
+    )
 
 
 class TestDiscardSummary:
@@ -132,9 +219,7 @@ class TestRunEvent:
                 run_id="run-123",
                 timestamp=datetime.now(tz=UTC),
                 event_type="unknown",  # type: ignore[arg-type]  # deliberate bad value for Pydantic to reject
-                data=ProgressData(
-                    rows_processed=0, rows_succeeded=0, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
-                ),
+                data=_progress_data(source_rows_processed=0, tokens_succeeded=0),
             )
 
     def test_progress_event_valid(self) -> None:
@@ -142,38 +227,27 @@ class TestRunEvent:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(
-                rows_processed=10,
-                rows_succeeded=4,
-                rows_failed=2,
-                rows_quarantined=0,
-                rows_routed_success=3,
-                rows_routed_failure=1,
+            data=_progress_data(
+                source_rows_processed=10,
+                tokens_succeeded=4,
+                tokens_failed=2,
+                tokens_routed_success=3,
+                tokens_routed_failure=1,
             ),
         )
         assert isinstance(event.data, ProgressData)
-        assert event.data.rows_processed == 10
-        assert event.data.rows_succeeded == 4
-        assert event.data.rows_failed == 2
-        assert event.data.rows_quarantined == 0
-        assert event.data.rows_routed_success == 3
-        assert event.data.rows_routed_failure == 1
+        assert event.data.source_rows_processed == 10
+        assert event.data.tokens_succeeded == 4
+        assert event.data.tokens_failed == 2
+        assert event.data.tokens_quarantined == 0
+        assert event.data.tokens_routed_success == 3
+        assert event.data.tokens_routed_failure == 1
 
-    def test_progress_event_carries_rows_routed_split(self) -> None:
-        """elspeth-5069612f3c — ProgressData wire shape MUST carry the routed
-        split so the in-flight SSE stream stays consistent with the TypeScript
-        ``RunEventProgress`` interface (``web/frontend/src/types/index.ts``)
-        which declares both fields as required.
-
-        Regression guard: prior to this fix the streaming progress payload
-        carried only ``rows_processed`` + ``rows_failed`` while the terminal
-        ``CompletedData`` / ``CancelledData`` shapes carried the split. The
-        frontend reducer fell back silently to zero, so running pipelines
-        always reported ``rows_routed_*`` as 0 in production.
-        """
+    def test_progress_event_carries_token_routed_split(self) -> None:
+        """ProgressData keeps route subsets while naming their token unit."""
         progress_fields = set(ProgressData.model_fields)
-        assert "rows_routed_success" in progress_fields
-        assert "rows_routed_failure" in progress_fields
+        assert "tokens_routed_success" in progress_fields
+        assert "tokens_routed_failure" in progress_fields
 
     def test_completed_event_valid(self) -> None:
         event = RunEvent(
@@ -182,15 +256,12 @@ class TestRunEvent:
             event_type="completed",
             data=CompletedData(
                 status="completed_with_failures",
-                rows_processed=100,
-                rows_succeeded=95,
-                rows_failed=3,
-                rows_quarantined=2,
+                accounting=_accounting(source_rows=100, succeeded=95, failed=3, quarantined=2),
                 landscape_run_id="lscape-1",
             ),
         )
         assert isinstance(event.data, CompletedData)
-        assert event.data.rows_succeeded == 95
+        assert event.data.accounting.tokens.succeeded == 95
         assert event.data.landscape_run_id == "lscape-1"
 
     def test_cancelled_event_valid(self) -> None:
@@ -198,19 +269,19 @@ class TestRunEvent:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="cancelled",
-            data=CancelledData(
-                rows_processed=50,
-                rows_succeeded=45,
-                rows_failed=2,
-                rows_quarantined=2,
-                rows_routed_success=1,
-                rows_routed_failure=1,
+            data=_cancelled_data(
+                source_rows_processed=50,
+                tokens_succeeded=45,
+                tokens_failed=2,
+                tokens_quarantined=2,
+                tokens_routed_success=1,
+                tokens_routed_failure=1,
             ),
         )
         assert isinstance(event.data, CancelledData)
-        assert event.data.rows_processed == 50
-        assert event.data.rows_succeeded == 45
-        assert event.data.rows_quarantined == 2
+        assert event.data.source_rows_processed == 50
+        assert event.data.tokens_succeeded == 45
+        assert event.data.tokens_quarantined == 2
 
     def test_failed_event_valid(self) -> None:
         event = RunEvent(
@@ -264,7 +335,7 @@ class TestRunEvent:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="cancelled",
-                data=CancelledData(rows_processed=0),  # type: ignore[call-arg]
+                data=CancelledData(source_rows_processed=0),  # type: ignore[call-arg]
             )
 
 
@@ -285,19 +356,12 @@ class TestRunEventJsonRoundTrip:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(
-                rows_processed=50,
-                rows_succeeded=47,
-                rows_failed=3,
-                rows_quarantined=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-            ),
+            data=_progress_data(source_rows_processed=50, tokens_succeeded=47, tokens_failed=3),
         )
         restored = self._round_trip(original)
         assert restored.event_type == "progress"
         assert isinstance(restored.data, ProgressData)
-        assert restored.data.rows_processed == 50
+        assert restored.data.source_rows_processed == 50
 
     def test_completed_round_trip(self) -> None:
         original = RunEvent(
@@ -306,17 +370,14 @@ class TestRunEventJsonRoundTrip:
             event_type="completed",
             data=CompletedData(
                 status="completed_with_failures",
-                rows_processed=100,
-                rows_succeeded=95,
-                rows_failed=3,
-                rows_quarantined=2,
+                accounting=_accounting(source_rows=100, succeeded=95, failed=3, quarantined=2),
                 landscape_run_id="lscape-1",
             ),
         )
         restored = self._round_trip(original)
         assert restored.event_type == "completed"
         assert isinstance(restored.data, CompletedData)
-        assert restored.data.rows_succeeded == 95
+        assert restored.data.accounting.tokens.succeeded == 95
         assert restored.data.landscape_run_id == "lscape-1"
 
     def test_cancelled_round_trip(self) -> None:
@@ -327,20 +388,13 @@ class TestRunEventJsonRoundTrip:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="cancelled",
-            data=CancelledData(
-                rows_processed=10,
-                rows_succeeded=8,
-                rows_failed=1,
-                rows_quarantined=1,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-            ),
+            data=_cancelled_data(tokens_succeeded=8, tokens_failed=1, tokens_quarantined=1),
         )
         restored = self._round_trip(original)
         assert restored.event_type == "cancelled"
         assert isinstance(restored.data, CancelledData)
-        assert restored.data.rows_succeeded == 8
-        assert restored.data.rows_quarantined == 1
+        assert restored.data.tokens_succeeded == 8
+        assert restored.data.tokens_quarantined == 1
 
     def test_failed_round_trip(self) -> None:
         original = RunEvent(
@@ -354,148 +408,88 @@ class TestRunEventJsonRoundTrip:
         assert restored.data.detail == "kaboom"
 
 
-class TestCompletedDataDecomposition:
-    """Enforce rows_processed >= succeeded + failed + routed + quarantined.
+class TestCompletedDataAccounting:
+    """Completed terminal events use Landscape-derived token accounting."""
 
-    Narrow invariant per elspeth-31d53c7493 — full DAG-aware balance is
-    tracked in elspeth-cf84eb1b52 (P0).  Over-counting (sum > processed)
-    is still a Tier 1 anomaly; under-counting (sum < processed) is the
-    legitimate signature of an aggregation pipeline that absorbed source
-    rows into CONSUMED_IN_BATCH.
-    """
-
-    def test_consistent_counts_accepted(self) -> None:
+    def test_completed_with_failures_accounting_accepted(self) -> None:
         data = CompletedData(
             status="completed_with_failures",
-            rows_processed=100,
-            rows_succeeded=95,
-            rows_failed=3,
-            rows_quarantined=2,
+            accounting=_accounting(source_rows=100, succeeded=95, failed=3, quarantined=2),
             landscape_run_id="lscape-1",
         )
-        assert data.rows_processed == 100
+        assert data.accounting.source.rows_processed == 100
+        assert data.accounting.tokens.succeeded == 95
+        assert data.accounting.tokens.failed == 3
 
-    def test_overcounted_terminals_rejected(self) -> None:
-        """Sum of terminal counts must not exceed rows_processed (over-counting bug)."""
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
-            CompletedData(
-                status="completed_with_failures",
-                rows_processed=100,
-                rows_succeeded=95,
-                rows_failed=6,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=3,  # 95 + 6 = 101 > 100
-                landscape_run_id="lscape-1",
-            )
-
-    def test_aggregation_undercount_accepted(self) -> None:
-        """S2 reproducer (run id 44f52421-a379-459b-96a8-6f0656086f16, 2026-05-01 eval).
-
-        csv 6 source rows -> batch_stats(group_by=customer_tier) -> json sink emits
-        2 aggregation outputs.  Source rows reach CONSUMED_IN_BATCH (no counter)
-        so rows_processed=6 but sum-of-four-buckets=2.  Equality formulation
-        rejected this legitimate shape, breaking pipeline_done_callback.
-        Inequality formulation accepts it.  Full DAG-aware balance equation
-        in elspeth-cf84eb1b52.
-        """
+    def test_aggregation_source_rows_and_output_tokens_are_separate(self) -> None:
         data = CompletedData(
             status="completed",
-            rows_processed=6,
-            rows_succeeded=2,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
+            accounting=_accounting(source_rows=6, succeeded=2),
             landscape_run_id="lscape-batchstats",
         )
-        assert data.rows_processed == 6
-        assert data.rows_succeeded == 2
+        assert data.accounting.source.rows_processed == 6
+        assert data.accounting.tokens.succeeded == 2
 
     def test_zero_counts_accepted(self) -> None:
         data = CompletedData(
             status="empty",
-            rows_processed=0,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_quarantined=0,
+            accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
             landscape_run_id="lscape-empty",
         )
-        assert data.rows_processed == 0
+        assert data.accounting.source.rows_processed == 0
+        assert data.accounting.tokens.emitted == 0
 
     def test_routed_rows_report_subset_details(self) -> None:
         data = CompletedData(
             status="completed_with_failures",
-            rows_processed=100,
-            rows_succeeded=90,
-            rows_failed=3,
-            rows_routed_success=5,
-            rows_routed_failure=0,
-            rows_quarantined=2,
+            accounting=_accounting(
+                source_rows=100,
+                succeeded=90,
+                failed=3,
+                routed_success=5,
+                routed_failure=0,
+                quarantined=2,
+            ),
             landscape_run_id="lscape-1",
         )
-        assert data.rows_routed_success == 5
-        assert data.rows_routed_failure == 0
+        assert data.accounting.routing.routed_success == 5
+        assert data.accounting.routing.routed_failure == 0
 
     def test_one_row_routed_success_completion_accepted(self) -> None:
         data = CompletedData(
             status="completed",
-            rows_processed=1,
-            rows_succeeded=1,
-            rows_failed=0,
-            rows_routed_success=1,
-            rows_routed_failure=0,
-            rows_quarantined=0,
+            accounting=_accounting(source_rows=1, succeeded=1, routed_success=1),
             landscape_run_id="lscape-routed",
         )
 
-        assert data.rows_routed_success == 1
-        assert data.rows_succeeded == 1
+        assert data.accounting.routing.routed_success == 1
+        assert data.accounting.tokens.succeeded == 1
 
     def test_routed_success_exceeding_succeeded_rejected(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match="rows_routed_success must be a subset"):
-            CompletedData(
-                status="completed",
-                rows_processed=1,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=1,
-                rows_routed_failure=0,
-                rows_quarantined=0,
-                landscape_run_id="lscape-routed",
-            )
+        with pytest.raises(pydantic.ValidationError, match=r"routing\.routed_success must be a subset"):
+            _accounting(source_rows=1, succeeded=0, routed_success=1)
 
 
 class TestRowCountConstraints:
-    """Row count fields must be non-negative."""
+    """Progress/cancelled counter fields must be non-negative."""
 
-    def test_negative_rows_processed_rejected(self) -> None:
+    def test_negative_source_rows_processed_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed=-1, rows_succeeded=0, rows_failed=0, rows_quarantined=0)
+            _progress_data(source_rows_processed=-1)
 
-    def test_negative_rows_failed_rejected(self) -> None:
+    def test_negative_tokens_failed_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed=0, rows_succeeded=0, rows_failed=-1, rows_quarantined=0)
+            _progress_data(source_rows_processed=0, tokens_succeeded=0, tokens_failed=-1)
 
-    def test_negative_cancelled_rows_rejected(self) -> None:
+    def test_negative_cancelled_source_rows_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            CancelledData(
-                rows_processed=-1,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-            )
+            _cancelled_data(source_rows_processed=-1, tokens_succeeded=0)
 
     def test_negative_completed_rows_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             CompletedData(
                 status="completed",
-                rows_processed=-1,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=-1, succeeded=0),
                 landscape_run_id="lscape-1",
             )
 
@@ -531,41 +525,32 @@ class TestCompletedDataLandscapeRunId:
         with pytest.raises(pydantic.ValidationError, match="string_too_short"):
             CompletedData(
                 status="completed",
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(),
                 landscape_run_id="",
             )
 
 
 class TestResponseModelConstraints:
-    """RunStatusResponse and RunResultsResponse enforce non-negative row counts."""
+    """RunStatusResponse and RunResultsResponse enforce non-negative accounting."""
 
-    def test_status_response_rejects_negative_rows(self) -> None:
+    def test_status_response_rejects_negative_accounting(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             RunStatusResponse(
                 run_id="r1",
                 status="completed",
                 started_at=None,
                 finished_at=None,
-                rows_processed=-1,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=-1, succeeded=0),
                 error=None,
-                landscape_run_id=None,
+                landscape_run_id="lscape-1",
             )
 
-    def test_results_response_rejects_negative_rows(self) -> None:
+    def test_results_response_rejects_negative_accounting(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             RunResultsResponse(
                 run_id="r1",
                 status="completed",
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=-1,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=10, succeeded=0, failed=-1),
                 landscape_run_id=None,
                 error=None,
             )
@@ -596,12 +581,30 @@ class TestStrictCoercionRejected:
                 status="completed",
                 started_at=None,
                 finished_at=None,
-                rows_processed="7",  # type: ignore[arg-type]
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=RunAccounting(
+                    source=RunAccountingSource(rows_processed="7"),  # type: ignore[arg-type]
+                    tokens=RunAccountingTokens(
+                        emitted=0,
+                        terminal=0,
+                        succeeded=0,
+                        failed=0,
+                        structural=0,
+                        pending=0,
+                    ),
+                    routing=RunAccountingRouting(
+                        routed_success=0,
+                        routed_failure=0,
+                        quarantined=0,
+                        discarded=0,
+                    ),
+                    integrity=RunAccountingIntegrity(
+                        closure="closed",
+                        missing_terminal_outcomes=0,
+                        duplicate_terminal_outcomes=0,
+                    ),
+                ),
                 error=None,
-                landscape_run_id=None,
+                landscape_run_id="lscape-1",
             )
 
     def test_run_results_response_rejects_string_int(self) -> None:
@@ -609,38 +612,81 @@ class TestStrictCoercionRejected:
             RunResultsResponse(
                 run_id="r1",
                 status="completed",
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed="2",  # type: ignore[arg-type]
-                rows_quarantined=0,
-                landscape_run_id=None,
+                accounting=RunAccounting(
+                    source=RunAccountingSource(rows_processed=10),
+                    tokens=RunAccountingTokens(
+                        emitted=12,
+                        terminal=12,
+                        succeeded=10,
+                        failed="2",  # type: ignore[arg-type]
+                        structural=0,
+                        pending=0,
+                    ),
+                    routing=RunAccountingRouting(
+                        routed_success=0,
+                        routed_failure=0,
+                        quarantined=0,
+                        discarded=0,
+                    ),
+                    integrity=RunAccountingIntegrity(
+                        closure="closed",
+                        missing_terminal_outcomes=0,
+                        duplicate_terminal_outcomes=0,
+                    ),
+                ),
+                landscape_run_id="lscape-1",
                 error=None,
             )
 
     def test_progress_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed="10", rows_succeeded=0, rows_failed=0, rows_quarantined=0)  # type: ignore[arg-type]
+            ProgressData(
+                source_rows_processed="10",  # type: ignore[arg-type]
+                tokens_succeeded=0,
+                tokens_failed=0,
+                tokens_quarantined=0,
+                tokens_routed_success=0,
+                tokens_routed_failure=0,
+            )
 
     def test_completed_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             CompletedData(
                 status="completed_with_failures",
-                rows_processed="100",  # type: ignore[arg-type]
-                rows_succeeded=95,
-                rows_failed=3,
-                rows_quarantined=2,
+                accounting=RunAccounting(
+                    source=RunAccountingSource(rows_processed="100"),  # type: ignore[arg-type]
+                    tokens=RunAccountingTokens(
+                        emitted=98,
+                        terminal=98,
+                        succeeded=95,
+                        failed=3,
+                        structural=0,
+                        pending=0,
+                    ),
+                    routing=RunAccountingRouting(
+                        routed_success=0,
+                        routed_failure=0,
+                        quarantined=2,
+                        discarded=0,
+                    ),
+                    integrity=RunAccountingIntegrity(
+                        closure="closed",
+                        missing_terminal_outcomes=0,
+                        duplicate_terminal_outcomes=0,
+                    ),
+                ),
                 landscape_run_id="lscape-1",
             )
 
     def test_cancelled_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             CancelledData(
-                rows_processed="50",  # type: ignore[arg-type]
-                rows_succeeded=45,
-                rows_failed=1,
-                rows_quarantined=2,
-                rows_routed_success=1,
-                rows_routed_failure=1,
+                source_rows_processed="50",  # type: ignore[arg-type]
+                tokens_succeeded=45,
+                tokens_failed=1,
+                tokens_quarantined=2,
+                tokens_routed_success=1,
+                tokens_routed_failure=1,
             )
 
     def test_error_data_rejects_int_as_string(self) -> None:
@@ -682,12 +728,9 @@ class TestExtraFieldsRejected:
                 status="completed",
                 started_at=None,
                 finished_at=None,
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(),
                 error=None,
-                landscape_run_id=None,
+                landscape_run_id="lscape-1",
                 extra_field=42,  # type: ignore[call-arg]
             )
 
@@ -696,27 +739,29 @@ class TestExtraFieldsRejected:
             RunResultsResponse(
                 run_id="r1",
                 status="completed",
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_quarantined=0,
-                landscape_run_id=None,
+                accounting=_accounting(),
+                landscape_run_id="lscape-1",
                 error=None,
                 duration_ms=1234,  # type: ignore[call-arg]
             )
 
     def test_progress_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ProgressData(rows_processed=10, rows_succeeded=10, rows_failed=0, rows_quarantined=0, percent=50.0)  # type: ignore[call-arg]
+            ProgressData(
+                source_rows_processed=10,
+                tokens_succeeded=10,
+                tokens_failed=0,
+                tokens_quarantined=0,
+                tokens_routed_success=0,
+                tokens_routed_failure=0,
+                percent=50.0,  # type: ignore[call-arg]
+            )
 
     def test_completed_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
             CompletedData(
                 status="completed_with_failures",
-                rows_processed=100,
-                rows_succeeded=95,
-                rows_failed=3,
-                rows_quarantined=2,
+                accounting=_accounting(source_rows=100, succeeded=95, failed=3, quarantined=2),
                 landscape_run_id="lscape-1",
                 duration_ms=5000,  # type: ignore[call-arg]
             )
@@ -727,21 +772,19 @@ class TestExtraFieldsRejected:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="progress",
-                data=ProgressData(
-                    rows_processed=10, rows_succeeded=10, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
-                ),
+                data=_progress_data(),
                 session_id="s-1",  # type: ignore[call-arg]
             )
 
     def test_cancelled_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
             CancelledData(
-                rows_processed=10,
-                rows_succeeded=8,
-                rows_failed=0,
-                rows_quarantined=2,
-                rows_routed_success=0,
-                rows_routed_failure=0,
+                source_rows_processed=10,
+                tokens_succeeded=8,
+                tokens_failed=0,
+                tokens_quarantined=2,
+                tokens_routed_success=0,
+                tokens_routed_failure=0,
                 reason="timeout",  # type: ignore[call-arg]
             )
 
@@ -764,10 +807,7 @@ class TestRunStatusResponseDatetimeStrict:
                 status="running",
                 started_at="2026-04-15T10:00:00+00:00",  # type: ignore[arg-type]
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=None,
                 error=None,
                 landscape_run_id=None,
             )
@@ -779,12 +819,9 @@ class TestRunStatusResponseDatetimeStrict:
                 status="completed",
                 started_at=datetime.now(tz=UTC),
                 finished_at="2026-04-15T10:05:00+00:00",  # type: ignore[arg-type]
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(),
                 error=None,
-                landscape_run_id=None,
+                landscape_run_id="lscape-1",
             )
 
 
@@ -796,9 +833,7 @@ class TestRunEventTimestampCoercion:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(
-                rows_processed=0, rows_succeeded=0, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
-            ),
+            data=_progress_data(source_rows_processed=0, tokens_succeeded=0),
         )
         assert isinstance(event.timestamp, datetime)
 
@@ -809,12 +844,12 @@ class TestRunEventTimestampCoercion:
             "timestamp": "2026-04-15T10:00:00+00:00",
             "event_type": "progress",
             "data": {
-                "rows_processed": 0,
-                "rows_succeeded": 0,
-                "rows_failed": 0,
-                "rows_quarantined": 0,
-                "rows_routed_success": 0,
-                "rows_routed_failure": 0,
+                "source_rows_processed": 0,
+                "tokens_succeeded": 0,
+                "tokens_failed": 0,
+                "tokens_quarantined": 0,
+                "tokens_routed_success": 0,
+                "tokens_routed_failure": 0,
             },
         }
         event = RunEvent.model_validate(raw)
@@ -827,164 +862,141 @@ class TestRunEventTimestampCoercion:
                 run_id="run-1",
                 timestamp=1713254400,
                 event_type="progress",
-                data=ProgressData(
-                    rows_processed=0, rows_succeeded=0, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
-                ),
+                data=_progress_data(source_rows_processed=0, tokens_succeeded=0),
             )
 
 
-class TestRunStatusDecomposition:
-    """RunStatusResponse enforces row count decomposition ONLY on terminal states.
+class TestRunStatusAccounting:
+    """RunStatusResponse validates terminal statuses against token accounting."""
 
-    Non-terminal states (pending/running) may have transiently inconsistent
-    counts while the orchestrator is mid-flight.  Terminal states must
-    decompose cleanly — a mismatch is a Tier 1 anomaly.
-    """
-
-    def test_running_accepts_inconsistent_counts(self) -> None:
-        """In-flight counts can be transiently inconsistent."""
+    def test_running_accepts_missing_accounting(self) -> None:
         resp = RunStatusResponse(
             run_id="r1",
             status="running",
             started_at=datetime.now(tz=UTC),
             finished_at=None,
-            rows_processed=5,
-            rows_succeeded=2,
-            rows_failed=1,
-            rows_quarantined=0,  # 2 + 1 + 0 = 3 != 5, but OK while running
+            accounting=None,
             error=None,
             landscape_run_id=None,
         )
-        assert resp.rows_processed == 5
+        assert resp.accounting is None
 
-    def test_pending_accepts_inconsistent_counts(self) -> None:
+    def test_pending_accepts_missing_accounting(self) -> None:
         resp = RunStatusResponse(
             run_id="r1",
             status="pending",
             started_at=None,
             finished_at=None,
-            rows_processed=10,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_quarantined=0,  # 0 != 10, but pending means nothing resolved
+            accounting=None,
             error=None,
             landscape_run_id=None,
         )
-        assert resp.rows_processed == 10
+        assert resp.accounting is None
 
-    def test_completed_rejects_overcounted_terminals(self) -> None:
-        """Sum of terminal counts > rows_processed is still a Tier 1 anomaly."""
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
-            RunStatusResponse(
-                run_id="r1",
-                status="completed",
-                started_at=datetime.now(tz=UTC),
-                finished_at=datetime.now(tz=UTC),
-                rows_processed=100,
-                rows_succeeded=95,
-                rows_failed=6,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=3,  # 95 + 6 = 101 > 100
-                error=None,
-                landscape_run_id="lscape-1",
-            )
-
-    def test_completed_aggregation_undercount_accepted(self) -> None:
-        """Aggregation pipelines legitimately undercount under the narrow
-        invariant (elspeth-31d53c7493).  S2 reproducer shape via the
-        terminal-status path.  Full balance in elspeth-cf84eb1b52.
-        """
+    def test_completed_accepts_one_source_row_many_tokens(self) -> None:
         resp = RunStatusResponse(
             run_id="r1",
             status="completed",
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
-            rows_processed=6,
-            rows_succeeded=2,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
+            accounting=_accounting(source_rows=1, succeeded=9323, structural=1),
             error=None,
-            landscape_run_id="lscape-batchstats",
+            landscape_run_id="lscape-fanout",
         )
-        assert resp.rows_processed == 6
-        assert resp.rows_succeeded == 2
+        assert resp.accounting is not None
+        assert resp.accounting.source.rows_processed == 1
+        assert resp.accounting.tokens.emitted == 9324
 
-    def test_failed_rejects_overcounted_terminals(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
+    def test_completed_rejects_open_accounting(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="requires closed token accounting"):
             RunStatusResponse(
                 run_id="r1",
-                status="failed",
+                status="completed",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=10,
-                rows_succeeded=8,
-                rows_failed=5,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,  # 8 + 5 = 13 > 10
-                error="pipeline crashed",
-                landscape_run_id=None,
-            )
-
-    def test_cancelled_rejects_overcounted_terminals(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
-            RunStatusResponse(
-                run_id="r1",
-                status="cancelled",
-                started_at=datetime.now(tz=UTC),
-                finished_at=datetime.now(tz=UTC),
-                rows_processed=50,
-                rows_succeeded=30,
-                rows_failed=25,
-                rows_routed_success=20,
-                rows_routed_failure=0,
-                rows_quarantined=5,  # 30 + 25 = 55 > 50
+                accounting=_accounting(
+                    source_rows=1,
+                    succeeded=1,
+                    pending=1,
+                    closure="open",
+                    missing_terminal_outcomes=1,
+                ),
                 error=None,
-                landscape_run_id=None,
+                landscape_run_id="lscape-1",
             )
 
-    def test_completed_accepts_consistent_counts(self) -> None:
-        # Phase 2.2: this shape (rows_failed=3, rows_quarantined=2 alongside
-        # rows_succeeded=95) is now `completed_with_failures` per the
-        # presence-indicator predicate.  The test still pins the
-        # row-count decomposition inequality at the API surface.
+    def test_completed_with_failures_accepts_success_and_failure_tokens(self) -> None:
         resp = RunStatusResponse(
             run_id="r1",
             status="completed_with_failures",
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
-            rows_processed=100,
-            rows_succeeded=95,
-            rows_failed=3,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=2,
+            accounting=_accounting(source_rows=100, succeeded=95, failed=3, quarantined=2),
             error=None,
             landscape_run_id="lscape-1",
         )
-        assert resp.rows_processed == 100
+        assert resp.accounting is not None
+        assert resp.accounting.tokens.failed == 3
 
-    def test_completed_accepts_routed_rows_in_terminal_counts(self) -> None:
-        # Phase 2.2: shape with failures => `completed_with_failures`.
+    def test_completed_with_failures_rejects_no_failure_tokens(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"tokens\.failed > 0"):
+            RunStatusResponse(
+                run_id="r1",
+                status="completed_with_failures",
+                started_at=datetime.now(tz=UTC),
+                finished_at=datetime.now(tz=UTC),
+                accounting=_accounting(source_rows=10, succeeded=10, failed=0),
+                error=None,
+                landscape_run_id="lscape-1",
+            )
+
+    def test_empty_accepts_zero_source_rows_and_zero_tokens(self) -> None:
         resp = RunStatusResponse(
             run_id="r1",
-            status="completed_with_failures",
+            status="empty",
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
-            rows_processed=100,
-            rows_succeeded=90,
-            rows_failed=3,
-            rows_routed_success=5,
-            rows_routed_failure=0,
-            rows_quarantined=2,
+            accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
             error=None,
-            landscape_run_id="lscape-1",
+            landscape_run_id="lscape-empty",
         )
-        assert resp.rows_routed_success == 5
-        assert resp.rows_routed_failure == 0
+        assert resp.status == "empty"
+
+    def test_empty_rejects_nonzero_source_rows(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"source\.rows_processed == 0"):
+            RunStatusResponse(
+                run_id="r1",
+                status="empty",
+                started_at=datetime.now(tz=UTC),
+                finished_at=datetime.now(tz=UTC),
+                accounting=_accounting(source_rows=1, succeeded=0, emitted=0),
+                error=None,
+                landscape_run_id="lscape-empty",
+            )
+
+    def test_failed_status_may_omit_accounting_for_exception_origin(self) -> None:
+        resp = RunStatusResponse(
+            run_id="r1",
+            status="failed",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            accounting=None,
+            error="pipeline crashed",
+            landscape_run_id=None,
+        )
+        assert resp.accounting is None
+
+    def test_cancelled_status_may_omit_accounting(self) -> None:
+        resp = RunStatusResponse(
+            run_id="r1",
+            status="cancelled",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            accounting=None,
+            error=None,
+            landscape_run_id=None,
+        )
+        assert resp.accounting is None
 
 
 class TestRunStatusTerminalInvariants:
@@ -997,12 +1009,7 @@ class TestRunStatusTerminalInvariants:
                 status="completed",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=1,
-                rows_succeeded=1,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=1, succeeded=1),
                 error=None,
                 landscape_run_id=None,
             )
@@ -1014,12 +1021,7 @@ class TestRunStatusTerminalInvariants:
                 status="failed",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
-                rows_processed=1,
-                rows_succeeded=0,
-                rows_failed=1,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=None,
                 error=None,
                 landscape_run_id=None,
             )
@@ -1031,109 +1033,62 @@ class TestRunStatusTerminalInvariants:
                 status="cancelled",
                 started_at=datetime.now(tz=UTC),
                 finished_at=None,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=None,
                 error=None,
                 landscape_run_id=None,
             )
 
 
-class TestRunResultsDecomposition:
-    """RunResultsResponse enforces row count decomposition unconditionally.
+class TestRunResultsAccounting:
+    """RunResultsResponse uses the same terminal accounting contract."""
 
-    The Literal restricts status to terminal values, so the invariant
-    always applies — parity with CompletedData.
-    """
-
-    def test_consistent_counts_accepted(self) -> None:
-        # Phase 2.2: shape with failures => `completed_with_failures`.
+    def test_completed_with_failures_accounting_accepted(self) -> None:
         resp = RunResultsResponse(
             run_id="r1",
             status="completed_with_failures",
-            rows_processed=100,
-            rows_succeeded=95,
-            rows_failed=3,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=2,
+            accounting=_accounting(source_rows=100, succeeded=95, failed=3, quarantined=2),
             landscape_run_id="lscape-1",
             error=None,
         )
-        assert resp.rows_processed == 100
+        assert resp.accounting is not None
+        assert resp.accounting.source.rows_processed == 100
 
-    def test_overcounted_terminals_rejected(self) -> None:
-        """Sum of terminal counts > rows_processed is over-counting (Tier 1 bug)."""
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
+    def test_completed_accepts_one_source_row_many_tokens(self) -> None:
+        resp = RunResultsResponse(
+            run_id="r1",
+            status="completed",
+            accounting=_accounting(source_rows=1, succeeded=9323, structural=1),
+            landscape_run_id="lscape-fanout",
+            error=None,
+        )
+        assert resp.accounting is not None
+        assert resp.accounting.tokens.emitted == 9324
+
+    def test_completed_rejects_open_accounting(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="requires closed token accounting"):
             RunResultsResponse(
                 run_id="r1",
-                status="completed_with_failures",
-                rows_processed=100,
-                rows_succeeded=50,
-                rows_failed=60,
-                rows_routed_success=40,
-                rows_routed_failure=0,
-                rows_quarantined=10,  # 50 + 60 = 110 > 100
+                status="completed",
+                accounting=_accounting(
+                    source_rows=1,
+                    succeeded=1,
+                    pending=1,
+                    closure="open",
+                    missing_terminal_outcomes=1,
+                ),
                 landscape_run_id="lscape-1",
                 error=None,
             )
 
-    def test_aggregation_undercount_accepted(self) -> None:
-        """S2 reproducer (2026-05-01 eval) via results endpoint.  Aggregation
-        pipelines legitimately have rows_processed > sum-of-terminal-counts
-        because CONSUMED_IN_BATCH source-row outcomes increment no counter
-        (engine/orchestrator/outcomes.py:194).  Full balance in elspeth-cf84eb1b52.
-        """
+    def test_failed_status_may_omit_accounting_for_exception_origin(self) -> None:
         resp = RunResultsResponse(
             run_id="r1",
-            status="completed",
-            rows_processed=6,
-            rows_succeeded=2,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
-            landscape_run_id="lscape-batchstats",
-            error=None,
+            status="failed",
+            accounting=None,
+            landscape_run_id=None,
+            error="kaboom",
         )
-        assert resp.rows_processed == 6
-        assert resp.rows_succeeded == 2
-
-    def test_failed_status_overcounted_rejected(self) -> None:
-        """Unconditional check: any terminal status triggers validation."""
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
-            RunResultsResponse(
-                run_id="r1",
-                status="failed",
-                rows_processed=10,
-                rows_succeeded=8,
-                rows_failed=5,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,  # 8 + 5 = 13 > 10
-                landscape_run_id=None,
-                error="kaboom",
-            )
-
-    def test_consistent_counts_accept_routed_rows(self) -> None:
-        # Phase 2.2: shape with failures => `completed_with_failures`.
-        resp = RunResultsResponse(
-            run_id="r1",
-            status="completed_with_failures",
-            rows_processed=100,
-            rows_succeeded=90,
-            rows_failed=3,
-            rows_routed_success=5,
-            rows_routed_failure=0,
-            rows_quarantined=2,
-            landscape_run_id="lscape-1",
-            error=None,
-        )
-        assert resp.rows_routed_success == 5
-        assert resp.rows_routed_failure == 0
+        assert resp.accounting is None
 
 
 class TestRunResultsTerminalInvariants:
@@ -1144,12 +1099,7 @@ class TestRunResultsTerminalInvariants:
             RunResultsResponse(
                 run_id="r1",
                 status="completed",
-                rows_processed=1,
-                rows_succeeded=1,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=1, succeeded=1),
                 landscape_run_id=None,
                 error=None,
             )
@@ -1159,12 +1109,7 @@ class TestRunResultsTerminalInvariants:
             RunResultsResponse(
                 run_id="r1",
                 status="failed",
-                rows_processed=1,
-                rows_succeeded=0,
-                rows_failed=1,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=None,
                 landscape_run_id=None,
                 error=None,
             )
@@ -1201,13 +1146,7 @@ class TestRunStatusDerivedSets:
 
 
 class TestRunStatusResponseStatusInvariant:
-    """Phase 2.2 (elspeth-0de989c56d) — Pydantic mirror of the L0 biconditional.
-
-    The same presence-indicator predicate that gates ``RunResult.__post_init__``
-    must gate the API surface so neither layer can serialize an inconsistent
-    status / row-count pair.  Mirrors the Phase 2.3 precedent
-    (``SecretInventoryResponse._check_reason_invariant``).
-    """
+    """Pydantic mirrors the token-accounting status taxonomy."""
 
     @staticmethod
     def _build(**overrides: object) -> RunStatusResponse:
@@ -1216,12 +1155,7 @@ class TestRunStatusResponseStatusInvariant:
             "status": "completed",
             "started_at": datetime.now(tz=UTC),
             "finished_at": datetime.now(tz=UTC),
-            "rows_processed": 10,
-            "rows_succeeded": 10,
-            "rows_failed": 0,
-            "rows_routed_success": 0,
-            "rows_routed_failure": 0,
-            "rows_quarantined": 0,
+            "accounting": _accounting(),
             "error": None,
             "landscape_run_id": "landscape-1",
         }
@@ -1231,104 +1165,69 @@ class TestRunStatusResponseStatusInvariant:
     def test_completed_with_failures_legal(self) -> None:
         response = self._build(
             status="completed_with_failures",
-            rows_processed=10,
-            rows_succeeded=7,
-            rows_failed=3,
+            accounting=_accounting(source_rows=10, succeeded=7, failed=3),
         )
         assert response.status == "completed_with_failures"
 
     def test_empty_legal(self) -> None:
         response = self._build(
             status="empty",
-            rows_processed=0,
-            rows_succeeded=0,
+            accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
+            landscape_run_id="landscape-empty",
         )
         assert response.status == "empty"
 
     def test_failed_with_zero_rows_succeeded_legal(self) -> None:
-        """S1B msg2 reproducer at the API layer."""
         response = self._build(
             status="failed",
-            rows_processed=6,
-            rows_succeeded=0,
-            rows_failed=6,
+            accounting=None,
             error="LLM transform raised on every row",
+            landscape_run_id=None,
         )
         assert response.status == "failed"
 
-    def test_failed_s1a_reproducer_legal(self) -> None:
-        """S1A reproducer at the API layer — every row took the on_error DIVERT.
-
-        Post-rows_routed-split (elspeth-5069612f3c): the on_error path increments
-        rows_routed_failure (NOT rows_routed_success). The schema invariant now
-        treats rows_routed_failure as a structural failure indicator, so this
-        shape (zero success indicators + non-zero failure indicators) classifies
-        as ``failed`` for the right structural reason.
-        """
+    def test_failed_with_failure_accounting_legal(self) -> None:
         response = self._build(
             status="failed",
-            rows_processed=6,
-            rows_succeeded=0,
-            rows_failed=6,
-            rows_routed_success=0,
-            rows_routed_failure=6,
+            accounting=_accounting(source_rows=6, succeeded=0, failed=6, routed_failure=6),
             error="LLM transform diverted every row to on_error",
         )
         assert response.status == "failed"
 
     def test_completed_rejects_zero_succeeded(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match=r"completed.*rows_succeeded > 0"):
-            self._build(status="completed", rows_processed=10, rows_succeeded=0, rows_failed=10, error="X")
+        with pytest.raises(pydantic.ValidationError, match=r"completed.*tokens.succeeded > 0"):
+            self._build(status="completed", accounting=_accounting(source_rows=10, succeeded=0, emitted=0))
 
     def test_completed_rejects_failures(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match=r"completed.*requires no failures"):
-            self._build(status="completed", rows_processed=10, rows_succeeded=7, rows_failed=3)
+        with pytest.raises(pydantic.ValidationError, match=r"completed.*tokens.failed == 0"):
+            self._build(status="completed", accounting=_accounting(source_rows=10, succeeded=7, failed=3))
 
     def test_completed_with_failures_rejects_zero_succeeded(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match=r"completed_with_failures.*rows_succeeded > 0"):
-            self._build(status="completed_with_failures", rows_processed=6, rows_succeeded=0, rows_failed=6, error="X")
+        with pytest.raises(pydantic.ValidationError, match=r"completed_with_failures.*tokens.succeeded > 0"):
+            self._build(status="completed_with_failures", accounting=_accounting(source_rows=6, succeeded=0, failed=6))
 
     def test_completed_with_failures_rejects_no_failures(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match=r"completed_with_failures.*requires.*failure"):
-            self._build(status="completed_with_failures", rows_processed=10, rows_succeeded=10, rows_failed=0)
+        with pytest.raises(pydantic.ValidationError, match=r"completed_with_failures.*tokens.failed > 0"):
+            self._build(status="completed_with_failures", accounting=_accounting(source_rows=10, succeeded=10, failed=0))
 
     def test_failed_tolerates_partial_successes_for_exception_bounded_runs(self) -> None:
-        # See ``_check_status_row_count_invariant`` — `failed` has two
-        # origins (predicate-decided no-success or exception-bounded with
-        # partial successes).  The API mirror tolerates either; the
-        # predicate picks COMPLETED_WITH_FAILURES on the success path
-        # whenever rows_succeeded > 0 alongside failures.
-        response = self._build(status="failed", rows_processed=10, rows_succeeded=5, rows_failed=5, error="X")
+        response = self._build(status="failed", accounting=_accounting(source_rows=10, succeeded=5, failed=5), error="X")
         assert response.status == "failed"
 
     def test_empty_rejects_nonzero_processed(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match=r"empty.*rows_processed == 0"):
-            self._build(status="empty", rows_processed=5, rows_succeeded=0)
-
-    # NOTE: `empty` + `has_failures` (rows_failed > 0 / rows_quarantined > 0)
-    # is unreachable at the API layer because `_validate_row_decomposition`
-    # fires first — `rows_processed=0` with any non-zero failure counter
-    # violates the inequality `rows_processed >= sum_terminal_counts`.  The
-    # L0 contract layer catches this case directly without the inequality
-    # in the way; see ``tests/unit/contracts/test_run_result.py::
-    # TestRunResultStatusInvariant::test_empty_rejects_failures`` for the
-    # primary coverage.
+        with pytest.raises(pydantic.ValidationError, match=r"empty.*source.rows_processed == 0"):
+            self._build(status="empty", accounting=_accounting(source_rows=5, succeeded=0, emitted=0), landscape_run_id="landscape-empty")
 
 
 class TestRunResultsResponseStatusInvariant:
-    """Same biconditional, but on the terminal-only ``RunResultsResponse``."""
+    """Same token-accounting taxonomy, but on terminal-only results."""
 
     @staticmethod
     def _build(**overrides: object) -> RunResultsResponse:
         kwargs: dict[str, object] = {
             "run_id": "run-1",
             "status": "completed",
-            "rows_processed": 10,
-            "rows_succeeded": 10,
-            "rows_failed": 0,
-            "rows_routed_success": 0,
-            "rows_routed_failure": 0,
-            "rows_quarantined": 0,
+            "accounting": _accounting(),
             "landscape_run_id": "landscape-1",
             "error": None,
         }
@@ -1338,18 +1237,23 @@ class TestRunResultsResponseStatusInvariant:
     def test_completed_with_failures_legal(self) -> None:
         response = self._build(
             status="completed_with_failures",
-            rows_processed=10,
-            rows_succeeded=7,
-            rows_failed=3,
+            accounting=_accounting(source_rows=10, succeeded=7, failed=3),
         )
         assert response.status == "completed_with_failures"
 
     def test_empty_legal(self) -> None:
-        assert self._build(status="empty", rows_processed=0, rows_succeeded=0).status == "empty"
+        assert (
+            self._build(
+                status="empty",
+                accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
+                landscape_run_id="landscape-empty",
+            ).status
+            == "empty"
+        )
 
     def test_completed_rejects_failures(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match=r"completed.*requires no failures"):
-            self._build(status="completed", rows_processed=10, rows_succeeded=7, rows_failed=3)
+        with pytest.raises(pydantic.ValidationError, match=r"completed.*tokens.failed == 0"):
+            self._build(status="completed", accounting=_accounting(source_rows=10, succeeded=7, failed=3))
 
 
 class TestErrorEventRoundTrip:
@@ -1415,22 +1319,26 @@ def test_validation_result_rejects_unknown_field():
         )
 
 
-class TestRowsRoutedSplitPublicApiFieldStability:
-    """elspeth-5069612f3c — public-API field-name pinning for the rows_routed split.
-
-    The four response models exposed via the web API must publish ``rows_routed_success``
-    and ``rows_routed_failure`` (and NOT the legacy ``rows_routed``) in their
-    JSON schema. Any future field-rename slip would be caught by this test.
-    """
+class TestRunAccountingPublicApiFieldStability:
+    """Terminal API models expose accounting, not legacy mixed-unit rows."""
 
     @pytest.mark.parametrize(
         "model_cls",
-        [CompletedData, RunStatusResponse, RunResultsResponse, CancelledData],
+        [CompletedData, RunStatusResponse, RunResultsResponse],
     )
-    def test_response_model_exposes_split_fields_in_json_schema(self, model_cls) -> None:
+    def test_terminal_models_expose_accounting_not_legacy_rows(self, model_cls) -> None:
         properties = model_cls.model_json_schema()["properties"]
-        assert "rows_routed_success" in properties, f"{model_cls.__name__} must expose rows_routed_success in its JSON schema"
-        assert "rows_routed_failure" in properties, f"{model_cls.__name__} must expose rows_routed_failure in its JSON schema"
+        assert "accounting" in properties, f"{model_cls.__name__} must expose accounting in its JSON schema"
+        assert "rows_processed" not in properties, f"{model_cls.__name__} must not expose legacy rows_processed"
+        assert "rows_succeeded" not in properties, f"{model_cls.__name__} must not expose legacy rows_succeeded"
+        assert "rows_failed" not in properties, f"{model_cls.__name__} must not expose legacy rows_failed"
+        assert "rows_routed" not in properties, f"{model_cls.__name__} must not expose legacy rows_routed"
+
+    @pytest.mark.parametrize("model_cls", [ProgressData, CancelledData])
+    def test_live_counter_models_still_expose_split_fields_in_json_schema(self, model_cls) -> None:
+        properties = model_cls.model_json_schema()["properties"]
+        assert "tokens_routed_success" in properties, f"{model_cls.__name__} must expose tokens_routed_success in its JSON schema"
+        assert "tokens_routed_failure" in properties, f"{model_cls.__name__} must expose tokens_routed_failure in its JSON schema"
         assert "rows_routed" not in properties, f"{model_cls.__name__} must not expose the legacy rows_routed field"
 
 
@@ -1449,12 +1357,7 @@ class TestTerminalEventStatusDiscriminator:
     def test_completed_data_accepts_completed_with_failures(self) -> None:
         data = CompletedData(
             status="completed_with_failures",
-            rows_processed=10,
-            rows_succeeded=7,
-            rows_failed=3,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
+            accounting=_accounting(source_rows=10, succeeded=7, failed=3),
             landscape_run_id="lscape-1",
         )
         assert data.status == "completed_with_failures"
@@ -1462,10 +1365,7 @@ class TestTerminalEventStatusDiscriminator:
     def test_completed_data_accepts_empty(self) -> None:
         data = CompletedData(
             status="empty",
-            rows_processed=0,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_quarantined=0,
+            accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
             landscape_run_id="lscape-empty",
         )
         assert data.status == "empty"
@@ -1480,10 +1380,7 @@ class TestTerminalEventStatusDiscriminator:
         with pytest.raises(pydantic.ValidationError):
             CompletedData(
                 status="failed",  # type: ignore[arg-type]
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
                 landscape_run_id="lscape-1",
             )
 
@@ -1492,51 +1389,32 @@ class TestTerminalEventStatusDiscriminator:
         with pytest.raises(pydantic.ValidationError):
             CompletedData(
                 status="running",  # type: ignore[arg-type]
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=0, succeeded=0, emitted=0),
                 landscape_run_id="lscape-1",
             )
 
     def test_completed_data_rejects_completed_with_no_success_indicator(self) -> None:
-        """status='completed' with zero success rows is a status/count mismatch.
-
-        Mirrors the L0 invariant: ``completed`` requires
-        ``rows_succeeded > 0 OR rows_routed_success > 0``.  This catches a
-        producer-side bug where the engine emits a clean-completion verdict
-        for a run that produced no success rows.
-        """
-        with pytest.raises(pydantic.ValidationError, match="success indicator"):
+        """status='completed' with zero success tokens is a taxonomy mismatch."""
+        with pytest.raises(pydantic.ValidationError, match=r"tokens\.succeeded > 0"):
             CompletedData(
                 status="completed",
-                rows_processed=5,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=5, succeeded=0, emitted=0),
                 landscape_run_id="lscape-1",
             )
 
     def test_completed_data_rejects_completed_with_failures_with_no_failure_indicator(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match="failure indicator"):
+        with pytest.raises(pydantic.ValidationError, match=r"tokens\.failed > 0"):
             CompletedData(
                 status="completed_with_failures",
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=10, succeeded=10, failed=0),
                 landscape_run_id="lscape-1",
             )
 
     def test_completed_data_rejects_empty_with_nonzero_rows_processed(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match="rows_processed == 0"):
+        with pytest.raises(pydantic.ValidationError, match=r"source\.rows_processed == 0"):
             CompletedData(
                 status="empty",
-                rows_processed=5,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=5, succeeded=0, emitted=0),
                 landscape_run_id="lscape-1",
             )
 
@@ -1545,26 +1423,19 @@ class TestTerminalEventStatusDiscriminator:
         don't pass it continue to work, and the wire payload is uniform with
         ``CompletedData``/``FailedData``.
         """
-        data = CancelledData(
-            rows_processed=10,
-            rows_succeeded=6,
-            rows_failed=2,
-            rows_quarantined=2,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-        )
+        data = _cancelled_data(tokens_succeeded=6, tokens_failed=2, tokens_quarantined=2)
         assert data.status == "cancelled"
 
     def test_cancelled_data_rejects_other_status(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             CancelledData(
                 status="completed",  # type: ignore[arg-type]
-                rows_processed=10,
-                rows_succeeded=10,
-                rows_failed=0,
-                rows_quarantined=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
+                source_rows_processed=10,
+                tokens_succeeded=10,
+                tokens_failed=0,
+                tokens_quarantined=0,
+                tokens_routed_success=0,
+                tokens_routed_failure=0,
             )
 
     def test_failed_data_status_defaults_to_failed(self) -> None:
@@ -1586,10 +1457,7 @@ class TestTerminalEventStatusDiscriminator:
             event_type="completed",
             data=CompletedData(
                 status="completed_with_failures",
-                rows_processed=10,
-                rows_succeeded=7,
-                rows_failed=3,
-                rows_quarantined=0,
+                accounting=_accounting(source_rows=10, succeeded=7, failed=3),
                 landscape_run_id="lscape-cwf",
             ),
         )
@@ -1610,12 +1478,12 @@ class TestS8FabricationGuard:
     """
 
     _PROGRESS_REQUIRED_FIELDS = (
-        "rows_processed",
-        "rows_succeeded",
-        "rows_failed",
-        "rows_quarantined",
-        "rows_routed_success",
-        "rows_routed_failure",
+        "source_rows_processed",
+        "tokens_succeeded",
+        "tokens_failed",
+        "tokens_quarantined",
+        "tokens_routed_success",
+        "tokens_routed_failure",
     )
 
     _CANCELLED_REQUIRED_FIELDS = _PROGRESS_REQUIRED_FIELDS
@@ -1630,32 +1498,25 @@ class TestS8FabricationGuard:
         assert missing_field in str(exc_info.value)
 
     def test_progress_data_no_default_zero(self) -> None:
-        """Constructing with only rows_processed must crash on five missing fields.
+        """Constructing with only source_rows_processed must crash on five missing fields.
 
         Pre-fix: the four routed/categorical defaults silently filled in 0.
-        Post-fix: only rows_processed is supplied; ProgressData crashes.
+        Post-fix: only source_rows_processed is supplied; ProgressData crashes.
         """
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed=10)  # type: ignore[call-arg]
+            ProgressData(source_rows_processed=10)  # type: ignore[call-arg]
 
     def test_progress_data_relaxed_sum_invariant(self) -> None:
         """Mid-flight transient inconsistency is allowed.
 
-        ProgressData may emit ``rows_processed=10`` while every terminal
+        ProgressData may emit ``source_rows_processed=10`` while every terminal
         bucket reads 0 — this represents a moment between row ingestion and
         categorisation.  The sum-invariant
         (succeeded+failed+quarantined+routed_success+routed_failure
         <= processed) is documented in the docstring as NOT enforced here.
         """
-        data = ProgressData(
-            rows_processed=10,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_quarantined=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-        )
-        assert data.rows_processed == 10
+        data = _progress_data(source_rows_processed=10, tokens_succeeded=0)
+        assert data.source_rows_processed == 10
 
     def test_progress_event_json_roundtrip_strict(self) -> None:
         """Reconnect-replay path: dict → RunEvent.model_validate.
@@ -1670,20 +1531,20 @@ class TestS8FabricationGuard:
             "timestamp": "2026-05-03T12:00:00+00:00",
             "event_type": "progress",
             "data": {
-                "rows_processed": 100,
-                "rows_succeeded": 80,
-                "rows_failed": 5,
-                "rows_quarantined": 10,
-                "rows_routed_success": 3,
-                "rows_routed_failure": 2,
+                "source_rows_processed": 100,
+                "tokens_succeeded": 80,
+                "tokens_failed": 5,
+                "tokens_quarantined": 10,
+                "tokens_routed_success": 3,
+                "tokens_routed_failure": 2,
             },
         }
         event = RunEvent.model_validate(payload)
         assert isinstance(event.data, ProgressData)
-        assert event.data.rows_succeeded == 80
-        assert event.data.rows_quarantined == 10
-        assert event.data.rows_routed_success == 3
-        assert event.data.rows_routed_failure == 2
+        assert event.data.tokens_succeeded == 80
+        assert event.data.tokens_quarantined == 10
+        assert event.data.tokens_routed_success == 3
+        assert event.data.tokens_routed_failure == 2
 
     def test_progress_event_json_roundtrip_partial_rejected(self) -> None:
         """Reconnect-replay path: partial data dict must crash.
@@ -1697,10 +1558,10 @@ class TestS8FabricationGuard:
             "timestamp": "2026-05-03T12:00:00+00:00",
             "event_type": "progress",
             "data": {
-                "rows_processed": 100,
-                "rows_failed": 5,
-                "rows_routed_success": 3,
-                "rows_routed_failure": 2,
+                "source_rows_processed": 100,
+                "tokens_failed": 5,
+                "tokens_routed_success": 3,
+                "tokens_routed_failure": 2,
             },
         }
         with pytest.raises(pydantic.ValidationError):

@@ -8,7 +8,14 @@ from datetime import datetime
 import pytest
 from sqlalchemy.pool import StaticPool
 
-from elspeth.web.execution.schemas import RunStatusResponse
+from elspeth.web.execution.schemas import (
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
+    RunStatusResponse,
+)
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
@@ -656,18 +663,38 @@ class TestAdr019LegacyCounterReadCompatibility:
     """Pre-ADR-019 sessions.db rows used disjoint routed/quarantine counters."""
 
     @staticmethod
+    def _accounting_from_run(run: RunRecord) -> RunAccounting:
+        return RunAccounting(
+            source=RunAccountingSource(rows_processed=run.rows_processed),
+            tokens=RunAccountingTokens(
+                emitted=run.rows_succeeded + run.rows_failed,
+                terminal=run.rows_succeeded + run.rows_failed,
+                succeeded=run.rows_succeeded,
+                failed=run.rows_failed,
+                structural=0,
+                pending=0,
+            ),
+            routing=RunAccountingRouting(
+                routed_success=run.rows_routed_success,
+                routed_failure=run.rows_routed_failure,
+                quarantined=run.rows_quarantined,
+                discarded=0,
+            ),
+            integrity=RunAccountingIntegrity(
+                closure="closed",
+                missing_terminal_outcomes=0,
+                duplicate_terminal_outcomes=0,
+            ),
+        )
+
+    @staticmethod
     def _status_response_from_run(run: RunRecord) -> RunStatusResponse:
         return RunStatusResponse(
             run_id=str(run.id),
             status=run.status,
             started_at=run.started_at,
             finished_at=run.finished_at,
-            rows_processed=run.rows_processed,
-            rows_succeeded=run.rows_succeeded,
-            rows_failed=run.rows_failed,
-            rows_routed_success=run.rows_routed_success,
-            rows_routed_failure=run.rows_routed_failure,
-            rows_quarantined=run.rows_quarantined,
+            accounting=TestAdr019LegacyCounterReadCompatibility._accounting_from_run(run),
             error=run.error,
             landscape_run_id=run.landscape_run_id,
         )

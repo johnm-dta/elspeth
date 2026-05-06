@@ -3,7 +3,7 @@
 //
 // Live progress display for an active execution run. Shows:
 // - Indeterminate progress bar (using .progress-bar CSS classes from App.css)
-// - Row counters: rows_processed, rows_failed (large, prominent)
+// - Explicit source/token counters
 // - Recent errors list (scrolling, newest first, capped at 50)
 // - Cancel button (disabled once run reaches terminal state)
 // - "Pipeline execution was cancelled" message on cancelled event
@@ -110,33 +110,57 @@ export function ProgressView() {
         />
       </div>
 
-      {/* Row counters -- large and prominent */}
+      {/* Source/token counters -- large and prominent */}
       <div className="progress-counters">
         <div>
           <div className="progress-counter-label">
-            Processed
+            Source Rows
           </div>
           <div className="progress-counter-value">
-            {progress.rows_processed.toLocaleString()}
+            {progress.source_rows_processed.toLocaleString()}
           </div>
         </div>
         <div>
           <div className="progress-counter-label">
-            Failed
+            Tokens Succeeded
+          </div>
+          <div className="progress-counter-value">
+            {progress.tokens_succeeded.toLocaleString()}
+          </div>
+        </div>
+        <div>
+          <div className="progress-counter-label">
+            Tokens Failed
           </div>
           <div
             className="progress-counter-value"
             style={{
               color:
-                progress.rows_failed > 0
+                progress.tokens_failed > 0
                   ? "var(--color-error)"
                   : "var(--color-text)",
             }}
           >
-            {progress.rows_failed.toLocaleString()}
+            {progress.tokens_failed.toLocaleString()}
           </div>
         </div>
       </div>
+
+      {(progress.tokens_quarantined > 0 ||
+        progress.tokens_routed_success > 0 ||
+        progress.tokens_routed_failure > 0) && (
+        <div className="progress-routing-summary">
+          {progress.tokens_routed_success > 0 && (
+            <span>{progress.tokens_routed_success.toLocaleString()} routed success</span>
+          )}
+          {progress.tokens_routed_failure > 0 && (
+            <span>{progress.tokens_routed_failure.toLocaleString()} routed failure</span>
+          )}
+          {progress.tokens_quarantined > 0 && (
+            <span>{progress.tokens_quarantined.toLocaleString()} quarantined</span>
+          )}
+        </div>
+      )}
 
       {/* Cancellation message */}
       {progress.status === "cancelled" && (

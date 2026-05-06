@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RunsView } from "./RunsView";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { Run, RunDiagnostics } from "@/types/index";
+import type { Run, RunAccounting, RunDiagnostics } from "@/types/index";
 
 vi.mock("@/api/client", () => ({
   fetchRuns: vi.fn().mockResolvedValue([]),
@@ -17,17 +17,39 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
     id: "run-1",
     session_id: "session-1",
     status: "failed",
-    rows_processed: 1,
-    rows_succeeded: 0,
-    rows_failed: 0,
-    rows_quarantined: 0,
-    rows_routed_success: 0,
-    rows_routed_failure: 0,
+    accounting: null,
+    error: null,
     started_at: "2026-04-26T05:31:58.000Z",
     finished_at: "2026-04-26T05:31:59.000Z",
     composition_version: 1,
     ...overrides,
   } as Run;
+}
+
+function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
+  return {
+    source: { rows_processed: 1 },
+    tokens: {
+      emitted: 9_324,
+      terminal: 9_324,
+      succeeded: 9_323,
+      failed: 0,
+      structural: 1,
+      pending: 0,
+    },
+    routing: {
+      routed_success: 0,
+      routed_failure: 0,
+      quarantined: 0,
+      discarded: 0,
+    },
+    integrity: {
+      closure: "closed",
+      missing_terminal_outcomes: 0,
+      duplicate_terminal_outcomes: 0,
+    },
+    ...overrides,
+  };
 }
 
 function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
@@ -138,21 +160,12 @@ describe("RunsView", () => {
     expect(screen.queryByText("-1s")).not.toBeInTheDocument();
   });
 
-  it("renders gate-routed completed runs without failure alert", () => {
-    // elspeth-5069612f3c / elspeth-71520f5e30 — the dashboard UI VAL gate
-    // for the gate-only-pipeline misclassification fix.  The fixed API
-    // response shape (status="completed", rows_routed_success>0,
-    // rows_routed_failure==0) must render without the failed-run alert
-    // and without the historical "No row reached the success path"
-    // structural-failure message.
+  it("renders fan-out accounting without treating token success as source rows", () => {
     useExecutionStore.setState({
       runs: [
         makeRun({
           status: "completed",
-          rows_processed: 3,
-          rows_failed: 0,
-          rows_routed_success: 3,
-          rows_routed_failure: 0,
+          accounting: makeAccounting(),
           error: null,
         }),
       ],
@@ -161,7 +174,11 @@ describe("RunsView", () => {
     render(<RunsView />);
 
     expect(screen.getByText("completed")).toBeInTheDocument();
-    expect(screen.getByText("3 rows")).toBeInTheDocument();
+    expect(screen.getByText("1 source row")).toBeInTheDocument();
+    expect(screen.getByText("9,324 tokens emitted")).toBeInTheDocument();
+    expect(screen.getByText("9,323 tokens succeeded")).toBeInTheDocument();
+    expect(screen.getByText("1 structural token")).toBeInTheDocument();
+    expect(screen.queryByText("9,323 rows")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/No row reached/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Pipeline execution failed/i)).not.toBeInTheDocument();
@@ -172,7 +189,17 @@ describe("RunsView", () => {
       runs: [
         makeRun({
           status: "completed",
-          rows_processed: 3,
+          accounting: makeAccounting({
+            source: { rows_processed: 3 },
+            tokens: {
+              emitted: 3,
+              terminal: 3,
+              succeeded: 3,
+              failed: 0,
+              structural: 0,
+              pending: 0,
+            },
+          }),
           discard_summary: {
             total: 3,
             validation_errors: 1,

@@ -17,6 +17,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from opentelemetry import metrics
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
@@ -51,7 +52,8 @@ from elspeth.web.composer.protocol import (
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.yaml_generator import generate_yaml
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.accounting import load_run_accounting_for_settings
+from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
@@ -61,6 +63,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateData,
     CompositionStateRecord,
     InvalidForkTargetError,
+    RunRecord,
     SessionRecord,
     SessionServiceProtocol,
 )
@@ -194,6 +197,54 @@ def _message_response(msg: ChatMessageRecord) -> ChatMessageResponse:
         created_at=msg.created_at,
         composition_state_id=str(msg.composition_state_id) if msg.composition_state_id else None,
     )
+
+
+def _run_accounting_integrity_http(
+    message: str,
+    *,
+    run_id: UUID | None = None,
+    landscape_run_id: str | None = None,
+    landscape_run_ids: Sequence[str] | None = None,
+    validation_errors: Sequence[Any] | None = None,
+    error: str | None = None,
+) -> HTTPException:
+    """Return the structured 500 used for public run-accounting contract failures."""
+    detail: dict[str, object] = {
+        "code": "run_integrity_error",
+        "message": message,
+    }
+    if run_id is not None:
+        detail["run_id"] = str(run_id)
+    if landscape_run_id is not None:
+        detail["landscape_run_id"] = landscape_run_id
+    if landscape_run_ids is not None:
+        detail["landscape_run_ids"] = list(landscape_run_ids)
+    if validation_errors is not None:
+        detail["validation_errors"] = list(validation_errors)
+    if error is not None:
+        detail["error"] = error
+    return HTTPException(status_code=500, detail=detail)
+
+
+def _validate_run_status_accounting_for_list(run: RunRecord, accounting: RunAccounting | None) -> None:
+    """Apply the canonical run status/accounting contract before list serialization."""
+    try:
+        RunStatusResponse(
+            run_id=str(run.id),
+            status=run.status,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            accounting=accounting,
+            error=run.error,
+            landscape_run_id=run.landscape_run_id,
+        )
+    except PydanticValidationError as exc:
+        raise _run_accounting_integrity_http(
+            "Session run failed internal accounting validation.",
+            run_id=run.id,
+            landscape_run_id=run.landscape_run_id,
+            validation_errors=exc.errors(include_url=False, include_context=False, include_input=False),
+        ) from exc
 
 
 def _litellm_error_detail(
@@ -2537,6 +2588,20 @@ def create_session_router() -> APIRouter:
         terminal_landscape_run_ids = tuple(
             run.landscape_run_id for run in runs if run.status in SESSION_TERMINAL_RUN_STATUS_VALUES and run.landscape_run_id is not None
         )
+        accounting_by_run_id = {}
+        if terminal_landscape_run_ids:
+            try:
+                accounting_by_run_id = await run_sync_in_worker(
+                    load_run_accounting_for_settings,
+                    request.app.state.settings,
+                    terminal_landscape_run_ids,
+                )
+            except ValueError as exc:
+                raise _run_accounting_integrity_http(
+                    "Session run accounting projection failed.",
+                    landscape_run_ids=terminal_landscape_run_ids,
+                    error=str(exc),
+                ) from exc
         discard_summaries = {}
         if terminal_landscape_run_ids:
             discard_summaries = await run_sync_in_worker(
@@ -2560,13 +2625,16 @@ def create_session_router() -> APIRouter:
             discard_summary = None
             if run.landscape_run_id is not None and run.landscape_run_id in discard_summaries:
                 discard_summary = discard_summaries[run.landscape_run_id]
+            accounting = None
+            if run.landscape_run_id is not None and run.landscape_run_id in accounting_by_run_id:
+                accounting = accounting_by_run_id[run.landscape_run_id]
+            _validate_run_status_accounting_for_list(run, accounting)
             responses.append(
                 RunResponse(
                     id=str(run.id),
                     session_id=str(run.session_id),
                     status=run.status,
-                    rows_processed=run.rows_processed,
-                    rows_failed=run.rows_failed,
+                    accounting=accounting,
                     error=run.error,
                     started_at=run.started_at,
                     finished_at=run.finished_at,

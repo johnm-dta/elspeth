@@ -22,40 +22,76 @@ from elspeth.web.execution.schemas import (
     ErrorData,
     FailedData,
     ProgressData,
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
     RunEvent,
 )
 
 _EventData = ProgressData | ErrorData | CompletedData | CancelledData | FailedData
 
+
+def _accounting() -> RunAccounting:
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=10),
+        tokens=RunAccountingTokens(
+            emitted=10,
+            terminal=10,
+            succeeded=10,
+            failed=0,
+            structural=0,
+            pending=0,
+        ),
+        routing=RunAccountingRouting(
+            routed_success=0,
+            routed_failure=0,
+            quarantined=0,
+            discarded=0,
+        ),
+        integrity=RunAccountingIntegrity(
+            closure="closed",
+            missing_terminal_outcomes=0,
+            duplicate_terminal_outcomes=0,
+        ),
+    )
+
+
+def _progress_data(value: int = 10) -> ProgressData:
+    return ProgressData(
+        source_rows_processed=value,
+        tokens_succeeded=value,
+        tokens_failed=0,
+        tokens_quarantined=0,
+        tokens_routed_success=0,
+        tokens_routed_failure=0,
+    )
+
+
+def _cancelled_data() -> CancelledData:
+    return CancelledData(
+        source_rows_processed=10,
+        tokens_succeeded=10,
+        tokens_failed=0,
+        tokens_quarantined=0,
+        tokens_routed_success=0,
+        tokens_routed_failure=0,
+    )
+
+
 # Typed as the concrete union so mypy resolves RunEvent(data=...) rather than
 # widening to the _StrictResponse base; also ensures the lambdas stay in
 # lockstep with RunEvent's discriminated union.
 _EVENT_DATA: dict[str, Callable[[], _EventData]] = {
-    "progress": lambda: ProgressData(
-        rows_processed=10,
-        rows_succeeded=10,
-        rows_failed=0,
-        rows_quarantined=0,
-        rows_routed_success=0,
-        rows_routed_failure=0,
-    ),
+    "progress": lambda: _progress_data(),
     "error": lambda: ErrorData(message="test error", node_id=None, row_id=None),
     "completed": lambda: CompletedData(
         status="completed",
-        rows_processed=10,
-        rows_succeeded=10,
-        rows_failed=0,
-        rows_quarantined=0,
+        accounting=_accounting(),
         landscape_run_id="lscape-1",
     ),
-    "cancelled": lambda: CancelledData(
-        rows_processed=10,
-        rows_succeeded=10,
-        rows_failed=0,
-        rows_quarantined=0,
-        rows_routed_success=0,
-        rows_routed_failure=0,
-    ),
+    "cancelled": lambda: _cancelled_data(),
     "failed": lambda: FailedData(detail="test failure", node_id=None),
 }
 
@@ -194,7 +230,7 @@ class TestProgressBroadcasterThreadSafety:
         assert received.run_id == "run-1"
         assert received.event_type == "progress"
         assert isinstance(received.data, ProgressData)
-        assert received.data.rows_processed == 10
+        assert received.data.source_rows_processed == 10
 
     @pytest.mark.asyncio
     async def test_multiple_broadcasts_from_thread_arrive_in_order(self) -> None:
@@ -208,14 +244,7 @@ class TestProgressBroadcasterThreadSafety:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="progress",
-                data=ProgressData(
-                    rows_processed=i,
-                    rows_succeeded=i,
-                    rows_failed=0,
-                    rows_quarantined=0,
-                    rows_routed_success=0,
-                    rows_routed_failure=0,
-                ),
+                data=_progress_data(i),
             )
             for i in range(5)
         ]
@@ -232,7 +261,7 @@ class TestProgressBroadcasterThreadSafety:
         for _ in range(5):
             item = await asyncio.wait_for(queue.get(), timeout=5.0)
             assert isinstance(item.data, ProgressData)
-            received.append(item.data.rows_processed)
+            received.append(item.data.source_rows_processed)
 
         assert received == [0, 1, 2, 3, 4]
 
@@ -362,14 +391,7 @@ class TestProgressBroadcasterCallbackBacklogBound:
                     run_id="run-1",
                     timestamp=datetime.now(tz=UTC),
                     event_type="progress",
-                    data=ProgressData(
-                        rows_processed=i,
-                        rows_succeeded=i,
-                        rows_failed=0,
-                        rows_quarantined=0,
-                        rows_routed_success=0,
-                        rows_routed_failure=0,
-                    ),
+                    data=_progress_data(i),
                 ),
             )
 
@@ -402,14 +424,7 @@ class TestProgressBroadcasterCallbackBacklogBound:
                     run_id="run-1",
                     timestamp=datetime.now(tz=UTC),
                     event_type="progress",
-                    data=ProgressData(
-                        rows_processed=i,
-                        rows_succeeded=i,
-                        rows_failed=0,
-                        rows_quarantined=0,
-                        rows_routed_success=0,
-                        rows_routed_failure=0,
-                    ),
+                    data=_progress_data(i),
                 ),
             )
 
@@ -440,14 +455,7 @@ class TestProgressBroadcasterCallbackBacklogBound:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="progress",
-                data=ProgressData(
-                    rows_processed=i,
-                    rows_succeeded=i,
-                    rows_failed=0,
-                    rows_quarantined=0,
-                    rows_routed_success=0,
-                    rows_routed_failure=0,
-                ),
+                data=_progress_data(i),
             )
             for i in range(5)
         ]
@@ -465,7 +473,7 @@ class TestProgressBroadcasterCallbackBacklogBound:
 
         # All 5 events delivered in order via _safe_put → asyncio.Queue.
         received = [queue.get_nowait() for _ in range(5)]
-        assert [r.data.rows_processed for r in received if isinstance(r.data, ProgressData)] == [0, 1, 2, 3, 4]
+        assert [r.data.source_rows_processed for r in received if isinstance(r.data, ProgressData)] == [0, 1, 2, 3, 4]
 
     def test_drain_clears_schedule_flag_so_next_broadcast_reschedules(self) -> None:
         """After the drain callback runs, the next broadcast must schedule again.

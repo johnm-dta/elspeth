@@ -453,6 +453,10 @@ Index("ix_nodes_run_id", nodes_table.c.run_id)
 Index("ix_edges_run_id", edges_table.c.run_id)
 Index("ix_rows_run_id", rows_table.c.run_id)
 Index("ix_tokens_row_id", tokens_table.c.row_id)
+# Performance index for run-accounting API projections and session-list batch
+# reads. This is additive and intentionally does not advance the SQLite schema
+# epoch or participate in the required-schema compatibility gate.
+Index("ix_tokens_run_id", tokens_table.c.run_id)
 Index("ix_token_parents_parent", token_parents_table.c.parent_token_id)
 Index("ix_node_states_token", node_states_table.c.token_id)
 Index("ix_node_states_node", node_states_table.c.node_id)

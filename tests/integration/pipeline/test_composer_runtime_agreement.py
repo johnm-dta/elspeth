@@ -132,6 +132,7 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
+from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.schemas import CompletedData
 from elspeth.web.execution.validation import validate_pipeline
 from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
@@ -2859,25 +2860,27 @@ class TestComposerRuntimeRunCompletionAgreement:
             "regression of the row-decomposition validator from `>=` back to `==` would slip past."
         )
 
-        # Drive the row-decomposition validator from the engine's actual
-        # counts.  Pre-Phase-2.1 this raised ``pydantic.ValidationError`` on
-        # the inequality shape and ``pipeline_done_callback`` crashed.
-        # Post-Phase-2.1 construction succeeds.
+        # Drive the completed-event validator from the engine's actual
+        # Landscape audit output. Pre-Phase-2.1 this test constructed the
+        # old row-counter payload directly and pinned the legitimate
+        # rows_processed > terminal-successes aggregation shape. The public
+        # event contract now carries explicit Landscape-derived accounting,
+        # so the agreement check loads that accounting from the run just
+        # emitted by the orchestrator.
         # Phase 2.2 (elspeth-0de989c56d): SSE payload carries the explicit
-        # status discriminator; this aggregation has rows_succeeded > 0 and
-        # no failures, so the engine classifies it as "completed".
+        # status discriminator; this aggregation has one successful terminal
+        # materialized token and no failures, so the engine classifies it as
+        # "completed".
+        accounting = load_run_accounting_from_db(landscape_db, landscape_run_id=run_result.run_id)
         completed = CompletedData(
             status="completed",
-            rows_processed=run_result.rows_processed,
-            rows_succeeded=run_result.rows_succeeded,
-            rows_failed=run_result.rows_failed,
-            rows_routed_success=run_result.rows_routed_success,
-            rows_routed_failure=run_result.rows_routed_failure,
-            rows_quarantined=run_result.rows_quarantined,
+            accounting=accounting,
             landscape_run_id=run_result.run_id,
         )
-        assert completed.rows_processed == run_result.rows_processed
-        assert completed.rows_succeeded == run_result.rows_succeeded
+        assert completed.accounting.source.rows_processed == run_result.rows_processed
+        assert completed.accounting.tokens.succeeded == run_result.rows_succeeded
+        assert completed.accounting.tokens.failed == 0
+        assert completed.accounting.integrity.closure == "closed"
         assert completed.landscape_run_id == run_result.run_id
         # The output sink received exactly the one aggregated row.
         assert len(sink.results) == 1, f"expected single aggregated output, got {len(sink.results)}"

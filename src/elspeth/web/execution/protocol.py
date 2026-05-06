@@ -8,7 +8,8 @@ from uuid import UUID
 
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.state import CompositionState
-from elspeth.web.execution.schemas import RunStatusResponse, ValidationResult
+from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
+from elspeth.web.sessions.protocol import RunRecord
 
 
 class ValidationSettings(Protocol):
@@ -94,7 +95,13 @@ class ExecutionService(Protocol):
         """
         ...
 
-    async def get_status(self, run_id: UUID) -> RunStatusResponse:
+    async def get_status(
+        self,
+        run_id: UUID,
+        *,
+        accounting: RunAccounting | None = None,
+        run_record: RunRecord | None = None,
+    ) -> RunStatusResponse:
         """Return current run status from the Run database record."""
         ...
 

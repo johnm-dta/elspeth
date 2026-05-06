@@ -43,6 +43,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.config import WebSettings
+from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
 from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
 from elspeth.web.execution.progress import ProgressBroadcaster
@@ -52,6 +53,7 @@ from elspeth.web.execution.schemas import (
     CompletedData,
     FailedData,
     ProgressData,
+    RunAccounting,
     RunEvent,
     RunStatusResponse,
     ValidationCheck,
@@ -63,6 +65,7 @@ from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
+    RunRecord,
     SessionRunStatus,
     SessionServiceProtocol,
 )  # B1: canonical definition
@@ -532,20 +535,26 @@ class ExecutionServiceImpl:
 
         return run_id
 
-    async def get_status(self, run_id: UUID) -> RunStatusResponse:
+    async def get_status(
+        self,
+        run_id: UUID,
+        *,
+        accounting: RunAccounting | None = None,
+        run_record: RunRecord | None = None,
+    ) -> RunStatusResponse:
         """Return current run status. AC #17: delegates to SessionService."""
-        run = await self._session_service.get_run(run_id)
+        if run_record is not None:
+            if run_record.id != run_id:
+                raise RuntimeError(f"Status snapshot run_id mismatch: expected {run_id}, got {run_record.id}")
+            run = run_record
+        else:
+            run = await self._session_service.get_run(run_id)
         return RunStatusResponse(
             run_id=str(run.id),
             status=run.status,
             started_at=run.started_at,
             finished_at=run.finished_at,
-            rows_processed=run.rows_processed,
-            rows_succeeded=run.rows_succeeded,
-            rows_failed=run.rows_failed,
-            rows_routed_success=run.rows_routed_success,
-            rows_routed_failure=run.rows_routed_failure,
-            rows_quarantined=run.rows_quarantined,
+            accounting=accounting,
             error=run.error,
             landscape_run_id=run.landscape_run_id,
         )
@@ -672,12 +681,12 @@ class ExecutionServiceImpl:
                         timestamp=datetime.now(tz=UTC),
                         event_type="cancelled",
                         data=CancelledData(
-                            rows_processed=0,
-                            rows_succeeded=0,
-                            rows_failed=0,
-                            rows_quarantined=0,
-                            rows_routed_success=0,
-                            rows_routed_failure=0,
+                            source_rows_processed=0,
+                            tokens_succeeded=0,
+                            tokens_failed=0,
+                            tokens_quarantined=0,
+                            tokens_routed_success=0,
+                            tokens_routed_failure=0,
                         ),
                     ),
                 )
@@ -700,12 +709,12 @@ class ExecutionServiceImpl:
                             timestamp=datetime.now(tz=UTC),
                             event_type="cancelled",
                             data=CancelledData(
-                                rows_processed=0,
-                                rows_succeeded=0,
-                                rows_failed=0,
-                                rows_quarantined=0,
-                                rows_routed_success=0,
-                                rows_routed_failure=0,
+                                source_rows_processed=0,
+                                tokens_succeeded=0,
+                                tokens_failed=0,
+                                tokens_quarantined=0,
+                                tokens_routed_success=0,
+                                tokens_routed_failure=0,
                             ),
                         ),
                     )
@@ -948,12 +957,12 @@ class ExecutionServiceImpl:
                             timestamp=datetime.now(tz=UTC),
                             event_type="cancelled",
                             data=CancelledData(
-                                rows_processed=result.rows_processed,
-                                rows_succeeded=result.rows_succeeded,
-                                rows_failed=result.rows_failed,
-                                rows_quarantined=result.rows_quarantined,
-                                rows_routed_success=result.rows_routed_success,
-                                rows_routed_failure=result.rows_routed_failure,
+                                source_rows_processed=result.rows_processed,
+                                tokens_succeeded=result.rows_succeeded,
+                                tokens_failed=result.rows_failed,
+                                tokens_quarantined=result.rows_quarantined,
+                                tokens_routed_success=result.rows_routed_success,
+                                tokens_routed_failure=result.rows_routed_failure,
                             ),
                         ),
                     )
@@ -1001,6 +1010,9 @@ class ExecutionServiceImpl:
                     ),
                 )
             else:
+                if landscape_db is None:
+                    raise RuntimeError("Tier-1 invariant: completed run has no open LandscapeDB for accounting projection")
+                accounting = load_run_accounting_from_db(landscape_db, landscape_run_id=result.run_id)
                 self._broadcaster.broadcast(
                     run_id,
                     RunEvent(
@@ -1026,12 +1038,7 @@ class ExecutionServiceImpl:
                                 Literal["completed", "completed_with_failures", "empty"],
                                 session_status,
                             ),
-                            rows_processed=result.rows_processed,
-                            rows_succeeded=result.rows_succeeded,
-                            rows_failed=result.rows_failed,
-                            rows_routed_success=result.rows_routed_success,
-                            rows_routed_failure=result.rows_routed_failure,
-                            rows_quarantined=result.rows_quarantined,
+                            accounting=accounting,
                             landscape_run_id=result.run_id,
                         ),
                     ),
@@ -1060,12 +1067,12 @@ class ExecutionServiceImpl:
                     timestamp=datetime.now(tz=UTC),
                     event_type="cancelled",
                     data=CancelledData(
-                        rows_processed=gse.rows_processed,
-                        rows_succeeded=gse.rows_succeeded,
-                        rows_failed=gse.rows_failed,
-                        rows_quarantined=gse.rows_quarantined,
-                        rows_routed_success=gse.rows_routed_success,
-                        rows_routed_failure=gse.rows_routed_failure,
+                        source_rows_processed=gse.rows_processed,
+                        tokens_succeeded=gse.rows_succeeded,
+                        tokens_failed=gse.rows_failed,
+                        tokens_quarantined=gse.rows_quarantined,
+                        tokens_routed_success=gse.rows_routed_success,
+                        tokens_routed_failure=gse.rows_routed_failure,
                     ),
                 ),
             )
@@ -1341,12 +1348,12 @@ class ExecutionServiceImpl:
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
             data=ProgressData(
-                rows_processed=progress.rows_processed,
-                rows_succeeded=progress.rows_succeeded,
-                rows_failed=progress.rows_failed,
-                rows_quarantined=progress.rows_quarantined,
-                rows_routed_success=progress.rows_routed_success,
-                rows_routed_failure=progress.rows_routed_failure,
+                source_rows_processed=progress.rows_processed,
+                tokens_succeeded=progress.rows_succeeded,
+                tokens_failed=progress.rows_failed,
+                tokens_quarantined=progress.rows_quarantined,
+                tokens_routed_success=progress.rows_routed_success,
+                tokens_routed_failure=progress.rows_routed_failure,
             ),
         )
 

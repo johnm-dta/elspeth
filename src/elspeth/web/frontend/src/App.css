@@ -2839,6 +2839,8 @@ summary:focus-visible {
 .progress-counters {
   display: flex;
   gap: var(--space-xl);
+  flex-wrap: wrap;
+  row-gap: var(--space-sm);
   margin-bottom: var(--space-md);
 }
 
@@ -2851,6 +2853,15 @@ summary:focus-visible {
 .progress-counter-value {
   font-size: 20px;
   font-weight: 700;
+}
+
+.progress-routing-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
 }
 
 .progress-cancelled-msg {

@@ -20,7 +20,7 @@ from uuid import UUID
 import pydantic
 from pydantic import BaseModel, ConfigDict, JsonValue, field_validator
 
-from elspeth.web.execution.schemas import DiscardSummary
+from elspeth.web.execution.schemas import DiscardSummary, RunAccounting
 from elspeth.web.sessions.protocol import SessionRunStatus
 from elspeth.web.validation import has_visible_content
 
@@ -180,8 +180,7 @@ class RunResponse(_StrictResponse):
     id: str
     session_id: str
     status: SessionRunStatus
-    rows_processed: int
-    rows_failed: int
+    accounting: RunAccounting | None = None
     error: str | None = None
     started_at: datetime
     finished_at: datetime | None = None

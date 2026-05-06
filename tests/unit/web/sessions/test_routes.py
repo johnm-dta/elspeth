@@ -37,7 +37,16 @@ from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResu
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.execution.schemas import (
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
+    ValidationCheck,
+    ValidationError,
+    ValidationResult,
+)
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
@@ -501,17 +510,80 @@ def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
             )
         )
         conn.execute(
-            token_outcomes_table.insert().values(
-                outcome_id="tout_discard",
-                run_id=run_id,
-                token_id="token-sink",
-                outcome=TerminalOutcome.FAILURE,
-                path=TerminalPath.SINK_DISCARDED,
-                completed=1,
-                recorded_at=now,
-                sink_name="__discard__",
-            )
+            token_outcomes_table.insert(),
+            [
+                {
+                    "outcome_id": "tout_transform_error",
+                    "run_id": run_id,
+                    "token_id": "token-transform",
+                    "outcome": TerminalOutcome.FAILURE,
+                    "path": TerminalPath.ON_ERROR_ROUTED,
+                    "completed": 1,
+                    "recorded_at": now,
+                    "sink_name": None,
+                },
+                {
+                    "outcome_id": "tout_discard",
+                    "run_id": run_id,
+                    "token_id": "token-sink",
+                    "outcome": TerminalOutcome.FAILURE,
+                    "path": TerminalPath.SINK_DISCARDED,
+                    "completed": 1,
+                    "recorded_at": now,
+                    "sink_name": "__discard__",
+                },
+            ],
         )
+
+
+def _fanout_accounting() -> RunAccounting:
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=1),
+        tokens=RunAccountingTokens(
+            emitted=9324,
+            terminal=9324,
+            succeeded=9323,
+            failed=0,
+            structural=1,
+            pending=0,
+        ),
+        routing=RunAccountingRouting(
+            routed_success=0,
+            routed_failure=0,
+            quarantined=0,
+            discarded=0,
+        ),
+        integrity=RunAccountingIntegrity(
+            closure="closed",
+            missing_terminal_outcomes=0,
+            duplicate_terminal_outcomes=0,
+        ),
+    )
+
+
+def _open_completed_accounting() -> RunAccounting:
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=1),
+        tokens=RunAccountingTokens(
+            emitted=2,
+            terminal=1,
+            succeeded=1,
+            failed=0,
+            structural=0,
+            pending=1,
+        ),
+        routing=RunAccountingRouting(
+            routed_success=0,
+            routed_failure=0,
+            quarantined=0,
+            discarded=0,
+        ),
+        integrity=RunAccountingIntegrity(
+            closure="open",
+            missing_terminal_outcomes=1,
+            duplicate_terminal_outcomes=0,
+        ),
+    )
 
 
 class TestSessionCRUDRoutes:
@@ -667,6 +739,145 @@ class TestSessionCRUDRoutes:
         assert runs[0]["error"] == "Pipeline execution failed (FrameworkBugError)"
 
     @pytest.mark.asyncio
+    async def test_session_run_list_returns_accounting_for_fanout_run(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        create_resp = client.post("/api/sessions", json={"title": "Fanout Run"})
+        session_id = uuid.UUID(create_resp.json()["id"])
+
+        state = await service.save_composition_state(
+            session_id,
+            CompositionStateData(is_valid=True),
+        )
+        run = await service.create_run(session_id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(
+            run.id,
+            "completed",
+            landscape_run_id=str(run.id),
+            rows_processed=1,
+            rows_succeeded=9323,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        monkeypatch.setattr(
+            "elspeth.web.sessions.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {str(run.id): _fanout_accounting()},
+            raising=False,
+        )
+
+        runs_resp = client.get(f"/api/sessions/{session_id}/runs")
+
+        assert runs_resp.status_code == 200
+        runs = runs_resp.json()
+        assert len(runs) == 1
+        payload = runs[0]
+        assert "rows_processed" not in payload
+        assert "rows_failed" not in payload
+        assert payload["accounting"]["source"]["rows_processed"] == 1
+        assert payload["accounting"]["tokens"]["succeeded"] == 9323
+
+    @pytest.mark.asyncio
+    async def test_session_run_list_fails_closed_when_completed_accounting_missing(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        create_resp = client.post("/api/sessions", json={"title": "Missing Accounting"})
+        session_id = uuid.UUID(create_resp.json()["id"])
+
+        state = await service.save_composition_state(
+            session_id,
+            CompositionStateData(is_valid=True),
+        )
+        run = await service.create_run(session_id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(
+            run.id,
+            "completed",
+            landscape_run_id=str(run.id),
+            rows_processed=1,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        monkeypatch.setattr(
+            "elspeth.web.sessions.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.discard_summary.load_discard_summaries_for_settings",
+            lambda settings, run_ids: {},
+        )
+
+        runs_resp = client.get(f"/api/sessions/{session_id}/runs")
+
+        assert runs_resp.status_code == 500
+        assert runs_resp.json()["detail"]["code"] == "run_integrity_error"
+
+    @pytest.mark.asyncio
+    async def test_session_run_list_fails_closed_when_completed_accounting_is_open(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        create_resp = client.post("/api/sessions", json={"title": "Open Accounting"})
+        session_id = uuid.UUID(create_resp.json()["id"])
+
+        state = await service.save_composition_state(
+            session_id,
+            CompositionStateData(is_valid=True),
+        )
+        run = await service.create_run(session_id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(
+            run.id,
+            "completed",
+            landscape_run_id=str(run.id),
+            rows_processed=1,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        monkeypatch.setattr(
+            "elspeth.web.sessions.routes.load_run_accounting_for_settings",
+            lambda settings, run_ids: {str(run.id): _open_completed_accounting()},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.discard_summary.load_discard_summaries_for_settings",
+            lambda settings, run_ids: {},
+        )
+
+        runs_resp = client.get(f"/api/sessions/{session_id}/runs")
+
+        assert runs_resp.status_code == 500
+        body = runs_resp.json()
+        assert body["detail"]["code"] == "run_integrity_error"
+        assert "requires closed token accounting" in str(body["detail"]["validation_errors"])
+
+    @pytest.mark.asyncio
     async def test_list_session_runs_includes_virtual_discard_summary(self, tmp_path) -> None:
         """Run cards must show rows routed to the virtual discard sink."""
         app, service = _make_app(tmp_path)
@@ -685,14 +896,15 @@ class TestSessionCRUDRoutes:
         await service.update_run_status(run.id, "running")
         await service.update_run_status(
             run.id,
-            "completed",
+            "failed",
             landscape_run_id=landscape_run_id,
-            rows_processed=3,
+            error="No row reached a success path.",
+            rows_processed=2,
             rows_succeeded=0,
-            rows_failed=1,
+            rows_failed=2,
             rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=2,
+            rows_routed_failure=1,
+            rows_quarantined=0,
         )
 
         runs_resp = client.get(f"/api/sessions/{session_id}/runs")

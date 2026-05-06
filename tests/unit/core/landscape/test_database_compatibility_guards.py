@@ -7,11 +7,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+
+ADR019_SCHEMA_EPOCH = 7
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -583,6 +585,50 @@ class TestSchemaCompatibilityGuards:
 
 class TestJournalPathGuards:
     """Coverage for from_url journal path derivation failure modes."""
+
+    def test_from_url_creates_missing_tokens_run_id_index_for_existing_adr019_db(self, tmp_path: Path) -> None:
+        """The run-accounting performance index is additive, not a startup blocker."""
+        db_path = tmp_path / "missing_tokens_run_id_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
+            conn.exec_driver_sql(f"PRAGMA user_version = {ADR019_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        indexes = {idx["name"] for idx in inspect(engine).get_indexes("tokens")}
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "ix_tokens_run_id" in indexes
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_create_tables_false_allows_missing_tokens_run_id_index_without_mutation(self, tmp_path: Path) -> None:
+        """Read-only opens tolerate the additive index absence and do not mutate it."""
+        db_path = tmp_path / "readonly_missing_tokens_run_id_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
+            conn.exec_driver_sql(f"PRAGMA user_version = {ADR019_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        indexes = {idx["name"] for idx in inspect(engine).get_indexes("tokens")}
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "ix_tokens_run_id" not in indexes
+        assert epoch == ADR019_SCHEMA_EPOCH
 
     def test_from_url_stamps_schema_epoch_for_compatible_sqlite_db(self, tmp_path: Path) -> None:
         """Compatible SQLite databases should be stamped for future migrations."""

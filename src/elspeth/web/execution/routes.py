@@ -15,14 +15,15 @@ run's parent session.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
-import pydantic
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
@@ -31,6 +32,7 @@ from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.config import WebSettings
+from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
 from elspeth.web.execution.outputs import (
@@ -56,6 +58,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.protocol import (
+    RunRecord,
     SessionServiceProtocol,
     TerminalSessionRunStatus,
 )
@@ -121,7 +124,81 @@ def _run_not_found_http() -> HTTPException:
     return HTTPException(status_code=404, detail="Run not found")
 
 
-def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
+class _RunStatusNotFoundError(Exception):
+    """Run disappeared between ownership verification and status projection."""
+
+
+class _RunStatusIntegrityError(Exception):
+    """Run status accounting projection failed internal integrity validation."""
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedRunStatus:
+    """Run status projection paired with the exact session-row snapshot used to build it."""
+
+    response: RunStatusResponse
+    record: RunRecord
+
+
+def _run_integrity_http(exc: ValidationError | _RunStatusIntegrityError) -> HTTPException:
+    detail: dict[str, Any] = {
+        "code": "run_integrity_error",
+        "message": "Run status failed internal accounting validation.",
+    }
+    if isinstance(exc, ValidationError):
+        detail["validation_errors"] = exc.errors(include_url=False, include_context=False, include_input=False)
+    else:
+        detail["error"] = str(exc)
+    return HTTPException(status_code=500, detail=detail)
+
+
+async def _load_run_status_snapshot_with_accounting(
+    run_id: UUID,
+    *,
+    app: Any,
+    service: ExecutionService,
+) -> _LoadedRunStatus:
+    """Load run status with Landscape-derived accounting when a run has audit data."""
+    session_service: SessionServiceProtocol = app.state.session_service
+    try:
+        run_record = await session_service.get_run(run_id)
+    except ValueError as exc:
+        raise _RunStatusNotFoundError from exc
+
+    accounting = None
+    if run_record.landscape_run_id:
+        try:
+            accounting_by_run_id = await run_sync_in_worker(
+                load_run_accounting_for_settings,
+                app.state.settings,
+                (run_record.landscape_run_id,),
+            )
+        except ValueError as exc:
+            raise _RunStatusIntegrityError(str(exc)) from exc
+        if run_record.landscape_run_id in accounting_by_run_id:
+            accounting = accounting_by_run_id[run_record.landscape_run_id]
+
+    try:
+        status = await service.get_status(run_id, accounting=accounting, run_record=run_record)
+    except ValidationError:
+        raise
+    except ValueError as exc:
+        raise _RunStatusNotFoundError from exc
+    return _LoadedRunStatus(response=status, record=run_record)
+
+
+async def _load_run_status_with_accounting(
+    run_id: UUID,
+    *,
+    app: Any,
+    service: ExecutionService,
+) -> RunStatusResponse:
+    """Load run status with accounting, returning only the public status response."""
+    loaded = await _load_run_status_snapshot_with_accounting(run_id, app=app, service=service)
+    return loaded.response
+
+
+def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_record: RunRecord | None = None) -> RunEvent:
     """Synthesize a terminal RunEvent from authoritative run status.
 
     ``current`` comes from our session database and is therefore Tier 1.
@@ -137,19 +214,16 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
     if current.status in ("completed", "completed_with_failures", "empty"):
         if current.landscape_run_id is None:
             raise RuntimeError(f"Completed run {current.run_id} has no landscape_run_id — Tier 1 anomaly (audit trail incomplete)")
+        if current.accounting is None:
+            raise RuntimeError(f"Completed run {current.run_id} has no accounting — Tier 1 anomaly (audit trail incomplete)")
         completed_status = cast(Literal["completed", "completed_with_failures", "empty"], current.status)
         try:
             payload: CompletedData | FailedData | CancelledData = CompletedData(
                 status=completed_status,
-                rows_processed=current.rows_processed,
-                rows_succeeded=current.rows_succeeded,
-                rows_failed=current.rows_failed,
-                rows_routed_success=current.rows_routed_success,
-                rows_routed_failure=current.rows_routed_failure,
-                rows_quarantined=current.rows_quarantined,
+                accounting=current.accounting,
                 landscape_run_id=current.landscape_run_id,
             )
-        except pydantic.ValidationError as exc:
+        except ValidationError as exc:
             raise RuntimeError(
                 f"Completed run {current.run_id} failed CompletedData validation — Tier 1 anomaly (audit trail inconsistent): {exc}"
             ) from exc
@@ -163,14 +237,35 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
         )
         event_type = "failed"
     elif current.status == "cancelled":
-        payload = CancelledData(
-            rows_processed=current.rows_processed,
-            rows_succeeded=current.rows_succeeded,
-            rows_failed=current.rows_failed,
-            rows_quarantined=current.rows_quarantined,
-            rows_routed_success=current.rows_routed_success,
-            rows_routed_failure=current.rows_routed_failure,
-        )
+        if current.accounting is not None:
+            payload = CancelledData(
+                source_rows_processed=current.accounting.source.rows_processed,
+                tokens_succeeded=current.accounting.tokens.succeeded,
+                tokens_failed=current.accounting.tokens.failed,
+                tokens_quarantined=current.accounting.routing.quarantined,
+                tokens_routed_success=current.accounting.routing.routed_success,
+                tokens_routed_failure=current.accounting.routing.routed_failure,
+            )
+        else:
+            if cancelled_run_record is None:
+                raise RuntimeError(
+                    f"Cancelled run {current.run_id} has no accounting and no RunRecord counters — "
+                    f"Tier 1 anomaly (cancellation replay cannot be reconstructed)"
+                )
+            if str(cancelled_run_record.id) != current.run_id:
+                raise RuntimeError(
+                    f"Cancelled replay RunRecord mismatch: status run {current.run_id} received counters for run {cancelled_run_record.id}"
+                )
+            if cancelled_run_record.status != "cancelled":
+                raise RuntimeError(f"Cancelled replay RunRecord status mismatch for run {current.run_id}: {cancelled_run_record.status!r}")
+            payload = CancelledData(
+                source_rows_processed=cancelled_run_record.rows_processed,
+                tokens_succeeded=cancelled_run_record.rows_succeeded,
+                tokens_failed=cancelled_run_record.rows_failed,
+                tokens_quarantined=cancelled_run_record.rows_quarantined,
+                tokens_routed_success=cancelled_run_record.rows_routed_success,
+                tokens_routed_failure=cancelled_run_record.rows_routed_failure,
+            )
         event_type = "cancelled"
     else:
         raise RuntimeError(f"_build_terminal_run_event called for non-terminal status {current.status!r}")
@@ -286,7 +381,7 @@ def _parse_run_diagnostics_working_view(
     stripped = explanation.strip()
     try:
         working_view = RunDiagnosticsWorkingView.model_validate_json(_strip_json_code_fence(stripped))
-    except pydantic.ValidationError:
+    except ValidationError:
         return stripped, _fallback_diagnostics_working_view(stripped, diagnostics)
     return working_view.meaning, working_view
 
@@ -459,9 +554,11 @@ def create_execution_router() -> APIRouter:
         """Return current run status."""
         await _verify_run_ownership(run_id, user, request)
         try:
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
         if status.status in RUN_STATUS_TERMINAL_VALUES and status.landscape_run_id is not None and status.discard_summary is None:
             from elspeth.web.execution.discard_summary import load_discard_summaries_for_settings
 
@@ -488,9 +585,11 @@ def create_execution_router() -> APIRouter:
         """Return a bounded Landscape diagnostics snapshot for a run."""
         await _verify_run_ownership(run_id, user, request)
         try:
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
 
         landscape_run_id = status.landscape_run_id or status.run_id
         return await run_sync_in_worker(
@@ -516,9 +615,11 @@ def create_execution_router() -> APIRouter:
         """Ask the configured LLM to explain the current diagnostics snapshot."""
         await _verify_run_ownership(run_id, user, request)
         try:
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
 
         landscape_run_id = status.landscape_run_id or status.run_id
         diagnostics = await run_sync_in_worker(
@@ -558,9 +659,11 @@ def create_execution_router() -> APIRouter:
         await _verify_run_ownership(run_id, user, request)
         try:
             await service.cancel(run_id)
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
         return {"status": status.status}
 
     @router.get(
@@ -576,9 +679,11 @@ def create_execution_router() -> APIRouter:
         """Return final run results. 409 if run is not terminal."""
         await _verify_run_ownership(run_id, user, request)
         try:
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
         if status.status in RUN_STATUS_NON_TERMINAL_VALUES:
             raise HTTPException(
                 status_code=409,
@@ -606,12 +711,7 @@ def create_execution_router() -> APIRouter:
         return RunResultsResponse(
             run_id=status.run_id,
             status=terminal_status,
-            rows_processed=status.rows_processed,
-            rows_succeeded=status.rows_succeeded,
-            rows_failed=status.rows_failed,
-            rows_routed_success=status.rows_routed_success,
-            rows_routed_failure=status.rows_routed_failure,
-            rows_quarantined=status.rows_quarantined,
+            accounting=status.accounting,
             landscape_run_id=status.landscape_run_id,
             error=status.error,
             discard_summary=status.discard_summary,
@@ -667,12 +767,16 @@ def create_execution_router() -> APIRouter:
             # client connected (short runs, page refresh), send the terminal
             # status immediately and close.
             try:
-                current = await service.get_status(UUID(run_id))
-            except ValueError:
+                current_snapshot = await _load_run_status_snapshot_with_accounting(UUID(run_id), app=websocket.app, service=service)
+            except _RunStatusNotFoundError:
                 await websocket.close(code=4004, reason="Run not found")
                 return
+            except (ValidationError, _RunStatusIntegrityError):
+                await websocket.close(code=1011, reason="Run status failed internal accounting validation")
+                return
+            current = current_snapshot.response
             if current.status in RUN_STATUS_TERMINAL_VALUES:
-                event = _build_terminal_run_event(current)
+                event = _build_terminal_run_event(current, cancelled_run_record=current_snapshot.record)
                 await websocket.send_json(event.model_dump(mode="json"))
                 await websocket.close(code=1000)
                 return
@@ -684,12 +788,16 @@ def create_execution_router() -> APIRouter:
                     # Re-check authoritative run status instead of sending an
                     # ad-hoc payload outside the RunEvent contract.
                     try:
-                        current = await service.get_status(UUID(run_id))
-                    except ValueError:
+                        current_snapshot = await _load_run_status_snapshot_with_accounting(UUID(run_id), app=websocket.app, service=service)
+                    except _RunStatusNotFoundError:
                         await websocket.close(code=4004, reason="Run not found")
                         break
+                    except (ValidationError, _RunStatusIntegrityError):
+                        await websocket.close(code=1011, reason="Run status failed internal accounting validation")
+                        break
+                    current = current_snapshot.response
                     if current.status in RUN_STATUS_TERMINAL_VALUES:
-                        terminal_event = _build_terminal_run_event(current)
+                        terminal_event = _build_terminal_run_event(current, cancelled_run_record=current_snapshot.record)
                         await websocket.send_json(terminal_event.model_dump(mode="json"))
                         await websocket.close(code=1000)
                         break
@@ -743,9 +851,11 @@ def create_execution_router() -> APIRouter:
         """
         await _verify_run_ownership(run_id, user, request)
         try:
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
 
         landscape_run_id = status.landscape_run_id or status.run_id
         return await run_sync_in_worker(
@@ -780,9 +890,11 @@ def create_execution_router() -> APIRouter:
         """
         await _verify_run_ownership(run_id, user, request)
         try:
-            status = await service.get_status(run_id)
-        except ValueError:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
             raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
 
         landscape_run_id = status.landscape_run_id or status.run_id
         manifest = await run_sync_in_worker(

@@ -88,13 +88,7 @@ class ValidationResult(_StrictResponse):
 
 
 class ProgressData(_StrictResponse):
-    """Payload for ``progress`` events (non-terminal, streaming).
-
-    elspeth-5069612f3c — ``rows_routed`` is split into MOVE (intentional gate
-    ``route_to_sink``) and DIVERT (transform ``on_error`` reroute). Both
-    fields are present on the wire so the streaming progress payload mirrors
-    ``CompletedData`` / ``CancelledData`` / TS ``RunEventProgress`` shape
-    exactly.
+    """Payload for ``progress`` events with explicit units.
 
     All six counter fields are REQUIRED with no defaults.  The engine's
     ``ProgressEvent`` (contracts/cli.py) always carries real counter values
@@ -103,22 +97,17 @@ class ProgressData(_StrictResponse):
     fabrication test.  Mid-run, an operator must be able to distinguish
     "no rows have succeeded yet" from "the field was never populated".
 
-    The sum-invariant ``rows_succeeded + rows_failed <= rows_processed`` is
-    intentionally NOT enforced here.  Non-terminal counts are allowed transient
-    inconsistency while the orchestrator is mid-flight: a row may be marked
-    processed before being categorised into one of the lifecycle terminal-state
-    buckets.  Naming the unenforced sum here keeps the relaxation discoverable
-    rather than implicit.  See
-    ``RunStatusResponse._check_row_decomposition`` for the matching
-    rationale on non-terminal status responses.
+    The old ``rows_*`` names mixed source rows and materialized token outcomes.
+    Progress events are still best-known live counters, not terminal
+    accounting, but the field names now make the unit boundary explicit.
     """
 
-    rows_processed: int = Field(ge=0)
-    rows_succeeded: int = Field(ge=0)
-    rows_failed: int = Field(ge=0)
-    rows_quarantined: int = Field(ge=0)
-    rows_routed_success: int = Field(ge=0)
-    rows_routed_failure: int = Field(ge=0)
+    source_rows_processed: int = Field(ge=0)
+    tokens_succeeded: int = Field(ge=0)
+    tokens_failed: int = Field(ge=0)
+    tokens_quarantined: int = Field(ge=0)
+    tokens_routed_success: int = Field(ge=0)
+    tokens_routed_failure: int = Field(ge=0)
 
 
 class ErrorData(_StrictResponse):
@@ -137,59 +126,96 @@ class ErrorData(_StrictResponse):
     row_id: str | None
 
 
-def _validate_row_decomposition(
-    rows_processed: int,
-    rows_succeeded: int,
-    rows_failed: int,
-) -> None:
-    """Enforce rows_processed >= succeeded + failed.
+class RunAccountingSource(_StrictResponse):
+    """Source-ingestion counts for a run."""
 
-    ADR-019 makes rows_routed_* and rows_quarantined reporting subsets of the
-    exhaustive lifecycle counters. They must not be added into this sum.
-
-    NARROW INVARIANT (elspeth-31d53c7493 carry-forward). The original equality
-    formulation does not hold for any DAG with aggregation, fork, expansion,
-    or coalesce — source rows reach terminal states the formula does not
-    account for. The relaxed inequality is preserved here.
-
-    The architecturally-correct formula (full DAG-aware balance) is tracked
-    in elspeth-cf84eb1b52. When that lands, this inequality is replaced by
-    the full balance.
-    """
-    sum_terminal = rows_succeeded + rows_failed
-    if rows_processed < sum_terminal:
-        raise ValueError(
-            f"Row count decomposition mismatch (over-counting): rows_processed={rows_processed} "
-            f"< rows_succeeded({rows_succeeded}) + rows_failed({rows_failed}) "
-            f"= {sum_terminal}. "
-            f"Tier 1 anomaly: orchestrator emitted more terminal-state counts than input rows. "
-            f"See elspeth-cf84eb1b52 for the full DAG-aware balance equation."
-        )
+    rows_processed: int = Field(ge=0)
 
 
-def _validate_response_counter_subsets(
-    *,
-    rows_succeeded: int,
-    rows_failed: int,
-    rows_routed_success: int,
-    rows_routed_failure: int,
-    rows_quarantined: int,
-) -> None:
-    """ADR-019: response structural counters are subsets of base counters."""
-    if rows_routed_success > rows_succeeded:
-        raise ValueError(
-            f"rows_routed_success must be a subset of rows_succeeded "
-            f"(got rows_routed_success={rows_routed_success}, rows_succeeded={rows_succeeded})"
-        )
-    if rows_routed_failure > rows_failed:
-        raise ValueError(
-            f"rows_routed_failure must be a subset of rows_failed "
-            f"(got rows_routed_failure={rows_routed_failure}, rows_failed={rows_failed})"
-        )
-    if rows_quarantined > rows_failed:
-        raise ValueError(
-            f"rows_quarantined must be a subset of rows_failed (got rows_quarantined={rows_quarantined}, rows_failed={rows_failed})"
-        )
+class RunAccountingTokens(_StrictResponse):
+    """Pipeline-token accounting for emitted materialized work."""
+
+    emitted: int = Field(ge=0)
+    terminal: int = Field(ge=0)
+    succeeded: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    structural: int = Field(ge=0)
+    pending: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_token_balance(self) -> Self:
+        if self.terminal != self.succeeded + self.failed + self.structural:
+            raise ValueError(
+                "tokens.terminal must equal tokens.succeeded + tokens.failed + tokens.structural "
+                f"(got terminal={self.terminal}, succeeded={self.succeeded}, "
+                f"failed={self.failed}, structural={self.structural})"
+            )
+        if self.emitted != self.terminal + self.pending:
+            raise ValueError(
+                "tokens.emitted must equal tokens.terminal + tokens.pending "
+                f"(got emitted={self.emitted}, terminal={self.terminal}, pending={self.pending})"
+            )
+        return self
+
+
+class RunAccountingRouting(_StrictResponse):
+    """Routing/disposition subset counts for terminal tokens."""
+
+    routed_success: int = Field(ge=0)
+    routed_failure: int = Field(ge=0)
+    quarantined: int = Field(ge=0)
+    discarded: int = Field(ge=0)
+
+
+class RunAccountingIntegrity(_StrictResponse):
+    """Closure integrity of the Landscape token ledger."""
+
+    closure: Literal["closed", "open", "unknown"]
+    missing_terminal_outcomes: int = Field(ge=0)
+    duplicate_terminal_outcomes: int = Field(ge=0)
+
+
+class RunAccounting(_StrictResponse):
+    """Explicit run accounting split by unit of account."""
+
+    source: RunAccountingSource
+    tokens: RunAccountingTokens
+    routing: RunAccountingRouting
+    integrity: RunAccountingIntegrity
+
+    @model_validator(mode="after")
+    def _check_integrity_contract(self) -> Self:
+        if self.routing.routed_success > self.tokens.succeeded:
+            raise ValueError(
+                "routing.routed_success must be a subset of tokens.succeeded "
+                f"(got routed_success={self.routing.routed_success}, succeeded={self.tokens.succeeded})"
+            )
+        if self.routing.routed_failure > self.tokens.failed:
+            raise ValueError(
+                "routing.routed_failure must be a subset of tokens.failed "
+                f"(got routed_failure={self.routing.routed_failure}, failed={self.tokens.failed})"
+            )
+        if self.routing.quarantined > self.tokens.failed:
+            raise ValueError(
+                "routing.quarantined must be a subset of tokens.failed "
+                f"(got quarantined={self.routing.quarantined}, failed={self.tokens.failed})"
+            )
+        if self.routing.discarded > self.tokens.failed:
+            raise ValueError(
+                f"routing.discarded must be a subset of tokens.failed (got discarded={self.routing.discarded}, failed={self.tokens.failed})"
+            )
+        if self.integrity.closure == "closed":
+            if self.tokens.pending != 0:
+                raise ValueError(f"closed accounting requires pending == 0, got {self.tokens.pending}")
+            if self.integrity.missing_terminal_outcomes != 0:
+                raise ValueError(
+                    f"closed accounting requires missing_terminal_outcomes == 0, got {self.integrity.missing_terminal_outcomes}"
+                )
+            if self.integrity.duplicate_terminal_outcomes != 0:
+                raise ValueError(
+                    f"closed accounting requires duplicate_terminal_outcomes == 0, got {self.integrity.duplicate_terminal_outcomes}"
+                )
+        return self
 
 
 def _require_terminal_run_fields(
@@ -215,76 +241,45 @@ def _require_terminal_run_fields(
         raise ValueError("status='failed' requires error")
 
 
-def _check_status_row_count_invariant(
-    status: str,
-    rows_processed: int,
-    rows_succeeded: int,
-    rows_failed: int,
-    rows_routed_success: int,
-    rows_routed_failure: int,
-    rows_quarantined: int,
-) -> None:
-    """Pydantic mirror of the ADR-019 L0 status predicate.
-
-    success_indicator = rows_succeeded > 0
-    failure_indicator = rows_failed > 0
-
-    The Pydantic mirror does NOT see rows_coalesce_failed (the API schema
-    does not surface it) — see the original docstring for the rationale;
-    every coalesce failure also increments rows_failed at the engine layer,
-    so the failure indicator is preserved.
-
-    Non-terminal (running / pending) and signal-bounded (cancelled) statuses
-    bypass the predicate.
-    """
-    success_indicator = rows_succeeded > 0
-    failure_indicator = rows_failed > 0
-
+def _check_status_accounting_invariant(status: str, accounting: RunAccounting | None) -> None:
+    """Validate status taxonomy against explicit token accounting."""
     if status in {"running", "pending", "cancelled"}:
         return
 
+    if status in OPERATOR_COMPLETION_RUN_STATUS_VALUES and accounting is None:
+        raise ValueError(f"status={status!r} requires Landscape-derived accounting")
+
     if status == "completed":
-        if not success_indicator:
-            raise ValueError(
-                f"status='completed' requires a success indicator "
-                f"(rows_succeeded > 0); "
-                f"got rows_succeeded={rows_succeeded} "
-                f"(use status='empty' for ingested-zero-rows runs, "
-                f"'failed' when rows were processed but none reached a success path)"
-            )
-        if failure_indicator:
-            raise ValueError(f"status='completed' requires no failures (rows_failed={rows_failed}); use status='completed_with_failures'")
+        assert accounting is not None
+        if accounting.integrity.closure != "closed":
+            raise ValueError("status='completed' requires closed token accounting")
+        if accounting.tokens.succeeded <= 0:
+            raise ValueError("status='completed' requires tokens.succeeded > 0")
+        if accounting.tokens.failed != 0:
+            raise ValueError("status='completed' requires tokens.failed == 0")
         return
 
     if status == "completed_with_failures":
-        if not success_indicator:
-            raise ValueError(
-                f"status='completed_with_failures' requires a success indicator "
-                f"(rows_succeeded > 0); "
-                f"got rows_succeeded={rows_succeeded} "
-                f"(use status='failed' when no row reached a success path)"
-            )
-        if not failure_indicator:
-            raise ValueError(
-                f"status='completed_with_failures' requires at least one failure indicator "
-                f"(rows_failed > 0); got rows_failed={rows_failed} "
-                f"(use status='completed' for clean runs)"
-            )
+        assert accounting is not None
+        if accounting.integrity.closure != "closed":
+            raise ValueError("status='completed_with_failures' requires closed token accounting")
+        if accounting.tokens.succeeded <= 0:
+            raise ValueError("status='completed_with_failures' requires tokens.succeeded > 0")
+        if accounting.tokens.failed <= 0:
+            raise ValueError("status='completed_with_failures' requires tokens.failed > 0")
         return
 
     if status == "failed":
-        return  # FAILED tolerates any shape (predicate-or-exception origin)
+        return  # FAILED may come from token accounting or exception origin.
 
     if status == "empty":
-        if rows_processed != 0:
-            raise ValueError(f"status='empty' requires rows_processed == 0, got {rows_processed}")
-        if success_indicator:
-            raise ValueError(f"status='empty' requires no success indicator (rows_succeeded={rows_succeeded})")
-        if failure_indicator:
-            raise ValueError(
-                f"status='empty' requires no failures (rows_failed={rows_failed}); "
-                f"use status='failed' when the run encountered failures with no successful rows"
-            )
+        assert accounting is not None
+        if accounting.integrity.closure != "closed":
+            raise ValueError("status='empty' requires closed token accounting")
+        if accounting.source.rows_processed != 0:
+            raise ValueError(f"status='empty' requires accounting.source.rows_processed == 0, got {accounting.source.rows_processed}")
+        if accounting.tokens.emitted != 0:
+            raise ValueError(f"status='empty' requires accounting.tokens.emitted == 0, got {accounting.tokens.emitted}")
         return
 
     raise ValueError(f"Unknown status {status!r}")
@@ -294,56 +289,25 @@ class CompletedData(_StrictResponse):
     """Payload for ``completed`` events (terminal).
 
     The ``status`` field is the backend's authoritative classification of the
-    run outcome — frontends MUST NOT re-derive it from row counts (that would
-    duplicate the ``failure_indicator``/``success_indicator`` invariant in
-    ``_validate_row_decomposition`` and create dual-source-of-truth drift).
+    run outcome — frontends MUST NOT re-derive it from accounting counters
+    (that would duplicate the backend taxonomy invariant and create
+    dual-source-of-truth drift).
     """
 
     status: Literal["completed", "completed_with_failures", "empty"]
-    rows_processed: int = Field(ge=0)
-    rows_succeeded: int = Field(ge=0)
-    rows_failed: int = Field(ge=0)
-    rows_routed_success: int = Field(default=0, ge=0)
-    rows_routed_failure: int = Field(default=0, ge=0)
-    rows_quarantined: int = Field(ge=0)
+    accounting: RunAccounting
     landscape_run_id: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _check_row_decomposition(self) -> Self:
-        _validate_row_decomposition(
-            self.rows_processed,
-            self.rows_succeeded,
-            self.rows_failed,
-        )
-        _validate_response_counter_subsets(
-            rows_succeeded=self.rows_succeeded,
-            rows_failed=self.rows_failed,
-            rows_routed_success=self.rows_routed_success,
-            rows_routed_failure=self.rows_routed_failure,
-            rows_quarantined=self.rows_quarantined,
-        )
-        return self
-
-    @model_validator(mode="after")
     def _check_status_consistency(self) -> Self:
-        # Mirror the L0 success_indicator/failure_indicator biconditional on
-        # the wire so the SSE event cannot drift from the run-status taxonomy.
-        # Reuses the canonical predicate at module scope — one source of truth
-        # for the classification rule.
-        _check_status_row_count_invariant(
-            self.status,
-            self.rows_processed,
-            self.rows_succeeded,
-            self.rows_failed,
-            self.rows_routed_success,
-            self.rows_routed_failure,
-            self.rows_quarantined,
-        )
+        # Reuse the canonical accounting predicate at module scope so completed
+        # events cannot drift from the run-status taxonomy.
+        _check_status_accounting_invariant(self.status, self.accounting)
         return self
 
 
 class CancelledData(_StrictResponse):
-    """Payload for ``cancelled`` events (terminal).
+    """Payload for ``cancelled`` events with best-known progress counters.
 
     All six counter fields are REQUIRED with no defaults — same fabrication
     rationale as ``ProgressData``.  At cancellation time the engine carries
@@ -356,12 +320,12 @@ class CancelledData(_StrictResponse):
     """
 
     status: Literal["cancelled"] = "cancelled"
-    rows_processed: int = Field(ge=0)
-    rows_succeeded: int = Field(ge=0)
-    rows_failed: int = Field(ge=0)
-    rows_quarantined: int = Field(ge=0)
-    rows_routed_success: int = Field(ge=0)
-    rows_routed_failure: int = Field(ge=0)
+    source_rows_processed: int = Field(ge=0)
+    tokens_succeeded: int = Field(ge=0)
+    tokens_failed: int = Field(ge=0)
+    tokens_quarantined: int = Field(ge=0)
+    tokens_routed_success: int = Field(ge=0)
+    tokens_routed_failure: int = Field(ge=0)
 
 
 class FailedData(_StrictResponse):
@@ -629,48 +593,15 @@ class RunStatusResponse(_StrictResponse):
     status: SessionRunStatus
     started_at: datetime | None
     finished_at: datetime | None
-    rows_processed: int = Field(ge=0)
-    rows_succeeded: int = Field(ge=0)
-    rows_failed: int = Field(ge=0)
-    rows_routed_success: int = Field(default=0, ge=0)
-    rows_routed_failure: int = Field(default=0, ge=0)
-    rows_quarantined: int = Field(ge=0)
+    accounting: RunAccounting | None = None
     error: str | None
     landscape_run_id: str | None
     discard_summary: DiscardSummary | None = None
 
     @model_validator(mode="after")
-    def _check_row_decomposition(self) -> Self:
-        """Enforce decomposition invariant ONLY on terminal states.
-
-        Non-terminal states (pending/running) may have transiently
-        inconsistent counts while the orchestrator is mid-flight
-        (a row may be marked processed before being categorised).
-        Terminal states must satisfy the narrow invariant in
-        ``_validate_row_decomposition`` (rows_processed >= sum of
-        terminal-state counts) — over-counting is a Tier 1 anomaly.
-        Full DAG-aware balance equation is tracked in elspeth-cf84eb1b52
-        (P0, blocks RC 5.0).
-
-        Phase 2.2 (elspeth-0de989c56d) also gates the four-value status
-        taxonomy via ``_check_status_row_count_invariant`` so the API
-        cannot serialize a status string that doesn't match the
-        row-count shape.  The two invariants are orthogonal — one is
-        about count consistency, the other about status accuracy.
-        """
+    def _check_status_contract(self) -> Self:
+        """Enforce terminal field requirements and token-accounting taxonomy."""
         if self.status in RUN_STATUS_TERMINAL_VALUES:
-            _validate_row_decomposition(
-                self.rows_processed,
-                self.rows_succeeded,
-                self.rows_failed,
-            )
-            _validate_response_counter_subsets(
-                rows_succeeded=self.rows_succeeded,
-                rows_failed=self.rows_failed,
-                rows_routed_success=self.rows_routed_success,
-                rows_routed_failure=self.rows_routed_failure,
-                rows_quarantined=self.rows_quarantined,
-            )
             _require_terminal_run_fields(
                 self.status,
                 finished_at=self.finished_at,
@@ -678,15 +609,7 @@ class RunStatusResponse(_StrictResponse):
                 error=self.error,
                 landscape_run_id=self.landscape_run_id,
             )
-        _check_status_row_count_invariant(
-            self.status,
-            self.rows_processed,
-            self.rows_succeeded,
-            self.rows_failed,
-            self.rows_routed_success,
-            self.rows_routed_failure,
-            self.rows_quarantined,
-        )
+        _check_status_accounting_invariant(self.status, self.accounting)
         return self
 
 
@@ -695,45 +618,19 @@ class RunResultsResponse(_StrictResponse):
 
     run_id: str
     status: TerminalSessionRunStatus
-    rows_processed: int = Field(ge=0)
-    rows_succeeded: int = Field(ge=0)
-    rows_failed: int = Field(ge=0)
-    rows_routed_success: int = Field(default=0, ge=0)
-    rows_routed_failure: int = Field(default=0, ge=0)
-    rows_quarantined: int = Field(ge=0)
+    accounting: RunAccounting | None = None
     landscape_run_id: str | None
     error: str | None
     discard_summary: DiscardSummary | None = None
 
     @model_validator(mode="after")
-    def _check_row_decomposition(self) -> Self:
-        _validate_row_decomposition(
-            self.rows_processed,
-            self.rows_succeeded,
-            self.rows_failed,
-        )
-        _validate_response_counter_subsets(
-            rows_succeeded=self.rows_succeeded,
-            rows_failed=self.rows_failed,
-            rows_routed_success=self.rows_routed_success,
-            rows_routed_failure=self.rows_routed_failure,
-            rows_quarantined=self.rows_quarantined,
-        )
+    def _check_status_contract(self) -> Self:
         _require_terminal_run_fields(
             self.status,
             error=self.error,
             landscape_run_id=self.landscape_run_id,
         )
-        # Phase 2.2 (elspeth-0de989c56d): status / row-count biconditional.
-        _check_status_row_count_invariant(
-            self.status,
-            self.rows_processed,
-            self.rows_succeeded,
-            self.rows_failed,
-            self.rows_routed_success,
-            self.rows_routed_failure,
-            self.rows_quarantined,
-        )
+        _check_status_accounting_invariant(self.status, self.accounting)
         return self
 
 

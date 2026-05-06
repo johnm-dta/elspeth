@@ -35,6 +35,13 @@ from elspeth.core.config import (
     TelemetrySettings,
 )
 from elspeth.web.execution.progress import ProgressBroadcaster
+from elspeth.web.execution.schemas import (
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
+)
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
@@ -105,6 +112,29 @@ def _mock_pipeline_settings() -> MagicMock:
     settings.checkpoint = CheckpointSettings(enabled=False)
     settings.telemetry = TelemetrySettings(enabled=False)
     return settings
+
+
+def _run_accounting_for_status(status: RunStatus) -> RunAccounting:
+    if status == RunStatus.EMPTY:
+        return RunAccounting(
+            source=RunAccountingSource(rows_processed=0),
+            tokens=RunAccountingTokens(emitted=0, terminal=0, succeeded=0, failed=0, structural=0, pending=0),
+            routing=RunAccountingRouting(routed_success=0, routed_failure=0, quarantined=0, discarded=0),
+            integrity=RunAccountingIntegrity(closure="closed", missing_terminal_outcomes=0, duplicate_terminal_outcomes=0),
+        )
+    if status == RunStatus.COMPLETED_WITH_FAILURES:
+        return RunAccounting(
+            source=RunAccountingSource(rows_processed=10),
+            tokens=RunAccountingTokens(emitted=10, terminal=10, succeeded=8, failed=2, structural=0, pending=0),
+            routing=RunAccountingRouting(routed_success=0, routed_failure=0, quarantined=0, discarded=0),
+            integrity=RunAccountingIntegrity(closure="closed", missing_terminal_outcomes=0, duplicate_terminal_outcomes=0),
+        )
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=10),
+        tokens=RunAccountingTokens(emitted=10, terminal=10, succeeded=10, failed=0, structural=0, pending=0),
+        routing=RunAccountingRouting(routed_success=0, routed_failure=0, quarantined=0, discarded=0),
+        integrity=RunAccountingIntegrity(closure="closed", missing_terminal_outcomes=0, duplicate_terminal_outcomes=0),
+    )
 
 
 @pytest.fixture
@@ -220,9 +250,7 @@ class TestExecutionFlow:
         )
         status = await service.get_status(run_id)
         assert status.status == "running"
-        assert status.rows_processed == 50
-        assert status.rows_routed_success == 0
-        assert status.rows_routed_failure == 0
+        assert status.accounting is None
 
 
 class TestWebRuntimeInfrastructure:
@@ -416,7 +444,11 @@ class TestB2ShutdownEvent:
         mock_result.rows_quarantined = 0
         mock_orch.run.return_value = mock_result
 
-        service._run_pipeline(str(run_id), "source:\n  plugin: csv", shutdown_event)
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+        ):
+            service._run_pipeline(str(run_id), "source:\n  plugin: csv", shutdown_event)
 
         # B2 invariant: shutdown_event was passed
         orch_run_call = mock_orch.run.call_args
@@ -482,7 +514,11 @@ class TestB3Construction:
             rows_quarantined=0,
         )
 
-        service._run_pipeline(str(uuid4()), "yaml", threading.Event())
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+        ):
+            service._run_pipeline(str(uuid4()), "yaml", threading.Event())
 
         # B3: LandscapeDB constructed from settings URL
         mock_landscape_cls.assert_called_once_with(connection_string="sqlite:///test_audit.db", passphrase=None)
@@ -721,7 +757,11 @@ class TestCancelMechanism:
         shutdown_event.set()
         run_id = str(uuid4())
 
-        service._run_pipeline(run_id, "source:\n  plugin: csv", shutdown_event)
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED_WITH_FAILURES),
+        ):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", shutdown_event)
 
         # The test sets shutdown_event BEFORE _run_pipeline, so the early
         # shutdown check (line 534) fires — no orchestrator runs, no row counts.
@@ -781,7 +821,11 @@ class TestCancelMechanism:
         shutdown_event = threading.Event()
         run_id = str(uuid4())
 
-        service._run_pipeline(run_id, "source:\n  plugin: csv", shutdown_event)
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED_WITH_FAILURES),
+        ):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", shutdown_event)
 
         status_calls = mock_session_service.update_run_status.call_args_list
         # Second call is the GSE handler (first is running transition)
@@ -851,7 +895,11 @@ class TestCancelMechanism:
         mock_orch.run.side_effect = set_event_on_run
         run_id = str(uuid4())
 
-        service._run_pipeline(run_id, "source:\n  plugin: csv", shutdown_event)
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED_WITH_FAILURES),
+        ):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", shutdown_event)
 
         # Must be "completed", NOT "cancelled"
         status_calls = mock_session_service.update_run_status.call_args_list
@@ -1353,7 +1401,11 @@ class TestCompletionPathExternalCancellation:
         mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
         mock_session_service.get_run.return_value = MagicMock(status="cancelled")
 
-        service._run_pipeline(str(uuid4()), "source:\n  plugin: csv", threading.Event())
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+        ):
+            service._run_pipeline(str(uuid4()), "source:\n  plugin: csv", threading.Event())
 
         assert blob_calls == [False]
         assert blob_state["status"] == "error"
@@ -1632,7 +1684,14 @@ class TestPostCompletionExceptionRecovery:
         )
 
         run_id = str(uuid4())
-        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError, match="simulated SSE crash"):
+        with (
+            patch("elspeth.web.execution.service.slog") as mock_slog,
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+            ),
+            pytest.raises(RuntimeError, match="simulated SSE crash"),
+        ):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
 
         # Exactly two status updates: "running" (line 650) and the terminal
@@ -1713,7 +1772,14 @@ class TestPostCompletionExceptionRecovery:
         )
 
         run_id = str(uuid4())
-        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError):
+        with (
+            patch("elspeth.web.execution.service.slog") as mock_slog,
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED_WITH_FAILURES),
+            ),
+            pytest.raises(RuntimeError),
+        ):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
 
         statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
@@ -1777,7 +1843,14 @@ class TestPostCompletionExceptionRecovery:
         )
 
         run_id = str(uuid4())
-        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError, match="simulated SSE crash"):
+        with (
+            patch("elspeth.web.execution.service.slog") as mock_slog,
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+            ),
+            pytest.raises(RuntimeError, match="simulated SSE crash"),
+        ):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
 
         # The probe failure must surface as a structured log so it's observable.
@@ -1899,7 +1972,13 @@ class TestPostCompletionExceptionRecovery:
         # Correct behaviour (asserted): the SSE-crash RuntimeError surfaces.
         # Today's broken behaviour (xfail): IllegalRunTransitionError surfaces
         # instead, with the original RuntimeError demoted to __context__.
-        with pytest.raises(RuntimeError, match="simulated SSE crash"):
+        with (
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+            ),
+            pytest.raises(RuntimeError, match="simulated SSE crash"),
+        ):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
 
     @patch("elspeth.web.execution.service.Orchestrator")
@@ -1960,7 +2039,14 @@ class TestPostCompletionExceptionRecovery:
         # The visible exception MUST be the probe's ValueError (Tier 1
         # corruption surfaces as itself).  The original RuntimeError is
         # preserved on ``__context__`` by Python's normal exception chaining.
-        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(ValueError, match="Run not found") as exc_info:
+        with (
+            patch("elspeth.web.execution.service.slog") as mock_slog,
+            patch(
+                "elspeth.web.execution.service.load_run_accounting_from_db",
+                return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+            ),
+            pytest.raises(ValueError, match="Run not found") as exc_info,
+        ):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
 
         # Exception chain pins the original cause — the probe ValueError
@@ -2437,12 +2523,12 @@ class TestEventBusBridge:
         # producer that hardcodes any single counter to 0 (which Pydantic
         # cannot detect — making the upstream ProgressEvent require all six
         # is the structural defense, this assertion is the test surface).
-        assert run_event.data.rows_processed == 100
-        assert run_event.data.rows_succeeded == 92
-        assert run_event.data.rows_failed == 5
-        assert run_event.data.rows_quarantined == 3
-        assert run_event.data.rows_routed_success == 7
-        assert run_event.data.rows_routed_failure == 2
+        assert run_event.data.source_rows_processed == 100
+        assert run_event.data.tokens_succeeded == 92
+        assert run_event.data.tokens_failed == 5
+        assert run_event.data.tokens_quarantined == 3
+        assert run_event.data.tokens_routed_success == 7
+        assert run_event.data.tokens_routed_failure == 2
         assert run_event.run_id == "run-123"
 
 
@@ -3138,7 +3224,11 @@ class TestEdgeCompatibility:
             rows_quarantined=0,
         )
 
-        service._run_pipeline(str(uuid4()), "source:\n  plugin: csv", threading.Event())
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+        ):
+            service._run_pipeline(str(uuid4()), "source:\n  plugin: csv", threading.Event())
 
         mock_graph.validate.assert_called_once()
         mock_graph.validate_edge_compatibility.assert_called_once()

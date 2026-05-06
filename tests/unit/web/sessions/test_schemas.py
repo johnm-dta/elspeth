@@ -7,6 +7,13 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from elspeth.web.execution.schemas import (
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
+)
 from elspeth.web.sessions.schemas import (
     ChatMessageResponse,
     CompositionStateResponse,
@@ -20,6 +27,31 @@ from elspeth.web.sessions.schemas import (
     SessionResponse,
     ValidationEntryResponse,
 )
+
+
+def _accounting() -> RunAccounting:
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=10),
+        tokens=RunAccountingTokens(
+            emitted=10,
+            terminal=10,
+            succeeded=10,
+            failed=0,
+            structural=0,
+            pending=0,
+        ),
+        routing=RunAccountingRouting(
+            routed_success=0,
+            routed_failure=0,
+            quarantined=0,
+            discarded=0,
+        ),
+        integrity=RunAccountingIntegrity(
+            closure="closed",
+            missing_terminal_outcomes=0,
+            duplicate_terminal_outcomes=0,
+        ),
+    )
 
 
 class TestCreateSessionRequest:
@@ -143,8 +175,7 @@ class TestRunResponse:
                 id="run-1",
                 session_id="sess-1",
                 status="invalid_status",
-                rows_processed=0,
-                rows_failed=0,
+                accounting=None,
                 started_at=datetime.now(UTC),
                 composition_version=1,
             )
@@ -156,12 +187,13 @@ class TestRunResponse:
             id="run-1",
             session_id="sess-1",
             status="completed",
-            rows_processed=10,
-            rows_failed=0,
+            accounting=_accounting(),
             started_at=datetime.now(UTC),
             composition_version=1,
         )
         assert resp.status == "completed"
+        assert resp.accounting is not None
+        assert resp.accounting.tokens.succeeded == 10
 
 
 def _valid_session_response_kwargs() -> dict[str, object]:
@@ -210,8 +242,7 @@ def _valid_run_response_kwargs() -> dict[str, object]:
         "id": "run-1",
         "session_id": "sess-1",
         "status": "completed",
-        "rows_processed": 10,
-        "rows_failed": 0,
+        "accounting": _accounting(),
         "started_at": datetime.now(UTC),
         "composition_version": 1,
     }
@@ -299,9 +330,30 @@ class TestSessionStrictCoercionRejected:
         with pytest.raises(ValidationError):
             CompositionStateResponse(**kwargs)  # type: ignore[arg-type]
 
-    def test_run_response_rejects_string_int_rows_processed(self) -> None:
+    def test_run_response_rejects_string_int_accounting(self) -> None:
         kwargs = _valid_run_response_kwargs()
-        kwargs["rows_processed"] = "10"
+        kwargs["accounting"] = {
+            "source": {"rows_processed": "10"},
+            "tokens": {
+                "emitted": 10,
+                "terminal": 10,
+                "succeeded": 10,
+                "failed": 0,
+                "structural": 0,
+                "pending": 0,
+            },
+            "routing": {
+                "routed_success": 0,
+                "routed_failure": 0,
+                "quarantined": 0,
+                "discarded": 0,
+            },
+            "integrity": {
+                "closure": "closed",
+                "missing_terminal_outcomes": 0,
+                "duplicate_terminal_outcomes": 0,
+            },
+        }
         with pytest.raises(ValidationError):
             RunResponse(**kwargs)  # type: ignore[arg-type]
 

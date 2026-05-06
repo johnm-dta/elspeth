@@ -779,8 +779,38 @@ Gotchas:
 ### Transforms
 
 **web_scrape** — Fetch and extract content from a URL in each row.
+Required options (all must appear in the `set_pipeline` payload — `url_field` alone is not enough; runtime validation rejects partial configs):
+- `schema`: input contract on the row reaching `web_scrape` (e.g., `{"mode": "fixed", "fields": ["url: str"]}` when the source emits a single `url` column).
+- `url_field`: name of the row field containing the URL to fetch (no default).
+- `content_field`: name of the field where scraped content lands (canonical default: `"content"`).
+- `fingerprint_field`: name of the field where the content hash lands (canonical default: `"content_fingerprint"`).
+- `format`: extraction format — `"text"` (preserves whitespace, use for line-framed pipelines), `"markdown"` (default for LLM extraction), or `"html"`.
+- `text_separator`: required when `format: "text"` and downstream is `line_explode`. Canonical default: `"\n"`.
+- `http`: nested object with three required keys:
+  - `abuse_contact`: a contact email for abuse reports (e.g., `"compliance@example.com"` for testing — operator overrides for production).
+  - `scraping_reason`: one-line human-readable reason for the scrape (e.g., `"Download a public text file and split it into individual lines"`).
+  - `allowed_hosts`: SSRF-mode — usually `"public_only"`. See Security Boundaries above.
+
+**Canonical full options block:**
+```json
+{
+  "schema": {"mode": "fixed", "fields": ["url: str"]},
+  "url_field": "url",
+  "content_field": "content",
+  "fingerprint_field": "content_fingerprint",
+  "format": "text",
+  "text_separator": "\n",
+  "http": {
+    "abuse_contact": "compliance@example.com",
+    "scraping_reason": "Fetch the URL and process its content",
+    "allowed_hosts": "public_only"
+  }
+}
+```
+
+Use this as the starting point and adjust `format` / `schema` / `text_separator` / `scraping_reason` per pipeline. **Do not omit `content_field`, `fingerprint_field`, or `http` — they are not optional, and their omission produces "Field required" runtime-preflight errors that have caused convergence failures empirically.**
+
 Gotchas:
-- You must specify `url_field` — the name of the row field containing the URL to fetch. There is no default.
 - See the SSRF and prompt-injection rules in "Security Boundaries" above before wiring `web_scrape` into a pipeline.
 - When `web_scrape` feeds `line_explode`, see the line_explode entry below for the framing-contract rule.
 

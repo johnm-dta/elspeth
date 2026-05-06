@@ -111,7 +111,14 @@ class TokenUsage:
         or an aggregate total. Use this when deciding whether to emit usage
         to telemetry — partial data is still valuable operational signal.
         """
-        return self.prompt_tokens is not None or self.completion_tokens is not None or self.reported_total is not None
+        return (
+            self.prompt_tokens is not None
+            or self.completion_tokens is not None
+            or self.reported_total is not None
+            or self.cached_prompt_tokens is not None
+            or self.cache_creation_input_tokens is not None
+            or self.cache_read_input_tokens is not None
+        )
 
     # ------------------------------------------------------------------
     # Serialization

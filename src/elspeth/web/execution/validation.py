@@ -31,7 +31,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import load_settings_from_yaml_string
-from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.dag.models import EdgeContractError, GraphValidationError
 from elspeth.core.secrets import is_secret_field, resolve_secret_refs, secret_env_ref_name
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import (
@@ -105,6 +105,106 @@ def _infer_component_type_from_plugin_error(
     if isinstance(exc, PluginConfigError):
         return exc.component_type
     return None
+
+
+def _format_edge_contract_failure(exc: EdgeContractError) -> tuple[str, str]:
+    """Build LLM-actionable (message, suggestion) pair from a structured edge-contract error.
+
+    The composer surfaces both fields verbatim into the assistant's reply when
+    runtime preflight rejects a completion claim. Empirically (cohort
+    diagnosis 2026-05-07), models converge on retry only when the message
+    names the producer/consumer node IDs and per-field issues, AND the
+    suggestion lists concrete tool-call shapes for the fix. Prose like
+    "Type mismatches: f (expected X, got Y)" by itself routinely caused the
+    model to surrender mid-loop because there was no obvious next move.
+
+    Format choices:
+      - Producer/consumer are introduced by NODE ID first (the model uses
+        these as ``node_id=`` arguments), then by SCHEMA NAME (informational
+        — schema classes are baked-in plugin contracts, the model can't
+        target them directly).
+      - Each ``CompatibilityResult`` issue category gets its own bullet
+        block. We keep the original "expected ... got ..." nomenclature
+        from ``CompatibilityResult.error_message`` for continuity, but
+        switch to "consumer requires ... producer emits ..." prose because
+        empirically the composer LLM mis-grounds "expected/got" against
+        the validator's perspective rather than the data-flow direction.
+      - The suggestion leads with option (a) (patch consumer) because the
+        dominant captured failure mode is consumer over-declaration. The
+        producer-side option is listed second with the caveat that plugin
+        output schemas are baked-in.
+    """
+    result = exc.compatibility_result
+    issue_lines: list[str] = []
+    if result.missing_fields:
+        issue_lines.append("Missing required fields (consumer requires, producer does not guarantee):")
+        for field_name in result.missing_fields:
+            issue_lines.append(f"  - '{field_name}'")
+    if result.type_mismatches:
+        issue_lines.append("Type mismatches:")
+        for field_name, expected, actual in result.type_mismatches:
+            issue_lines.append(f"  - field '{field_name}': consumer requires '{expected}', producer emits '{actual}'")
+    if result.constraint_mismatches:
+        issue_lines.append("Constraint mismatches:")
+        for field_name, reason in result.constraint_mismatches:
+            issue_lines.append(f"  - field '{field_name}': {reason}")
+    if result.extra_fields:
+        issue_lines.append("Extra fields forbidden by consumer (producer emits, consumer rejects):")
+        for field_name in result.extra_fields:
+            issue_lines.append(f"  - '{field_name}'")
+
+    issues_block = "\n".join(issue_lines) if issue_lines else "(no per-field detail available)"
+
+    message = (
+        f"Edge contract violation between producer node '{exc.from_node_id}' "
+        f"(schema '{exc.producer_schema_name}') and consumer node '{exc.to_node_id}' "
+        f"(schema '{exc.consumer_schema_name}'):\n"
+        f"{issues_block}"
+    )
+
+    suggestion = _build_edge_contract_suggestion(exc)
+    return message, suggestion
+
+
+def _build_edge_contract_suggestion(exc: EdgeContractError) -> str:
+    """Compose the action-oriented suggestion text for an edge-contract failure.
+
+    Split out from ``_format_edge_contract_failure`` so the suggestion text
+    can be unit-tested without exercising the full message-building flow,
+    and so future tuning of the suggestion (e.g., emitting different prose
+    for missing-field vs type-mismatch cases) keeps the message format
+    stable.
+    """
+    result = exc.compatibility_result
+    has_type_mismatch = bool(result.type_mismatches)
+    has_missing = bool(result.missing_fields)
+    has_extras = bool(result.extra_fields)
+
+    parts: list[str] = []
+    parts.append("Most edge-contract failures come from the consumer over-declaring fields it doesn't operate on. Try option (a) first.")
+    parts.append("")
+    parts.append(f"  (a) Relax the consumer's input schema on node '{exc.to_node_id}'. Either:")
+    if has_type_mismatch:
+        parts.append("      - Change the declared field type(s) to match what the producer emits (see Type mismatches above).")
+    if has_missing:
+        parts.append("      - Drop missing required fields from the consumer's required_fields if the consumer doesn't actually need them.")
+    if has_extras:
+        parts.append(
+            "      - Switch the consumer's input schema mode to 'flexible' or 'observed' so it accepts the producer's extra fields."
+        )
+    parts.append(
+        "      - Or switch the consumer's input schema mode to 'flexible' so it accepts the producer's full output without redeclaring every field."
+    )
+    parts.append(f"      Tool: patch_node_options(node_id='{exc.to_node_id}', patch={{'schema': {{...}}}})")
+    parts.append("")
+    parts.append(
+        f"  (b) Patch the producer node '{exc.from_node_id}'. Note: plugin output schemas are largely baked-in by the plugin's contract — "
+        f"this option only works if you mis-declared the producer's schema in your initial set_pipeline / upsert_node call. "
+        f"If the producer is using its plugin's default output contract, option (a) is the only fix."
+    )
+    parts.append(f"      Tool: patch_node_options(node_id='{exc.from_node_id}', patch={{'schema': {{...}}}})")
+
+    return "\n".join(parts)
 
 
 def _skipped_checks(from_check: str) -> list[ValidationCheck]:
@@ -826,6 +926,11 @@ def validate_pipeline(
             )
         )
     except GraphValidationError as exc:
+        # ValidationCheck.detail keeps the legacy single-line prose so the
+        # operator-facing /validate response and dashboard run-status panel
+        # render the same compact summary they always have. The richer
+        # multi-line message + suggestion live on the ValidationError below
+        # and surface to the composer LLM.
         checks.append(
             ValidationCheck(
                 name=_CHECK_SCHEMA,
@@ -833,14 +938,25 @@ def validate_pipeline(
                 detail=str(exc),
             )
         )
-        errors.append(
-            ValidationError(
-                component_id=exc.component_id,
-                component_type=exc.component_type,
-                message=str(exc),
-                suggestion=None,
+        if isinstance(exc, EdgeContractError):
+            edge_message, edge_suggestion = _format_edge_contract_failure(exc)
+            errors.append(
+                ValidationError(
+                    component_id=exc.component_id,
+                    component_type=exc.component_type,
+                    message=edge_message,
+                    suggestion=edge_suggestion,
+                )
             )
-        )
+        else:
+            errors.append(
+                ValidationError(
+                    component_id=exc.component_id,
+                    component_type=exc.component_type,
+                    message=str(exc),
+                    suggestion=None,
+                )
+            )
         return ValidationResult(
             is_valid=False,
             checks=checks,

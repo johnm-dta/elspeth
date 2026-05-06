@@ -94,13 +94,15 @@ _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 # than "creative writing" in the LLM-debugging-skill temperature guide;
 # 0.0 is the right point for tool-construction tasks.
 #
-# Both values are recorded on every audit row via ComposerLLMCall so a
-# reviewer can detect drift if the constants are ever changed and tie
-# individual failures to the precise sampling regime that produced them.
+# The temperature value is recorded on every audit row via ComposerLLMCall.
+# The seed is recorded when LiteLLM advertises support for the configured
+# provider/model, otherwise it is omitted from the provider request and
+# recorded as ``None`` so the audit row mirrors the actual request shape.
 #
 # Configurability is Tier 2 — do not read from settings/env without an ADR.
 _COMPOSER_LLM_TEMPERATURE: Final[float] = 0.0
 _COMPOSER_LLM_SEED: Final[int] = 42
+_COMPOSER_LLM_SEED_PARAM: Final[str] = "seed"
 
 type RequiredPath = tuple[str, ...]
 
@@ -142,6 +144,21 @@ async def _litellm_acompletion(**kwargs: Any) -> Any:
     import litellm
 
     return await litellm.acompletion(**kwargs)
+
+
+def _litellm_completion_supports_param(model: str, param: str) -> bool:
+    """Return whether LiteLLM advertises chat-completion support for ``param``."""
+    import litellm
+
+    supported_params = litellm.get_supported_openai_params(model=model)
+    return isinstance(supported_params, list) and param in supported_params
+
+
+def _composer_llm_seed_for_model(model: str) -> int | None:
+    """Seed value to send to LiteLLM, or ``None`` when the provider rejects it."""
+    if _litellm_completion_supports_param(model, _COMPOSER_LLM_SEED_PARAM):
+        return _COMPOSER_LLM_SEED
+    return None
 
 
 def _token_usage_from_response(response: Any | None) -> TokenUsage:
@@ -242,7 +259,7 @@ def _build_llm_call_record(
     started_at: datetime,
     started_ns: int,
     temperature: float,
-    seed: int,
+    seed: int | None,
     response: Any | None = None,
     error_class: str | None = None,
     error_message: str | None = None,
@@ -538,6 +555,52 @@ def _find_missing_required_paths(
 _TOOL_REQUIRED_PATHS: dict[str, tuple[_CompiledRequiredPath, ...]] = _build_tool_required_paths_index()
 
 
+def _state_is_structurally_empty(state: CompositionState) -> bool:
+    """Return True when no composition tools have produced visible state.
+
+    Used by ``_finalize_no_tool_response`` to short-circuit the synthetic
+    preflight-failed message: when the model gave up after failing to
+    converge on a valid pipeline build, its prose is more truthful than
+    the synthesizer's Pydantic-noise replacement, and we surface the prose
+    instead.
+
+    "Structurally empty" means no source, no nodes, no outputs — the three
+    user-meaningful state fields. ``edges`` is implied (edges only exist
+    between declared nodes) and ``metadata`` is not load-bearing for this
+    check.
+    """
+    return state.source is None and not state.nodes and not state.outputs
+
+
+# Suffix appended to the model's prose when finalize-time runtime preflight
+# fails on a structurally-empty state. Single source of truth so tests can
+# pin the contract without duplicating the prose. Stable, system-attributed
+# so a UI can detect and re-style it if desired.
+_EMPTY_STATE_FINALIZE_SUFFIX = (
+    "\n\n---\n\n"
+    "[ELSPETH-SYSTEM] The pipeline is still empty — the composer did not "
+    "complete a valid build this turn. To continue: refine your request "
+    "with more specifics, or reply telling the composer to retry with the "
+    "plan it described above."
+)
+
+
+def _compose_empty_state_message(content: str) -> str:
+    """Build the user-facing message for the empty-state finalize path.
+
+    Surfaces the model's content (which audit-DB inspection shows is
+    typically an honest report of what the model tried and what blocked
+    convergence) and appends a system-attributed suffix telling the user
+    how to proceed.
+
+    Edge case: if the model produced no content at all, the suffix alone
+    becomes the message — better than silence.
+    """
+    if not content:
+        return _EMPTY_STATE_FINALIZE_SUFFIX.lstrip("\n").lstrip("-").lstrip()
+    return content + _EMPTY_STATE_FINALIZE_SUFFIX
+
+
 @dataclass(frozen=True, slots=True)
 class ComposerAvailability:
     """Boot-time availability snapshot for the composer service."""
@@ -777,6 +840,39 @@ class ComposerServiceImpl:
             return ComposerResult(message=content, state=state, tool_invocations=tool_invocations, llm_calls=llm_calls)
 
         if not runtime_result.is_valid:
+            # Structurally-empty state special case (Tier 1.5 §7.6 followup).
+            #
+            # The synthesizer below was designed for the case where the model
+            # falsely claims completion: the server replaces the lie with a
+            # concrete preflight-failed message that names the actual issue.
+            #
+            # On a structurally-empty state, however, the model isn't lying.
+            # Audit-DB inspection of captured rag-text-llm REDs (sessions
+            # 2cf59016, 12f061d9, 29ef178e — 2026-05-06 cohort) shows the
+            # model spent 20+ tool calls trying to converge on a valid
+            # set_pipeline call, gave up, and produced honest prose
+            # explaining what it tried to build and what's blocking
+            # ("I did discover the needed plugin requirements... web_scrape
+            # needs explicit schema, url_field..."). The synthesizer
+            # discards this and replaces it with raw Pydantic noise
+            # ("source: Field required, sinks: Field required"), which is
+            # both less informative and looks like a system bug to a viewer.
+            #
+            # When the state is structurally empty, pass through the model's
+            # content (it is more truthful than the synthesizer in this
+            # case) and append a brief system-attributed suffix telling the
+            # user what to do next. The original content is also preserved
+            # in raw_assistant_content for the audit trail, matching the
+            # synthesizer-path semantics.
+            if _state_is_structurally_empty(state):
+                return ComposerResult(
+                    message=_compose_empty_state_message(content),
+                    state=state,
+                    runtime_preflight=runtime_result,
+                    raw_assistant_content=content,
+                    tool_invocations=tool_invocations,
+                    llm_calls=llm_calls,
+                )
             return ComposerResult(
                 message=self._runtime_preflight_failure_message(runtime_result),
                 state=state,
@@ -2112,12 +2208,17 @@ class ComposerServiceImpl:
         from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
         try:
+            seed = _composer_llm_seed_for_model(self._model)
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "tools": tools,
+                "temperature": _COMPOSER_LLM_TEMPERATURE,
+            }
+            if seed is not None:
+                kwargs[_COMPOSER_LLM_SEED_PARAM] = seed
             response = await _litellm_acompletion(
-                model=self._model,
-                messages=messages,
-                tools=tools,
-                temperature=_COMPOSER_LLM_TEMPERATURE,
-                seed=_COMPOSER_LLM_SEED,
+                **kwargs,
             )
         except LiteLLMBadRequestError as exc:
             raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
@@ -2136,11 +2237,16 @@ class ComposerServiceImpl:
         from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
         try:
+            seed = _composer_llm_seed_for_model(self._model)
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": messages,
+                "temperature": _COMPOSER_LLM_TEMPERATURE,
+            }
+            if seed is not None:
+                kwargs[_COMPOSER_LLM_SEED_PARAM] = seed
             response = await _litellm_acompletion(
-                model=self._model,
-                messages=messages,
-                temperature=_COMPOSER_LLM_TEMPERATURE,
-                seed=_COMPOSER_LLM_SEED,
+                **kwargs,
             )
         except LiteLLMBadRequestError as exc:
             raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
@@ -2479,7 +2585,7 @@ class ComposerServiceImpl:
                         started_at=started_at,
                         started_ns=started_ns,
                         temperature=_COMPOSER_LLM_TEMPERATURE,
-                        seed=_COMPOSER_LLM_SEED,
+                        seed=_composer_llm_seed_for_model(self._model),
                         response=response,
                         error_class=error_class,
                         error_message=error_message,

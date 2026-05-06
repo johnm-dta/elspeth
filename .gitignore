@@ -71,6 +71,11 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Pycache and other Python build artefacts
+__pycache__/
+*.py[cod]
+
+
 # PyInstaller
 *.manifest
 *.spec

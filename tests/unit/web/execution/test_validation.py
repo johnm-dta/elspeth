@@ -17,8 +17,9 @@ import pytest
 import yaml
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
-from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.dag.models import EdgeContractError, GraphValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer.state import (
@@ -30,7 +31,9 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.validation import (
+    _build_edge_contract_suggestion,
     _collect_secret_refs,
+    _format_edge_contract_failure,
     _infer_component_type_from_plugin_error,
     validate_pipeline,
 )
@@ -1920,3 +1923,275 @@ sinks:
         assert _check(result, "graph_structure").passed is True
         assert _check(result, "route_target_resolution").passed is True
         assert _check(result, "schema_compatibility").passed is False
+
+
+class TestEdgeContractFailureFormatting:
+    """Tier 1.5 final hardening — composer LLM-actionable preflight error format.
+
+    The cohort report 2026-05-07 identified intermediate-edge schema-contract
+    drift as the dominant pre-existing failure mode (e.g. WebScrapeOutput.fetch_status:int
+    vs LineExplodeInput.fetch_status:str|None on a model-overdeclared consumer
+    schema). The structural fix preserves CompatibilityResult through the
+    GraphValidationError → ValidationError translation so the error message
+    surfaced to the composer LLM is named, per-field, and points at concrete
+    tool-call shapes.
+
+    These tests pin the message and suggestion shapes so prose drift is
+    visible in PRs. The exact wording is allowed to evolve, but the contract
+    points (named producer/consumer node IDs, per-field detail, both fix
+    options, patch_node_options arguments) are load-bearing.
+    """
+
+    @staticmethod
+    def _make_edge_error(
+        *,
+        from_node_id: str = "web_scrape_a1b2c3",
+        to_node_id: str = "line_explode_d4e5f6",
+        producer_schema_name: str = "WebScrapeOutput",
+        consumer_schema_name: str = "LineExplodeInput",
+        missing_fields: tuple[str, ...] = (),
+        type_mismatches: tuple[tuple[str, str, str], ...] = (),
+        extra_fields: tuple[str, ...] = (),
+        constraint_mismatches: tuple[tuple[str, str], ...] = (),
+    ) -> EdgeContractError:
+        result = CompatibilityResult(
+            compatible=False,
+            missing_fields=missing_fields,
+            type_mismatches=type_mismatches,
+            extra_fields=extra_fields,
+            constraint_mismatches=constraint_mismatches,
+        )
+        return EdgeContractError(
+            f"Edge from '{from_node_id}' to '{to_node_id}' invalid",
+            from_node_id=from_node_id,
+            to_node_id=to_node_id,
+            producer_schema_name=producer_schema_name,
+            consumer_schema_name=consumer_schema_name,
+            compatibility_result=result,
+            component_type="transform",
+        )
+
+    def test_edge_contract_error_is_graph_validation_error(self) -> None:
+        """Subclass: existing catch-GraphValidationError sites keep working."""
+        exc = self._make_edge_error(
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        assert isinstance(exc, GraphValidationError)
+        # component_id is the consumer (preserves existing semantics).
+        assert exc.component_id == "line_explode_d4e5f6"
+        assert exc.component_type == "transform"
+
+    def test_edge_contract_error_carries_structured_fields(self) -> None:
+        exc = self._make_edge_error(
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        assert exc.from_node_id == "web_scrape_a1b2c3"
+        assert exc.to_node_id == "line_explode_d4e5f6"
+        assert exc.producer_schema_name == "WebScrapeOutput"
+        assert exc.consumer_schema_name == "LineExplodeInput"
+        assert exc.compatibility_result.compatible is False
+        assert exc.compatibility_result.type_mismatches == (("fetch_status", "str | None", "int"),)
+
+    # ── Captured-RED scenario regression ─────────────────────────────────
+
+    def test_format_captured_red_type_mismatch_names_nodes_and_field(self) -> None:
+        """The exact captured-RED case from session 20260506T160557Z."""
+        exc = self._make_edge_error(
+            from_node_id="transform_fetch_rules_46d77f2bcb4a",
+            to_node_id="transform_split_lines_c3322ba122ca",
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        message, _suggestion = _format_edge_contract_failure(exc)
+
+        # Both nodes named (the model uses these as node_id= arguments).
+        assert "transform_fetch_rules_46d77f2bcb4a" in message
+        assert "transform_split_lines_c3322ba122ca" in message
+        # Schema names surfaced (informational).
+        assert "WebScrapeOutput" in message
+        assert "LineExplodeInput" in message
+        # Per-field detail with data-flow nomenclature.
+        assert "fetch_status" in message
+        assert "consumer requires 'str | None'" in message
+        assert "producer emits 'int'" in message
+        # Producer/consumer roles labelled at the top (not just field-level).
+        assert "producer node 'transform_fetch_rules_46d77f2bcb4a'" in message
+        assert "consumer node 'transform_split_lines_c3322ba122ca'" in message
+
+    def test_suggestion_lists_both_options_with_node_ids(self) -> None:
+        exc = self._make_edge_error(
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        suggestion = _build_edge_contract_suggestion(exc)
+
+        # Option (a): patch consumer.
+        assert "(a)" in suggestion
+        assert "patch_node_options(node_id='line_explode_d4e5f6'" in suggestion
+        # Option (b): patch producer.
+        assert "(b)" in suggestion
+        assert "patch_node_options(node_id='web_scrape_a1b2c3'" in suggestion
+        # Steers toward (a) — most failures are consumer over-declaration.
+        assert "Try option (a) first" in suggestion or "option (a) first" in suggestion
+
+    def test_suggestion_for_type_mismatch_mentions_changing_declared_type(self) -> None:
+        exc = self._make_edge_error(
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        suggestion = _build_edge_contract_suggestion(exc)
+        assert "declared field type" in suggestion or "Change the declared field type" in suggestion
+
+    def test_suggestion_for_missing_fields_mentions_dropping_required(self) -> None:
+        exc = self._make_edge_error(
+            missing_fields=("content",),
+        )
+        suggestion = _build_edge_contract_suggestion(exc)
+        assert "Drop missing required fields" in suggestion
+
+    def test_suggestion_for_extra_fields_mentions_flexible_mode(self) -> None:
+        exc = self._make_edge_error(
+            extra_fields=("debug_field",),
+        )
+        suggestion = _build_edge_contract_suggestion(exc)
+        # Flexible mode is the canonical fix for extra-field rejection.
+        assert "'flexible'" in suggestion
+
+    # ── All issue categories ─────────────────────────────────────────────
+
+    def test_missing_fields_block_present_when_applicable(self) -> None:
+        exc = self._make_edge_error(missing_fields=("content", "fingerprint"))
+        message, _ = _format_edge_contract_failure(exc)
+        assert "Missing required fields" in message
+        assert "'content'" in message
+        assert "'fingerprint'" in message
+
+    def test_constraint_mismatches_block_present_when_applicable(self) -> None:
+        exc = self._make_edge_error(
+            constraint_mismatches=(("price", "consumer requires finite floats"),),
+        )
+        message, _ = _format_edge_contract_failure(exc)
+        assert "Constraint mismatches" in message
+        assert "'price'" in message
+        assert "consumer requires finite floats" in message
+
+    def test_extra_fields_block_present_when_applicable(self) -> None:
+        exc = self._make_edge_error(extra_fields=("debug_field",))
+        message, _ = _format_edge_contract_failure(exc)
+        assert "Extra fields forbidden by consumer" in message
+        assert "'debug_field'" in message
+
+    def test_combined_issue_categories_all_appear(self) -> None:
+        exc = self._make_edge_error(
+            missing_fields=("content",),
+            type_mismatches=(("count", "int", "str"),),
+            extra_fields=("debug",),
+            constraint_mismatches=(("price", "consumer requires finite floats"),),
+        )
+        message, _ = _format_edge_contract_failure(exc)
+        assert "Missing required fields" in message
+        assert "Type mismatches" in message
+        assert "Constraint mismatches" in message
+        assert "Extra fields forbidden by consumer" in message
+
+    # ── End-to-end through validate_pipeline ─────────────────────────────
+
+    @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
+    @patch("elspeth.web.execution.validation.build_runtime_graph")
+    @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
+    def test_edge_contract_error_produces_rich_validation_error(
+        self,
+        mock_assemble: MagicMock,
+        mock_build_graph: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_load: MagicMock,
+    ) -> None:
+        """validate_pipeline must surface the rich message + suggestion when
+        graph.validate_edge_compatibility() raises EdgeContractError."""
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        mock_load.return_value = MagicMock()
+        mock_bundle = MagicMock()
+        mock_bundle.source = MagicMock()
+        mock_bundle.source_settings = MagicMock()
+        mock_bundle.transforms = ()
+        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+
+        mock_graph = MagicMock()
+        mock_build_graph.return_value = mock_graph
+        mock_graph.validate.return_value = None
+        mock_assemble.return_value = MagicMock()
+
+        edge_exc = self._make_edge_error(
+            type_mismatches=(("fetch_status", "str | None", "int"),),
+        )
+        mock_graph.validate_edge_compatibility.side_effect = edge_exc
+
+        state = _make_state()
+        settings = _make_settings()
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "schema_compatibility").passed is False
+        # Exactly one error emitted from the schema-compat path.
+        assert len(result.errors) == 1
+        err = result.errors[0]
+        # Rich multi-line message — not the legacy single-line str(exc).
+        assert "producer node" in err.message
+        assert "consumer node" in err.message
+        assert "fetch_status" in err.message
+        # Suggestion populated with concrete tool-call shapes.
+        assert err.suggestion is not None
+        assert "patch_node_options" in err.suggestion
+        # Component attribution preserved.
+        assert err.component_id == "line_explode_d4e5f6"
+        assert err.component_type == "transform"
+
+    @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
+    @patch("elspeth.web.execution.validation.build_runtime_graph")
+    @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
+    def test_plain_graph_validation_error_falls_back_to_legacy_format(
+        self,
+        mock_assemble: MagicMock,
+        mock_build_graph: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_load: MagicMock,
+    ) -> None:
+        """Non-edge-contract GraphValidationError keeps legacy str(exc)
+        message and suggestion=None (other failure modes don't have
+        structured per-field detail to enrich from)."""
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        mock_load.return_value = MagicMock()
+        mock_bundle = MagicMock()
+        mock_bundle.source = MagicMock()
+        mock_bundle.source_settings = MagicMock()
+        mock_bundle.transforms = ()
+        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+
+        mock_graph = MagicMock()
+        mock_build_graph.return_value = mock_graph
+        mock_graph.validate.return_value = None
+        mock_assemble.return_value = MagicMock()
+
+        # Plain GraphValidationError — not the EdgeContractError subclass.
+        mock_graph.validate_edge_compatibility.side_effect = GraphValidationError(
+            "some other graph problem",
+            component_id="node_x",
+            component_type="transform",
+        )
+
+        state = _make_state()
+        settings = _make_settings()
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert len(result.errors) == 1
+        err = result.errors[0]
+        # Legacy single-line message preserved.
+        assert err.message == "some other graph problem"
+        # No suggestion synthesized (we don't have structured fields to use).
+        assert err.suggestion is None

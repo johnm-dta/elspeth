@@ -72,7 +72,11 @@ def main() -> int:
         node_plugins: list[str] = []
         for n in nodes:
             if isinstance(n, dict):
-                node_plugins.append((n.get("plugin") or n.get("type") or "").lower())
+                # Gates have plugin: null and identify themselves via node_type.
+                # Without node_type fallback, fork/route scenarios are scored AMBER
+                # despite being functionally correct. The legacy "type" key is kept
+                # for any scenario that pre-dates the node_type/plugin split.
+                node_plugins.append((n.get("plugin") or n.get("node_type") or n.get("type") or "").lower())
         node_blob = " ".join(node_plugins)
 
         kind_groups = green.get("must_have_node_kinds_substring_any_of") or []

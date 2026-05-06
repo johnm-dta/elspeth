@@ -2071,7 +2071,7 @@ class TestPartialStatePreservation:
 
 
 class TestComposerSamplingDeterminism:
-    """Composer LLM calls must use temperature=0.0 and seed=42.
+    """Composer LLM calls must use temperature=0.0 and supported deterministic seed.
 
     RGR investigation 2026-05-06 §4.4: uncontrolled sampling at the
     LiteLLM/OpenRouter default (~1.0) was the largest single explanation
@@ -2085,8 +2085,15 @@ class TestComposerSamplingDeterminism:
     """
 
     @pytest.mark.asyncio
-    async def test_call_llm_passes_temperature_zero_and_seed_42(self) -> None:
-        """The tool-loop LLM call site sends temperature=0.0 and seed=42."""
+    async def test_call_llm_passes_temperature_zero_and_seed_42(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The tool-loop LLM call site sends temperature=0.0 and seed=42 when supported."""
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature", "tools", "seed"],
+        )
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -2113,13 +2120,46 @@ class TestComposerSamplingDeterminism:
         assert first_call_kwargs["seed"] == 42, f"composer must send seed=42, got {first_call_kwargs.get('seed')!r}"
 
     @pytest.mark.asyncio
-    async def test_call_text_llm_passes_temperature_zero_and_seed_42(self) -> None:
-        """The diagnostics text-LLM call site also sends temperature=0.0 and seed=42.
+    async def test_call_llm_omits_seed_when_provider_does_not_support_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Direct Anthropic-style adapters reject OpenAI seed; omit it when unsupported."""
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature", "tools"],
+        )
+        catalog = _mock_catalog()
+        settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        completion = _make_llm_response(content="acknowledged")
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=completion,
+        ) as mock_acomp:
+            await service._call_llm([{"role": "user", "content": "Hello"}], [])
+
+        kwargs = mock_acomp.call_args_list[0].kwargs
+        assert kwargs["temperature"] == 0.0
+        assert "seed" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_call_text_llm_passes_temperature_zero_and_seed_42(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The diagnostics text-LLM call site also sends temperature=0.0 and seed=42 when supported.
 
         run-diagnostics text generation goes through _call_text_llm. Since the
         skill prescribes determinism for the user's LLM transforms, the host
         composer should be at least as deterministic.
         """
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature", "seed"],
+        )
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -2137,6 +2177,32 @@ class TestComposerSamplingDeterminism:
         kwargs = mock_acomp.call_args_list[0].kwargs
         assert kwargs["temperature"] == 0.0
         assert kwargs["seed"] == 42
+
+    @pytest.mark.asyncio
+    async def test_call_text_llm_omits_seed_when_provider_does_not_support_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Diagnostics must share the same provider-parameter gate as composition."""
+        import litellm
+
+        monkeypatch.setattr(
+            litellm,
+            "get_supported_openai_params",
+            lambda model: ["temperature"],
+        )
+        catalog = _mock_catalog()
+        settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        completion = _make_llm_response(content="diagnostic text")
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=completion,
+        ) as mock_acomp:
+            await service._call_text_llm([{"role": "user", "content": "explain"}])
+
+        kwargs = mock_acomp.call_args_list[0].kwargs
+        assert kwargs["temperature"] == 0.0
+        assert "seed" not in kwargs
 
 
 class TestEmptyChoicesValidation:
@@ -3941,3 +4007,261 @@ class TestComposerRuntimePreflightFinalGate:
 
         with pytest.raises(AttributeError):
             error.original_exc = RuntimeError("replacement")
+
+
+class TestEmptyStateFinalizePassthrough:
+    """Tier 1.5 §7.6 followup — empty-state finalize-time passthrough.
+
+    Audit-DB inspection of three captured rag-text-llm REDs (2026-05-06
+    cohort, sessions 2cf59016, 12f061d9, 29ef178e) showed the model spent
+    20+ tool calls trying to converge on a valid set_pipeline build, gave
+    up, and produced honest prose explaining what it tried and what's
+    blocking. The synthesizer was discarding this prose and replacing it
+    with raw Pydantic noise ("source: Field required, sinks: Field
+    required") that looked like a system bug to a viewer.
+
+    The structural fix: when state is structurally empty (no source, no
+    nodes, no outputs) at finalize time AND the cached/computed runtime
+    preflight is invalid, the model isn't lying about completion — it's
+    reporting honest failure. Pass through its content with a
+    system-attributed suffix telling the user what to do next.
+
+    These tests pin the new behaviour. The original synthesizer path
+    (non-empty state with invalid preflight) is left unchanged and tested
+    by sister tests above.
+    """
+
+    # ── Standalone tests on the helpers ─────────────────────────────────
+
+    def test_state_is_structurally_empty_returns_true_for_empty_state(self) -> None:
+        from elspeth.web.composer.service import _state_is_structurally_empty
+
+        state = _empty_state()
+        assert _state_is_structurally_empty(state) is True
+
+    def test_state_is_structurally_empty_false_with_source(self) -> None:
+        from elspeth.web.composer.service import _state_is_structurally_empty
+
+        state = _empty_state().with_source(
+            SourceSpec(plugin="csv", on_success="t1", options={"path": "/tmp/x.csv"}, on_validation_failure="discard")
+        )
+        assert _state_is_structurally_empty(state) is False
+
+    def test_state_is_structurally_empty_false_with_output(self) -> None:
+        from elspeth.web.composer.service import _state_is_structurally_empty
+
+        state = _empty_state().with_output(
+            OutputSpec(
+                name="main", plugin="csv", options={"path": "/tmp/y.csv", "schema": {"mode": "observed"}}, on_write_failure="discard"
+            )
+        )
+        assert _state_is_structurally_empty(state) is False
+
+    def test_compose_empty_state_message_appends_system_suffix(self) -> None:
+        from elspeth.web.composer.service import _compose_empty_state_message
+
+        content = "I tried to build the pipeline but couldn't converge."
+        msg = _compose_empty_state_message(content)
+        # Original content preserved (model's prose is the truthful part).
+        assert content in msg
+        # System-attributed marker present (UI / scorers can detect).
+        assert "[ELSPETH-SYSTEM]" in msg
+        # Concrete next-step guidance.
+        assert "refine" in msg.lower() or "retry" in msg.lower()
+
+    def test_compose_empty_state_message_handles_empty_content(self) -> None:
+        """Edge case: model produced no content at all. Suffix becomes the
+        whole message (better than silence)."""
+        from elspeth.web.composer.service import _compose_empty_state_message
+
+        msg = _compose_empty_state_message("")
+        assert "[ELSPETH-SYSTEM]" in msg
+        assert msg.startswith("[ELSPETH-SYSTEM]") or msg.lstrip().startswith("[ELSPETH-SYSTEM]")
+
+    # ── End-to-end through _finalize_no_tool_response ────────────────────
+
+    @pytest.mark.asyncio
+    async def test_empty_state_invalid_preflight_passes_through_model_content(self) -> None:
+        """The captured rag-text-llm RED scenario: empty state, invalid
+        cached preflight, model gave up with honest prose. Synthesizer
+        must NOT fire."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        invalid_preflight = ValidationResult(
+            is_valid=False,
+            checks=[
+                ValidationCheck(
+                    name="settings_load",
+                    passed=False,
+                    detail="Pipeline state is empty",
+                )
+            ],
+            errors=[
+                ValidationError(
+                    component_id=None,
+                    component_type=None,
+                    message="2 validation errors for ElspethSettings — source: Field required, sinks: Field required",
+                    suggestion=None,
+                )
+            ],
+        )
+        model_prose = (
+            "I did discover the needed plugin requirements: web_scrape needs explicit "
+            "schema, url_field, content_field, fingerprint_field, and http. The setup "
+            "needs one more valid build pass to supply the right options."
+        )
+
+        with patch.object(service, "_runtime_preflight") as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=model_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=invalid_preflight,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        # Model's prose preserved as the load-bearing part of the message.
+        assert model_prose in result.message
+        # System suffix appended.
+        assert "[ELSPETH-SYSTEM]" in result.message
+        # Synthesized Pydantic-noise message did NOT replace the prose.
+        assert "Field required" not in result.message
+        assert "I cannot mark this pipeline complete yet" not in result.message
+        # Audit fields preserved (matches synthesizer-path semantics).
+        assert result.raw_assistant_content == model_prose
+        assert result.runtime_preflight is invalid_preflight
+        # No re-run of runtime preflight (state.version unchanged).
+        mock_preflight.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_state_invalid_preflight_after_state_mutation_run_preflight(self) -> None:
+        """Even when the preflight is computed fresh (state.version > initial),
+        the empty-state branch fires if the resulting state is empty."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        # Simulate state.version bump without populating any state fields
+        # (e.g., the model called a mutation that net-emptied the state).
+        bumped_state = replace(state, version=state.version + 1)
+        invalid_preflight = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id=None,
+                    component_type=None,
+                    message="Pipeline empty",
+                    suggestion=None,
+                )
+            ],
+        )
+
+        with patch.object(service, "_runtime_preflight", return_value=invalid_preflight):
+            result = await service._finalize_no_tool_response(
+                content="Model prose explaining the gap.",
+                state=bumped_state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        assert "Model prose explaining the gap." in result.message
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "Pipeline empty" not in result.message  # synthesizer skipped
+
+    @pytest.mark.asyncio
+    async def test_non_empty_state_invalid_preflight_still_synthesizes(self) -> None:
+        """Regression — when the state has actually been populated AND
+        runtime preflight is invalid, the synthesizer still fires
+        (preserving the original "model lied about completion" semantics).
+        This branch is the load-bearing safety net for the empty-state
+        special case above."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="t1",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="discard",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        bumped_state = replace(state, version=state.version + 1)
+        invalid_preflight = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="t1",
+                    component_type="transform",
+                    message="Forbidden name: 'end_of_source'",
+                    suggestion="Omit trigger for end-of-source-only aggregation.",
+                )
+            ],
+        )
+
+        with patch.object(service, "_runtime_preflight", return_value=invalid_preflight):
+            result = await service._finalize_no_tool_response(
+                content="The pipeline is complete and valid.",
+                state=bumped_state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        # Synthesizer fired — original message replaced.
+        assert result.message != "The pipeline is complete and valid."
+        assert "I cannot mark this pipeline complete" in result.message
+        assert "Forbidden name" in result.message
+        # No empty-state suffix.
+        assert "[ELSPETH-SYSTEM]" not in result.message
+        # raw_assistant_content preserved (matches synthesizer semantics).
+        assert result.raw_assistant_content == "The pipeline is complete and valid."
+
+    @pytest.mark.asyncio
+    async def test_empty_state_valid_preflight_preserves_message_verbatim(self) -> None:
+        """Sanity: empty state but valid preflight is a degenerate but
+        well-defined case (an empty pipeline that "passes" preflight is
+        only possible if validation is bypassed). The model's content
+        must NOT be touched in this case — neither synthesizer nor
+        empty-state suffix."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        valid_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch.object(service, "_runtime_preflight"):
+            result = await service._finalize_no_tool_response(
+                content="All good.",
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=valid_preflight,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        assert result.message == "All good."
+        assert result.raw_assistant_content is None  # no replacement happened

@@ -35,8 +35,8 @@ Before Task 1 changes required columns, inventory every direct writer for both a
 Run:
 
 ```bash
-rg -n "insert\((models\.)?chat_messages_table|chat_messages_table\.insert|insert\(chat_messages_table" src tests -g '*.py'
-rg -n "INSERT\s+INTO\s+chat_messages|exec_driver_sql\(|raw_connection\(|cursor\.execute\(" src tests -g '*.py'
+rg -n "insert\((models\.)?chat_messages_table|chat_messages_table\.insert|insert\(chat_messages_table" src tests evals -g '*.py'
+rg -n "INSERT\s+INTO\s+chat_messages|exec_driver_sql\(|raw_connection\(|cursor\.execute\(|executemany\(" src tests evals -g '*.py'
 ```
 
 Expected: every SQLAlchemy-table result is either rewritten in this schedule, routed through the new helper, or explicitly documented as not writing rows. Every raw-SQL result must be inspected and classified as one of: direct writer, corruption fixture that intentionally bypasses the normal writer, or unrelated raw SQL. Do not rely on the SQLAlchemy grep alone; existing tests use raw cursor SQL for integrity/corruption setup, and those sites can otherwise bypass the new required columns.
@@ -57,9 +57,12 @@ Expected: every SQLAlchemy-table result supplies `provenance`, uses the new help
 Paste a table into the PR body with these columns: table, file, line, writer kind, required 1A action, and verification. Include every production and test writer. The reviewed snapshot must include at least:
 
 - `src/elspeth/web/sessions/service.py` — `add_message`, `save_composition_state`, `set_active_state`, and `fork_session`.
-- `tests/unit/web/sessions/test_models.py` — direct composition-state rows.
+- `tests/unit/web/sessions/test_models.py` — direct chat-message rows and direct composition-state rows.
 - `tests/unit/web/blobs/test_service.py` — direct composition-state rows.
 - `tests/unit/web/composer/test_tools.py` — direct composition-state rows.
+- `tests/unit/evals/lib/test_decode_tools.py` — standalone SQLite
+  `chat_messages` fixture schema plus raw `INSERT INTO chat_messages`
+  rows used by the eval decode helper tests.
 - `tests/unit/web/sessions/test_fork.py` — raw FK-off corruption fixture.
 - `tests/unit/web/sessions/test_routes.py` — OperationalError SQL canaries that mention
   `chat_messages` / `composition_states` without writing those tables.
@@ -82,11 +85,26 @@ ReviewedWriter(
 )
 ```
 
-For raw strings/cursor operations, key the allowlist by `path`, `enclosing_symbol`, matched table name, operation kind, and semantic purpose (`corruption_fixture`, `operational_error_canary`, `unrelated_raw_sql`, etc.). A new direct writer inside an already-allowed file must still fail unless it is inside the same reviewed semantic site. The scanner must ignore its own scanner patterns in `test_static_direct_writers.py` so the test does not allowlist itself by accident.
+For raw strings / DB-API cursor operations, key the allowlist by `path`, `enclosing_symbol`, matched table name, operation kind, and semantic purpose (`standalone_eval_fixture`, `corruption_fixture`, `operational_error_canary`, `unrelated_raw_sql`, etc.). This includes raw `INSERT INTO ...` strings passed through `sqlite3` / DB-API `execute(...)` or `executemany(...)`, not only SQLAlchemy `exec_driver_sql(...)` or explicit `cursor.execute(...)` calls. A new direct writer inside an already-allowed file must still fail unless it is inside the same reviewed semantic site. The scanner must ignore its own scanner patterns in `test_static_direct_writers.py` so the test does not allowlist itself by accident.
 
-The same static guard must also check lock-sensitive helper usage: calls to `_reserve_sequence_range(...)` and `_insert_composition_state(...)` must either be inside `with self._session_write_lock(conn, session_id):` in the same enclosing symbol or be explicitly allowlisted as a negative test. For inline `composition_states.version` allocation, the guard must reject a `SELECT MAX(composition_states.version)` / insert pair in `save_composition_state` or `set_active_state` unless the enclosing AST block is inside `_session_write_lock`. This closes the review finding that lock discipline cannot remain comment-only.
+The same static guard must also check lock-sensitive helper usage: calls to `_reserve_sequence_range(...)`, `_insert_chat_message(...)`, and `_insert_composition_state(...)` must either be inside `with self._session_write_lock(conn, session_id):` in the same enclosing symbol or be explicitly allowlisted as a negative test. The helpers themselves must also call `_assert_session_write_lock_held(...)`, so the precondition is enforced at runtime and by static drift checks. For inline `composition_states.version` allocation, the guard must reject a `SELECT MAX(composition_states.version)` / insert pair in `save_composition_state` or `set_active_state` unless the enclosing AST block is inside `_session_write_lock`. This closes the review finding that lock discipline cannot remain comment-only.
 
 The same cutover must add canonical test row factories for any remaining intentional direct inserts, so future tests do not silently omit `sequence_no`, `writer_principal`, or `provenance`.
+
+Required guard tests inside `tests/unit/web/sessions/test_static_direct_writers.py`:
+
+1. `test_static_direct_writers_match_reviewed_allowlist` — scans the live `src/` and `tests/` tree and fails on any unreviewed SQLAlchemy/table/raw writer match.
+2. `test_static_direct_writer_guard_rejects_unreviewed_chat_insert` — feeds the scanner a synthetic unallowlisted `chat_messages_table.insert()` site and asserts it fails closed.
+3. `test_static_direct_writer_guard_rejects_unreviewed_state_insert` — feeds the scanner a synthetic unallowlisted `composition_states_table.insert()` site and asserts it fails closed.
+4. `test_static_helper_lock_guard_rejects_unlocked_allocator` — feeds the scanner a synthetic `_reserve_sequence_range(...)` / `_insert_chat_message(...)` / `_insert_composition_state(...)` call outside `_session_write_lock` and asserts it fails closed.
+
+Run the static guard explicitly:
+
+```bash
+.venv/bin/python -m pytest tests/unit/web/sessions/test_static_direct_writers.py -v
+```
+
+Expected before the guard implementation exists: FAIL. Expected after the scanner, reviewed allowlist, and synthetic negative fixtures land: PASS. Do not count the guard as review evidence unless the synthetic negative tests prove it rejects a new bypass without modifying production source.
 
 - [ ] **Step 5: Commit the inventory result before the schema/current-writer cutover**
 
@@ -301,7 +319,20 @@ def _make_session(
     )
 ```
 
-- [ ] **Step 1c: Write the failing schema test**
+- [ ] **Step 1c: Commit the shared conftests before any later task imports them**
+
+The shared `_make_session` helpers do not depend on the rev-4 schema and
+must be available from a clean checkout before Task 7 creates
+`tests/unit/web/sessions/test_persist_compose_turn.py`. Commit them as a
+standalone test-support change now; otherwise the Task 7 commit imports a
+file that is still only present in an uncommitted worktree.
+
+```bash
+git add tests/unit/web/conftest.py tests/integration/web/conftest.py
+git commit -m "test(web): add shared session row factories for phase 1 persistence tests"
+```
+
+- [ ] **Step 1d: Write the failing schema test**
 
 Create `tests/unit/web/sessions/test_chat_messages.py`:
 
@@ -731,7 +762,7 @@ unique-index behaviour.
 
 - [ ] **Step 5: Do not commit the schema metadata standalone**
 
-Stop here with the tests and metadata changes verified locally. Per the 1A atomicity rule, these `chat_messages` schema changes are committed only in Task 14's schema/current-writer cutover, after `add_message`, `fork_session`, and all direct test writers supply `sequence_no` and `writer_principal`. Task 14's commit command stages `src/elspeth/web/sessions/models.py`, both conftests, and `tests/unit/web/sessions/test_chat_messages.py`.
+Stop here with the tests and metadata changes verified locally. Per the 1A atomicity rule, these `chat_messages` schema changes are committed only in Task 14's schema/current-writer cutover, after `add_message`, `fork_session`, and all direct test writers supply `sequence_no` and `writer_principal`. Task 14's commit command stages `src/elspeth/web/sessions/models.py` and `tests/unit/web/sessions/test_chat_messages.py`; the shared conftests were already committed in Step 1c so Task 7 and later clean checkouts can import `_make_session`.
 
 ---
 ## Task 2: Add partial unique index on `(session_id, tool_call_id) WHERE role='tool'`
@@ -779,6 +810,31 @@ def test_tool_call_id_unique_within_session(engine):
             ))
 
 
+def test_tool_call_id_may_repeat_across_sessions(engine):
+    """The unique index scope is (session_id, tool_call_id), not
+    tool_call_id globally. Two sessions may receive the same provider
+    tool_call_id without colliding."""
+    with engine.begin() as conn:
+        _make_session(conn, session_id="s1")
+        _make_session(conn, session_id="s2")
+        for sid, assistant_id, tool_id, seq in (
+            ("s1", "a1", "t1", 1),
+            ("s2", "a2", "t2", 1),
+        ):
+            conn.execute(insert(models.chat_messages_table).values(
+                id=assistant_id, session_id=sid, role="assistant",
+                content="", sequence_no=seq, writer_principal="compose_loop",
+                created_at=datetime(2026, 4, 30, tzinfo=UTC),
+            ))
+            conn.execute(insert(models.chat_messages_table).values(
+                id=tool_id, session_id=sid, role="tool",
+                content="{}", sequence_no=seq + 1, writer_principal="compose_loop",
+                tool_call_id="same_provider_id",
+                parent_assistant_id=assistant_id,
+                created_at=datetime(2026, 4, 30, tzinfo=UTC),
+            ))
+
+
 def test_tool_call_id_unique_only_within_role_tool(engine):
     """The partial unique index excludes role!='tool' rows so user/assistant
     rows with NULL tool_call_id do not all collide on NULL."""
@@ -800,9 +856,9 @@ def test_tool_call_id_unique_only_within_role_tool(engine):
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_chat_messages.py::test_tool_call_id_unique_within_session -v
+.venv/bin/python -m pytest tests/unit/web/sessions/test_chat_messages.py -v -k "tool_call_id_unique_within_session or tool_call_id_may_repeat_across_sessions"
 ```
-Expected: FAIL — partial unique index does not exist.
+Expected: `test_tool_call_id_unique_within_session` FAILS because the partial unique index does not exist. `test_tool_call_id_may_repeat_across_sessions` may already pass before the index exists; it is still part of the green gate because it proves the index was not accidentally scoped to `tool_call_id` alone.
 
 - [ ] **Step 3: Add the partial unique index**
 
@@ -837,7 +893,7 @@ or `event` imports are needed.)
 ```bash
 .venv/bin/python -m pytest tests/unit/web/sessions/test_chat_messages.py -v
 ```
-Expected: PASS for the two new tests; previously-passing tests still pass.
+Expected: PASS for the three new tests; previously-passing tests still pass. The cross-session duplicate test is required evidence that the index is scoped by `session_id`.
 
 - [ ] **Step 5: Do not commit the schema metadata standalone**
 
@@ -1710,9 +1766,9 @@ def test_file_backed_sqlite_lock_serializes_independent_connections(tmp_path):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k reserve_sequence
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "reserve_sequence_range or session_write_lock_serializes_sqlite_same_session_sequence_allocation or file_backed_sqlite_sequence_allocator_smoke or file_backed_sqlite_lock_serializes_independent_connections"
 ```
-Expected: FAIL — helper does not exist.
+Expected: FAIL — helper does not exist. The command must include the same-session and file-backed SQLite race tests; `-k reserve_sequence` alone does not match them and is not a valid lock-safety red run.
 
 - [ ] **Step 3: Implement the helper**
 
@@ -1778,9 +1834,9 @@ def _reserve_sequence_range(
 - [ ] **Step 4: Run tests to verify pass**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k reserve_sequence
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "reserve_sequence_range or session_write_lock_serializes_sqlite_same_session_sequence_allocation or file_backed_sqlite_sequence_allocator_smoke or file_backed_sqlite_lock_serializes_independent_connections"
 ```
-Expected: PASS.
+Expected: PASS for the helper tests and both SQLite race proofs. A pass that omits either concurrency test is a false green.
 
 - [ ] **Step 5: Do not commit this helper standalone**
 
@@ -1803,20 +1859,21 @@ def test_insert_chat_message_returns_id_and_persists_row(service):
     now = datetime.now(UTC)
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s3")
-        msg_id = service._insert_chat_message(
-            conn,
-            session_id="s3",
-            role="assistant",
-            content="hello",
-            raw_content=None,
-            tool_calls=None,
-            sequence_no=1,
-            writer_principal="compose_loop",
-            composition_state_id=None,
-            tool_call_id=None,
-            parent_assistant_id=None,
-            created_at=now,
-        )
+        with service._session_write_lock(conn, "s3"):
+            msg_id = service._insert_chat_message(
+                conn,
+                session_id="s3",
+                role="assistant",
+                content="hello",
+                raw_content=None,
+                tool_calls=None,
+                sequence_no=1,
+                writer_principal="compose_loop",
+                composition_state_id=None,
+                tool_call_id=None,
+                parent_assistant_id=None,
+                created_at=now,
+            )
         assert isinstance(msg_id, str) and len(msg_id) > 0
         rows = conn.execute(text(
             "SELECT id, role, sequence_no, raw_content FROM chat_messages WHERE session_id='s3'"
@@ -1838,25 +1895,52 @@ def test_insert_chat_message_persists_raw_content(service):
     now = datetime.now(UTC)
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s3_raw")
-        service._insert_chat_message(
-            conn,
-            session_id="s3_raw",
-            role="assistant",
-            content="redacted output",
-            raw_content="original LLM output before preflight redaction",
-            tool_calls=None,
-            sequence_no=1,
-            writer_principal="compose_loop",
-            composition_state_id=None,
-            tool_call_id=None,
-            parent_assistant_id=None,
-            created_at=now,
-        )
+        with service._session_write_lock(conn, "s3_raw"):
+            service._insert_chat_message(
+                conn,
+                session_id="s3_raw",
+                role="assistant",
+                content="redacted output",
+                raw_content="original LLM output before preflight redaction",
+                tool_calls=None,
+                sequence_no=1,
+                writer_principal="compose_loop",
+                composition_state_id=None,
+                tool_call_id=None,
+                parent_assistant_id=None,
+                created_at=now,
+            )
         row = conn.execute(text(
             "SELECT content, raw_content FROM chat_messages WHERE session_id='s3_raw'"
         )).first()
         assert row.content == "redacted output"
         assert row.raw_content == "original LLM output before preflight redaction"
+
+
+def test_insert_chat_message_requires_session_write_lock(service):
+    """The helper is the actual chat-row writer, so the lock precondition
+    must be mechanical instead of docstring-only. A future caller that
+    skips `_reserve_sequence_range` must still crash before writing an
+    arbitrary caller-supplied sequence number."""
+    from datetime import UTC, datetime
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s3_no_lock")
+        with pytest.raises(RuntimeError, match="_session_write_lock"):
+            service._insert_chat_message(
+                conn,
+                session_id="s3_no_lock",
+                role="assistant",
+                content="hello",
+                raw_content=None,
+                tool_calls=None,
+                sequence_no=1,
+                writer_principal="compose_loop",
+                composition_state_id=None,
+                tool_call_id=None,
+                parent_assistant_id=None,
+                created_at=datetime.now(UTC),
+            )
 
 
 def test_insert_chat_message_rejects_tool_parent_that_is_not_assistant(service):
@@ -1878,29 +1962,30 @@ def test_insert_chat_message_rejects_tool_parent_that_is_not_assistant(service):
             writer_principal="route_user_message",
             created_at=now,
         ))
-        with pytest.raises(RuntimeError, match="parent_assistant_id.*assistant"):
-            service._insert_chat_message(
-                conn,
-                session_id="s3_parent_role",
-                role="tool",
-                content="{}",
-                raw_content=None,
-                tool_calls=None,
-                sequence_no=2,
-                writer_principal="compose_loop",
-                composition_state_id=None,
-                tool_call_id="tc_1",
-                parent_assistant_id="u_parent",
-                created_at=now,
-            )
+        with service._session_write_lock(conn, "s3_parent_role"):
+            with pytest.raises(RuntimeError, match="parent_assistant_id.*assistant"):
+                service._insert_chat_message(
+                    conn,
+                    session_id="s3_parent_role",
+                    role="tool",
+                    content="{}",
+                    raw_content=None,
+                    tool_calls=None,
+                    sequence_no=2,
+                    writer_principal="compose_loop",
+                    composition_state_id=None,
+                    tool_call_id="tc_1",
+                    parent_assistant_id="u_parent",
+                    created_at=now,
+                )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py::test_insert_chat_message_returns_id_and_persists_row -v
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k insert_chat_message
 ```
-Expected: FAIL.
+Expected: FAIL — `_insert_chat_message` and its lock/parent/raw-content safeguards do not exist yet. The command must run every `insert_chat_message` test in this task, not just the happy path.
 
 - [ ] **Step 3: Implement the helper**
 
@@ -1972,6 +2057,11 @@ def _insert_chat_message(
     session. The DB FK only proves same-session existence, not parent
     role.
     """
+    self._assert_session_write_lock_held(
+        conn,
+        session_id,
+        caller="_insert_chat_message",
+    )
     if role == "tool":
         if parent_assistant_id is None:
             raise RuntimeError("_insert_chat_message: tool row requires parent_assistant_id")
@@ -2006,9 +2096,9 @@ def _insert_chat_message(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py::test_insert_chat_message_returns_id_and_persists_row -v
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k insert_chat_message
 ```
-Expected: PASS.
+Expected: PASS for the happy path, `raw_content` persistence, lock-precondition, and non-assistant-parent rejection tests. A pass that omits the negative tests is a false green.
 
 - [ ] **Step 5: Do not commit this helper standalone**
 
@@ -2250,9 +2340,10 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
     """B1 (Phase 1 plan-review synthesis): under the held advisory
     lock, repeated calls to ``_insert_composition_state`` for the same
     session allocate contiguous versions starting at 1. The test runs
-    serially within a single transaction. The concurrent same-state
-    compose case is exercised on PostgreSQL by Task 16's stale-rejection
-    regression."""
+    serially within a single transaction. The concurrent state-version
+    allocator proof for current 1A helpers is the SQLite race regression
+    immediately below; Task 16 owns only the later
+    ``persist_compose_turn`` stale-state intent check."""
     from elspeth.web.sessions.protocol import CompositionStateData
 
     with service._engine.begin() as conn:
@@ -2275,6 +2366,56 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
         )).fetchall()
     assert [r.version for r in rows] == [1, 2, 3]
     assert [r.id for r in rows] == ids
+
+
+@pytest.mark.timeout(5)
+def test_session_write_lock_serializes_sqlite_same_session_state_version_allocation(service):
+    """Current 1A state writers also use SELECT MAX(version)+1.
+    Two same-session SQLite writers must not both reserve version 1."""
+    from concurrent.futures import ThreadPoolExecutor, wait
+    import threading
+    import time
+
+    from elspeth.web.sessions import models
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from sqlalchemy import select
+
+    barrier = threading.Barrier(2)
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s4_state_lock")
+
+    def _writer(index: int) -> int:
+        barrier.wait()
+        with service._engine.begin() as conn:
+            with service._session_write_lock(conn, "s4_state_lock"):
+                state_id = service._insert_composition_state(
+                    conn,
+                    session_id="s4_state_lock",
+                    state=CompositionStateData(metadata_={"index": index}),
+                    derived_from_state_id=None,
+                    provenance="session_seed",
+                )
+                time.sleep(0.01)
+                row = conn.execute(
+                    select(models.composition_states_table.c.version).where(
+                        models.composition_states_table.c.id == state_id
+                    )
+                ).scalar_one()
+                return int(row)
+
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
+        futures = [pool.submit(_writer, index) for index in (1, 2)]
+        done, not_done = wait(futures, timeout=2.0)
+        assert not not_done, (
+            "SQLite same-session state-version workers did not finish "
+            "within 2s; likely deadlock or lock-order regression"
+        )
+        versions = sorted(future.result(timeout=0) for future in done)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    assert versions == [1, 2]
 
 
 def test_insert_composition_state_versions_are_per_session(service):
@@ -2359,7 +2500,7 @@ def test_insert_composition_state_rejects_unknown_provenance(service):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k insert_composition_state
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "insert_composition_state or session_write_lock_serializes_sqlite_same_session_state_version_allocation"
 ```
 Expected: FAIL.
 
@@ -2595,7 +2736,7 @@ writers are locked.
 - [ ] **Step 4: Run tests to verify pass**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k insert_composition_state
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "insert_composition_state or session_write_lock_serializes_sqlite_same_session_state_version_allocation"
 .venv/bin/python -m pytest tests/unit/web/sessions/ -v
 ```
 Expected: PASS for the new tests AND every previously-passing sessions test continues to pass (the refactor must not break existing behaviour).
@@ -2649,7 +2790,7 @@ with `tool_calls` or `composition_state_id`.
 
 ### 14.2 Behaviour-preservation contract
 
-These four behaviours exist in the current `add_message` implementation
+These behaviours exist in the current `add_message` implementation
 and MUST survive the rewrite. Each has an
 explicit regression test in this task.
 
@@ -2670,8 +2811,9 @@ explicit regression test in this task.
    referenced in spec §2 and produced by routes 1749 and 2152.
 4. **`ChatMessageRecord` return** — the method returns a populated
    `ChatMessageRecord` (with the freshly-allocated `id`, `created_at`,
-   the supplied `raw_content`/`composition_state_id`, and the new
-   `tool_call_id` / `parent_assistant_id` linkage fields). Route
+   the supplied `raw_content`/`composition_state_id`,
+   `writer_principal`, and the new `tool_call_id` /
+   `parent_assistant_id` linkage fields). Route
    callers that read `assistant_msg.id` and tests across `test_fork.py`,
    `test_routes.py`, and `test_service.py`
    consume the returned record.
@@ -2683,12 +2825,22 @@ This single commit modifies:
 - `src/elspeth/web/sessions/protocol.py` — `ChatMessageRole`, `ChatMessageRecord`, and `SessionServiceProtocol.add_message` declaration (re-grep the current file before editing).
 - `src/elspeth/web/sessions/service.py` — `SessionServiceImpl.add_message` body and helper internals, **plus `fork_session`'s direct batch insert into `chat_messages_table`** (see §14.6 below — this is an additional production writer that is invisible to the `\.add_message(` grep below).
 - `src/elspeth/web/sessions/routes.py` — 6 production `service.add_message(...)` call sites, including `_persist_tool_invocations` and `_persist_llm_calls`.
-- `tests/unit/web/sessions/test_protocol.py` — protocol/dataclass coverage for the new `audit` role and message linkage fields.
+- `evals/lib/decode_tools.py` — raw SQLite diagnostic reader for
+  `chat_messages`; switch rev-4 DB reads from `ORDER BY created_at, id`
+  to `ORDER BY sequence_no`.
+- `tests/unit/web/sessions/test_protocol.py` — protocol/dataclass coverage for the new `audit` role plus `writer_principal` and message linkage fields.
 - `tests/unit/web/sessions/test_service.py` — ~10 call sites.
 - `tests/unit/web/sessions/test_fork.py` — ~38 call sites **plus a new regression test for the `fork_session` batch-insert sweep — see §14.6**.
 - `tests/unit/web/sessions/test_routes.py` — ~22 call sites.
 - `tests/unit/web/sessions/test_datetime_timezone.py` — 1 call site.
 - `tests/unit/web/sessions/test_persist_compose_turn.py` — extends with `add_message` regression tests in this task.
+- `tests/unit/evals/lib/test_decode_tools.py` — update the standalone
+  `chat_messages` fixture schema and raw inserts so they mirror the new
+  required columns (`sequence_no`, `writer_principal`, `tool_call_id`,
+  `parent_assistant_id`) or deliberately document why any direct fixture
+  field remains absent. This file is not an `add_message` caller, but it
+  is a raw chat-message writer and must move in the same schema/current-
+  writer cutover.
 
 Use `rg -n "\.add_message\(" src tests -g '*.py'`
 before the rewrite to confirm the `add_message` call-site count for
@@ -2754,10 +2906,11 @@ Also add a `fork_session` response backstop: copied `role="audit"` rows may be p
 
 ### 14.5 Test-suite call-site migration
 
-The test suite has ~71 `service.add_message(...)` calls. Most are
-positional `service.add_message(session.id, "user", "msg")` patterns.
-The mechanical migration: append `, writer_principal=<value>` to
-every call, choosing the value by role:
+The exact number of `service.add_message(...)` test calls drifts as the
+suite grows, and the grep below is authoritative. Most current test
+callers are positional `service.add_message(session.id, "user", "msg")`
+patterns. The mechanical migration: append
+`, writer_principal=<value>` to every call, choosing the value by role:
 
 | Test message role | `writer_principal` |
 |---|---|
@@ -2787,7 +2940,7 @@ production route helper/call sites, 1 protocol declaration, 1 service
 definition, and existing tests. The grep output is the implementer's
 working set for this commit; paste the count into the PR body.
 
-- [ ] **Step 2: Write the regression tests pinning the four preserved behaviours**
+- [ ] **Step 2: Write the regression tests pinning the preserved behaviours**
 
 Add to `tests/unit/web/sessions/test_persist_compose_turn.py` (the
 file already imports `_make_session` from conftest):
@@ -2919,6 +3072,7 @@ async def test_add_message_returns_chat_message_record(service):
     assert result.session_id == sid
     assert result.role == "user"
     assert result.content == "hi"
+    assert result.writer_principal == "route_user_message"
     assert result.created_at is not None
 
 
@@ -2970,17 +3124,21 @@ so the internal audit breadcrumb role is typed:
 ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
 ```
 
-Append the new linkage fields to `ChatMessageRecord` so every read path
-hydrates the columns Task 1 added:
+Append the new metadata/linkage fields to `ChatMessageRecord` so every
+read path hydrates the columns Task 1 added:
 
 ```python
+    writer_principal: str
     tool_call_id: str | None = None
     parent_assistant_id: UUID | None = None
 ```
 
-`tool_call_id` is the provider/tool-call identifier and remains a
-string. `parent_assistant_id` is a chat-message primary key exposed by
-the service layer the same way `id`, `session_id`, and
+`writer_principal` is required on every hydrated record because
+`fork_session` must preserve copied history's original audit writer
+instead of deriving one from role. `tool_call_id` is the
+provider/tool-call identifier and remains a string.
+`parent_assistant_id` is a chat-message primary key exposed by the
+service layer the same way `id`, `session_id`, and
 `composition_state_id` are exposed: as `UUID` values, not raw DB strings.
 
 Then replace the existing declaration with:
@@ -3100,6 +3258,7 @@ async def add_message(
         tool_calls=tool_calls,
         created_at=now,
         composition_state_id=composition_state_id,
+        writer_principal=writer_principal,
         tool_call_id=tool_call_id,
         parent_assistant_id=parent_assistant_id,
     )
@@ -3265,6 +3424,7 @@ adding them to the `freeze_fields(self, "tool_calls")` container guard.
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/sessions/ tests/unit/web/blobs/test_routes.py tests/unit/web/blobs/test_service.py tests/unit/web/composer/test_tools.py -v
+.venv/bin/python -m pytest tests/unit/evals/lib/test_decode_tools.py -v
 .venv/bin/python -m mypy src/elspeth/web/sessions/service.py src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/routes.py
 .venv/bin/python -m ruff check src/elspeth/contracts/advisory_locks.py src/elspeth/web/sessions/service.py src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/routes.py tests/unit/web/sessions/test_static_direct_writers.py tests/unit/web/sessions/test_protocol.py
 .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
@@ -3299,8 +3459,6 @@ git add src/elspeth/web/sessions/service.py \
         src/elspeth/web/sessions/protocol.py \
         src/elspeth/web/sessions/routes.py \
         src/elspeth/contracts/advisory_locks.py \
-        tests/unit/web/conftest.py \
-        tests/integration/web/conftest.py \
         tests/unit/web/sessions/test_static_direct_writers.py \
         tests/unit/web/sessions/test_chat_messages.py \
         tests/unit/web/sessions/test_composition_states.py \
@@ -3313,7 +3471,8 @@ git add src/elspeth/web/sessions/service.py \
         tests/unit/web/sessions/test_datetime_timezone.py \
         tests/unit/web/sessions/test_models.py \
         tests/unit/web/blobs/test_service.py \
-        tests/unit/web/composer/test_tools.py
+        tests/unit/web/composer/test_tools.py \
+        tests/unit/evals/lib/test_decode_tools.py
 git commit -m "feat(sessions)!: rev-4 add_message rewrite — required writer_principal, sequence_no allocation, full call-site sweep (composer-progress-persistence phase 1)
 
 BREAKING: SessionServiceProtocol.add_message and SessionServiceImpl.add_message
@@ -3325,8 +3484,8 @@ Adds \`sequence_no\` allocation under _session_write_lock.
 
 PRESERVED behaviours: _assert_state_in_session cross-session guard,
 sessions.updated_at write-through, raw_content persistence,
-ChatMessageRecord return type. Each preserved behaviour has an
-explicit regression test.
+ChatMessageRecord return type and writer_principal hydration. Each
+preserved behaviour has an explicit regression test.
 
 All callers (6 production route/helper sites in routes.py + 1
 production batch-write site in fork_session [§14.6] + the current test
@@ -3357,7 +3516,8 @@ the same atomic commit as the `add_message` rewrite.
 
 **Prerequisite inside the atomic commit.** Complete the protocol and
 read-path hydration edits from §14.4/§14.7 before coding this fork copy
-sweep. `fork_session` needs `ChatMessageRecord.tool_call_id` and
+sweep. `fork_session` needs `ChatMessageRecord.writer_principal`,
+`ChatMessageRecord.tool_call_id`, and
 `ChatMessageRecord.parent_assistant_id` populated by `get_messages`;
 using those fields before protocol/dataclass/get-message hydration lands
 turns the fork code into an attribute-error path instead of a schema
@@ -3366,13 +3526,13 @@ order matters: protocol + hydration first, then fork copying.
 
 **File:** `src/elspeth/web/sessions/service.py` (`fork_session`; re-grep the current function before editing).
 
-**Change 1 — populate `writer_principal` for every row in `msg_records_data`.**
+**Change 1 — populate truthful `writer_principal` for every row in `msg_records_data`.**
 
 The fork transaction builds three categories of rows:
 
 | Row category | Source line range | `writer_principal` value | Rationale |
 |---|---|---|---|
-| Copied source-session messages | ~1115-1129 | role-keyed per §14.5 table (`"user"`→`"route_user_message"`, `"assistant"`→`"compose_loop"`, `"system"`→`"route_system_message"`, `"tool"`→`"compose_loop"`, `"audit"`→`"compose_loop"`) | These rows came from the source session's history; the role-keyed default is the closest available approximation. **Fidelity follow-up (OQ):** preserving the *original* source row's `writer_principal` would be more truthful, but `ChatMessageRecord` does not currently expose that field. File an OQ ticket to extend `ChatMessageRecord` and switch to source-preservation in a follow-up phase. |
+| Copied source-session messages | ~1115-1129 | `msg.writer_principal` from the hydrated source row | These rows came from the source session's history. 1A must preserve the stored audit writer; deriving a replacement from `role` fabricates provenance and is not acceptable for copied history. `ChatMessageRecord` therefore exposes `writer_principal` in this same atomic cut. |
 | New synthetic system message ("Conversation forked from an earlier point.") | ~1131-1143 | `"session_fork"` (new enum value added to `ck_chat_messages_writer_principal` CHECK in Task 1) | This row is unambiguously authored by the fork operation, not by the route handler that originally accepted user input. |
 | New edited user message | ~1149-1161 | `"session_fork"` | Same — the fork operation, not the route handler, is the authoritative writer. The `composition_state_id` correctly points at the COPIED state in the new session (current behaviour preserved). |
 
@@ -3459,18 +3619,18 @@ for msg in messages_to_copy:
             "tool_calls": deep_thaw(msg.tool_calls) if msg.tool_calls else None,
             "tool_call_id": msg.tool_call_id,            # NEW
             "parent_assistant_id": copied_parent_assistant_id,  # NEW, rewritten
-            "writer_principal": _ROLE_TO_WRITER_PRINCIPAL[msg.role],  # NEW
+            "writer_principal": msg.writer_principal,  # NEW, preserved
             "created_at": msg.created_at,
             "composition_state_id": None,  # Don't reference source session states
         }
     )
 ```
 
-This requires `ChatMessageRecord` to expose `tool_call_id` and
-`parent_assistant_id` (both are post-Task-1 columns). Confirm at the
-top of T14 that the protocol dataclass has been extended to include
-them — if not, this is the commit that extends it (it's part of the
-same atomic cut).
+This requires `ChatMessageRecord` to expose `writer_principal`,
+`tool_call_id`, and `parent_assistant_id` (all are post-Task-1
+columns). Confirm at the top of T14 that the protocol dataclass has
+been extended to include them — if not, this is the commit that extends
+it (it's part of the same atomic cut).
 
 The exact field declarations to append to
 `src/elspeth/web/sessions/protocol.py`'s `ChatMessageRecord` dataclass
@@ -3478,17 +3638,20 @@ The exact field declarations to append to
 `raw_content`, `tool_calls`, `composition_state_id`):
 
 ```python
+    writer_principal: str
     tool_call_id: str | None = None
     parent_assistant_id: UUID | None = None
 ```
 
-Type rationale: `tool_call_id` is a provider/tool-call identifier and
-stays `str | None`. `parent_assistant_id` references
+Type rationale: `writer_principal` is a required scalar because copied
+fork history must preserve the original writer; no role-keyed fallback
+is allowed for source rows. `tool_call_id` is a provider/tool-call
+identifier and stays `str | None`. `parent_assistant_id` references
 `chat_messages.id`, which the service layer already exposes as `UUID`
 on `ChatMessageRecord.id`; hydrate it to `UUID | None` in every
 constructor (`add_message`, `get_messages`, and `fork_session`
-returns). **No `freeze_fields` call is required for these two fields**
-— both are scalar/immutable values, so the `frozen=True` slot itself is
+returns). **No `freeze_fields` call is required for these three fields**
+— they are scalar/immutable values, so the `frozen=True` slot itself is
 sufficient deep-immutability guard (per CLAUDE.md's "Scalar-Only Fields
 Need No Guard"). The existing `__post_init__` only calls
 `freeze_fields(self, "tool_calls")` because `tool_calls` is the only
@@ -3517,34 +3680,20 @@ longer needed. Build the fork rows with the writer/linkage/sequence
 fields described here; §14.7 removes the offset in the same atomic T14
 commit so the write-side and read-side ordering changes land together.
 
-**Helper constant.** Add to `service.py` near the top of the module
-(after the imports). **`MappingProxyType` is not currently imported by
-`service.py`**, so this commit must also add `from types import
-MappingProxyType` to the module imports (alphabetical with the existing
-`from datetime import UTC, datetime, timedelta` / `from pathlib import
-Path` block) — the constant declaration below relies on it.
-
-```python
-_ROLE_TO_WRITER_PRINCIPAL: Mapping[str, str] = MappingProxyType({
-    "user": "route_user_message",
-    "assistant": "compose_loop",
-    "system": "route_system_message",
-    "tool": "compose_loop",
-    "audit": "compose_loop",
-})
-```
-
-The `MappingProxyType` wrap matches the project's `freeze_fields`
-discipline — module-level mappings that callers might mutate are a
-defect class CLAUDE.md's frozen-dataclass section calls out.
+**No role-keyed fallback helper.** Do not add a
+`_ROLE_TO_WRITER_PRINCIPAL` fallback for copied source rows. It would
+silently rewrite audit metadata for any source row whose stored writer
+differs from the default, including future/admin tooling. New synthetic
+fork rows use the explicit `"session_fork"` value; copied rows use the
+stored `msg.writer_principal`.
 
 **Required regression tests** (add to `tests/unit/web/sessions/test_fork.py`):
 
-1. `test_fork_session_assigns_writer_principal_per_role` — fork a
-   session that contains user, assistant, system, and tool rows;
-   assert each copied row's `writer_principal` matches the role-keyed
-   default, the new system fork notice has `writer_principal="session_fork"`,
-   and the new edited user message has `writer_principal="session_fork"`.
+1. `test_fork_session_preserves_copied_writer_principal` — fork a
+   session that contains user, assistant, system, audit, and tool rows;
+   assert each copied row's `writer_principal` exactly matches the
+   source row's stored value, while the new system fork notice and new
+   edited user message both have `writer_principal="session_fork"`.
 2. `test_fork_session_assigns_contiguous_sequence_no` — fork a session
    with N copied messages; assert the resulting `chat_messages.sequence_no`
    values for the new session are exactly `[1, 2, ..., N+2]` (N copied
@@ -3559,19 +3708,15 @@ defect class CLAUDE.md's frozen-dataclass section calls out.
    session where the slice `[:fork_idx]` excludes the assistant message
    that an in-slice tool row depends on; assert `RuntimeError` with the
    precise "fork slice excludes parent assistant" message.
-5. `test_fork_session_rejects_with_admin_tool_writer_principal_when_not_admin`
-   — sanity check that the role-keyed default does not silently
-   downgrade an `admin_tool` source row; document expected behaviour
-   (currently `admin_tool` is reserved for future use and produces no
-   rows, so this test is a no-op pinning that future behaviour requires
-   a deliberate decision).
+5. `test_fork_session_preserves_admin_tool_writer_principal_on_copied_rows`
+   — insert a reviewed direct source row with
+   `writer_principal="admin_tool"` and verify the fork copy keeps that
+   exact value. This is the regression that prevents future code from
+   reintroducing role-keyed provenance fabrication.
 
-The first four tests are required Green-bar additions. Test 5 is a
-documentation pin only and MUST NOT be counted as protective coverage or
-a merge gate — annotate it with `pytest.skip(reason="admin_tool
-reserved")` if the source path produces no `admin_tool` rows today. If
-an `admin_tool` writer exists by implementation time, replace the skip
-with a real invariant test before claiming coverage.
+All five tests are required Green-bar additions. Do not skip the
+`admin_tool` preservation test: it can be built with a reviewed direct
+row and the schema enum already allows the value.
 
 ---
 
@@ -3615,14 +3760,18 @@ result = conn.execute(
 allocator (`_reserve_sequence_range` under _session_write_lock) is the
 single arbiter of ordering, and the per-session unique index
 `ix_chat_messages_session_sequence` (Task 1) makes the ordering key
-both unique and dense within a session.
+unique within a session. Treat density only as a per-successful-batch
+expectation (for example, a single fork copy gets `[1, 2, ...]`);
+`sequence_no` is not a global gap-free counter and rollback/cancel paths
+must not rely on it being dense forever.
 
-In the same `get_messages` edit, hydrate the new linkage fields on every
-returned `ChatMessageRecord`:
+In the same `get_messages` edit, hydrate the new metadata/linkage fields
+on every returned `ChatMessageRecord`:
 
 ```python
 ChatMessageRecord(
     # ... existing fields ...
+    writer_principal=row.writer_principal,
     tool_call_id=row.tool_call_id,
     parent_assistant_id=UUID(row.parent_assistant_id)
     if row.parent_assistant_id is not None
@@ -3631,8 +3780,9 @@ ChatMessageRecord(
 ```
 
 This is not optional: §14.6's `fork_session` copy loop reads
-`msg.tool_call_id` and `msg.parent_assistant_id`, and Phase 3/4 recovery
-surfaces rely on the service API carrying the same parentage the DB
+`msg.writer_principal`, `msg.tool_call_id`, and
+`msg.parent_assistant_id`, and Phase 3/4 recovery surfaces rely on the
+service API carrying the same audit writer and parentage the DB
 enforces.
 
 **Change 2 — Remove the `fork_session` microsecond-offset workaround.**
@@ -3693,15 +3843,22 @@ import in the same edit. (Other usages — `grep -n "timedelta" service.py`
 
 **Change 3 — read-path consumers that depend on chat-message ordering.**
 
-`grep -rn "get_messages\|chat_messages_table.*order_by" src/ tests/ --include="*.py"`
+`rg -n "get_messages|chat_messages_table.*order_by|ORDER BY .*created_at|FROM chat_messages" src tests evals -g '*.py'`
 to enumerate every consumer of `get_messages`. As of the rev-4
 snapshot:
 
 - `src/elspeth/web/sessions/routes.py:412` (`_composer_chat_history`)
   reads `get_messages` output to build the LLM input. Behaviour is
   unchanged — the order it already expects (assistant before its tool
-  rows, system before user, copied messages before fork-time inserts)
-  is exactly what `sequence_no` enforces.
+	  rows, system before user, copied messages before fork-time inserts)
+	  is exactly what `sequence_no` enforces.
+- `evals/lib/decode_tools.py:55` reads the same SQLite session DB
+  directly for audit/transcript diagnostics and currently orders by
+  `created_at, id`. This is a raw SQL read-side consumer, not a service
+  `get_messages` caller, and it MUST move to `ORDER BY sequence_no`
+  in the same 1A cutover. Leaving it on `created_at, id` would make the
+  diagnostic view disagree with the canonical service ordering exactly
+  where 1A is trying to remove same-timestamp ambiguity.
 - Phase 4 recovery panel (not yet implemented) will consume
   `get_messages` and depends on stable intra-turn ordering. The
   ordering switch is its prerequisite.
@@ -3722,6 +3879,23 @@ assert the returned roles/ids are ordered by `sequence_no`, not
 inside Schedule 1A; the multi-tool `persist_compose_turn` integration
 test remains Schedule 1B coverage.
 
+**Required eval diagnostic regression.** Extend
+`tests/unit/evals/lib/test_decode_tools.py` so the standalone fixture
+schema mirrors the rev-4 `chat_messages` columns needed by the decoder:
+`sequence_no`, `writer_principal`, `tool_call_id`, and
+`parent_assistant_id`. Update raw inserts to supply `sequence_no` and
+`writer_principal` for every row and linkage fields for tool rows when
+present. Add `test_decode_tool_sequence_orders_same_timestamp_rows_by_sequence_no`:
+create rows for one session with identical `created_at` values, insert
+them in a non-sequence order, call `decode_tool_sequence`, and assert the
+returned roles/ids follow `sequence_no`, not `created_at`, `id`, or
+insertion accident. Run this test with the rest of Task 14's targeted
+verification:
+
+```bash
+.venv/bin/python -m pytest tests/unit/evals/lib/test_decode_tools.py -v
+```
+
 ---
 ## Task 18: Document the staging session-DB recreation procedure
 
@@ -3736,9 +3910,13 @@ chat_messages` / `DELETE FROM composition_states` is therefore
 incorrect: it leaves the old table shape behind and startup rejects the
 stale DB.
 
-The correct pre-release procedure is to stop the service, archive the
-current session DB file, remove the live file, and restart so
+The correct pre-release procedure is to stop the service, verify no
+writer still has the SQLite database open, archive the current session
+DB artifact set, remove the live artifact set, and restart so
 `initialize_session_schema` recreates the schema from current metadata.
+For SQLite, the artifact set is not just `sessions.db`: the main file,
+`sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are one
+rollback/recreate unit. Never archive or delete only the main file.
 
 **Files:**
 - Modify: `docs/guides/session-db-reset.md` (existing canonical reset runbook)
@@ -3747,6 +3925,11 @@ current session DB file, remove the live file, and restart so
 - [ ] **Step 1: Extend the existing session DB reset runbook**
 
 Start from `docs/guides/session-db-reset.md`. Keep its Landscape orphaning stop/go gates, path-resolution rules, health checks, and create-session/journal verification. Add any 1A-specific schema-cutover notes there first; do not create a second reset procedure that can drift from the existing guide.
+
+Update the guide's expected session-table inventory in the same edit so
+it includes the new `audit_access_log` table. `initialize_session_schema`
+validates the metadata table set exactly; a reset guide that still lists
+only the pre-1A tables is stale and cannot be used as cutover evidence.
 
 - [ ] **Step 2: Add the session-DB recreation procedure**
 
@@ -3765,10 +3948,14 @@ has no Alembic migrations. When a pre-release plan changes the session
 schema, recreate the DB file from current metadata.
 
 This procedure destroys staging session rows, chat history, composition
-states, runs, run events, blob/blob-link database records, and encrypted
-`user_secrets` stored in the web session DB. It does not delete blob
-payload files under the data directory, Landscape audit data, payload
-storage, Filigree state, or source files. Do not run it outside staging.
+states, audit access log rows, runs, run events, blob/blob-link database
+records, and encrypted `user_secrets` stored in the web session DB. It
+does not delete blob payload files under the data directory, Landscape
+audit data, payload storage, Filigree state, or source files. Do not run
+it outside staging.
+For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and
+`sessions.db-journal` are handled as one matched artifact set for
+archive, deletion, and rollback.
 
 ## Preconditions
 
@@ -3790,6 +3977,10 @@ storage, Filigree state, or source files. Do not run it outside staging.
    radius. Either the archived DB is the accepted recovery point, or
    staging secrets have a documented re-entry/reseed procedure before
    users resume composer work.
+9. No other host-side process is writing the SQLite DB. The procedure
+   stops `elspeth-web.service` and checks open handles before copying;
+   if another process still has the main DB or a sidecar open, stop and
+   identify it before continuing.
 
 ## Procedure
 
@@ -3842,6 +4033,13 @@ case "$DB_PATH" in
     *) echo "REFUSING: DB_PATH is outside $PROJECT_ROOT_CANON: $DB_PATH" >&2; exit 1 ;;
 esac
 
+DB_ARTIFACTS=(
+    "$DB_PATH"
+    "$DB_PATH-wal"
+    "$DB_PATH-shm"
+    "$DB_PATH-journal"
+)
+
 echo "Resolved staging session DB path: $DB_PATH"
 read -r -p "Archive and recreate this staging DB? Type RECREATE to continue: " CONFIRM
 if [ "$CONFIRM" != "RECREATE" ]; then
@@ -3851,13 +4049,37 @@ fi
 
 sudo systemctl stop "$SERVICE"
 
-if [ -e "$DB_PATH" ]; then
-    SNAPSHOT="$DB_PATH.pre-phase1.$(date -u +%Y%m%dT%H%M%SZ)"
-    sudo cp -a "$DB_PATH" "$SNAPSHOT"
-    echo "Archived existing DB to $SNAPSHOT"
+if command -v fuser >/dev/null 2>&1; then
+    for artifact in "${DB_ARTIFACTS[@]}"; do
+        if [ -e "$artifact" ] && sudo fuser "$artifact" >/dev/null 2>&1; then
+            echo "REFUSING: $artifact is still open after $SERVICE stopped." >&2
+            sudo fuser -v "$artifact" >&2 || true
+            exit 1
+        fi
+    done
 fi
 
-sudo rm -f "$DB_PATH"
+FOUND_DB_ARTIFACT=0
+for artifact in "${DB_ARTIFACTS[@]}"; do
+    if [ -e "$artifact" ]; then
+        FOUND_DB_ARTIFACT=1
+    fi
+done
+
+if [ "$FOUND_DB_ARTIFACT" -eq 1 ]; then
+    SNAPSHOT_DIR="$DB_PATH.pre-phase1.$(date -u +%Y%m%dT%H%M%SZ)"
+    sudo mkdir -p "$SNAPSHOT_DIR"
+    for artifact in "${DB_ARTIFACTS[@]}"; do
+        if [ -e "$artifact" ]; then
+            sudo cp -a "$artifact" "$SNAPSHOT_DIR/$(basename "$artifact")"
+        fi
+    done
+    echo "Archived existing DB artifact set to $SNAPSHOT_DIR"
+fi
+
+for artifact in "${DB_ARTIFACTS[@]}"; do
+    sudo rm -f "$artifact"
+done
 sudo systemctl start "$SERVICE"
 
 curl --unix-socket /run/elspeth/uvicorn.sock -fsS http://localhost/api/health
@@ -3901,25 +4123,57 @@ set -euo pipefail
 PROJECT_ROOT="/home/john/elspeth"
 SERVICE="elspeth-web.service"
 DB_PATH="/absolute/path/resolved/by/the/procedure"
-SNAPSHOT="/absolute/path/to/sessions.db.pre-phase1.YYYYMMDDTHHMMSSZ"
-PRE_CUTOVER_REF="<recorded commit/ref compatible with SNAPSHOT>"
+SNAPSHOT_DIR="/absolute/path/to/sessions.db.pre-phase1.YYYYMMDDTHHMMSSZ"
+PRE_CUTOVER_REF="<recorded commit/ref compatible with SNAPSHOT_DIR>"
+DB_ARTIFACTS=(
+    "$DB_PATH"
+    "$DB_PATH-wal"
+    "$DB_PATH-shm"
+    "$DB_PATH-journal"
+)
 
 sudo systemctl stop "$SERVICE"
 
-if [ -e "$DB_PATH" ]; then
-    FAILED_NEW_DB="$DB_PATH.failed-phase1.$(date -u +%Y%m%dT%H%M%SZ)"
-    sudo cp -a "$DB_PATH" "$FAILED_NEW_DB"
-    echo "Preserved failed new DB at $FAILED_NEW_DB"
+FOUND_NEW_ARTIFACT=0
+for artifact in "${DB_ARTIFACTS[@]}"; do
+    if [ -e "$artifact" ]; then
+        FOUND_NEW_ARTIFACT=1
+    fi
+done
+
+if [ "$FOUND_NEW_ARTIFACT" -eq 1 ]; then
+    FAILED_NEW_DB_DIR="$DB_PATH.failed-phase1.$(date -u +%Y%m%dT%H%M%SZ)"
+    sudo mkdir -p "$FAILED_NEW_DB_DIR"
+    for artifact in "${DB_ARTIFACTS[@]}"; do
+        if [ -e "$artifact" ]; then
+            sudo cp -a "$artifact" "$FAILED_NEW_DB_DIR/$(basename "$artifact")"
+        fi
+    done
+    echo "Preserved failed new DB artifact set at $FAILED_NEW_DB_DIR"
+fi
+
+if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
+    echo "REFUSING: $PROJECT_ROOT has uncommitted changes; preserve or commit them before rollback." >&2
+    git -C "$PROJECT_ROOT" status --short >&2
+    exit 1
 fi
 
 # Use the approved source-checkout rollback mechanism for staging. The
 # important invariant is compatibility: the restored process must run the
-# pre-cutover code that understands SNAPSHOT's schema. Do not use
-# `git reset --hard` from automation; if the checkout is dirty, stop and
-# preserve it for operator review.
+# pre-cutover code that understands SNAPSHOT_DIR's schema. Do not use
+# `git reset --hard` from automation; the dirty-tree guard above makes
+# this fail closed before switching refs.
 git -C "$PROJECT_ROOT" switch --detach "$PRE_CUTOVER_REF"
 
-sudo cp -a "$SNAPSHOT" "$DB_PATH"
+for artifact in "${DB_ARTIFACTS[@]}"; do
+    sudo rm -f "$artifact"
+done
+for artifact in "${DB_ARTIFACTS[@]}"; do
+    archived="$SNAPSHOT_DIR/$(basename "$artifact")"
+    if [ -e "$archived" ]; then
+        sudo cp -a "$archived" "$artifact"
+    fi
+done
 sudo systemctl start "$SERVICE"
 
 curl --unix-socket /run/elspeth/uvicorn.sock -fsS http://localhost/api/health
@@ -3942,7 +4196,11 @@ primarily a name/shape guard for expected tables, columns, CHECK names,
 and index names; it is not a compatibility migration engine and must not
 be treated as proof that stale CHECK expressions, partial-index
 predicates, or old table layouts are safe. Archive/delete/recreate is
-the only accepted cutover path for this 1A schema change.
+the only accepted cutover path for this 1A schema change. Archive,
+delete, and rollback must handle the SQLite main DB plus `-wal`, `-shm`,
+and `-journal` sidecars as a single artifact set; mixing a new main file
+with stale sidecars, or restoring a main file without its sidecars, is
+not a valid reset.
 ````
 
 - [ ] **Step 3: Verify the procedure locally before committing**
@@ -3978,10 +4236,10 @@ git commit -m "docs(runbooks): session-DB recreation procedure for staging schem
 2. [ ] `tests/unit/web/sessions/test_static_direct_writers.py` fails closed on new SQLAlchemy or raw-SQL direct writers outside the reviewed allowlist.
 3. [ ] No direct writer can insert a chat message or composition state without satisfying the new required columns.
 4. [ ] `add_message` preserves cross-session guards, `updated_at`, `raw_content`, and `ChatMessageRecord` return hydration.
-5. [ ] `fork_session` no longer bypasses sequence/provenance requirements.
+5. [ ] `fork_session` no longer bypasses sequence/provenance requirements and preserves copied rows' stored `writer_principal` values instead of deriving them from role.
 6. [ ] Public route responses and composer prompt history exclude internal `role="audit"` rows.
 7. [ ] Audit breadcrumb persistence failures remain fail-soft and class-name-only; they do not mask the primary composer response.
-8. [ ] The staging session-DB recreation runbook exists, includes rollback that restores DB + compatible source ref together, and has been reviewed before any schema-breaking deploy.
+8. [ ] The staging session-DB recreation runbook exists, includes `audit_access_log` in the table/blast-radius text, restores DB + compatible source ref together, and fail-closes rollback on a dirty checkout before any source ref switch.
 9. [ ] SQLite current-behavior tests pass.
 10. [ ] 1A is documented as proving SQLite-current deployability only; full PostgreSQL DDL and concurrency proof belongs to Schedule 1C and is not claimed here.
 11. [ ] Ruff, mypy, and tier-model enforcement pass for the 1A touched surfaces, and the merge gate includes `.venv/bin/python -m pytest tests/unit/web/ tests/integration/web/ -v`.

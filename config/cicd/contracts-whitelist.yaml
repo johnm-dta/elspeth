@@ -675,6 +675,16 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm_before_deadline:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm_with_audit:messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm_with_audit:tools (list)"
+  # Advisor escape hatch: arguments come from the composer LLM's tool-call
+  # payload (a JSON object), structurally identical to other LLM-tool-call
+  # arguments processed elsewhere in the dispatch loop. Required fields are
+  # validated by _TOOL_REQUIRED_PATHS before the method runs.
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_advisor_with_audit:arguments"
+  # Advisor argument validator (F3 fix). Receives the same LLM-tool-call
+  # payload; returns either None (valid) or an ARG_ERROR result_payload dict
+  # for the caller to embed in the outer ComposerToolInvocation record.
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._validate_advisor_arguments:arguments"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._validate_advisor_arguments:return"
   # elspeth-4e79436719 §Phase 3: Anthropic cache_control marker transform
   # operates on the same provider-call payload shape as the call sites above.
   # The `tools` parameter is typed `list | None`, so the contracts check

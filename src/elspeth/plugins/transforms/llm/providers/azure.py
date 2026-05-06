@@ -12,6 +12,7 @@ evicting the wrong cache entry during retry races.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -260,12 +261,17 @@ class AzureLLMProvider:
 
 
 # Optional SDK import — module-level so tests can mock it.
+_imported_configure_azure_monitor: Callable[..., None] | None
 try:
     from azure.monitor.opentelemetry import (
-        configure_azure_monitor,
+        configure_azure_monitor as _azure_monitor_sdk_configure,
     )
 except ImportError:
-    configure_azure_monitor = None  # type: ignore[assignment]
+    _imported_configure_azure_monitor = None
+else:
+    _imported_configure_azure_monitor = _azure_monitor_sdk_configure
+
+configure_azure_monitor: Callable[..., None] | None = _imported_configure_azure_monitor
 
 # Module-level idempotency guard — Azure Monitor is process-global.
 _azure_monitor_configured: bool = False

@@ -42,6 +42,30 @@ class WebSettings(BaseModel):
     composer_runtime_preflight_timeout_seconds: float = Field(default=5.0, gt=0)
     composer_rate_limit_per_minute: int = Field(..., ge=1)
     composer_expose_provider_errors: bool = False
+    # Advisor escape hatch: lets the composer LLM phone a frontier model
+    # for guidance when stuck. Disabled by default; enabling it filters
+    # the request_advisor_hint tool into get_tool_definitions(). Budget
+    # is per-compose-request (local counter), not per-session lifetime.
+    composer_advisor_enabled: bool = False
+    composer_advisor_model: str = "anthropic/claude-sonnet-4-6"
+    composer_advisor_max_calls_per_compose: int = Field(
+        default=4,
+        ge=0,
+        description=(
+            "Maximum advisor calls per compose request (NOT per session-across-time). "
+            "Each new user prompt starts with a fresh budget. The default of 4 is "
+            "sized to accommodate one proactive intro call (security/red-list trigger) "
+            "plus three reactive recovery calls — the proactive call should not crowd "
+            "out reactive recovery. A user prompting 10 times in one session may make "
+            "up to 40 advisor calls total over the session lifetime; session-lifetime "
+            "cost is bounded by composer_rate_limit_per_minute, not this setting. "
+            "Raise this for heavyweight workloads (e.g. business-analysis pipelines "
+            "with many plugins where the LLM benefits from multiple intro consultations)."
+        ),
+    )
+    composer_advisor_max_prompt_tokens: int = Field(default=4000, ge=1)
+    composer_advisor_max_completion_tokens: int = Field(default=1500, ge=1)
+    composer_advisor_timeout_seconds: float = Field(default=60.0, gt=0)
     auth_rate_limit_per_minute: int = Field(default=20, ge=1)
     secret_key: str = (
         "change-me-in-production"  # Security rule S3 (seam-contracts.md): Sub-2 startup guard enforces non-default in production

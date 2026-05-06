@@ -347,7 +347,11 @@ def get_expression_grammar() -> str:
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 34 tools: 11 discovery + 13 mutation + 7 blob tools + 3 secret tools.
+    Returns 35 tools: 11 discovery + 13 mutation + 7 blob tools + 3 secret
+    tools + 1 advisor tool. ``request_advisor_hint`` is the only tool that
+    is filtered out of the LLM-visible list when the operator's
+    ``composer_advisor_enabled`` flag is False (the default) — see
+    ``ComposerServiceImpl._get_litellm_tools``.
 
     The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
     enumerates the same tool set in its Step-0 section. The drift gate
@@ -855,6 +859,64 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["error_text"],
+            },
+        },
+        {
+            "name": "request_advisor_hint",
+            "description": (
+                "ESCAPE HATCH — call ONLY when stuck for two or more turns on the "
+                "same validator error after consulting `explain_validation_error` "
+                "and `get_plugin_assistance` and re-reading the relevant plugin "
+                "schema. Forwards your problem statement and context to a frontier "
+                "model and returns guidance text. The reply is ADVICE, not "
+                "configuration — you must still call the appropriate mutation tool "
+                "yourself to apply any change. Budget is finite (sized per compose "
+                "request, not per session lifetime) and exhausting it returns a "
+                "structured error rather than crashing — inspect budget_remaining "
+                "in each response. Do NOT call this tool in a loop, do NOT use it "
+                "as a substitute for reading validator output. Disabled by default; "
+                "only available when the operator has explicitly enabled it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "problem_summary": {
+                        "type": "string",
+                        "description": (
+                            "Your own statement of what you are trying to do and "
+                            "why you are stuck. One or two sentences. Be specific: "
+                            "'I cannot get llm transform options to validate against "
+                            "the Azure provider schema' is useful; 'help' is not."
+                        ),
+                    },
+                    "recent_errors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."
+                        ),
+                    },
+                    "attempted_actions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "What you have already tried, one item per attempt. "
+                            "Include the tool name and a one-line summary of the "
+                            "argument shape. The advisor uses this to avoid "
+                            "suggesting things you have already ruled out."
+                        ),
+                    },
+                    "schema_excerpt": {
+                        "type": "string",
+                        "description": (
+                            "Optional — the relevant plugin schema snippet you are "
+                            "working against, as returned by `get_plugin_schema`. "
+                            "Including this lets the advisor give field-level "
+                            "guidance grounded in the exact contract."
+                        ),
+                    },
+                },
+                "required": ["problem_summary", "recent_errors", "attempted_actions"],
             },
         },
         {

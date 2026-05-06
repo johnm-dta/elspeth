@@ -28,7 +28,7 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 - **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`
 - **State / preview:** `get_pipeline_state`, `preview_pipeline`, `diff_pipeline`
 - **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
-- **Diagnostics:** `explain_validation_error`
+- **Diagnostics:** `explain_validation_error`, `request_advisor_hint`
 - **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `update_blob`, `delete_blob`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 
@@ -105,7 +105,7 @@ The `edges` array in `set_pipeline` carries metadata (id, label) about each conn
   "edges": [
     {"id": "e1", "from_node": "source", "to_node": "fetch", "edge_type": "on_success"},
     {"id": "e2", "from_node": "fetch", "to_node": "split_lines", "edge_type": "on_success"},
-    {"id": "e3", "from_node": "split_lines", "to_node": "output_lines", "edge_type": "on_success"}
+    {"id": "e3", "from_node": "split_lines", "to_node": "lines_out", "edge_type": "on_success"}
   ],
   "outputs": [
     {"sink_name": "lines_out", "plugin": "json", "options": {"...": "..."}}
@@ -421,6 +421,66 @@ If a tool call fails or returns unexpected results:
 | `Path violation (S2): '<path>' is outside the allowed directories. Source file paths must be under <data_dir>/blobs/` | You passed a literal local path that's not under the blob root. | Either (a) the user uploaded a file — use `set_source_from_blob` with the existing blob_id (call `list_blobs` if you don't have it), or (b) the user gave inline content — `create_blob` first, then `set_source_from_blob`. |
 | `set_source must not be called with 'blob_ref' in options` | You tried to wire a blob via the wrong tool. | Drop `set_source` and use `set_source_from_blob({blob_id, on_success, options: {…}})` instead. The blob_ref + path pair is set authoritatively by `set_source_from_blob`. |
 | `line_explode.source_field.line_framed_text` (semantic contract) | The upstream producer doesn't emit newline-framed text — typically a `text` source whose value is a URL string, not file contents. | Insert a `web_scrape` transform with `format: "text"` and `text_separator: "\n"` between the source and `line_explode`. See Pattern 1b. |
+
+#### When You Are Still Stuck — `request_advisor_hint` (escape hatch, optional)
+
+`request_advisor_hint` is an **opt-in escape hatch** that forwards your problem statement and context to a frontier model and returns guidance text. It is disabled by default — the operator must explicitly enable it on the deployment, and when disabled the tool simply will not appear in your tool list. When it *is* available, treat it as a narrow-use lifeline, not a routine consultant.
+
+**Call it when ANY of the following is true:**
+
+1. **Reactive — you are stuck in a validation loop (the primary case).** All of:
+   - You have already attempted the full Tool Failure Recovery sequence above (re-sync state, check schema, call `explain_validation_error`, call `get_plugin_assistance` if the validator emitted a `requirement_code`).
+   - You have made at least two retry attempts on the same validator error and the failure mode has not changed.
+   - You can articulate, in one or two sentences, what you are trying to do and *what you do not understand*. If you cannot, you are not yet stuck — you are still discovering.
+
+2. **Proactive — security or safety wiring.** The user's request involves any of: content moderation, prompt-injection defence, secret routing across plugin boundaries, PII destinations, regulatory-data sinks, or any flow where externally-fetched content reaches an LLM without an intermediate shield. In these cases, call `request_advisor_hint` *before* `set_pipeline` to sanity-check plugin choice and wiring shape — silent security failures are the worst kind of failure, and a budget slot is cheap insurance against them.
+
+3. **Proactive — red-listed plugins.** The user's plan involves any of these plugins, which have non-obvious configuration surfaces or production-impact considerations:
+   - `llm` — provider-specific required fields (Azure `deployment`, OpenRouter model slugs, etc.) that are not visible in the base schema, prompt-template design, model-selection cost trade-offs, and downstream `llm_response`-string handling
+   - `database` — SQL routing, credential handling
+   - `dataverse` — auth, production-data writes
+   - `azure_content_safety`, `azure_prompt_shield` — security boundaries, threshold semantics
+   - `rag_retrieval`, `chroma_sink` — vector store shape, indexing trade-offs
+
+   Call `request_advisor_hint` *before* `set_pipeline` and describe both the user's task and the wiring shape you intend; ask for a sanity check on plugin choice and option-block content.
+
+**Do NOT call it when:**
+- It is your first or second turn AND none of the proactive triggers above fire — the cheat sheet plus a careful read of `get_plugin_schema` resolves the vast majority of routine validation failures.
+- You are merely uncertain about a design choice for a routine task. The advisor is for the high-stakes triggers above and for breaking validation deadlocks, not for design opinions on simple pipelines.
+- You have not read the validator output carefully. The advisor sees only what you forward; if you have not read the error, neither has it.
+- You want to look up a plugin's option schema → use `get_plugin_schema` instead.
+- You want to list available plugins → use `list_sources`, `list_transforms`, `list_sinks`.
+- You want to validate a fully-built pipeline → use `preview_pipeline`.
+- You are explaining a `runtime preflight failed` message that names a specific field → read the suggestion in the error message first; only escalate if the suggestion does not resolve the issue.
+
+**Treat the reply as advice, not configuration.** The advisor returns guidance text — possibly suggestions like "try setting `provider: azure` and supplying `deployment`" — but it is *your* job to call the appropriate mutation tool (`patch_node_options`, `set_pipeline`, etc.) to apply any change. Never echo the advisor's text into the audit trail as if it were authoritative; it is a hint that you choose to act on or not.
+
+**Budget is finite, per compose request (not per session lifetime).** Each new user prompt starts with a fresh budget. Each successful or failed outbound advisor call consumes one slot of `composer_advisor_max_calls_per_compose`. Argument-rejection (ARG_ERROR — a local type-check or size-cap reject before any outbound call) does NOT consume budget. Exhausting the budget returns a structured `BUDGET_EXHAUSTED` result rather than crashing. Inspect `budget_remaining` in each successful response so you know how many slots are left. Do not call the advisor in a loop hoping for a different answer — the canonical-hash audit captures every prompt and reply, and repeated near-identical prompts will be visible to anyone reviewing the session.
+
+**Good vs bad prompt:**
+
+```text
+GOOD:
+  problem_summary: "I cannot get the llm transform to validate. I chose
+                    provider=azure, but set_pipeline keeps rejecting the
+                    options with a missing-field error I do not recognise."
+  recent_errors:   ["Invalid options for transform 'llm': field 'deployment'
+                    is required when provider='azure'",
+                    "Invalid options for transform 'llm': field 'deployment'
+                    is required when provider='azure'"]
+  attempted_actions: ["set_pipeline with options={provider: 'azure',
+                       api_base: 'https://...'} — same error twice",
+                      "get_plugin_schema('transform','llm') — schema does
+                       not list 'deployment' as required"]
+  schema_excerpt:  "<the snippet from get_plugin_schema>"
+
+BAD:
+  problem_summary: "help"
+  recent_errors:   []
+  attempted_actions: []
+```
+
+The good prompt names the goal, includes the verbatim error twice (showing the loop), explains the contradictory observation (schema does not list the field but the validator demands it), and forwards the schema. The bad prompt forces the advisor to guess what is wrong and wastes budget.
 
 #### Fixing Schema Contract Violations
 
@@ -784,7 +844,7 @@ Required options (all must appear in the `set_pipeline` payload — `url_field` 
 - `url_field`: name of the row field containing the URL to fetch (no default).
 - `content_field`: name of the field where scraped content lands (canonical default: `"content"`).
 - `fingerprint_field`: name of the field where the content hash lands (canonical default: `"content_fingerprint"`).
-- `format`: extraction format — `"text"` (preserves whitespace, use for line-framed pipelines), `"markdown"` (default for LLM extraction), or `"html"`.
+- `format`: extraction format — `"text"` (preserves whitespace, use for line-framed pipelines), `"markdown"` (default for LLM extraction), or `"raw"` (raw HTML bytes as text).
 - `text_separator`: required when `format: "text"` and downstream is `line_explode`. Canonical default: `"\n"`.
 - `http`: nested object with three required keys:
   - `abuse_contact`: a contact email for abuse reports (e.g., `"compliance@example.com"` for testing — operator overrides for production).
@@ -953,8 +1013,8 @@ The very first tool call for a URL-input pipeline must be `create_blob` with the
 **Examples:**
 - User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:
   1. `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")`
-  2. `set_source_from_blob({blob_id, on_success: "fetch", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
-  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "main", on_success: <next-step-or-sink>, options: {format: "text", text_separator: "\n"}})`
+  2. `set_source_from_blob({blob_id, on_success: "url_rows", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
+  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "url_rows", on_success: "scraped_content", options: {schema: {mode: "fixed", fields: ["url: str"]}, url_field: "url", content_field: "content", fingerprint_field: "content_fingerprint", format: "text", text_separator: "\n", http: {abuse_contact: "compliance@example.com", scraping_reason: "Download a public URL and process its content", allowed_hosts: "public_only"}}})`
   ⚠ Skipping step 3 means the pipeline emits the URL string itself, not the URL's content. Downstream transforms like `line_explode` or `llm` will see the URL text instead of what was at the URL, and the validator will reject the pipeline. See Pattern 1 (`URL → Scrape → Extract → JSON`) and Pattern 1b (`URL → Download → Split into Lines → JSON`) under "Common Pipeline Patterns" for full chains.
 - User provides JSON data → `create_blob(filename="data.json", mime_type="application/json", content='[{"id": 1, "name": "test"}]')` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`
 - User provides CSV rows → `create_blob(filename="data.csv", mime_type="text/csv", content="name,age\nAlice,30\nBob,25")` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`

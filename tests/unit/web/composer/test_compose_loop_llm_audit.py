@@ -163,6 +163,32 @@ async def test_text_only_success_records_llm_call_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seed_omission_for_unsupported_provider_is_reflected_in_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import litellm
+
+    monkeypatch.setattr(
+        litellm,
+        "get_supported_openai_params",
+        lambda model: ["temperature", "tools"],
+    )
+    service = ComposerServiceImpl(
+        catalog=_mock_catalog(),
+        settings=_make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022"),
+    )
+    state = _empty_state()
+    llm_response = _make_llm_response(content="Done.")
+
+    with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response) as mock_acomp:
+        result = await service.compose("Build a CSV pipeline", [], state)
+
+    request_kwargs = mock_acomp.call_args.kwargs
+    assert request_kwargs["temperature"] == 0.0
+    assert "seed" not in request_kwargs
+    assert result.llm_calls[0].temperature == 0.0
+    assert result.llm_calls[0].seed is None
+
+
+@pytest.mark.asyncio
 async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
     service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
     state = _empty_state()

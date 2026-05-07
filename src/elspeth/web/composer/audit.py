@@ -759,13 +759,16 @@ async def dispatch_with_audit(
             # explicit narrow.
             if success_version_after is None:
                 raise RuntimeError("dispatch_with_audit: SUCCESS status with no version_after captured")
-            recorder.record(
-                finish_success(
+            try:
+                invocation = finish_success(
                     audit,
                     result_payload=_result_to_audit_payload(success_result),
                     version_after=success_version_after,
                 )
-            )
+            except Exception as exc:
+                recorder.record(finish_plugin_crash(audit, exc=exc))
+                raise
+            recorder.record(invocation)
         elif status is ComposerToolStatus.ARG_ERROR:
             if arg_error_exc is None:
                 raise RuntimeError("dispatch_with_audit: ARG_ERROR status with no captured exception")

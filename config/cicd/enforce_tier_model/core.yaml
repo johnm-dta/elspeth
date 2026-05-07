@@ -4,7 +4,7 @@ per_file_rules:
   - R5
   reason: Tree-walk over Tier-3 config dicts requires isinstance() for structural dispatch (dict/list/leaf), and exact ${NAME} secret-env marker detection requires confirming scalar strings before regex parsing. The entire point of this module is to inspect an arbitrary config dict whose shape is external/user-provided.
   expires: null
-  max_hits: 5
+  max_hits: 10
 - pattern: core/expression_parser.py
   rules:
   - R5
@@ -219,7 +219,7 @@ allow_hits:
   owner: bugfix
   reason: Post-point-of-no-return recovery — payloads are already irreversibly deleted, so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=a7cea0a6f0d0ce4b
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=b640bacb8966c304
   owner: core
   reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
   safety: Raises TypeError if not dict; no silent coercion

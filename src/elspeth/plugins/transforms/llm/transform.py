@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
 from operator import or_
-from typing import Annotated, Any, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
 import structlog
 from pydantic import Field as PydanticField
@@ -69,6 +69,9 @@ from elspeth.plugins.transforms.llm.tracing import AzureAITracingConfig, Tracing
 from elspeth.plugins.transforms.llm.validation import reject_nonfinite_constant, strip_markdown_fences, validate_field_value
 
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from elspeth.contracts.plugin_semantics import OutputSemanticDeclaration
 
 
 def _warn_telemetry_before_start(event: Any) -> None:
@@ -1000,7 +1003,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
     name = "llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c2ba40f9b135efbc"
+    source_file_hash: str | None = "sha256:8b50d4f0ab38bbea"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1357,6 +1360,51 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         passed to ``__init__``) — distinct meanings, distinct names.
         """
         return self._config
+
+    def output_semantics(self) -> OutputSemanticDeclaration:
+        """Declare that raw LLM response fields are strings.
+
+        Single-query mode emits ``response_field`` directly. Multi-query mode
+        emits one raw response field per query using ``<query>_<response_field>``.
+        Structured multi-query extracted fields have their own schema types, but
+        this semantic contract only claims the raw response-content fields whose
+        runtime value is mechanically known here.
+        """
+        from elspeth.contracts.plugin_semantics import (
+            ContentKind,
+            FieldSemanticFacts,
+            OutputSemanticDeclaration,
+            SemanticValueType,
+            TextFraming,
+        )
+
+        if isinstance(self._strategy, MultiQueryStrategy):
+            return OutputSemanticDeclaration(
+                fields=tuple(
+                    FieldSemanticFacts(
+                        field_name=f"{spec.name}_{self._response_field}",
+                        content_kind=ContentKind.UNKNOWN,
+                        text_framing=TextFraming.UNKNOWN,
+                        value_type=SemanticValueType.STR,
+                        fact_code="llm.response_field.string",
+                        configured_by=("queries", "response_field"),
+                    )
+                    for spec in self._strategy.query_specs
+                ),
+            )
+
+        return OutputSemanticDeclaration(
+            fields=(
+                FieldSemanticFacts(
+                    field_name=self._response_field,
+                    content_kind=ContentKind.UNKNOWN,
+                    text_framing=TextFraming.UNKNOWN,
+                    value_type=SemanticValueType.STR,
+                    fact_code="llm.response_field.string",
+                    configured_by=("response_field", "queries"),
+                ),
+            ),
+        )
 
     def connect_output(self, output: OutputPort, max_pending: int = 30) -> None:
         """Connect output port and initialize batch processing."""

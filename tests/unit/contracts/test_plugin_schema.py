@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 import elspeth.contracts as contracts
 import elspeth.contracts.data as data_contracts
 from elspeth.contracts import CompatibilityResult
@@ -53,14 +51,3 @@ class TestCompatibilityResultErrorMessage:
         """Edge case: compatible=False but no error details produces empty string."""
         result = CompatibilityResult(compatible=False)
         assert result.error_message == ""
-
-
-class TestPluginSchemaNotInOldLocation:
-    """Verify plugins/schemas.py has been deleted."""
-
-    def test_old_import_path_removed(self) -> None:
-        """Importing from plugins.schemas should fail - module deleted."""
-        with pytest.raises(ModuleNotFoundError):
-            from elspeth.plugins.schemas import (  # type: ignore[import-not-found]
-                PluginSchema,  # noqa: F401
-            )

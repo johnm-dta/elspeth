@@ -4456,6 +4456,25 @@ class TestPatchSourceOptions:
         assert opts["path"] == "/a"
         assert opts["encoding"] == "utf-8"
 
+    def test_patch_source_options_rejects_literal_credential_value_without_mutating_state(self) -> None:
+        state = self._state_with_source({"path": "/a"})
+        catalog = _mock_catalog()
+        literal = "literal-source-key-for-test"
+
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"api_key": literal}},
+            state,
+            catalog,
+        )
+
+        _assert_secret_wiring_contract_failure(
+            result,
+            state,
+            literal_value=literal,
+            field="source:api_key",
+        )
+
     def test_patch_source_options_deletes_key(self) -> None:
         state = self._state_with_source({"path": "/a", "encoding": "utf-8"})
         catalog = _mock_catalog()
@@ -4633,6 +4652,25 @@ class TestPatchNodeOptions:
         assert node.node_type == "transform"
         assert node.plugin == "uppercase"
 
+    def test_patch_node_options_rejects_literal_credential_value_without_mutating_state(self) -> None:
+        state = self._state_with_node({"field": "old"})
+        catalog = _mock_catalog()
+        literal = "literal-node-key-for-test"
+
+        result = execute_tool(
+            "patch_node_options",
+            {"node_id": "t1", "patch": {"api_key": literal}},
+            state,
+            catalog,
+        )
+
+        _assert_secret_wiring_contract_failure(
+            result,
+            state,
+            literal_value=literal,
+            field="t1:api_key",
+        )
+
     def test_patch_node_options_unknown_node_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -4684,6 +4722,25 @@ class TestPatchOutputOptions:
 
         opts = deep_thaw(output.options)
         assert opts["path"] == "/new.csv"
+
+    def test_patch_output_options_rejects_literal_credential_value_without_mutating_state(self) -> None:
+        state = self._state_with_output({"path": "/old.csv"})
+        catalog = _mock_catalog()
+        literal = "literal-output-password-for-test"
+
+        result = execute_tool(
+            "patch_output_options",
+            {"sink_name": "main", "patch": {"password": literal}},
+            state,
+            catalog,
+        )
+
+        _assert_secret_wiring_contract_failure(
+            result,
+            state,
+            literal_value=literal,
+            field="main:password",
+        )
 
     def test_patch_output_options_unknown_sink_fails(self) -> None:
         state = _empty_state()
@@ -4872,6 +4929,33 @@ def _valid_pipeline_args() -> dict[str, Any]:
     }
 
 
+def _llm_options_with_api_key(api_key: Any) -> dict[str, Any]:
+    """Return LLM transform options that are otherwise valid."""
+    return {
+        "provider": "openrouter",
+        "model": "openai/gpt-4o-mini",
+        "api_key": api_key,
+        "template": "Classify the current row.",
+        "schema": {"mode": "observed"},
+    }
+
+
+def _assert_secret_wiring_contract_failure(
+    result: ToolResult,
+    original_state: CompositionState,
+    *,
+    literal_value: str,
+    field: str,
+) -> None:
+    assert result.success is False
+    assert result.updated_state is original_state
+    assert result.updated_state.version == original_state.version
+    assert result.data is not None
+    assert field in result.data["credential_fields"]
+    assert "list_secret_refs -> validate_secret_ref -> wire_secret_ref" in result.data["error"]
+    assert literal_value not in repr(result.to_dict())
+
+
 class TestSetPipelineSchemaShape:
     """Lock the ``set_pipeline`` schema shape so the elspeth-4e79436719 Bug A
     regression cannot return via a future schema edit.
@@ -4904,6 +4988,15 @@ class TestSetPipelineSchemaShape:
         # — if inline_blob is supplied, these are the fields the walker enforces.
         assert set(inline["required"]) == {"filename", "mime_type", "content"}
 
+    def test_existing_blob_binding_is_optional_at_source_level(self) -> None:
+        """Atomic set_pipeline must expose an existing-blob binding path."""
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        defns = {d["name"]: d for d in get_tool_definitions()}
+        source = defns["set_pipeline"]["parameters"]["properties"]["source"]
+        assert "blob_id" in source["properties"], "source.blob_id must bind an already uploaded blob"
+        assert "blob_id" not in source["required"]
+
 
 class TestSetPipeline:
     def test_set_pipeline_creates_valid_state(self) -> None:
@@ -4914,6 +5007,242 @@ class TestSetPipeline:
         assert result.validation is not None
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
+
+    def test_set_pipeline_rejects_literal_credential_value_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        literal = "literal-api-key-for-test"
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "code_themes",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": _llm_options_with_api_key(literal),
+        }
+        args["edges"][0]["to_node"] = "code_themes"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        _assert_secret_wiring_contract_failure(
+            result,
+            state,
+            literal_value=literal,
+            field="code_themes:api_key",
+        )
+
+    def test_set_pipeline_accepts_wired_secret_ref_marker(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "code_themes",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+        }
+        args["edges"][0]["to_node"] = "code_themes"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        node = result.updated_state.nodes[0]
+        assert node.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+
+    def test_upsert_node_rejects_literal_credential_value_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        literal = "literal-upsert-key-for-test"
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key(literal),
+            },
+            state,
+            catalog,
+        )
+
+        _assert_secret_wiring_contract_failure(
+            result,
+            state,
+            literal_value=literal,
+            field="code_themes:api_key",
+        )
+
+    def test_set_pipeline_rejects_manual_blob_ref_in_source_options(self) -> None:
+        """Manual blob_ref must not bypass the blob-backed source binding tools."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["source"]["options"] = {
+            "blob_ref": "manual-ref",
+            "path": "/tmp/not_the_blob_storage.csv",
+            "schema": {"mode": "observed"},
+        }
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert result.updated_state.version == 1
+        assert "set_source_from_blob" in result.data["error"]
+        assert "source.inline_blob" in result.data["error"]
+
+    def test_set_pipeline_binds_existing_blob_instead_of_header_only_sibling(self, tmp_path: Path) -> None:
+        """Complete-pipeline writes must preserve the user-selected uploaded blob."""
+        from datetime import UTC, datetime
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        header_only_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        uploaded_path = storage_dir / f"{uploaded_id}_contact_form_submissions.csv"
+        header_only_path = storage_dir / f"{header_only_id}_hubspot_export.csv"
+        uploaded_content = (
+            "submission_id,timestamp,name,email,company,message\n"
+            "CF-501,2026-08-01T09:14Z,Sarah Patel,sarah@example.com,Northwind,Interested in pricing\n"
+            "CF-502,2026-08-01T09:22Z,Bot Bot,spam@example.test,,CHEAP SEO SERVICES\n"
+        )
+        header_only_content = "submission_id,timestamp,name,email,company,message\n"
+        uploaded_path.write_text(uploaded_content, encoding="utf-8")
+        header_only_path.write_text(header_only_content, encoding="utf-8")
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert(),
+                [
+                    {
+                        "id": uploaded_id,
+                        "session_id": session_id,
+                        "filename": "contact_form_submissions.csv",
+                        "mime_type": "text/csv",
+                        "size_bytes": len(uploaded_content.encode("utf-8")),
+                        "content_hash": _STUB_SHA256,
+                        "storage_path": str(uploaded_path),
+                        "created_at": now,
+                        "created_by": "user",
+                        "source_description": "scenario uploaded contact form submissions",
+                        "status": "ready",
+                    },
+                    {
+                        "id": header_only_id,
+                        "session_id": session_id,
+                        "filename": "hubspot_export.csv",
+                        "mime_type": "text/csv",
+                        "size_bytes": len(header_only_content.encode("utf-8")),
+                        "content_hash": _STUB_SHA256_ALT,
+                        "storage_path": str(header_only_path),
+                        "created_at": now,
+                        "created_by": "assistant",
+                        "source_description": "header-only inferred schema",
+                        "status": "ready",
+                    },
+                ],
+            )
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "blob_id": uploaded_id,
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        assert result.success is True
+        assert result.updated_state.source is not None
+        source_options = result.updated_state.source.options
+        assert source_options["blob_ref"] == uploaded_id
+        assert source_options["path"] == str(uploaded_path)
+        assert source_options["path"] != str(header_only_path)
+        assert result.data["source_blob"]["blob_id"] == uploaded_id
+
+    def test_set_pipeline_rejects_header_only_inline_csv_when_uploaded_csv_exists(self, tmp_path: Path) -> None:
+        """Header-only inline CSV must not supersede an uploaded ready CSV."""
+        from datetime import UTC, datetime
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = "name,email\nAlice,alice@example.com\n"
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_text(uploaded_content, encoding="utf-8")
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content.encode("utf-8")),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert "header-only inline CSV" in result.data["error"]
+        assert uploaded_id in result.data["error"]
 
     def test_set_pipeline_unknown_source_plugin_fails(self) -> None:
         state = _empty_state()
@@ -5527,6 +5856,25 @@ class TestGetPluginAssistance:
         assert payload["summary"]
         assert payload["suggested_fixes"]
 
+    def test_batch_distribution_profile_assistance_points_categorical_counts_to_top_k(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_name": "batch_distribution_profile",
+                "issue_code": "batch_distribution_profile.value_field.numeric",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.data
+        assert payload["plugin_name"] == "batch_distribution_profile"
+        assert payload["issue_code"] == "batch_distribution_profile.value_field.numeric"
+        assert "numeric" in payload["summary"]
+        assert any("batch_top_k" in fix for fix in payload["suggested_fixes"])
+
     def test_unknown_issue_code_returns_explicit_no_assistance(self) -> None:
         """Plugin returns None for unknown issue codes -> tool returns success
         with explicit summary=None and empty suggestion list so the agent sees
@@ -5673,6 +6021,106 @@ class TestPreviewPipeline:
         assert "text" in source_to_t1["consumer_requires"]
         assert source_to_t1["satisfied"] is True
         assert result.data["is_valid"] is True
+
+    def test_preview_pipeline_suggests_fork_gate_for_duplicate_consumers(self) -> None:
+        """Duplicate consumers get a copyable fork-gate repair skeleton."""
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="classified_rows",
+                    options={"path": "/data/in.csv", "schema": {"mode": "fixed", "fields": ["text: str"]}},
+                    on_validation_failure="quarantine",
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="fraud_filter",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="classified_rows",
+                    on_success="fraud_rows",
+                    on_error="discard",
+                    options={
+                        "operations": [{"target": "fraud_flag", "expression": "row['text']"}],
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="regular_filter",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="classified_rows",
+                    on_success="regular_rows",
+                    on_error="discard",
+                    options={
+                        "operations": [{"target": "regular_flag", "expression": "row['text']"}],
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_output(OutputSpec(name="fraud_rows", plugin="csv", options={"path": "outputs/fraud.csv"}, on_write_failure="discard"))
+            .with_output(OutputSpec(name="regular_rows", plugin="csv", options={"path": "outputs/regular.csv"}, on_write_failure="discard"))
+        )
+
+        result = execute_tool("preview_pipeline", {}, state, _mock_catalog())
+        payload = result.to_dict()["data"]
+
+        assert result.success is True
+        assert any("Duplicate consumer for connection 'classified_rows'" in err["message"] for err in payload["errors"])
+        repairs = payload["graph_repair_suggestions"]
+        assert len(repairs) == 1
+        repair = repairs[0]
+        assert repair["code"] == "duplicate_consumer_connection"
+        assert repair["connection"] == "classified_rows"
+        assert repair["strategy"] == "insert_fork_gate"
+        assert repair["tool_sequence"][0]["arguments"]["input"] == "classified_rows_to_fraud_filter"
+        assert repair["tool_sequence"][1]["arguments"]["input"] == "classified_rows_to_regular_filter"
+        assert repair["tool_sequence"][2] == {
+            "tool": "upsert_node",
+            "arguments": {
+                "id": "fork_classified_rows",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "classified_rows",
+                "on_success": None,
+                "on_error": None,
+                "options": {},
+                "condition": "True",
+                "routes": {},
+                "fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"],
+                "branches": None,
+                "policy": None,
+                "merge": None,
+                "trigger": None,
+                "output_mode": None,
+                "expected_output_count": None,
+            },
+        }
+        assert repair["tool_sequence"][-1] == {"tool": "preview_pipeline", "arguments": {}}
+
+        fixed_state = state
+        for step in repair["tool_sequence"][:-1]:
+            step_result = execute_tool(step["tool"], step["arguments"], fixed_state, _mock_catalog())
+            fixed_state = step_result.updated_state
+        fixed_preview = execute_tool("preview_pipeline", {}, fixed_state, _mock_catalog()).to_dict()["data"]
+
+        assert not any("Duplicate consumer for connection 'classified_rows'" in err["message"] for err in fixed_preview["errors"])
 
     def test_preview_source_with_schema_config_field_name(self) -> None:
         state = _empty_state().with_source(
@@ -6148,6 +6596,47 @@ class TestPrevalidatePluginOptions:
         messages = result.data["error"]
         assert "required_input_fields" in messages
         assert "batch-aware" in messages
+
+    def test_upsert_node_rejects_batch_replicate_as_plain_transform(self) -> None:
+        """Batch-only fan-out plugins must use the aggregation path, not row-mode transforms."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="batch_replicate",
+                description="Batch replicate aggregation",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "replicate",
+                "node_type": "transform",
+                "plugin": "batch_replicate",
+                "input": "source",
+                "on_success": "out",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "replications": [
+                        {"source_field": "region", "output_field": "region_copy"},
+                    ],
+                },
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.data is not None
+        messages = result.data["error"]
+        assert "batch_replicate" in messages
+        assert "aggregation" in messages
+        assert "output_mode: transform" in messages
 
     def test_secret_ref_field_passes_prevalidation(self) -> None:
         """Options with secret_ref markers pass prevalidation.

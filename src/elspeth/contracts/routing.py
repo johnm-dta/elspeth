@@ -143,6 +143,7 @@ class RouteDestinationKind(StrEnum):
     FORK = "fork"
     SINK = "sink"
     PROCESSING_NODE = "processing_node"
+    DISCARD = "discard"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +190,10 @@ class RouteDestination:
     @classmethod
     def processing_node(cls, next_node_id: NodeID) -> "RouteDestination":
         return cls(kind=RouteDestinationKind.PROCESSING_NODE, next_node_id=next_node_id)
+
+    @classmethod
+    def discard(cls) -> "RouteDestination":
+        return cls(kind=RouteDestinationKind.DISCARD)
 
 
 @dataclass(frozen=True, slots=True)

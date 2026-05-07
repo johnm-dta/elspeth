@@ -896,6 +896,33 @@ class TestStage1Validation:
 
         assert result.is_valid, result.errors
 
+    def test_gate_route_to_discard_is_valid_without_output_named_discard(self) -> None:
+        """Gate routes may target virtual 'discard' without declaring a sink."""
+        state = self._empty_state()
+        state = state.with_source(self._make_source(on_success="gate_in"))
+        state = state.with_node(
+            NodeSpec(
+                id="quality_gate",
+                node_type="gate",
+                plugin=None,
+                input="gate_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['keep']",
+                routes={"true": "main", "false": "discard"},
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+
     def test_dangling_edge_from_node(self) -> None:
         state = self._empty_state()
         state = state.with_source(self._make_source())
@@ -3624,6 +3651,56 @@ class TestSchemaContractValidation:
         assert "batch-aware" in messages
         agg_contract = next(ec for ec in result.edge_contracts if ec.to_id == "agg1")
         assert agg_contract.satisfied is True
+
+    def test_distribution_profile_unknown_value_type_warns_to_sample_or_use_top_k(self) -> None:
+        """Observed upstream schema cannot prove value_field is numeric before execute."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="profile_in",
+                options={
+                    "schema": {
+                        "mode": "observed",
+                        "guaranteed_fields": ["community", "financial_barrier"],
+                    }
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="profile_barriers",
+                node_type="aggregation",
+                plugin="batch_distribution_profile",
+                input="profile_in",
+                on_success="main",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "value_field": "financial_barrier",
+                    "group_by": "community",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+        state = state.with_edge(self._make_edge("e1", "source", "profile_barriers"))
+        state = state.with_edge(self._make_edge("e2", "profile_barriers", "main"))
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+        warnings = [entry for entry in result.warnings if entry.component == "node:profile_barriers"]
+        assert any(
+            warning.severity == "high"
+            and "batch_distribution_profile.value_field.numeric" in warning.message
+            and "batch_top_k" in warning.message
+            for warning in warnings
+        )
 
     def test_aggregation_nested_wrapper_required_input_fields_fail(self) -> None:
         """Aggregation wrapper-shaped options.required_input_fields is honored."""

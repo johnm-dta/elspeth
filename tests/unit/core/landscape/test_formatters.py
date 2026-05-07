@@ -504,7 +504,7 @@ class TestLineageTextFormatter:
             token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
             source_row=RowLineage(
                 row_id="row-456",
-                run_id="run-789",
+                run_id="run-001",
                 source_node_id="src-node",
                 row_index=0,
                 source_data_hash="abc123",
@@ -536,7 +536,7 @@ class TestLineageTextFormatter:
             token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
             source_row=RowLineage(
                 row_id="row-456",
-                run_id="run-789",
+                run_id="run-001",
                 source_node_id="src-node",
                 row_index=0,
                 source_data_hash="abc123",
@@ -551,7 +551,7 @@ class TestLineageTextFormatter:
             outcome=TokenOutcome(
                 outcome_id="out-1",
                 token_id="tok-123",
-                run_id="run-789",
+                run_id="run-001",
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.DEFAULT_FLOW,
                 completed=True,
@@ -580,7 +580,7 @@ class TestLineageTextFormatter:
             token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
             source_row=RowLineage(
                 row_id="row-456",
-                run_id="run-789",
+                run_id="run-001",
                 source_node_id="src-node",
                 row_index=0,
                 source_data_hash="abc123",

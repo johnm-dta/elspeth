@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 # at 500 to leave headroom for other query parameters in the same statement.
 _METADATA_CHUNK_SIZE = 500
 _DELEGATION_PATHS = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
+_RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
 
 __all__ = [
     "RecoveryManager",
@@ -110,14 +111,19 @@ class RecoveryManager:
         if run is None:
             return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
 
-        if run.status == RunStatus.COMPLETED:
+        try:
+            run_status = RunStatus(run.status)
+        except ValueError as exc:
+            raise CheckpointCorruptionError(f"Run {run_id} has invalid status {run.status!r}; audit trail is corrupt") from exc
+
+        if run_status == RunStatus.COMPLETED:
             return ResumeCheck(can_resume=False, reason="Run already completed successfully")
 
-        if run.status == RunStatus.RUNNING:
+        if run_status == RunStatus.RUNNING:
             return ResumeCheck(can_resume=False, reason="Run is still in progress")
 
-        # Any other status (FAILED, INTERRUPTED) is eligible for resume
-        # if a valid checkpoint exists.
+        if run_status not in _RESUMABLE_RUN_STATUSES:
+            return ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")
 
         try:
             checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)

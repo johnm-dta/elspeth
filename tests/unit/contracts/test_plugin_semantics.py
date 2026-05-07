@@ -16,6 +16,7 @@ from elspeth.contracts.plugin_semantics import (
     OutputSemanticDeclaration,
     SemanticEdgeContract,
     SemanticOutcome,
+    SemanticValueType,
     TextFraming,
     UnknownSemanticPolicy,
     compare_semantic,
@@ -49,6 +50,15 @@ class TestTextFraming:
         }
 
 
+class TestSemanticValueType:
+    def test_membership_is_closed_for_phase_1(self):
+        assert {member.value for member in SemanticValueType} == {
+            "unknown",
+            "str",
+            "list",
+        }
+
+
 class TestUnknownSemanticPolicy:
     def test_membership_is_closed_for_phase_1(self):
         assert {member.value for member in UnknownSemanticPolicy} == {
@@ -79,6 +89,7 @@ class TestFieldSemanticFacts:
         assert facts.field_name == "content"
         assert facts.content_kind is ContentKind.PLAIN_TEXT
         assert facts.text_framing is TextFraming.COMPACT
+        assert facts.value_type is SemanticValueType.UNKNOWN
         assert facts.fact_code == "web_scrape.content.compact_text"
         assert facts.configured_by == ("format", "text_separator")
 
@@ -98,6 +109,7 @@ class TestFieldSemanticFacts:
             fact_code="t.x.unknown",
         )
         assert facts.configured_by == ()
+        assert facts.value_type is SemanticValueType.UNKNOWN
 
 
 class TestFieldSemanticRequirement:
@@ -130,23 +142,28 @@ class TestFieldSemanticRequirement:
         # frozenset rather than a live set reference.
         kinds = {ContentKind.PLAIN_TEXT}
         framings = {TextFraming.NEWLINE_FRAMED}
+        value_types = {SemanticValueType.LIST}
         configured_by = ["source_field"]
         requirement = FieldSemanticRequirement(
             field_name="x",
             accepted_content_kinds=kinds,
             accepted_text_framings=framings,
             requirement_code="t.x.req",
+            accepted_value_types=value_types,
             configured_by=configured_by,
         )
         assert isinstance(requirement.accepted_content_kinds, frozenset)
         assert isinstance(requirement.accepted_text_framings, frozenset)
+        assert isinstance(requirement.accepted_value_types, frozenset)
         assert isinstance(requirement.configured_by, tuple)
         # Mutating the original containers MUST NOT affect the frozen fields.
         kinds.add(ContentKind.MARKDOWN)
         framings.add(TextFraming.LINE_COMPATIBLE)
+        value_types.add(SemanticValueType.STR)
         configured_by.append("extra")
         assert ContentKind.MARKDOWN not in requirement.accepted_content_kinds
         assert TextFraming.LINE_COMPATIBLE not in requirement.accepted_text_framings
+        assert SemanticValueType.STR not in requirement.accepted_value_types
         assert "extra" not in requirement.configured_by
 
 
@@ -297,6 +314,40 @@ class TestCompareSemantic:
         req = self._req({ContentKind.PLAIN_TEXT}, {TextFraming.NEWLINE_FRAMED})
         assert compare_semantic(facts_kind_unknown, req) is SemanticOutcome.UNKNOWN
         assert compare_semantic(facts_framing_unknown, req) is SemanticOutcome.UNKNOWN
+
+    def test_conflict_on_value_type_mismatch(self):
+        facts = FieldSemanticFacts(
+            "x",
+            ContentKind.UNKNOWN,
+            text_framing=TextFraming.UNKNOWN,
+            value_type=SemanticValueType.STR,
+            fact_code="t.x.str",
+        )
+        req = FieldSemanticRequirement(
+            field_name="x",
+            accepted_content_kinds=frozenset(),
+            accepted_text_framings=frozenset(),
+            requirement_code="json_explode.array_field.list",
+            accepted_value_types=frozenset({SemanticValueType.LIST}),
+        )
+        assert compare_semantic(facts, req) is SemanticOutcome.CONFLICT
+
+    def test_unknown_when_required_value_type_is_unknown(self):
+        facts = FieldSemanticFacts(
+            "x",
+            ContentKind.UNKNOWN,
+            text_framing=TextFraming.UNKNOWN,
+            value_type=SemanticValueType.UNKNOWN,
+            fact_code="t.x.unknown",
+        )
+        req = FieldSemanticRequirement(
+            field_name="x",
+            accepted_content_kinds=frozenset(),
+            accepted_text_framings=frozenset(),
+            requirement_code="json_explode.array_field.list",
+            accepted_value_types=frozenset({SemanticValueType.LIST}),
+        )
+        assert compare_semantic(facts, req) is SemanticOutcome.UNKNOWN
 
 
 _CONTENT_KINDS = list(ContentKind)

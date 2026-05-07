@@ -141,6 +141,19 @@ class TestBatchOutlierAnnotator:
             {"row_index": 2, "reason": "non_finite_value"},
         ]
 
+    def test_huge_integer_overflow_returns_transform_error(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
+
+        transform = BatchOutlierAnnotator({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+
+        result = transform.process([_make_row({"id": 1, "score": 10**1000})], ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "float_overflow"
+        assert result.reason["operation"] == "float_conversion"
+        assert not result.retryable
+
     def test_non_numeric_values_raise_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_outlier_annotator import BatchOutlierAnnotator
 

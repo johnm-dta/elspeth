@@ -173,6 +173,41 @@ class _FlushContext:
             )
 
 
+def _validated_quarantined_indices(result: TransformResult, *, buffered_token_count: int, aggregation_name: str) -> set[int]:
+    """Extract and validate batch-transform quarantine metadata."""
+    if result.success_reason is None or "metadata" not in result.success_reason:
+        return set()
+
+    metadata = result.success_reason["metadata"]
+    if type(metadata) is not dict:
+        raise OrchestrationInvariantError(
+            f"Aggregation {aggregation_name!r} returned success_reason.metadata={metadata!r}; "
+            f"expected dict when quarantine metadata is present"
+        )
+    if "quarantined_indices" not in metadata:
+        return set()
+
+    raw_indices = metadata["quarantined_indices"]
+    if type(raw_indices) is not list:
+        raise OrchestrationInvariantError(
+            f"Aggregation {aggregation_name!r} returned quarantined_indices={raw_indices!r}; expected list[int]"
+        )
+
+    quarantined_index_set: set[int] = set()
+    for position, raw_index in enumerate(raw_indices):
+        if type(raw_index) is not int:
+            raise OrchestrationInvariantError(
+                f"Aggregation {aggregation_name!r} returned quarantined_indices[{position}]={raw_index!r}; expected int"
+            )
+        if raw_index < 0 or raw_index >= buffered_token_count:
+            raise OrchestrationInvariantError(
+                f"Aggregation {aggregation_name!r} returned quarantined_indices[{position}]={raw_index}; "
+                f"valid index range is 0..{buffered_token_count - 1}"
+            )
+        quarantined_index_set.add(raw_index)
+    return quarantined_index_set
+
+
 # --- Discriminated union types for _process_single_token extraction ---
 
 
@@ -590,6 +625,8 @@ class RowProcessor:
         """
         if outcome.sink_name is not None:
             return (outcome.sink_name,)
+        elif outcome.discarded:
+            return ("discard",)
         elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
             # For forks, return the branch names of child tokens
             return tuple(child.branch_name for child in outcome.child_tokens if child.branch_name)
@@ -981,6 +1018,29 @@ class RowProcessor:
                 f"{type(record_failure).__name__}: {record_failure}"
             ) from record_failure
 
+    def _record_gate_discarded_outcome(
+        self,
+        *,
+        token: TokenInfo,
+        gate_name: str,
+        node_id: NodeID,
+    ) -> None:
+        """Record terminal gate discard outcome or raise on audit failure."""
+        try:
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_DISCARDED,
+            )
+        except LandscapeRecordError as record_failure:
+            raise AuditIntegrityError(
+                f"Failed to record GATE_DISCARDED outcome for token {token.token_id!r} "
+                f"(gate={gate_name!r}, node={node_id!r}). "
+                f"Audit trail is INCOMPLETE — the gate node state is already COMPLETED "
+                f"but the terminal token_outcome is missing. Recorder failure: "
+                f"{type(record_failure).__name__}: {record_failure}"
+            ) from record_failure
+
     def _route_empty_emission_results(
         self,
         fctx: _FlushContext,
@@ -1106,14 +1166,11 @@ class RowProcessor:
         get QUARANTINED terminal state instead of CONSUMED_IN_BATCH, identified
         via quarantined_indices in the result's success_reason metadata.
         """
-        # Extract quarantined indices from result metadata.
-        # metadata is optional in TransformSuccessReason — only present when
-        # the batch transform quarantines rows.
-        quarantined_index_set: set[int] = set()
-        if result.success_reason and "metadata" in result.success_reason:
-            metadata = result.success_reason["metadata"]
-            if "quarantined_indices" in metadata:
-                quarantined_index_set = set(metadata["quarantined_indices"])
+        quarantined_index_set = _validated_quarantined_indices(
+            result,
+            buffered_token_count=len(fctx.buffered_tokens),
+            aggregation_name=fctx.settings.name,
+        )
 
         # Extract output rows
         if result.is_multi_row:
@@ -1146,9 +1203,20 @@ class RowProcessor:
         child_items: list[WorkItem] = []
 
         if fctx.buffered_tokens:
+            non_quarantined_tokens = tuple(token for index, token in enumerate(fctx.buffered_tokens) if index not in quarantined_index_set)
+            if not non_quarantined_tokens:
+                raise OrchestrationInvariantError(
+                    f"Aggregation {fctx.settings.name!r} emitted {len(output_rows)} output row(s) "
+                    f"but all {len(fctx.buffered_tokens)} buffered token(s) were quarantined"
+                )
+            expand_parent_token = (
+                fctx.expand_parent_token
+                if any(token.token_id == fctx.expand_parent_token.token_id for token in non_quarantined_tokens)
+                else non_quarantined_tokens[0]
+            )
             output_contract = output_rows[0].contract
             expanded_tokens, _expand_group_id = self._token_manager.expand_token(
-                parent_token=fctx.expand_parent_token,
+                parent_token=expand_parent_token,
                 expanded_rows=[row.to_dict() for row in output_rows],
                 output_contract=output_contract,
                 node_id=fctx.node_id,
@@ -2460,6 +2528,39 @@ class RowProcessor:
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.GATE_ROUTED,
                 sink_name=outcome.sink_name,
+            )
+            if sibling_results:
+                return _GateTerminal(result=(current_result, *sibling_results))
+            return _GateTerminal(result=current_result)
+
+        if outcome.discarded:
+            self._record_gate_discarded_outcome(
+                token=current_token,
+                gate_name=gate.name,
+                node_id=node_id,
+            )
+            with best_effort(
+                "TokenCompleted telemetry after gate discard audit",
+                run_id=self._run_id,
+                token_id=current_token.token_id,
+                gate_node_id=node_id,
+                gate_name=gate.name,
+            ):
+                self._emit_token_completed(
+                    current_token,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.GATE_DISCARDED,
+                )
+            sibling_results = self._notify_coalesce_of_lost_branch(
+                current_token,
+                "gate_discarded",
+                child_items,
+            )
+            current_result = RowResult(
+                token=current_token,
+                final_data=current_token.row_data,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_DISCARDED,
             )
             if sibling_results:
                 return _GateTerminal(result=(current_result, *sibling_results))

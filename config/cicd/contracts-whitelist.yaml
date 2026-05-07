@@ -563,7 +563,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_authoring_validation_payload:return"
   - "src/elspeth/web/composer/tools.py:get_tool_definitions:return (list)"
   - "src/elspeth/web/composer/tools.py:execute_tool:arguments"
-  - "src/elspeth/web/composer/tools.py:_validate_source_path:options"
   - "src/elspeth/web/composer/tools.py:_execute_set_source:args"
   - "src/elspeth/web/composer/tools.py:_execute_upsert_node:args"
   - "src/elspeth/web/composer/tools.py:_execute_upsert_edge:args"
@@ -635,7 +634,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_validate_sink_path:options"
   - "src/elspeth/web/composer/tools.py:_prevalidate_plugin_options:options"
   - "src/elspeth/web/composer/tools.py:_prevalidate_plugin_options:injected_fields"
-  - "src/elspeth/web/composer/tools.py:_prevalidate_source:options"
   - "src/elspeth/web/composer/tools.py:_prevalidate_transform:options"
   - "src/elspeth/web/composer/tools.py:_prevalidate_sink:options"
 

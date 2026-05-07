@@ -52,6 +52,14 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 
+_COMPLETED_AT_REQUIRED_RUN_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_FAILURES,
+        RunStatus.EMPTY,
+    }
+)
+
 
 class RunLoader:
     """Loader for Run records."""
@@ -74,10 +82,10 @@ class RunLoader:
                     f"Run {row.run_id} has status='running' but completed_at is set — "
                     f"audit integrity violation (running runs must not have completed_at)"
                 )
-        elif status == RunStatus.COMPLETED and row.completed_at is None:
+        elif status in _COMPLETED_AT_REQUIRED_RUN_STATUSES and row.completed_at is None:
             raise AuditIntegrityError(
-                f"Run {row.run_id} has status='completed' but completed_at is NULL — "
-                f"audit integrity violation (completed runs must have completed_at)"
+                f"Run {row.run_id} has status={status.value!r} but completed_at is NULL — "
+                f"audit integrity violation ({status.value!r} runs must have completed_at)"
             )
         # FAILED and INTERRUPTED: completed_at may or may not be set.
         # complete_run() sets it; update_run_status() (recovery path) does not.

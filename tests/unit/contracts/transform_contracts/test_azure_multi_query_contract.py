@@ -19,10 +19,12 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
 from openai.types.completion_usage import CompletionUsage
 
+from elspeth.contracts import TransformResult
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.llm.transform import LLMTransform
+from elspeth.testing import make_pipeline_row
 
-from .test_batch_transform_protocol import BatchTransformContractTestBase
+from .test_batch_transform_protocol import BatchTransformContractTestBase, CollectingOutputPort
 
 
 def _make_chat_completion(content: str = '{"score": 85, "rationale": "test"}') -> ChatCompletion:
@@ -43,8 +45,11 @@ def _make_chat_completion(content: str = '{"score": 85, "rationale": "test"}') -
 
 
 class _FakeCompletions:
+    def __init__(self) -> None:
+        self.content = '{"score": 85, "rationale": "test"}'
+
     def create(self, **_: Any) -> ChatCompletion:
-        return _make_chat_completion()
+        return _make_chat_completion(self.content)
 
 
 class _FakeChat:
@@ -58,6 +63,24 @@ class _FakeAzureOpenAI:
 
     def close(self) -> None:
         pass
+
+
+def _submit_and_collect_single_result(
+    started_transform: BatchTransformMixin,
+    row_data: dict[str, Any],
+    ctx: Any,
+    output_port: CollectingOutputPort,
+) -> TransformResult:
+    started_transform.accept(make_pipeline_row(row_data), ctx)
+
+    arrived = output_port.wait_for_results(1, timeout=10.0)
+    assert arrived, "Result did not arrive via OutputPort within timeout"
+
+    results = output_port.get_results()
+    assert len(results) == 1
+    _token, result, _state_id = results[0]
+    assert isinstance(result, TransformResult)
+    return result
 
 
 class TestMultiQueryLLMSpecific:
@@ -176,3 +199,31 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
     @pytest.fixture
     def valid_input(self) -> dict[str, Any]:
         return {"cs1_a": "value_a", "cs1_b": "value_b"}
+
+    def test_malformed_json_response_emits_non_retryable_query_error(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_azure_openai: _FakeAzureOpenAI,
+    ) -> None:
+        """Contract: malformed LLM JSON fails closed through the batch output path."""
+        mock_azure_openai.chat.completions.content = "not valid JSON"
+
+        result = _submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.row is None
+        assert result.reason is not None
+        assert result.reason["reason"] == "json_parse_failed"
+        assert result.reason["query_name"] == "cs1_test_criterion"
+        assert result.reason["query_index"] == 0
+        assert result.reason["raw_response_preview"] == "not valid JSON"
+        assert result.reason["discarded_successful_queries"] == 0

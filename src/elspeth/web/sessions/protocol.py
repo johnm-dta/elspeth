@@ -19,7 +19,7 @@ from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import freeze_fields, require_int
 
 ChatMessageRole = Literal["user", "assistant", "system", "tool"]
 # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
@@ -36,6 +36,14 @@ CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
+_RUN_COUNTER_FIELDS: tuple[str, ...] = (
+    "rows_processed",
+    "rows_succeeded",
+    "rows_failed",
+    "rows_routed_success",
+    "rows_routed_failure",
+    "rows_quarantined",
+)
 
 # Legal run status transitions. Implementations MUST reject any
 # transition not in this table.
@@ -222,6 +230,7 @@ class RunRecord:
     pipeline_yaml: str | None
 
     def __post_init__(self) -> None:
+        self._validate_counters()
         if self.status not in SESSION_RUN_STATUS_VALUES:
             raise AuditIntegrityError(f"Tier 1: runs.status is {self.status!r}, expected one of {sorted(SESSION_RUN_STATUS_VALUES)}")
         if self.status in SESSION_TERMINAL_RUN_STATUS_VALUES and self.finished_at is None:
@@ -238,6 +247,29 @@ class RunRecord:
             raise AuditIntegrityError(f"Tier 1: status={self.status!r} run is missing landscape_run_id")
         if self.status == "failed" and not self.error:
             raise AuditIntegrityError("Tier 1: failed run is missing error")
+
+    def _validate_counters(self) -> None:
+        for field_name in _RUN_COUNTER_FIELDS:
+            try:
+                require_int(getattr(self, field_name), f"runs.{field_name}", min_value=0)
+            except (TypeError, ValueError) as exc:
+                raise AuditIntegrityError(f"Tier 1: {exc}") from exc
+
+        if self.rows_routed_success > self.rows_succeeded:
+            raise AuditIntegrityError(
+                "Tier 1: rows_routed_success must be a subset of rows_succeeded "
+                f"(got rows_routed_success={self.rows_routed_success}, rows_succeeded={self.rows_succeeded})"
+            )
+        if self.rows_routed_failure > self.rows_failed:
+            raise AuditIntegrityError(
+                "Tier 1: rows_routed_failure must be a subset of rows_failed "
+                f"(got rows_routed_failure={self.rows_routed_failure}, rows_failed={self.rows_failed})"
+            )
+        if self.rows_quarantined > self.rows_failed:
+            raise AuditIntegrityError(
+                "Tier 1: rows_quarantined must be a subset of rows_failed "
+                f"(got rows_quarantined={self.rows_quarantined}, rows_failed={self.rows_failed})"
+            )
 
 
 class InvalidForkTargetError(Exception):

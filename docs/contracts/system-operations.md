@@ -157,6 +157,7 @@ Route resolution:
     Look up label in gate.routes
     → "continue": token continues to next node
     → "fork": create child tokens (see Fork section)
+    → "discard": token stops with audited gate_discarded terminal outcome
     → sink_name: token routed to sink
 ```
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -58,6 +58,14 @@ class _InheritedDeclaredSource(_DeclaredSourceBase):
     pass
 
 
+class _BadDeclaredSourceTuple(_DeclaredSourceBase):
+    declared_guaranteed_fields = ("customer_id",)
+
+
+class _BadDeclaredSourceItem(_DeclaredSourceBase):
+    declared_guaranteed_fields = frozenset({1})
+
+
 class _DeclaredSinkBase(BaseSink):
     name = "declared-sink-base"
     input_schema = PluginSchema
@@ -79,6 +87,14 @@ class _DeclaredSinkBase(BaseSink):
 
 class _InheritedDeclaredSink(_DeclaredSinkBase):
     pass
+
+
+class _BadDeclaredSinkTuple(_DeclaredSinkBase):
+    declared_required_fields = ("customer_id",)
+
+
+class _BadDeclaredSinkItem(_DeclaredSinkBase):
+    declared_required_fields = frozenset({1})
 
 
 class _DeclaredOutputPlugin:
@@ -178,6 +194,40 @@ def test_sink_helper_does_not_cross_match_source_role(
     expected: frozenset[str] | None,
 ) -> None:
     assert sink_declared_required_fields(plugin) == expected
+
+
+@pytest.mark.parametrize(
+    ("helper", "plugin", "match"),
+    [
+        (
+            source_declared_guaranteed_fields,
+            _BadDeclaredSourceTuple(),
+            r"_BadDeclaredSourceTuple\.declared_guaranteed_fields must be frozenset, got 'tuple'\.",
+        ),
+        (
+            source_declared_guaranteed_fields,
+            _BadDeclaredSourceItem(),
+            r"_BadDeclaredSourceItem\.declared_guaranteed_fields must contain only str items\.",
+        ),
+        (
+            sink_declared_required_fields,
+            _BadDeclaredSinkTuple(),
+            r"_BadDeclaredSinkTuple\.declared_required_fields must be frozenset, got 'tuple'\.",
+        ),
+        (
+            sink_declared_required_fields,
+            _BadDeclaredSinkItem(),
+            r"_BadDeclaredSinkItem\.declared_required_fields must contain only str items\.",
+        ),
+    ],
+)
+def test_role_helpers_reject_invalid_declared_field_surfaces(
+    helper: Callable[[object], frozenset[str] | None],
+    plugin: object,
+    match: str,
+) -> None:
+    with pytest.raises(TypeError, match=match):
+        helper(plugin)
 
 
 @pytest.mark.parametrize(

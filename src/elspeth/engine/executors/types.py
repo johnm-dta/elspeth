@@ -44,6 +44,7 @@ class GateOutcome:
     child_tokens: tuple[TokenInfo, ...] = ()
     sink_name: str | None = None
     next_node_id: NodeID | None = None
+    discarded: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "child_tokens", tuple(self.child_tokens))
@@ -65,11 +66,22 @@ class GateOutcome:
                 raise ValueError(f"GateOutcome invariant: CONTINUE action cannot have next_node_id={self.next_node_id!r}")
             if self.child_tokens:
                 raise ValueError(f"GateOutcome invariant: CONTINUE action cannot have child_tokens (got {len(self.child_tokens)})")
+            if self.discarded:
+                raise ValueError("GateOutcome invariant: CONTINUE action cannot have discarded=True")
         elif kind == RoutingKind.ROUTE:
             if self.child_tokens:
                 raise ValueError(f"GateOutcome invariant: ROUTE action cannot have child_tokens (got {len(self.child_tokens)})")
-            if self.sink_name is None and self.next_node_id is None:
-                raise ValueError("GateOutcome invariant: ROUTE action must have either sink_name or next_node_id")
+            route_destinations = sum(
+                1
+                for present in (
+                    self.sink_name is not None,
+                    self.next_node_id is not None,
+                    self.discarded,
+                )
+                if present
+            )
+            if route_destinations != 1:
+                raise ValueError("GateOutcome invariant: ROUTE action must have exactly one of sink_name, next_node_id, or discarded=True")
         elif kind == RoutingKind.FORK_TO_PATHS:
             if not self.child_tokens:
                 raise ValueError("GateOutcome invariant: FORK_TO_PATHS action must have non-empty child_tokens")
@@ -77,3 +89,5 @@ class GateOutcome:
                 raise ValueError(f"GateOutcome invariant: FORK_TO_PATHS action cannot have sink_name={self.sink_name!r}")
             if self.next_node_id is not None:
                 raise ValueError(f"GateOutcome invariant: FORK_TO_PATHS action cannot have next_node_id={self.next_node_id!r}")
+            if self.discarded:
+                raise ValueError("GateOutcome invariant: FORK_TO_PATHS action cannot have discarded=True")

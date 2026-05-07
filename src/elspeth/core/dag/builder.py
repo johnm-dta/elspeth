@@ -364,6 +364,8 @@ def build_execution_graph(
             if target == "fork":
                 # Fork is a special routing mode - handled by fork_to branches
                 graph.add_route_resolution_entry(gid, route_label, RouteDestination.fork())
+            elif target == "discard":
+                graph.add_route_resolution_entry(gid, route_label, RouteDestination.discard())
             elif SinkName(target) in sink_ids:
                 target_sink_id = sink_ids[SinkName(target)]
                 graph.add_edge(gid, target_sink_id, label=route_label, mode=RoutingMode.MOVE)

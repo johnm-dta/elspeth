@@ -11,10 +11,16 @@ Layer: L0 (contracts). Imports nothing above contracts.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+ComposerLLMProviderCostSource = Literal["not_available", "response_usage.cost"]
+
+PROVIDER_COST_SOURCE_NOT_AVAILABLE: ComposerLLMProviderCostSource = "not_available"
+PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST: ComposerLLMProviderCostSource = "response_usage.cost"
 
 
 class ComposerLLMCallStatus(StrEnum):
@@ -83,6 +89,23 @@ class ComposerLLMCall:
     cached_prompt_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    provider_cost: float | None = None
+    provider_cost_source: ComposerLLMProviderCostSource = PROVIDER_COST_SOURCE_NOT_AVAILABLE
+
+    def __post_init__(self) -> None:
+        if self.provider_cost is not None:
+            if (
+                type(self.provider_cost) is bool
+                or type(self.provider_cost) not in (int, float)
+                or not math.isfinite(float(self.provider_cost))
+                or self.provider_cost < 0
+            ):
+                raise ValueError("provider_cost must be a finite non-negative number or None")
+            object.__setattr__(self, "provider_cost", float(self.provider_cost))
+        if self.provider_cost is None and self.provider_cost_source != PROVIDER_COST_SOURCE_NOT_AVAILABLE:
+            raise ValueError("provider_cost_source must be not_available when provider_cost is None")
+        if self.provider_cost is not None and self.provider_cost_source == PROVIDER_COST_SOURCE_NOT_AVAILABLE:
+            raise ValueError("provider_cost_source must identify the provider metadata field when provider_cost is set")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict for sidecar serialization."""

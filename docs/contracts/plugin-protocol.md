@@ -1,7 +1,7 @@
 # ELSPETH Plugin Protocol Contract
 
-> **Status:** FINAL (v1.11)
-> **Last Updated:** 2026-04-20
+> **Status:** FINAL (v1.12)
+> **Last Updated:** 2026-05-07
 > **Authority:** This document is the master reference for all plugin interactions.
 
 ## Overview
@@ -72,7 +72,7 @@ ELSPETH uses a three-tier trust model that determines how exceptions should be h
 
 | Tier | Trust Level | Coercion | Exception Handling |
 |------|-------------|----------|-------------------|
-| **External Data** (Source input) | Zero trust | ✅ Allowed | Validate, coerce, quarantine failures |
+| **External Data** (Source input or transform-side external response) | Zero trust | ✅ Allowed at that external boundary | Validate, coerce, quarantine/return error failures |
 | **Pipeline Data** (Post-source rows) | Elevated ("probably ok") | ❌ Forbidden | Types trusted, wrap VALUE operations |
 | **Our Code** (Plugin internals) | Full trust | ❌ N/A | Let it crash - bugs must surface |
 
@@ -93,6 +93,10 @@ parsed = datetime.fromisoformat(row["date"])  # 💥 ValueError - WRAP THIS
 #### The Divide-By-Zero Test
 
 ```python
+from elspeth.contracts.contract_propagation import propagate_contract
+from elspeth.contracts.schema_contract import PipelineRow
+
+
 # THEIR DATA value caused the error → WRAP AND HANDLE
 def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     try:
@@ -102,8 +106,10 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
             {"reason": "division_by_zero", "field": "divisor"},
             retryable=False,
         )
+    output = {**row.to_dict(), "result": result}
+    output_contract = propagate_contract(row.contract, output, transform_adds_fields=True)
     return TransformResult.success(
-        {"result": result},
+        PipelineRow(output, output_contract),
         success_reason={"action": "calculated"},
     )
 
@@ -111,8 +117,10 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     # If _batch_count is 0, that's MY bug - I should have initialized it
     average = self._total / self._batch_count  # Let it crash!
+    output = {**row.to_dict(), "average": average}
+    output_contract = propagate_contract(row.contract, output, transform_adds_fields=True)
     return TransformResult.success(
-        {"average": average},
+        PipelineRow(output, output_contract),
         success_reason={"action": "averaged"},
     )
 ```
@@ -122,10 +130,10 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 | Plugin Type | May Coerce Types? | Why |
 |-------------|-------------------|-----|
 | **Source** | ✅ Yes | Normalizes external data at ingestion boundary (`"42"` → `42`) |
-| **Transform** | ❌ No | Receives validated data; wrong types = upstream bug |
+| **Transform** | ❌ No for pipeline rows; ✅ only for new external responses fetched by the transform | Pipeline data is validated; external API/LLM/DB/file responses are fresh Tier 3 boundaries |
 | **Sink** | ❌ No | Receives validated data; wrong types = upstream bug |
 
-If a transform receives `"42"` when its `input_schema` says `int`, that's a bug in the source or upstream transform. The correct fix is to fix the upstream plugin, NOT to coerce in the transform.
+If a transform receives `"42"` when its `input_schema` says `int`, that's a bug in the source or upstream transform. The correct fix is to fix the upstream plugin, NOT to coerce in the transform. If the same transform calls an external service and receives `"42"` in that response, that response is Tier 3 and must be validated/coerced immediately at the call boundary before being merged into the pipeline row.
 
 #### The Boundary
 
@@ -150,12 +158,13 @@ If a transform receives `"42"` when its `input_schema` says `int`, that's a bug 
 │                                                                      │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  THEIR DATA TYPES (at Source boundary ONLY)                         │
+│  THEIR DATA TYPES (at any external boundary)                        │
 │  ─────────────────────────────────────────────────────────          │
 │  • External data may have wrong types                               │
-│  • Sources MAY coerce: "42" → 42, "true" → True                     │
+│  • Sources MAY coerce source input: "42" → 42, "true" → True        │
+│  • Transforms MAY coerce fresh external responses they fetch        │
 │  • Sources MUST quarantine rows that can't be coerced               │
-│  • Transforms/Sinks MUST NOT coerce types                           │
+│  • Transforms/Sinks MUST NOT coerce already-validated pipeline rows │
 │                                                                      │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
@@ -185,7 +194,7 @@ If a transform receives `"42"` when its `input_schema` says `int`, that's a bug 
 
 **Rules:**
 - Plugins MUST wrap operations on row values and return error results on failure
-- Sources MAY coerce external data types; Transforms/Sinks MUST NOT
+- Sources MAY coerce source input; transforms MAY coerce fresh external responses they fetch; transforms and sinks MUST NOT coerce already-validated pipeline rows
 - Plugins MUST NOT wrap operations on internal state - let bugs surface
 - If you're tempted to add `try/except` around your own logic, you have a bug to fix
 - If a transform receives wrong types, that's an upstream bug to fix, not something to coerce
@@ -195,6 +204,16 @@ If a transform receives `"42"` when its `input_schema` says `int`, that's a bug 
 All lifecycle hooks are REQUIRED in the protocol, even if implementation is `pass`.
 
 **Why:** The audit trail records every lifecycle event. Even an empty `on_start()` produces an audit record: "plugin started at timestamp X". This is defensible under audit.
+
+### 5. Built-In Discovery Is Dynamic
+
+Built-in plugins are discovered by scanning `PLUGIN_SCAN_CONFIG` in
+`src/elspeth/plugins/infrastructure/discovery.py`. The scan is non-recursive:
+top-level `sources/`, `transforms/`, and `sinks/` modules are discovered
+automatically, while new subdirectories must be listed explicitly.
+`PluginManager.register_builtin_plugins()` registers the discovered classes via
+generated pluggy hook implementations. There is no separate CLI registry for
+new built-in plugins.
 
 ---
 
@@ -210,10 +229,12 @@ All lifecycle hooks are REQUIRED in the protocol, even if implementation is `pas
 
 ```python
 name: str                          # Plugin identifier (e.g., "csv", "api", "satellite")
+config_model: type[PluginConfig] | None
 output_schema: type[PluginSchema]  # Schema of rows this source produces
 node_id: str | None                # Set by orchestrator after registration
 determinism: Determinism           # See Determinism Declaration section for all 6 levels
 plugin_version: str                # Semantic version for reproducibility
+source_file_hash: str | None       # Entry-point module hash for audit identity
 declared_guaranteed_fields: frozenset[str]  # Runtime producer guarantee surface (ADR-016)
 ```
 
@@ -278,7 +299,7 @@ def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
     Example:
         try:
             validated = self._schema_contract.validate(row)
-            yield SourceRow.valid(validated, contract=self._schema_contract)
+            yield SourceRow.valid(validated, contract=self.require_schema_contract())
         except ValidationError as e:
             if self._on_validation_failure != "discard":
                 yield SourceRow.quarantined(
@@ -345,15 +366,15 @@ class SourceRow:
     is_quarantined: bool
     quarantine_error: str | None
     quarantine_destination: str | None
-    contract: SchemaContract | None  # Enables to_pipeline_row() conversion
+    contract: SchemaContract | None  # Required for valid rows; absent for quarantined rows
 
     @classmethod
-    def valid(cls, row: dict[str, Any], contract: SchemaContract | None = None) -> SourceRow:
+    def valid(cls, row: dict[str, Any], *, contract: SchemaContract) -> SourceRow:
         """Create a valid source row.
 
         Args:
             row: Validated row data
-            contract: Optional schema contract for the row (enables to_pipeline_row())
+            contract: Schema contract for the row
 
         Returns:
             SourceRow with is_quarantined=False
@@ -381,9 +402,9 @@ class SourceRow:
 ```
 
 **Usage:**
-- Valid rows: `SourceRow.valid(row_dict)` or `SourceRow.valid(row_dict, contract=schema_contract)`
+- Valid rows: `SourceRow.valid(row_dict, contract=schema_contract)`
 - Invalid rows: `SourceRow.quarantined(row_data, error_message, destination_sink)`
-- The `contract` parameter is optional but enables downstream conversion to PipelineRow
+- The `contract` parameter is required for valid rows; without it the engine cannot create downstream `PipelineRow` values
 - Quarantined rows never have contracts
 
 #### Audit Records
@@ -412,18 +433,20 @@ class SourceRow:
 
 ```python
 name: str
+config_model: type[PluginConfig] | None
 input_schema: type[PluginSchema]
 output_schema: type[PluginSchema]
 node_id: str | None
 determinism: Determinism
 plugin_version: str
+source_file_hash: str | None
 is_batch_aware: bool = False  # Set True for batch processing at aggregation nodes
 creates_tokens: bool = False  # Set True for deaggregation (1→N row expansion)
 passes_through_input: bool = False  # Set True only when every emitted row preserves input fields
 can_drop_rows: bool = False  # Set True only when pass-through transform may intentionally emit zero rows
 declared_input_fields: frozenset[str] = frozenset()  # Required input-field declaration (single-row only)
 declared_output_fields: frozenset[str] = frozenset()  # Guaranteed per-emitted-row output fields
-transforms_adds_fields: bool = False  # Set True if transform adds fields to the output schema
+_output_schema_config: SchemaConfig | None = None  # Required when output fields are declared
 ```
 
 #### Token Creation (Deaggregation)
@@ -431,15 +454,26 @@ transforms_adds_fields: bool = False  # Set True if transform adds fields to the
 Transforms that expand one row into multiple rows must declare `creates_tokens = True`:
 
 ```python
+from elspeth.contracts.contract_propagation import propagate_contract
+
+
 class JSONExplode(BaseTransform):
     name = "json_explode"
     creates_tokens = True  # Engine creates new tokens for each output row
+    declared_output_fields = frozenset({"item", "item_index"})
     # ...
 
     def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
         items = row["items"]  # Trust: source validated this is a list
+        output_rows = []
+        for i, item in enumerate(items):
+            output = {**row.to_dict(), "item": item, "item_index": i}
+            output_contract = propagate_contract(row.contract, output, transform_adds_fields=True)
+            output_contract = self._apply_declared_output_field_contracts(output_contract)
+            output_contract = self._align_output_contract(output_contract)
+            output_rows.append(PipelineRow(output, output_contract))
         return TransformResult.success_multi(
-            [{**row.to_dict(), "item": item, "item_index": i} for i, item in enumerate(items)],
+            output_rows,
             success_reason={"action": "exploded", "output_count": len(items)},
         )
 ```
@@ -480,27 +514,21 @@ Transforms can declare `is_batch_aware = True` to receive batched rows when used
 class SummaryTransform(BaseTransform):
     name = "summary"
     is_batch_aware = True  # Engine may pass aggregated data when used at aggregation node
-    # ... other attrs ...
+    # ... set input_schema, output_schema, _output_schema_config, and
+    # self._aggregate_output_contract in __init__ ...
 
     def process(
         self,
-        row: PipelineRow,
+        rows: list[PipelineRow],
         ctx: PluginContext,
     ) -> TransformResult:
-        # When used in aggregation, engine buffers rows and passes aggregated data
-        # For this example, assume row contains aggregated batch metadata
-        if "batch_rows" in row:
-            # Batch mode: aggregate the rows
-            batch_rows = row["batch_rows"]
-            total = sum(r["value"] for r in batch_rows)
-            return TransformResult.success(
-                {"total": total, "count": len(batch_rows)},
-                success_reason={"action": "aggregated", "batch_size": len(batch_rows)},
-            )
-        # Single row mode
+        total = float(sum(r["value"] for r in rows))
         return TransformResult.success(
-            row.to_dict(),
-            success_reason={"action": "passthrough"},
+            PipelineRow(
+                {"total": total, "count": len(rows)},
+                self._aggregate_output_contract,
+            ),
+            success_reason={"action": "aggregated", "batch_size": len(rows)},
         )
 ```
 
@@ -511,7 +539,7 @@ class SummaryTransform(BaseTransform):
 3. Engine calls `transform.process(rows: list[PipelineRow], ctx)` with the batch
 4. Transform returns aggregated result
 
-> **Implementation note:** Batch-aware transforms implement `BatchTransformProtocol` — a separate protocol from `TransformProtocol`. The key difference is the `process()` signature: `BatchTransformProtocol.process(rows: list[PipelineRow], ctx)` receives a list of `PipelineRow`, while `TransformProtocol.process(row: PipelineRow, ctx)` receives a single row. Both protocols share most attributes (`name`, `input_schema`, `output_schema`, `is_batch_aware`, `creates_tokens`), though `transforms_adds_fields` is only on `TransformProtocol`.
+> **Implementation note:** Batch-aware transforms implement `BatchTransformProtocol` — a separate protocol from `TransformProtocol`. The key difference is the `process()` signature: `BatchTransformProtocol.process(rows: list[PipelineRow], ctx)` receives a list of `PipelineRow`, while `TransformProtocol.process(row: PipelineRow, ctx)` receives a single row. Both protocols share most attributes (`name`, `input_schema`, `output_schema`, `is_batch_aware`, `creates_tokens`, `declared_output_fields`, and `_output_schema_config`).
 
 **Key points:**
 - `is_batch_aware = False` (default): Transform implements `TransformProtocol`, receives single `PipelineRow`
@@ -543,6 +571,10 @@ transforms:
 | **Transform Bug** | Exception thrown | CRASH immediately |
 
 ```python
+from elspeth.contracts.contract_propagation import propagate_contract
+from elspeth.contracts.schema_contract import PipelineRow
+
+
 # PROCESSING ERROR - legitimate, uses on_error routing
 def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     if row["quantity"] == 0:
@@ -550,15 +582,17 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
             {"reason": "division_by_zero", "field": "quantity"},
             retryable=False,
         )
+    output = {**row.to_dict(), "unit_price": row["total"] / row["quantity"]}
+    output_contract = propagate_contract(row.contract, output, transform_adds_fields=True)
     return TransformResult.success(
-        {"unit_price": row["total"] / row["quantity"]},
+        PipelineRow(output, output_contract),
         success_reason={"action": "calculated_unit_price"},
     )
 
 # TRANSFORM BUG - crashes, does NOT use on_error routing
 def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     return TransformResult.success(
-        {"value": row["nonexistent"]},  # KeyError = BUG
+        PipelineRow({"value": row["nonexistent"]}, row.contract),  # KeyError = BUG
         success_reason={"action": "processed"},
     )
 ```
@@ -581,8 +615,8 @@ def process(
         ctx: Plugin context
 
     Returns:
-        TransformResult.success(row, success_reason={...}) - processed row
-        TransformResult.success_multi(rows, success_reason={...}) - multiple output rows
+        TransformResult.success(PipelineRow(...), success_reason={...}) - processed row
+        TransformResult.success_multi([PipelineRow(...)], success_reason={...}) - multiple output rows
         TransformResult.error(reason, retryable=bool) - processing failed
 
     Notes:
@@ -616,8 +650,8 @@ def on_complete(self, ctx: PluginContext) -> None:
 @dataclass
 class TransformResult:
     status: Literal["success", "error"]
-    row: dict[str, Any] | PipelineRow | None           # Single output row (mutually exclusive with rows)
-    rows: list[dict[str, Any] | PipelineRow] | None    # Multi-row output (mutually exclusive with row)
+    row: PipelineRow | None                            # Single output row (mutually exclusive with rows)
+    rows: tuple[PipelineRow, ...] | None               # Multi-row output (mutually exclusive with row)
     reason: TransformErrorReason | None                # Error details or None (success)
     retryable: bool = False                            # Can this operation be retried?
 
@@ -631,11 +665,7 @@ class TransformResult:
 
     # Context snapshot for audit trail (optional)
     # Contains operational metadata like pool stats, ordering info
-    context_after: dict[str, Any] | None
-
-    # Schema contract for output (optional)
-    # Enables conversion to PipelineRow via to_pipeline_row()/to_pipeline_rows()
-    contract: SchemaContract | None
+    context_after: NodeStateContext | None
 
     @property
     def is_multi_row(self) -> bool:
@@ -667,17 +697,16 @@ class TransformResult:
 ```python
 # REQUIRED: success_reason parameter (keyword-only)
 TransformResult.success(
-    row,
+    PipelineRow(output_dict, output_contract),
     success_reason={"action": "processed"},
     context_after=None,  # Optional operational metadata
-    contract=None,       # Optional schema contract for to_pipeline_row()
 )
 
+output_rows = (PipelineRow(row1, output_contract), PipelineRow(row2, output_contract))
 TransformResult.success_multi(
-    rows,
-    success_reason={"action": "split", "count": len(rows)},
+    output_rows,
+    success_reason={"action": "split", "count": len(output_rows)},
     context_after=None,  # Optional operational metadata
-    contract=None,       # Optional schema contract for to_pipeline_rows()
 )
 
 TransformResult.success_empty(
@@ -695,11 +724,21 @@ TransformResult.error(
 **Multi-row usage:**
 
 ```python
+from elspeth.contracts.contract_propagation import propagate_contract
+
+
 # Deaggregation: 1 input → N outputs
 def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     items = row["items"]  # Trust: source validated this is a list
+    output_rows = []
+    for i, item in enumerate(items):
+        output = {**row.to_dict(), "item": item, "item_index": i}
+        output_contract = propagate_contract(row.contract, output, transform_adds_fields=True)
+        output_contract = self._apply_declared_output_field_contracts(output_contract)
+        output_contract = self._align_output_contract(output_contract)
+        output_rows.append(PipelineRow(output, output_contract))
     return TransformResult.success_multi(
-        [{**row.to_dict(), "item": item, "item_index": i} for i, item in enumerate(items)],
+        output_rows,
         success_reason={"action": "exploded", "output_count": len(items)},
     )
 
@@ -707,8 +746,15 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     # When is_batch_aware=True and used in aggregation, engine may pass aggregated data
     rows = row if isinstance(row, list) else [row]
+    output_rows = []
+    for r in rows:
+        output = {**r.to_dict(), "batch_size": len(rows)}
+        output_contract = propagate_contract(r.contract, output, transform_adds_fields=True)
+        output_contract = self._apply_declared_output_field_contracts(output_contract)
+        output_contract = self._align_output_contract(output_contract)
+        output_rows.append(PipelineRow(output, output_contract))
     return TransformResult.success_multi(
-        [{**r, "batch_size": len(rows)} for r in rows],
+        output_rows,
         success_reason={"action": "batch_enriched", "batch_size": len(rows)},
     )
 ```
@@ -760,11 +806,14 @@ close()
 
 ```python
 name: str
+config_model: type[PluginConfig] | None
 input_schema: type[PluginSchema]
 node_id: str | None
 idempotent: bool                # Can this sink handle duplicate writes safely?
 determinism: Determinism
 plugin_version: str
+source_file_hash: str | None
+declared_required_fields: frozenset[str]
 ```
 
 #### Required Methods
@@ -773,7 +822,7 @@ plugin_version: str
 def __init__(self, config: dict[str, Any]) -> None:
     """Initialize with configuration."""
 
-def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
+def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> SinkWriteResult:
     """Receive rows and return proof of work.
 
     The sink controls its own internal processing:
@@ -781,11 +830,12 @@ def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescr
     - May queue internally and process later (satellite, async API)
     - May batch for efficiency
 
-    MUST return ArtifactDescriptor describing what was produced/queued.
+    MUST return SinkWriteResult describing what was produced/queued.
     SHOULD NOT block for slow operations - queue internally, confirm in on_complete().
 
     Returns:
-        ArtifactDescriptor with content_hash and size_bytes (REQUIRED for audit)
+        SinkWriteResult with ArtifactDescriptor content_hash and size_bytes
+        (REQUIRED for audit) plus optional row diversions
     """
 
 def flush(self) -> None:
@@ -840,7 +890,18 @@ def on_complete(self, ctx: PluginContext) -> None:
     """
 ```
 
-#### ArtifactDescriptor Contract
+#### SinkWriteResult and ArtifactDescriptor Contract
+
+`write()` returns `SinkWriteResult`. Its `artifact` is the primary audit proof;
+its `diversions` tuple carries per-row write failures recorded with
+`BaseSink._divert_row()`.
+
+```python
+@dataclass(frozen=True)
+class SinkWriteResult:
+    artifact: ArtifactDescriptor
+    diversions: tuple[RowDiversion, ...] = ()
+```
 
 ```python
 @dataclass(frozen=True)
@@ -884,7 +945,7 @@ on_start(ctx)               ← Open connections, prepare
     │
     ▼
 ┌──────────────────────────────────────────────┐
-│ write(rows, ctx) → ArtifactDescriptor        │  ← May be called multiple times
+│ write(rows, ctx) → SinkWriteResult          │  ← May be called multiple times
 │     │                                        │
 │     ▼                                        │
 │ (sink processes on its own schedule)         │
@@ -928,7 +989,7 @@ Sinks that don't support resume (`supports_resume=False`) will never have these 
 
 #### Audit Records
 
-- Each `write()`: ArtifactDescriptor (type, path, hash, size)
+- Each `write()`: SinkWriteResult with ArtifactDescriptor (type, path, hash, size) and any diversions
 - `on_complete` timestamp (confirms delivery)
 - Idempotency key if applicable
 
@@ -1495,11 +1556,12 @@ Plugins make calls; the engine throttles them.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.12 | 2026-05-07 | Accuracy pass for current runtime contracts — documented required `SourceRow.valid(..., contract=...)`, `TransformResult` `PipelineRow`-only outputs, `SinkWriteResult` sink returns, dynamic built-in discovery, `config_model`/`source_file_hash` identity surfaces, and transform-side external Tier 3 boundaries |
 | 1.11 | 2026-04-20 | Added `declared_input_fields`, `declared_output_fields`, and `can_drop_rows` transform declarations; documented `TransformResult.success_empty()` and `DROPPED_BY_FILTER` zero-emission semantics |
 | 1.10 | 2026-02-13 | RC-3 alignment — Fixed stale "(config OR plugin)" gate description to "(config-driven)" (gate plugins removed 2026-02-11). Corrected gate key property to reflect routing-only behavior (no row modification). |
 | 1.9 | 2026-02-08 | Second accuracy pass — Fixed `Determinism` comment (all 6 levels, not 3), `Enum` → `StrEnum`, `list[dict]` → `list[PipelineRow]` in aggregation section, `invalid_data` → `invalid_input` error category, `RoutingAction.route()` parameter clarification, `BatchTransformProtocol` attribute precision |
-| 1.8 | 2026-02-08 | Accuracy pass — Fixed `RoutingAction.fork()` → `fork_to_paths()`, documented `SanitizedDatabaseUrl`/`SanitizedWebhookUrl` for ArtifactDescriptor factories, documented `BatchTransformProtocol` as separate protocol, added `transforms_adds_fields` attribute, expanded expression language reference, fixed `ctx.run_started_at` reference, documented sink resume capability, noted `CoalesceProtocol` existence |
-| 1.7 | 2026-02-05 | **CRITICAL UPDATES**: (1) `TransformResult.success()` requires `success_reason` parameter (keyword-only, crashes if missing), (2) Row type changed from `dict[str, Any]` to `PipelineRow` in Transform/Gate signatures, (3) Added `context_after` field for operational metadata, (4) Added `contract` field and `to_pipeline_row()` methods on all result types, (5) Enhanced `flush()` documentation with durability guarantees, (6) Updated `SourceRow` to document `contract` parameter and `to_pipeline_row()` method, (7) Fixed `load()` return type to `Iterator[SourceRow]` |
+| 1.8 | 2026-02-08 | Accuracy pass — Fixed `RoutingAction.fork()` → `fork_to_paths()`, documented `SanitizedDatabaseUrl`/`SanitizedWebhookUrl` for ArtifactDescriptor factories, documented `BatchTransformProtocol` as separate protocol, added the legacy adds-fields declaration later superseded by `declared_output_fields`, expanded expression language reference, fixed `ctx.run_started_at` reference, documented sink resume capability, noted `CoalesceProtocol` existence |
+| 1.7 | 2026-02-05 | **CRITICAL UPDATES**: (1) `TransformResult.success()` requires `success_reason` parameter (keyword-only, crashes if missing), (2) Row type changed from `dict[str, Any]` to `PipelineRow` in Transform/Gate signatures, (3) Added `context_after` field for operational metadata, (4) Added schema-contract conversion methods on result types, (5) Enhanced `flush()` documentation with durability guarantees, (6) Updated `SourceRow` to document `contract` parameter and `to_pipeline_row()` method, (7) Fixed `load()` return type to `Iterator[SourceRow]` |
 | 1.6 | 2026-01-20 | Gate documentation: config expression gates, `GateResult` contract, routing actions |
 | 1.5 | 2026-01-19 | Multi-row output: `creates_tokens` attribute, `TransformResult.success_multi()`, `rows` field, aggregation `output_mode` (passthrough/transform), `BUFFERED` and `EXPANDED` outcomes |
 | 1.4 | 2026-01-19 | Batch-aware transforms (`is_batch_aware`), structural aggregation (engine owns buffers), crash recovery for batches |

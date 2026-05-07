@@ -53,6 +53,7 @@ class _RouteDispatchOutcome:
     child_tokens: tuple[TokenInfo, ...] = ()
     sink_name: str | None = None
     next_node_id: NodeID | None = None
+    discarded: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "child_tokens", tuple(self.child_tokens))
@@ -60,6 +61,11 @@ class _RouteDispatchOutcome:
             raise ValueError(
                 f"_RouteDispatchOutcome invariant violation: sink_name={self.sink_name!r} and "
                 f"next_node_id={self.next_node_id!r} are mutually exclusive."
+            )
+        if self.discarded and (self.sink_name is not None or self.next_node_id is not None):
+            raise ValueError(
+                f"_RouteDispatchOutcome invariant violation: discarded=True cannot be combined with "
+                f"sink_name={self.sink_name!r} or next_node_id={self.next_node_id!r}."
             )
 
 
@@ -173,6 +179,12 @@ class GateExecutor:
                 action=action,
             )
             return _RouteDispatchOutcome(action=action, child_tokens=tuple(child_tokens))
+
+        if destination.kind == RouteDestinationKind.DISCARD:
+            return _RouteDispatchOutcome(
+                action=RoutingAction.route(route_label, mode=mode, reason=reason),
+                discarded=True,
+            )
 
         route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
         self._record_routing(
@@ -301,6 +313,7 @@ class GateExecutor:
             child_tokens = dispatch.child_tokens
             sink_name = dispatch.sink_name
             next_node_id = dispatch.next_node_id
+            discarded = dispatch.discarded
 
             # Create GateResult for audit fields
             # Config gates don't modify data, so use input dict as output
@@ -337,6 +350,7 @@ class GateExecutor:
             child_tokens=child_tokens,
             sink_name=sink_name,
             next_node_id=next_node_id,
+            discarded=discarded,
         )
 
     def _record_routing(

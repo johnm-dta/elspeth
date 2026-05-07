@@ -103,6 +103,27 @@ def _collect_rows(source: SourceProtocol, ctx: PluginContext) -> list[SourceRow]
     return rows
 
 
+def _source_boundary_snapshot(
+    source: SourceProtocol,
+) -> tuple[
+    frozenset[str],
+    dict[str, Any] | None,
+    tuple[dict[str, str], str | None] | None,
+    str,
+    str,
+]:
+    """Capture the source contract metadata that must survive lifecycle hooks."""
+    contract = source.get_schema_contract()
+    field_resolution = source.get_field_resolution()
+    return (
+        frozenset(source.declared_guaranteed_fields),
+        contract.to_checkpoint_format() if contract is not None else None,
+        (dict(field_resolution[0]), field_resolution[1]) if field_resolution is not None else None,
+        source._on_validation_failure,
+        source.on_success,
+    )
+
+
 class SourceContractTestBase(ABC):
     """Abstract base class for source contract verification.
 
@@ -248,25 +269,28 @@ class SourceContractTestBase(ABC):
     # =========================================================================
 
     def test_close_is_idempotent(self, source: SourceProtocol, ctx: PluginContext) -> None:
-        """Contract: close() MUST be safe to call multiple times."""
-        # Exhaust the iterator
-        list(source.load(ctx))
+        """Contract: close() MUST be repeatable without erasing source contract metadata."""
+        _collect_rows(source, ctx)
+        before_close = _source_boundary_snapshot(source)
 
-        # close() should not raise on first call
-        source.close()
+        assert source.close() is None
+        assert _source_boundary_snapshot(source) == before_close
 
-        # close() should not raise on subsequent calls (idempotent)
-        source.close()
-        source.close()
+        assert source.close() is None
+        assert source.close() is None
+        assert _source_boundary_snapshot(source) == before_close
 
     def test_on_start_does_not_raise(self, source: SourceProtocol, ctx: PluginContext) -> None:
-        """Contract: on_start() lifecycle hook MUST not raise."""
-        source.on_start(ctx)
+        """Contract: on_start() lifecycle hook MUST complete without returning control data."""
+        assert source.on_start(ctx) is None
 
-    def test_on_complete_does_not_raise(self, source: SourceProtocol, ctx: PluginContext) -> None:
-        """Contract: on_complete() lifecycle hook MUST not raise."""
-        list(source.load(ctx))
-        source.on_complete(ctx)
+    def test_on_complete_preserves_source_contract_metadata(self, source: SourceProtocol, ctx: PluginContext) -> None:
+        """Contract: on_complete() MUST not erase the completed source boundary contract."""
+        _collect_rows(source, ctx)
+        before_complete = _source_boundary_snapshot(source)
+
+        assert source.on_complete(ctx) is None
+        assert _source_boundary_snapshot(source) == before_complete
 
 
 # =============================================================================

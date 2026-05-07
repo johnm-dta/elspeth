@@ -24,6 +24,28 @@ from elspeth.web.sessions.protocol import (
 )
 
 
+def _run_record(**overrides: object) -> RunRecord:
+    data = {
+        "id": uuid4(),
+        "session_id": uuid4(),
+        "state_id": uuid4(),
+        "status": "running",
+        "started_at": datetime.now(UTC),
+        "finished_at": None,
+        "rows_processed": 0,
+        "rows_succeeded": 0,
+        "rows_failed": 0,
+        "rows_routed_success": 0,
+        "rows_routed_failure": 0,
+        "rows_quarantined": 0,
+        "error": None,
+        "landscape_run_id": None,
+        "pipeline_yaml": None,
+    }
+    data.update(overrides)
+    return RunRecord(**data)  # type: ignore[arg-type]
+
+
 class TestSessionRecord:
     def test_frozen_immutability(self) -> None:
         record = SessionRecord(
@@ -125,25 +147,51 @@ class TestCompositionStateRecord:
 
 class TestRunRecord:
     def test_frozen_immutability(self) -> None:
-        record = RunRecord(
-            id=uuid4(),
-            session_id=uuid4(),
-            state_id=uuid4(),
-            status="running",
-            started_at=datetime.now(UTC),
-            finished_at=None,
-            rows_processed=0,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_routed_success=0,
-            rows_routed_failure=0,
-            rows_quarantined=0,
-            error=None,
-            landscape_run_id=None,
-            pipeline_yaml=None,
-        )
+        record = _run_record()
         with pytest.raises(AttributeError):
             record.status = "completed"  # type: ignore[misc]
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "rows_processed",
+            "rows_succeeded",
+            "rows_failed",
+            "rows_routed_success",
+            "rows_routed_failure",
+            "rows_quarantined",
+        ],
+    )
+    def test_run_counters_reject_negative_values(self, field_name: str) -> None:
+        with pytest.raises(AuditIntegrityError, match=rf"runs\.{field_name} must be >= 0"):
+            _run_record(**{field_name: -1})
+
+    @pytest.mark.parametrize(
+        ("field_name", "bad_value", "type_name"),
+        [
+            ("rows_processed", True, "bool"),
+            ("rows_succeeded", "1", "str"),
+            ("rows_failed", 1.0, "float"),
+            ("rows_routed_success", False, "bool"),
+            ("rows_routed_failure", "0", "str"),
+            ("rows_quarantined", 0.5, "float"),
+        ],
+    )
+    def test_run_counters_reject_non_integer_values(self, field_name: str, bad_value: object, type_name: str) -> None:
+        with pytest.raises(AuditIntegrityError, match=rf"runs\.{field_name} must be int, got {type_name}"):
+            _run_record(**{field_name: bad_value})
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"rows_succeeded": 1, "rows_routed_success": 2}, "rows_routed_success must be a subset of rows_succeeded"),
+            ({"rows_failed": 1, "rows_routed_failure": 2}, "rows_routed_failure must be a subset of rows_failed"),
+            ({"rows_failed": 1, "rows_quarantined": 2}, "rows_quarantined must be a subset of rows_failed"),
+        ],
+    )
+    def test_routed_and_quarantine_counters_must_be_subsets(self, overrides: dict[str, int], message: str) -> None:
+        with pytest.raises(AuditIntegrityError, match=message):
+            _run_record(**overrides)
 
     def test_run_status_literal_and_transition_table_share_one_source_of_truth(self) -> None:
         assert frozenset(get_args(SessionRunStatus)) == SESSION_RUN_STATUS_VALUES

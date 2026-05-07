@@ -40,6 +40,7 @@ EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"
 
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
+_DISCARD_ROUTE_TARGET = "discard"
 
 # Sink plugin names whose configuration requires a `path` option (W6 warning).
 # MUST be a subset of the runtime sink registry — drift here means composer
@@ -332,6 +333,14 @@ def _known_batch_aware_transform_plugins() -> frozenset[str]:
     return frozenset(cls.name for cls in transforms if cls.is_batch_aware)
 
 
+def _known_batch_aware_transform_plugins_requiring_aggregation() -> frozenset[str]:
+    """Return batch-aware transform names that do not support row-mode dispatch."""
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    transforms = get_shared_plugin_manager().get_transforms()
+    return frozenset(cls.name for cls in transforms if cls.is_batch_aware and not cls.supports_row_mode_when_batch_aware)
+
+
 def _declared_input_fields_option(options: Mapping[str, Any]) -> object:
     """Return the raw declared-input-field option, including wrapper-shaped aggregations."""
     if _DECLARED_INPUT_FIELDS_OPTION in options:
@@ -367,6 +376,199 @@ def _batch_aware_required_input_fields_error(
     )
 
 
+def _batch_aware_placement_error(
+    node_id: str,
+    node_type: str,
+    plugin_name: str | None,
+    output_mode: str | None,
+) -> str | None:
+    """Reject batch-only transforms from row-mode composer placement."""
+    if plugin_name is None or plugin_name not in _known_batch_aware_transform_plugins_requiring_aggregation():
+        return None
+
+    if node_type == "transform":
+        message = (
+            f"Node '{node_id}' uses batch-aware transform '{plugin_name}' as node_type='transform'. "
+            "Batch-aware transforms require the aggregation/batch path unless the plugin explicitly supports row mode. "
+            "Configure this node as node_type='aggregation' with an aggregation trigger, or use a row-level transform instead."
+        )
+        if plugin_name == "batch_replicate":
+            message += " For batch_replicate, set output_mode: transform so replicated rows create new downstream tokens."
+        return message
+
+    if plugin_name == "batch_replicate" and node_type == "aggregation" and output_mode != "transform":
+        return (
+            f"Node '{node_id}' uses batch_replicate, which deaggregates a batch into new rows. "
+            "Configure it as an aggregation with output_mode: transform so replicated rows create new downstream tokens."
+        )
+
+    return None
+
+
+def _batch_distribution_profile_contract_options(node: NodeSpec) -> Mapping[str, Any]:
+    if node.node_type != "aggregation":
+        return node.options
+    contract_options, _owner = get_aggregation_contract_options(node.options, owner=f"node:{node.id}")
+    return contract_options
+
+
+def _batch_distribution_profile_value_field_message(
+    *,
+    value_field: str,
+    field_type: str,
+) -> str:
+    return (
+        f"batch_distribution_profile.value_field '{value_field}' is numeric-only, "
+        f"but upstream declares type {field_type} "
+        "(batch_distribution_profile.value_field.numeric). "
+        "Categorical distributions, barrier counts, and theme frequency should use batch_top_k "
+        "with field set to the categorical column and group_by as needed, not batch_distribution_profile."
+    )
+
+
+def _producer_declared_field_type(
+    producer_id: str,
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+    *,
+    node_by_id: Mapping[str, NodeSpec],
+    field_name: str,
+) -> str | None:
+    """Return a declared schema field type for a producer, or None when unknown."""
+    owner = "source" if producer_id == "source" else f"node:{producer_id}"
+    raw_schema = get_raw_schema_config(options, owner=owner)
+    if raw_schema is not None and raw_schema.fields is not None:
+        for field in raw_schema.fields:
+            if field.name == field_name:
+                return field.field_type
+        return None
+
+    if producer_id == "source":
+        return None
+
+    if producer_id not in node_by_id:
+        return None
+    producer_node = node_by_id[producer_id]
+    if producer_node.plugin is None:
+        return None
+    if producer_node.node_type not in {"transform", "aggregation"}:
+        return None
+
+    try:
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        transform = get_shared_plugin_manager().create_transform(
+            producer_node.plugin,
+            deep_thaw(producer_node.options),
+        )
+    except Exception as exc:
+        if _is_static_contract_probe_exception(exc):
+            return None
+        raise
+
+    output_schema = transform._output_schema_config
+    if output_schema is None or output_schema.fields is None:
+        return None
+    for field in output_schema.fields:
+        if field.name == field_name:
+            return field.field_type
+    return None
+
+
+def _is_static_contract_probe_exception(exc: Exception) -> bool:
+    """Return True for expected draft/config failures from static probes."""
+    from elspeth.plugins.infrastructure.config_base import PluginConfigError
+    from elspeth.plugins.infrastructure.manager import PluginNotFoundError
+    from elspeth.plugins.infrastructure.templates import TemplateError
+    from elspeth.plugins.infrastructure.validation import UnknownPluginTypeError
+
+    if isinstance(exc, (PluginConfigError, PluginNotFoundError, TemplateError, UnknownPluginTypeError)):
+        return True
+    return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
+
+
+def _batch_distribution_profile_value_field_entries(
+    source: SourceSpec | None,
+    nodes: tuple[NodeSpec, ...],
+) -> tuple[tuple[ValidationEntry, ...], tuple[ValidationEntry, ...]]:
+    """Validate numeric-only batch_distribution_profile value_field contracts."""
+    from elspeth.web.composer._producer_resolver import ProducerResolver
+
+    errors: list[ValidationEntry] = []
+    warnings: list[ValidationEntry] = []
+    node_by_id = {node.id: node for node in nodes}
+    resolver = ProducerResolver.build(
+        source=source,
+        nodes=nodes,
+        sink_names=frozenset(),
+    )
+    numeric_types = {"int", "float"}
+
+    for node in nodes:
+        if node.plugin != "batch_distribution_profile":
+            continue
+        options = _batch_distribution_profile_contract_options(node)
+        if "value_field" not in options:
+            continue
+        value_field = options["value_field"]
+        if type(value_field) is not str or not value_field.strip():
+            continue
+        value_field = value_field.strip()
+
+        producer = resolver.walk_to_real_producer(node.input)
+        if producer is None:
+            warnings.append(
+                ValidationEntry(
+                    f"node:{node.id}",
+                    (
+                        f"batch_distribution_profile.value_field '{value_field}' is numeric-only, "
+                        "but the upstream producer is unresolved "
+                        "(batch_distribution_profile.value_field.numeric). "
+                        "If this field is categorical, use batch_top_k instead."
+                    ),
+                    "high",
+                )
+            )
+            continue
+
+        field_type = _producer_declared_field_type(
+            producer.producer_id,
+            producer.plugin_name,
+            producer.options,
+            node_by_id=node_by_id,
+            field_name=value_field,
+        )
+        if field_type is None:
+            warnings.append(
+                ValidationEntry(
+                    f"node:{node.id}",
+                    (
+                        f"batch_distribution_profile.value_field '{value_field}' is numeric-only, "
+                        "but upstream schema is observed or does not declare the field type. "
+                        "Inspect a data sample before execute "
+                        "(batch_distribution_profile.value_field.numeric); "
+                        "categorical distributions should use batch_top_k."
+                    ),
+                    "high",
+                )
+            )
+            continue
+        if field_type in numeric_types:
+            continue
+        errors.append(
+            ValidationEntry(
+                f"node:{node.id}",
+                _batch_distribution_profile_value_field_message(
+                    value_field=value_field,
+                    field_type=field_type,
+                ),
+                "high",
+            )
+        )
+
+    return tuple(errors), tuple(warnings)
+
+
 def _runtime_connection_targets(
     source: SourceSpec | None,
     nodes: tuple[NodeSpec, ...],
@@ -388,7 +590,7 @@ def _runtime_connection_targets(
         if node.on_error is not None and node.on_error != "discard":
             targets.add(node.on_error)
         if node.routes is not None:
-            targets.update(node.routes.values())
+            targets.update(target for target in node.routes.values() if target != _DISCARD_ROUTE_TARGET)
         if node.fork_to is not None:
             targets.update(node.fork_to)
     return targets
@@ -644,6 +846,8 @@ def _check_schema_contracts(
                 _record_description(node.on_error, f"node '{node.id}' on_error")
         if node.routes is not None:
             for route_label, target in node.routes.items():
+                if target == _DISCARD_ROUTE_TARGET:
+                    continue
                 if target in sink_names:
                     _record_direct_sink(target, node.id, node.plugin, node.options)
                     continue
@@ -1610,6 +1814,10 @@ class CompositionState:
 
         # 7. Node type field consistency
         for node in self.nodes:
+            batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
+            if batch_placement_error is not None:
+                errors.append(_err(f"node:{node.id}", batch_placement_error, "high"))
+
             batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
             if batch_required_error is not None:
                 errors.append(_err(f"node:{node.id}", batch_required_error, "high"))
@@ -1706,9 +1914,13 @@ class CompositionState:
         semantic_errors, semantic_contracts = validate_semantic_contracts(self)
         errors.extend(semantic_errors)
 
+        numeric_contract_errors, numeric_contract_warnings = _batch_distribution_profile_value_field_entries(self.source, self.nodes)
+        errors.extend(numeric_contract_errors)
+
         # --- Warnings (advisory, non-blocking) ---
         warnings: list[ValidationEntry] = []
         _warn = ValidationEntry
+        warnings.extend(numeric_contract_warnings)
 
         # Build connection-field targets (wiring that doesn't require edges)
         connection_targets = _runtime_connection_targets(self.source, self.nodes)

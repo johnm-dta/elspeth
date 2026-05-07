@@ -69,6 +69,7 @@ def _make_token(
     token_id: str = "tok-1",
     row_id: str = "row-1",
     *,
+    run_id: str = "run-1",
     fork_group_id: str | None = None,
     join_group_id: str | None = None,
     expand_group_id: str | None = None,
@@ -79,7 +80,7 @@ def _make_token(
         token_id=token_id,
         row_id=row_id,
         created_at=datetime(2026, 1, 15, tzinfo=UTC),
-        run_id="run-test",
+        run_id=run_id,
         fork_group_id=fork_group_id,
         join_group_id=join_group_id,
         expand_group_id=expand_group_id,
@@ -274,6 +275,30 @@ class TestExplainTier1Corruption:
                 calls=(),
                 parent_tokens=(),
             )
+
+    def test_lineage_result_run_id_mismatch_raises_audit_integrity(self) -> None:
+        """LineageResult rejects mismatched token/source row runs as corruption."""
+        row_lineage = _make_row_lineage()  # has run_id="run-1"
+        mismatched_token = _make_token(token_id="tok-1", row_id="row-1", run_id="run-2")
+
+        with pytest.raises(AuditIntegrityError, match="run_id mismatch"):
+            LineageResult(
+                token=mismatched_token,
+                source_row=row_lineage,
+                node_states=(),
+                routing_events=(),
+                calls=(),
+                parent_tokens=(),
+            )
+
+    def test_explain_direct_token_run_mismatch_raises_audit_integrity(self) -> None:
+        """explain() must fail closed when token belongs to a different run."""
+        token = _make_token(token_id="tok-cross-run", row_id="row-1", run_id="run-2")
+        row_lineage = _make_row_lineage()  # same row_id, requested/source run is run-1
+        factory = _make_factory(token=token, row_lineage=row_lineage)
+
+        with pytest.raises(AuditIntegrityError, match="run_id mismatch"):
+            explain(factory.query, factory.data_flow, "run-1", token_id="tok-cross-run")
 
 
 # ===========================================================================

@@ -220,6 +220,114 @@ class TestValidatePipelineBatchTransformOptions:
         assert "batch-aware" in messages
         mock_yaml_gen.generate_yaml.assert_not_called()
 
+    def test_batch_replicate_plain_transform_returns_structured_validation_error(self) -> None:
+        source = SourceSpec(
+            plugin="csv",
+            on_success="replicate_in",
+            options={"schema": {"mode": "fixed", "fields": ["region: str"]}},
+            on_validation_failure="discard",
+        )
+        replicate = NodeSpec(
+            id="replicate",
+            node_type="transform",
+            plugin="batch_replicate",
+            input="replicate_in",
+            on_success="primary",
+            on_error="discard",
+            options={
+                "schema": {"mode": "observed"},
+                "replications": [
+                    {"source_field": "region", "output_field": "region_copy"},
+                ],
+            },
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+        state = CompositionState(
+            source=source,
+            nodes=(replicate,),
+            edges=(),
+            outputs=(_make_output({"schema": {"mode": "observed"}}),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n"
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "batch_transform_options").passed is False
+        messages = "\n".join(error.message for error in result.errors)
+        assert "batch_replicate" in messages
+        assert "aggregation" in messages
+        assert "output_mode: transform" in messages
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_batch_distribution_profile_rejects_string_value_field_before_runtime(self) -> None:
+        source = SourceSpec(
+            plugin="csv",
+            on_success="profile_in",
+            options={
+                "schema": {
+                    "mode": "fixed",
+                    "fields": [
+                        "community: str",
+                        "wave: str",
+                        "financial_barrier: str",
+                    ],
+                }
+            },
+            on_validation_failure="discard",
+        )
+        profile = NodeSpec(
+            id="profile_barriers",
+            node_type="aggregation",
+            plugin="batch_distribution_profile",
+            input="profile_in",
+            on_success="primary",
+            on_error="discard",
+            options={
+                "schema": {"mode": "observed"},
+                "value_field": "financial_barrier",
+                "group_by": "community",
+            },
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+        state = CompositionState(
+            source=source,
+            nodes=(profile,),
+            edges=(),
+            outputs=(_make_output({"schema": {"mode": "observed"}}),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n"
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "batch_transform_options").passed is False
+        messages = "\n".join(error.message for error in result.errors)
+        assert "batch_distribution_profile.value_field" in messages
+        assert "numeric-only" in messages
+        assert "financial_barrier" in messages
+        assert "upstream declares type str" in messages
+        assert "batch_top_k" in messages
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
 
 class TestValidatePipelineSinkPathAllowlist:
     """Sink path allowlist — prevents arbitrary file writes via sink options."""
@@ -543,6 +651,97 @@ class TestValidatePipelineSemanticContracts:
         # Subsequent checks may still fail (depends on fixture); we only
         # assert semantic_contracts itself passed.
         assert _check(result, "semantic_contracts").passed is True
+
+    def test_single_query_llm_string_rejected_before_json_explode_runtime(self) -> None:
+        """A single-query LLM response_field is str, not a json_explode array."""
+        state = CompositionState(
+            metadata=PipelineMetadata(name="llm-json-explode-contract"),
+            version=1,
+            edges=(),
+            source=SourceSpec(
+                plugin="csv",
+                on_success="llm_in",
+                options={
+                    "path": "/tmp/test_data/blobs/prompts.csv",
+                    "schema": {"mode": "fixed", "fields": ["topic: str"]},
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="ask_llm",
+                    node_type="transform",
+                    plugin="llm",
+                    input="llm_in",
+                    on_success="explode_in",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "api_key": "test-key",
+                        "model": "openai/gpt-4o",
+                        "template": "Return three themes.",
+                        "response_field": "llm_response",
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+                NodeSpec(
+                    id="explode_themes",
+                    node_type="transform",
+                    plugin="json_explode",
+                    input="explode_in",
+                    on_success="results",
+                    on_error="discard",
+                    options={
+                        "schema": {
+                            "mode": "flexible",
+                            "fields": ["llm_response: str"],
+                        },
+                        "array_field": "llm_response",
+                        "output_field": "theme",
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            outputs=(
+                OutputSpec(
+                    name="results",
+                    plugin="json",
+                    options={"path": "/tmp/test_data/outputs/themes.json"},
+                    on_write_failure="discard",
+                ),
+            ),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "semantic_contracts").passed is False
+        assert any(
+            error.component_id == "explode_themes"
+            and "json_explode.array_field.list" in error.message
+            and "value_type=str" in error.message
+            and (
+                "json_explode requires list field; LLM response_field is str. "
+                "Use structured-output parsing or a transform that parses JSON object/string first."
+            )
+            in error.message
+            for error in result.errors
+        )
+        mock_yaml_gen.generate_yaml.assert_not_called()
 
 
 class TestValidatePipelineRelativePaths:

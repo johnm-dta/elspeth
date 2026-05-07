@@ -217,6 +217,36 @@ class TestGenerateYaml:
         assert g["routes"]["high"] == "good_output"
         assert g["routes"]["low"] == "review_output"
 
+    def test_gate_route_to_discard_is_exported_as_virtual_destination(self) -> None:
+        from elspeth.core.config import load_settings_from_yaml_string
+
+        state = _make_gate_pipeline()
+        gate = state.nodes[0]
+        state = state.with_node(
+            NodeSpec(
+                id=gate.id,
+                node_type=gate.node_type,
+                plugin=gate.plugin,
+                input=gate.input,
+                on_success=gate.on_success,
+                on_error=gate.on_error,
+                options=gate.options,
+                condition=gate.condition,
+                routes={"true": "good_output", "false": "discard"},
+                fork_to=gate.fork_to,
+                branches=gate.branches,
+                policy=gate.policy,
+                merge=gate.merge,
+            )
+        )
+
+        yaml_str = generate_yaml(state)
+        parsed = yaml.safe_load(yaml_str)
+
+        assert parsed["gates"][0]["routes"]["false"] == "discard"
+        settings = load_settings_from_yaml_string(yaml_str)
+        assert settings.gates[0].routes["false"] == "discard"
+
     def test_aggregation_pipeline(self) -> None:
         state = _make_aggregation_pipeline()
         yaml_str = generate_yaml(state)

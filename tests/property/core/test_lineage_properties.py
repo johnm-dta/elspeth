@@ -274,11 +274,13 @@ class TestLineageResultStructureProperties:
 
     def test_error_tuples_default_to_empty(self) -> None:
         """Property: Error tuples default to empty (not None)."""
-        # Create minimal valid LineageResult with matching row_ids
+        # Create minimal valid LineageResult with matching row and run ownership.
         token = MagicMock()
         token.row_id = "row-1"
+        token.run_id = "run-1"
         source_row = MagicMock()
         source_row.row_id = "row-1"
+        source_row.run_id = "run-1"
         result = LineageResult(
             token=token,
             source_row=source_row,
@@ -314,7 +316,9 @@ class TestExplainTierOneTrustProperties:
 
         # Token exists with a fork group ID (required for parent consistency)
         token = MagicMock()
+        token.token_id = token_id
         token.row_id = "row_123"
+        token.run_id = run_id
         token.fork_group_id = "some-fork-group"
         token.join_group_id = None
         token.expand_group_id = None
@@ -323,6 +327,7 @@ class TestExplainTierOneTrustProperties:
         # Source row exists
         source_row = MagicMock()
         source_row.row_id = "row_123"
+        source_row.run_id = run_id
         query.explain_row.return_value = source_row
 
         # Node states exist

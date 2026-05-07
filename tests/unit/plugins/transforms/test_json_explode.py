@@ -70,6 +70,28 @@ class TestJSONExplodeHappyPath:
 
         assert transform.creates_tokens is True
 
+    def test_input_semantic_requirements_declare_array_field_list(self) -> None:
+        """json_explode statically requires array_field to be a list value."""
+        from elspeth.contracts.plugin_semantics import SemanticValueType
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "array_field": "items",
+            }
+        )
+
+        requirements = transform.input_semantic_requirements()
+
+        assert len(requirements.fields) == 1
+        req = requirements.fields[0]
+        assert req.field_name == "items"
+        assert req.requirement_code == "json_explode.array_field.list"
+        assert req.accepted_value_types == frozenset({SemanticValueType.LIST})
+        assert req.accepted_content_kinds == frozenset()
+        assert req.accepted_text_framings == frozenset()
+
     def test_empty_array_returns_error(self, ctx: PluginContext) -> None:
         """Empty array produces error (nothing to deaggregate)."""
         from elspeth.plugins.transforms.json_explode import JSONExplode

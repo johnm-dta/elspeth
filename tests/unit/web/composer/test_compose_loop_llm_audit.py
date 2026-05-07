@@ -105,6 +105,7 @@ def _make_llm_response(
     completion_tokens: int | None = 7,
     total_tokens: int | None = None,
     request_id: str | None = "chatcmpl-123",
+    cost: float | int | str | None = None,
 ) -> _FakeLLMResponse:
     fake_tool_calls: list[_FakeToolCall] | None = None
     if tool_calls:
@@ -115,7 +116,7 @@ def _make_llm_response(
             )
             for tc in tool_calls
         ]
-    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens)
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, cost=cost)
     return _FakeLLMResponse(
         choices=[_FakeChoice(message=_FakeMessage(content=content, tool_calls=fake_tool_calls))],
         model=model,
@@ -147,7 +148,8 @@ async def test_text_only_success_records_llm_call_metadata() -> None:
     with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response) as mock_acomp:
         result = await service.compose("Build a CSV pipeline", [], state)
 
-    assert result.message == "Done."
+    assert "No composer mutation tool returned success=true" in result.message
+    assert result.raw_assistant_content == "Done."
     assert len(result.llm_calls) == 1
     call = result.llm_calls[0]
     request_kwargs = mock_acomp.call_args.kwargs
@@ -157,9 +159,39 @@ async def test_text_only_success_records_llm_call_metadata() -> None:
     assert call.prompt_tokens == 11
     assert call.completion_tokens == 7
     assert call.total_tokens == 18
+    assert call.provider_cost is None
+    assert call.provider_cost_source == "not_available"
     assert call.provider_request_id == "chatcmpl-123"
     assert call.messages_hash == stable_hash(request_kwargs["messages"])
     assert call.tools_spec_hash == stable_hash(request_kwargs["tools"])
+
+
+@pytest.mark.asyncio
+async def test_success_records_provider_cost_from_usage_metadata() -> None:
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    state = _empty_state()
+    llm_response = _make_llm_response(content="Done.", cost=0.0037)
+
+    with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response):
+        result = await service.compose("Build a CSV pipeline", [], state)
+
+    call = result.llm_calls[0]
+    assert call.provider_cost == 0.0037
+    assert call.provider_cost_source == "response_usage.cost"
+
+
+@pytest.mark.asyncio
+async def test_malformed_provider_cost_is_recorded_as_unavailable() -> None:
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    state = _empty_state()
+    llm_response = _make_llm_response(content="Done.", cost="not-a-number")
+
+    with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response):
+        result = await service.compose("Build a CSV pipeline", [], state)
+
+    call = result.llm_calls[0]
+    assert call.provider_cost is None
+    assert call.provider_cost_source == "not_available"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator, model_validator
 
@@ -21,6 +21,9 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
+
+if TYPE_CHECKING:
+    from elspeth.contracts.plugin_assistance import PluginAssistance
 
 type BatchDistributionProfileRow = dict[str, object]
 
@@ -93,7 +96,7 @@ class BatchDistributionProfile(BaseTransform):
 
     name = "batch_distribution_profile"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7ec124ec354dd2a3"
+    source_file_hash: str | None = "sha256:af404628fc32f1f9"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
 
@@ -149,6 +152,33 @@ class BatchDistributionProfile(BaseTransform):
             guaranteed_fields=guaranteed,
             required_fields=None,
             audit_fields=None,
+        )
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        from elspeth.contracts.plugin_assistance import PluginAssistance
+
+        if issue_code != "batch_distribution_profile.value_field.numeric":
+            return None
+        return PluginAssistance(
+            plugin_name="batch_distribution_profile",
+            issue_code="batch_distribution_profile.value_field.numeric",
+            summary=(
+                "batch_distribution_profile computes numeric descriptive statistics only. "
+                "Its value_field must be int or float; categorical counts and theme frequencies belong in batch_top_k."
+            ),
+            suggested_fixes=(
+                "Use batch_top_k with field set to the categorical column for barrier counts, theme frequencies, or distributions over strings.",
+                "Keep batch_distribution_profile only for numeric measures such as amounts, scores, durations, or counts.",
+                "When grouping numeric profiles, set group_by to the categorical partition field and value_field to the numeric measure.",
+            ),
+            composer_hints=(
+                "Words like distribution, barrier counts, theme frequency, category counts, or categorical summary should map to batch_top_k unless the requested statistic is numeric.",
+            ),
         )
 
     def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:

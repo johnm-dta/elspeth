@@ -92,6 +92,40 @@ def _assert_frozenset_of_str(value: object, *, attr_name: str) -> frozenset[str]
     return value
 
 
+def _transform_boundary_snapshot(transform: TransformProtocol) -> dict[str, Any]:
+    return {
+        "can_drop_rows": transform.can_drop_rows,
+        "config": dict(transform.config),
+        "creates_tokens": transform.creates_tokens,
+        "declared_input_fields": transform.declared_input_fields,
+        "declared_output_fields": transform.declared_output_fields,
+        "determinism": transform.determinism,
+        "effective_static_contract": transform.effective_static_contract(),
+        "input_schema": transform.input_schema,
+        "is_batch_aware": transform.is_batch_aware,
+        "lifecycle_started": transform._on_start_called,
+        "name": transform.name,
+        "node_id": transform.node_id,
+        "on_error": transform.on_error,
+        "on_success": transform.on_success,
+        "output_schema": transform.output_schema,
+        "passes_through_input": transform.passes_through_input,
+        "plugin_version": transform.plugin_version,
+        "source_file_hash": transform.source_file_hash,
+    }
+
+
+def _transform_result_snapshot(result: TransformResult) -> dict[str, Any]:
+    return {
+        "reason": result.reason,
+        "retryable": result.retryable,
+        "row": result.row.to_dict() if result.row is not None else None,
+        "rows": tuple(row.to_dict() for row in result.rows) if result.rows is not None else None,
+        "status": result.status,
+        "success_reason": result.success_reason,
+    }
+
+
 class TransformContractTestBase(ABC):
     """Abstract base class for transform contract verification.
 
@@ -148,6 +182,10 @@ class TransformContractTestBase(ABC):
     def test_transform_has_batch_awareness_flag(self, transform: TransformProtocol) -> None:
         """Contract: Transform MUST have 'is_batch_aware' attribute."""
         assert isinstance(transform.is_batch_aware, bool)
+
+    def test_transform_has_batch_row_mode_opt_in_flag(self, transform: TransformProtocol) -> None:
+        """Contract: Transform MUST declare whether batch-aware row mode is supported."""
+        assert isinstance(transform.supports_row_mode_when_batch_aware, bool)
 
     def test_transform_has_creates_tokens_flag(self, transform: TransformProtocol) -> None:
         """Contract: Transform MUST have 'creates_tokens' attribute."""
@@ -278,26 +316,36 @@ class TransformContractTestBase(ABC):
         valid_input: dict[str, Any],
         ctx: PluginContext,
     ) -> None:
-        """Contract: close() MUST be safe to call multiple times."""
-        # Process something first (skip process() for batch transforms)
+        """Contract: repeated close() preserves transform metadata and output snapshots."""
+        result = None
+        result_snapshot = None
         if not _is_batch_transform(transform):
-            pipeline_row = make_pipeline_row(valid_input)
-            transform.process(pipeline_row, ctx)
+            result = _process_successful_valid_input(transform, valid_input, ctx)
+            result_snapshot = _transform_result_snapshot(result)
+        boundary_snapshot = _transform_boundary_snapshot(transform)
 
-        # close() should not raise on first call
-        transform.close()
+        assert transform.close() is None
+        assert transform.close() is None
+        assert transform.close() is None
 
-        # close() should not raise on subsequent calls (idempotent)
-        transform.close()
-        transform.close()
+        assert _transform_boundary_snapshot(transform) == boundary_snapshot
+        if result_snapshot is not None:
+            assert result is not None
+            assert _transform_result_snapshot(result) == result_snapshot
 
     def test_on_start_does_not_raise(
         self,
         transform: TransformProtocol,
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_start() lifecycle hook MUST not raise."""
-        transform.on_start(ctx)
+        """Contract: on_start() returns None and sets the lifecycle guard."""
+        boundary_snapshot = _transform_boundary_snapshot(transform)
+        boundary_snapshot["lifecycle_started"] = True
+
+        assert transform.on_start(ctx) is None
+
+        assert transform._on_start_called is True
+        assert _transform_boundary_snapshot(transform) == boundary_snapshot
 
     def test_on_complete_does_not_raise(
         self,
@@ -305,12 +353,20 @@ class TransformContractTestBase(ABC):
         valid_input: dict[str, Any],
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_complete() lifecycle hook MUST not raise."""
-        # Process something first (skip process() for batch transforms)
+        """Contract: on_complete() preserves transform metadata and output snapshots."""
+        result = None
+        result_snapshot = None
         if not _is_batch_transform(transform):
-            pipeline_row = make_pipeline_row(valid_input)
-            transform.process(pipeline_row, ctx)
-        transform.on_complete(ctx)
+            result = _process_successful_valid_input(transform, valid_input, ctx)
+            result_snapshot = _transform_result_snapshot(result)
+        boundary_snapshot = _transform_boundary_snapshot(transform)
+
+        assert transform.on_complete(ctx) is None
+
+        assert _transform_boundary_snapshot(transform) == boundary_snapshot
+        if result_snapshot is not None:
+            assert result is not None
+            assert _transform_result_snapshot(result) == result_snapshot
 
 
 class TransformContractPropertyTestBase(TransformContractTestBase):

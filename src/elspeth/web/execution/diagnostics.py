@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, func, select
+from sqlalchemy.engine import Connection
 
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -59,10 +60,9 @@ def _max_datetime(values: list[datetime | None]) -> datetime | None:
     return max(present)
 
 
-def _count_by_value(db: LandscapeDB, table: Any, column: Any, *, run_id: str) -> dict[str, int]:
+def _count_by_value(conn: Connection, table: Any, column: Any, *, run_id: str) -> dict[Any, Any]:
     stmt = select(column, func.count().label("count")).where(table.c.run_id == run_id).group_by(column)
-    with db.read_only_connection() as conn:
-        return {str(row[0]): int(row._mapping["count"]) for row in conn.execute(stmt)}
+    return {row[0]: row._mapping["count"] for row in conn.execute(stmt)}
 
 
 def _empty_diagnostics(
@@ -176,7 +176,7 @@ def load_run_diagnostics_from_db(
             .limit(preview_limit)
         )
         token_rows = list(conn.execute(token_stmt))
-        token_ids = tuple(str(row.token_id) for row in token_rows)
+        token_ids = tuple(row.token_id for row in token_rows)
 
         states_by_token: dict[str, list[RunDiagnosticNodeState]] = {token_id: [] for token_id in token_ids}
         if token_ids:
@@ -208,14 +208,14 @@ def load_run_diagnostics_from_db(
                 )
             )
             for row in conn.execute(state_stmt):
-                states_by_token[str(row.token_id)].append(
+                states_by_token[row.token_id].append(
                     RunDiagnosticNodeState(
-                        state_id=str(row.state_id),
-                        token_id=str(row.token_id),
-                        node_id=str(row.node_id),
-                        step_index=int(row.step_index),
-                        attempt=int(row.attempt),
-                        status=str(row.status),
+                        state_id=row.state_id,
+                        token_id=row.token_id,
+                        node_id=row.node_id,
+                        step_index=row.step_index,
+                        attempt=row.attempt,
+                        status=row.status,
                         duration_ms=row.duration_ms,
                         started_at=row.started_at,
                         completed_at=row.completed_at,
@@ -241,10 +241,10 @@ def load_run_diagnostics_from_db(
         )
         operations = [
             RunDiagnosticOperation(
-                operation_id=str(row.operation_id),
-                node_id=str(row.node_id),
-                operation_type=str(row.operation_type),
-                status=str(row.status),
+                operation_id=row.operation_id,
+                node_id=row.node_id,
+                operation_type=row.operation_type,
+                status=row.status,
                 duration_ms=row.duration_ms,
                 started_at=row.started_at,
                 completed_at=row.completed_at,
@@ -268,11 +268,11 @@ def load_run_diagnostics_from_db(
         )
         artifacts = [
             RunDiagnosticArtifact(
-                artifact_id=str(row.artifact_id),
-                sink_node_id=str(row.sink_node_id),
-                artifact_type=str(row.artifact_type),
-                path_or_uri=str(row.path_or_uri),
-                size_bytes=int(row.size_bytes),
+                artifact_id=row.artifact_id,
+                sink_node_id=row.sink_node_id,
+                artifact_type=row.artifact_type,
+                path_or_uri=row.path_or_uri,
+                size_bytes=row.size_bytes,
                 created_at=row.created_at,
             )
             for row in conn.execute(artifact_stmt)
@@ -297,8 +297,8 @@ def load_run_diagnostics_from_db(
             ).scalar_one_or_none(),
         ]
 
-    state_counts = _count_by_value(db, node_states_table, node_states_table.c.status, run_id=landscape_run_id)
-    operation_counts = _count_by_value(db, operations_table, operations_table.c.operation_type, run_id=landscape_run_id)
+        state_counts = _count_by_value(conn, node_states_table, node_states_table.c.status, run_id=landscape_run_id)
+        operation_counts = _count_by_value(conn, operations_table, operations_table.c.operation_type, run_id=landscape_run_id)
 
     return RunDiagnosticsResponse(
         run_id=run_id,
@@ -314,8 +314,8 @@ def load_run_diagnostics_from_db(
         ),
         tokens=[
             RunDiagnosticToken(
-                token_id=str(row.token_id),
-                row_id=str(row.row_id),
+                token_id=row.token_id,
+                row_id=row.row_id,
                 row_index=row.row_index,
                 branch_name=row.branch_name,
                 fork_group_id=row.fork_group_id,
@@ -324,7 +324,7 @@ def load_run_diagnostics_from_db(
                 step_in_pipeline=row.step_in_pipeline,
                 created_at=row.created_at,
                 terminal_outcome=row.terminal_outcome,
-                states=states_by_token[str(row.token_id)],
+                states=states_by_token[row.token_id],
             )
             for row in token_rows
         ],

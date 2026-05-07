@@ -883,11 +883,11 @@ class TestWebSocketReconnectTier1Guards:
             started_at=now,
             finished_at=now,
             rows_processed=2,
-            rows_succeeded=3,
-            rows_failed=4,
-            rows_routed_success=5,
+            rows_succeeded=5,
+            rows_failed=7,
+            rows_routed_success=3,
             rows_routed_failure=6,
-            rows_quarantined=7,
+            rows_quarantined=4,
             error=None,
             landscape_run_id=None,
             pipeline_yaml=None,
@@ -898,11 +898,11 @@ class TestWebSocketReconnectTier1Guards:
         payload = event.model_dump(mode="json")
         assert payload["event_type"] == "cancelled"
         assert payload["data"]["source_rows_processed"] == 2
-        assert payload["data"]["tokens_succeeded"] == 3
-        assert payload["data"]["tokens_failed"] == 4
-        assert payload["data"]["tokens_routed_success"] == 5
+        assert payload["data"]["tokens_succeeded"] == 5
+        assert payload["data"]["tokens_failed"] == 7
+        assert payload["data"]["tokens_routed_success"] == 3
         assert payload["data"]["tokens_routed_failure"] == 6
-        assert payload["data"]["tokens_quarantined"] == 7
+        assert payload["data"]["tokens_quarantined"] == 4
 
 
 class TestRunStatusEndpoint:

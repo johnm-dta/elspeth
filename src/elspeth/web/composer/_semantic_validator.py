@@ -155,6 +155,27 @@ def _find_producer_facts(
     return None
 
 
+def _targeted_conflict_repair_hint(
+    *,
+    consumer_plugin: str,
+    producer_plugin: str | None,
+    requirement_code: str,
+    facts: FieldSemanticFacts | None,
+) -> str | None:
+    if (
+        consumer_plugin == "json_explode"
+        and producer_plugin == "llm"
+        and requirement_code == "json_explode.array_field.list"
+        and facts is not None
+        and facts.value_type.value == "str"
+    ):
+        return (
+            "json_explode requires list field; LLM response_field is str. "
+            "Use structured-output parsing or a transform that parses JSON object/string first."
+        )
+    return None
+
+
 def validate_semantic_contracts(
     state: CompositionState,
 ) -> tuple[tuple[ValidationEntry, ...], tuple[SemanticEdgeContract, ...]]:
@@ -265,27 +286,52 @@ def validate_semantic_contracts(
                 producer_label = upstream_producer.plugin_name if upstream_producer.plugin_name is not None else "(unknown plugin)"
                 facts_kind = facts.content_kind.value if facts else "unknown"
                 facts_framing = facts.text_framing.value if facts else "unknown"
+                facts_value_type = facts.value_type.value if facts else "unknown"
                 # Generic diagnostic: name producer, consumer, field,
                 # observed producer facts, and the requirement_code.
                 # Do NOT enumerate accepted enum sets — that prints
                 # values like "markdown" / "newline_framed" which read
                 # as fix prose ("use markdown"). Fix prose belongs in
                 # PluginAssistance, addressed by requirement_code.
+                repair_hint = _targeted_conflict_repair_hint(
+                    consumer_plugin=node.plugin,
+                    producer_plugin=upstream_producer.plugin_name,
+                    requirement_code=req.requirement_code,
+                    facts=facts,
+                )
+                message = (
+                    f"Semantic contract violation: '{upstream_producer.producer_id}' "
+                    f"-> '{node.id}'. Consumer ({node.plugin}) requires field "
+                    f"'{req.field_name}' to satisfy {req.requirement_code}, "
+                    f"but producer ({producer_label}) declares "
+                    f"content_kind={facts_kind}, text_framing={facts_framing}, "
+                    f"value_type={facts_value_type}."
+                )
+                if repair_hint is not None:
+                    message = f"{message} {repair_hint}"
                 errors.append(
                     ValidationEntry(
                         f"node:{node.id}",
-                        (
-                            f"Semantic contract violation: '{upstream_producer.producer_id}' "
-                            f"-> '{node.id}'. Consumer ({node.plugin}) requires field "
-                            f"'{req.field_name}' to satisfy {req.requirement_code}, "
-                            f"but producer ({producer_label}) declares "
-                            f"content_kind={facts_kind}, text_framing={facts_framing}."
-                        ),
+                        message,
                         cast(Severity, req.severity),
                     )
                 )
             elif outcome is SemanticOutcome.UNKNOWN and req.unknown_policy is UnknownSemanticPolicy.FAIL:
                 producer_label = upstream_producer.plugin_name if upstream_producer.plugin_name is not None else "(unknown plugin)"
+                if facts is None:
+                    semantic_detail = (
+                        "declares no semantic facts for that field. "
+                        "Producers semantically feeding this consumer must "
+                        "declare output_semantics()."
+                    )
+                else:
+                    semantic_detail = (
+                        "does not declare all semantic dimensions required "
+                        "for that field. Declared facts: "
+                        f"content_kind={facts.content_kind.value}, "
+                        f"text_framing={facts.text_framing.value}, "
+                        f"value_type={facts.value_type.value}."
+                    )
                 errors.append(
                     ValidationEntry(
                         f"node:{node.id}",
@@ -294,9 +340,7 @@ def validate_semantic_contracts(
                             f"requires field '{req.field_name}' "
                             f"({req.requirement_code}) but upstream producer "
                             f"'{upstream_producer.producer_id}' ({producer_label}) "
-                            f"declares no semantic facts for that field. "
-                            f"Producers semantically feeding this consumer must "
-                            f"declare output_semantics()."
+                            f"{semantic_detail}"
                         ),
                         cast(Severity, req.severity),
                     )

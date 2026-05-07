@@ -347,9 +347,10 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `field_mapper` | Rename, compute, drop fields |
 | `truncate` | Limit string field lengths |
 | `keyword_filter` | Filter rows by regex patterns |
-| `json_explode` | Expand JSON arrays to multiple rows |
+| `json_explode` | Expand list-valued fields to multiple rows |
 | `batch_stats` | Compute statistics over a batch, optionally one row per `group_by` value |
-| `batch_replicate` | Replicate rows N times |
+| `batch_replicate` | Batch deaggregation; configure as an aggregation with `output_mode: transform` |
+| `batch_distribution_profile` | Numeric-only batch distribution statistics; use `batch_top_k` for categorical counts/frequencies |
 | `web_scrape` | HTML content extraction with SSRF prevention |
 | `llm` | Unified LLM transform (azure/openrouter providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
@@ -369,7 +370,7 @@ gates:
     condition: "row['confidence'] >= 0.85"
     routes:
       "true": next_step_in   # Connection name for downstream node
-      "false": review_sink   # Route to named sink
+      "false": discard       # Virtual terminal discard; records gate_discarded
 
   - name: amount_threshold
     input: validated
@@ -394,8 +395,9 @@ gates:
 | `<connection_name>` | Forward to a downstream node that declares this as its `input` |
 | `<sink_name>` | Route directly to named sink |
 | `fork` | Split to multiple paths (requires `fork_to`) |
+| `discard` | Stop this branch without a sink; records an audited `gate_discarded` terminal outcome |
 
-All route destinations must be explicit connection names or sink names. There is no implicit "forward to next step" — every routing decision must name its destination.
+All route destinations must be explicit connection names, sink names, `fork`, or the virtual `discard` target. There is no implicit "forward to next step" — every routing decision must name its destination.
 
 ### Boolean Conditions
 
@@ -735,7 +737,7 @@ landscape:
 ```yaml
 landscape:
   backend: postgresql
-  url: postgresql://user:password@host:5432/elspeth
+  url: postgresql://user@host:5432/elspeth
 ```
 
 **Note:** Passwords in URLs are fingerprinted (not stored) when `ELSPETH_FINGERPRINT_KEY` is set.

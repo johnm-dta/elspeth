@@ -28,3 +28,28 @@ def test_best_effort_logs_exception_type_without_raw_message() -> None:
     assert fields["error_type"] == "RuntimeError"
     assert "error" not in fields
     assert sensitive_detail not in str(slog.warning.call_args)
+
+
+def test_best_effort_suppresses_logger_failures() -> None:
+    """Logger failures must not replace the ceremony failure being suppressed."""
+    with patch("elspeth.engine._best_effort._slog") as slog:
+        slog.warning.side_effect = RuntimeError("logger backend failed")
+
+        with best_effort("TokenCompleted telemetry", run_id="run-1"):
+            raise ValueError("primary ceremony failure")
+
+    slog.warning.assert_called_once()
+
+
+def test_best_effort_reserved_context_keys_cannot_mask_ceremony_failure() -> None:
+    """Caller context cannot collide with reserved structured log fields."""
+    with (
+        patch("elspeth.engine._best_effort._slog") as slog,
+        best_effort("TokenCompleted telemetry", operation="caller-operation", error_type="caller-error"),
+    ):
+        raise ValueError("primary ceremony failure")
+
+    slog.warning.assert_called_once()
+    fields = slog.warning.call_args.kwargs
+    assert fields["operation"] == "TokenCompleted telemetry"
+    assert fields["error_type"] == "ValueError"

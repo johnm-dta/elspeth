@@ -12,10 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import pytest
+
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
-from elspeth.web.composer.audit import BufferingRecorder, audit_envelope
+from elspeth.web.composer.audit import BufferingRecorder, audit_envelope, begin_dispatch, dispatch_with_audit
 
 
 def _make_invocation(seq: int) -> ComposerToolInvocation:
@@ -106,3 +109,49 @@ def test_audit_envelope_invocation_is_json_serializable() -> None:
     round_tripped = json.loads(serialized)
     assert round_tripped["_kind"] == "audit"
     assert round_tripped["invocation"]["tool_call_id"] == "tc-1"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_with_audit_records_plugin_crash_when_success_payload_extraction_fails() -> None:
+    """A bad successful result shape must not bypass the audit recorder."""
+
+    @dataclass(frozen=True, slots=True)
+    class _UpdatedState:
+        version: int
+
+    class _BadResult:
+        updated_state = _UpdatedState(version=2)
+
+        def to_dict(self) -> list[str]:
+            return ["not", "a", "mapping"]
+
+    async def _dispatch() -> _BadResult:
+        return _BadResult()
+
+    recorder = BufferingRecorder()
+    audit = begin_dispatch(
+        "tc-bad-result",
+        "set_metadata",
+        {"patch": {"name": "bad-result"}},
+        version_before=1,
+        actor="assistant",
+    )
+
+    with pytest.raises(TypeError, match=r"result.to_dict\(\) returned list"):
+        await dispatch_with_audit(
+            recorder=recorder,
+            audit=audit,
+            do_dispatch=_dispatch,
+            version_after_provider=lambda result: result.updated_state.version,
+            arg_error_payload_factory=lambda _exc: {"error": "unused"},
+        )
+
+    invocations = recorder.invocations
+    assert len(invocations) == 1
+    inv = invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_call_id == "tc-bad-result"
+    assert inv.error_class == "TypeError"
+    assert inv.error_message == "TypeError"
+    assert inv.version_before == 1
+    assert inv.version_after is None

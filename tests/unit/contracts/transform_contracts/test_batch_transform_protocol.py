@@ -31,12 +31,11 @@ Usage:
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -52,9 +51,6 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import OutputPort
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.testing import make_contract, make_pipeline_row, make_row
-
-if TYPE_CHECKING:
-    pass
 
 
 class _BatchContractInputSchema(PluginSchema):
@@ -106,6 +102,8 @@ class _BatchContractExemplarTransform(BaseTransform, BatchTransformMixin):
 
     def accept(self, row: PipelineRow, ctx: TransformContext) -> None:
         """Accept one row and process it through BatchTransformMixin."""
+        if not self._batch_connected:
+            raise RuntimeError("connect_output() must be called before accept()")
         self.accept_row(row, ctx, self._process_row)
 
     def _process_row(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
@@ -304,6 +302,10 @@ class BatchTransformContractTestBase(ABC):
         """Contract: Transform MUST have 'is_batch_aware' attribute."""
         assert isinstance(batch_transform.is_batch_aware, bool)
 
+    def test_transform_has_batch_row_mode_opt_in_flag(self, batch_transform: TransformProtocol) -> None:
+        """Contract: Transform MUST declare whether batch-aware row mode is supported."""
+        assert isinstance(batch_transform.supports_row_mode_when_batch_aware, bool)
+
     def test_transform_has_creates_tokens_flag(self, batch_transform: TransformProtocol) -> None:
         """Contract: Transform MUST have 'creates_tokens' attribute."""
         assert isinstance(batch_transform.creates_tokens, bool)
@@ -375,13 +377,11 @@ class BatchTransformContractTestBase(ABC):
         batch_transform.on_start(ctx)
 
         try:
-            with pytest.raises((RuntimeError, AttributeError, ValueError)):
+            with pytest.raises(RuntimeError, match=r"connect_output\(\).*before accept"):
                 pipeline_row = make_pipeline_row(valid_input)
                 batch_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
         finally:
-            # Cleanup attempt (may fail, that's ok)
-            with contextlib.suppress(Exception):
-                batch_transform.close()
+            batch_transform.close()
 
     def test_connect_output_cannot_be_called_twice(
         self,
@@ -392,7 +392,7 @@ class BatchTransformContractTestBase(ABC):
         batch_transform.connect_output(output_port)  # type: ignore[attr-defined]
 
         try:
-            with pytest.raises((RuntimeError, ValueError)):
+            with pytest.raises(RuntimeError, match=r"connect_output\(\).*called|already"):
                 batch_transform.connect_output(CollectingOutputPort())  # type: ignore[attr-defined]
         finally:
             batch_transform.close()

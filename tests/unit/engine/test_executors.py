@@ -406,9 +406,9 @@ class TestGateOutcome:
             GateOutcome(result=result, updated_token=_make_token(), child_tokens=(_make_token(),), sink_name="s")
 
     def test_route_requires_destination(self) -> None:
-        """ROUTE action must specify either sink_name or next_node_id."""
+        """ROUTE action must specify sink_name, next_node_id, or discard."""
         result = GateResult(row={"a": 1}, action=RoutingAction.route("label"))
-        with pytest.raises(ValueError, match="ROUTE action must have either"):
+        with pytest.raises(ValueError, match="ROUTE action must have exactly one"):
             GateOutcome(result=result, updated_token=_make_token())
 
     def test_fork_requires_child_tokens(self) -> None:
@@ -460,6 +460,30 @@ class TestTransformExecutor:
 
         transform.input_schema = StrictSchema
         token = _make_token(data={"count": "not_an_int"})
+        ctx = make_context()
+
+        with pytest.raises(PluginContractViolation, match="input validation failed"):
+            executor.execute_transform(transform, token, ctx)
+
+        transform.process.assert_not_called()
+
+    def test_input_schema_validation_rejects_coercible_wrong_runtime_type(self) -> None:
+        """Transform input validation must not coerce Tier 2 runtime row values."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        transform = _make_transform()
+
+        from elspeth.contracts import PluginSchema
+
+        class StrictInputSchema(PluginSchema):
+            count: int
+
+        transform.input_schema = StrictInputSchema
+        token = _make_token(data={"count": "42"})
+        transform.process.return_value = TransformResult.success(
+            make_row({"value": "processed"}, contract=_make_contract()),
+            success_reason={"action": "test"},
+        )
         ctx = make_context()
 
         with pytest.raises(PluginContractViolation, match="input validation failed"):
@@ -700,6 +724,35 @@ class TestTransformExecutor:
         transform.output_schema = StrictOutputSchema
         transform.process.return_value = TransformResult.success(
             make_row({"value": "out", "processed": "not-a-bool"}, contract=output_contract),
+            success_reason={"action": "test"},
+        )
+        ctx = make_context()
+
+        with pytest.raises(PluginContractViolation, match="output validation failed"):
+            executor.execute_transform(transform, token, ctx)
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args.kwargs
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["state_id"] == "state_001"
+        assert kwargs["error"].exception_type == "PluginContractViolation"
+
+    def test_output_schema_validation_rejects_coercible_wrong_runtime_type_before_completed(self) -> None:
+        """Transform output validation must reject coercible schema-wrong values before audit completion."""
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        token = _make_token()
+        transform = _make_transform()
+
+        from elspeth.contracts import PluginSchema
+
+        class StrictOutputSchema(PluginSchema):
+            count: int
+
+        output_contract = _make_output_contract()
+        transform.output_schema = StrictOutputSchema
+        transform.process.return_value = TransformResult.success(
+            make_row({"count": "42"}, contract=output_contract),
             success_reason={"action": "test"},
         )
         ctx = make_context()
@@ -1308,6 +1361,39 @@ class TestGateExecutor:
         )
 
         assert outcome.sink_name == "error_sink"
+
+    def test_config_gate_discard_route_returns_virtual_discard_without_edge(self) -> None:
+        """A gate route to 'discard' terminates without requiring a sink edge."""
+        factory = _make_factory()
+        route_map = {(NodeID("cg_1"), "false"): RouteDestination.discard()}
+        executor = GateExecutor(
+            factory.execution,
+            _make_span_factory(),
+            _make_step_resolver(),
+            edge_map={},
+            route_resolution_map=route_map,
+        )
+        config = GateSettings(
+            name="my_gate",
+            input="in_conn",
+            condition="False",
+            routes={"true": "next_conn", "false": "discard"},
+        )
+        token = _make_token(contract=_make_contract())
+        ctx = make_context()
+
+        outcome = executor.execute_config_gate(
+            config,
+            "cg_1",
+            token,
+            ctx,
+        )
+
+        assert outcome.discarded is True
+        assert outcome.sink_name is None
+        assert outcome.next_node_id is None
+        assert outcome.child_tokens == ()
+        factory.execution.record_routing_event.assert_not_called()
 
     def test_config_gate_string_result_used_as_label(self) -> None:
         """String condition result used as route label directly."""

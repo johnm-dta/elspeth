@@ -200,6 +200,20 @@ class TestRunLoader:
         with pytest.raises(AuditIntegrityError, match="completed_at"):
             loader.load(sa_row)
 
+    @pytest.mark.parametrize(
+        "status",
+        [
+            RunStatus.COMPLETED_WITH_FAILURES,
+            RunStatus.EMPTY,
+        ],
+    )
+    def test_terminal_success_status_without_completed_at_raises_audit_integrity(self, status: RunStatus) -> None:
+        """Terminal successful run statuses with NULL completed_at are Tier 1 integrity violations."""
+        sa_row = self._make_run_row(status=status.value, completed_at=None)
+        loader = RunLoader()
+        with pytest.raises(AuditIntegrityError, match=f"status='{status.value}'"):
+            loader.load(sa_row)
+
     def test_running_with_completed_at_raises_audit_integrity(self) -> None:
         """Running run with completed_at set is a Tier 1 integrity violation."""
         sa_row = self._make_run_row(status="running", completed_at=LATER)

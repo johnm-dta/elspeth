@@ -203,7 +203,7 @@ Add or update a pipeline node — transforms, gates, aggregations, or coalesces.
 | `on_error` | string | No | Error output — a sink name or `"discard"` |
 | `options` | object | No | Plugin-specific configuration |
 | `condition` | string | No | Gate expression (gates only) |
-| `routes` | object | No | Gate route mapping, e.g. `{"true": "sink_name", "false": "next_node"}` (gates only) |
+| `routes` | object | No | Gate route mapping to a sink name, downstream connection name, `"fork"`, or virtual `"discard"` target, e.g. `{"true": "sink_name", "false": "discard"}` (gates only) |
 | `fork_to` | array | No | Fork destination connection names (fork gates only) |
 | `branches` | array | No | Branch input connection names (coalesce only, min 2) |
 | `policy` | string | No | Coalesce policy: `"require_all"`, `"quorum"`, `"best_effort"`, `"first"` |

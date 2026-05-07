@@ -288,6 +288,22 @@ class TestLLMTransformOpenRouterInit:
         assert "llm_response" in transform.declared_output_fields
         assert "llm_response_model" in transform.declared_output_fields
 
+    def test_output_semantics_declares_single_query_response_field_as_string(self) -> None:
+        """Single-query raw LLM output is a string semantic value."""
+        from elspeth.contracts.plugin_semantics import ContentKind, SemanticValueType, TextFraming
+
+        transform = LLMTransform(_openrouter_config(response_field="analysis", template="{{ row.text }}"))
+
+        declaration = transform.output_semantics()
+
+        assert len(declaration.fields) == 1
+        facts = declaration.fields[0]
+        assert facts.field_name == "analysis"
+        assert facts.value_type is SemanticValueType.STR
+        assert facts.content_kind is ContentKind.UNKNOWN
+        assert facts.text_framing is TextFraming.UNKNOWN
+        assert facts.configured_by == ("response_field", "queries")
+
 
 class TestLLMTransformOpenRouterPipelining:
     """Tests for LLMTransform (OpenRouter) with row-level pipelining.

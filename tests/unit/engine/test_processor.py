@@ -1583,14 +1583,16 @@ class TestAggregationFailureMatrix:
         source_row = _make_source_row({"value": 10})
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
+        valid_buffered_token = make_token_info(row_id="row-a", token_id="token-valid", data={"value": 1})
 
-        # The triggering token is the only buffered token (count=1 trigger).
-        # Index 0 in quarantined_indices means the triggering token IS quarantined.
+        # The triggering token is the second buffered token. Index 1 in
+        # quarantined_indices means the triggering token IS quarantined while
+        # the batch still has a valid parent for emitted output.
         flush_result = TransformResult.success(
             make_row({"value": 999}, contract=_make_contract()),
             success_reason={
                 "action": "batch_processed",
-                "metadata": {"quarantined_indices": [0]},
+                "metadata": {"quarantined_indices": [1]},
             },
         )
 
@@ -1598,7 +1600,7 @@ class TestAggregationFailureMatrix:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
-            return flush_result, [captured["token"]], "batch-1"
+            return flush_result, [valid_buffered_token, captured["token"]], "batch-1"
 
         with (
             patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
@@ -1624,10 +1626,19 @@ class TestAggregationFailureMatrix:
             f"Expected triggering token RowResult with QUARANTINED outcome, got outcomes: {[r.outcome for r in results]}"
         )
 
-        # Recorder must also have recorded QUARANTINED (not CONSUMED_IN_BATCH).
-        recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
-        assert (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) in recorded_pairs
-        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs
+        # Recorder must also have recorded the triggering token as QUARANTINED,
+        # not CONSUMED_IN_BATCH. Other valid buffered tokens are still consumed.
+        triggering_token_id = captured["token"].token_id
+        recorded = [
+            (
+                call.kwargs["ref"].token_id,
+                call.kwargs["outcome"],
+                call.kwargs["path"],
+            )
+            for call in record_outcome.call_args_list
+        ]
+        assert (triggering_token_id, TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) in recorded
+        assert (triggering_token_id, TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded
 
     def test_transform_mode_triggering_token_consumed_when_not_quarantined(self) -> None:
         """Triggering token's RowResult is CONSUMED_IN_BATCH when not in quarantined_indices.
@@ -1679,6 +1690,124 @@ class TestAggregationFailureMatrix:
         # Recorder should have CONSUMED_IN_BATCH, not QUARANTINED.
         recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
         assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) in recorded_pairs
+
+    def test_transform_mode_count_flush_expands_from_non_quarantined_parent(self) -> None:
+        """Count-triggered batch output children must not use a quarantined triggering token as parent."""
+        _db, factory, processor, transform, _agg_node = self._setup_batch_processor(output_mode="transform")
+        source_row = _make_source_row({"value": 10})
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        captured: dict[str, TokenInfo] = {}
+        valid_buffered_token = make_token_info(row_id="row-a", token_id="token-valid", data={"value": 1})
+
+        flush_result = TransformResult.success(
+            make_row({"value": 999}, contract=_make_contract()),
+            success_reason={
+                "action": "batch_processed",
+                "metadata": {"quarantined_indices": [1]},
+            },
+        )
+
+        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+            captured["token"] = token
+
+        def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
+            return flush_result, [valid_buffered_token, captured["token"]], "batch-1"
+
+        with (
+            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
+            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
+            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
+            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
+            patch.object(factory.data_flow, "record_token_outcome"),
+            patch.object(processor, "_emit_transform_completed"),
+            patch.object(processor, "_emit_token_completed"),
+            patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")) as expand_token,
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=source_row,
+                transforms=[transform],
+                ctx=ctx,
+            )
+
+        assert expand_token.call_args is not None
+        assert expand_token.call_args.kwargs["parent_token"] == valid_buffered_token
+
+    def test_transform_mode_timeout_flush_expands_from_non_quarantined_parent(self) -> None:
+        """Timeout/end-of-source batch output children must not use a quarantined first buffered token as parent."""
+        _db, factory, processor, transform, agg_node = self._setup_batch_processor(output_mode="transform")
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        quarantined_token = make_token_info(row_id="row-a", token_id="token-quarantined", data={"value": 1})
+        valid_token = make_token_info(row_id="row-b", token_id="token-valid", data={"value": 2})
+
+        flush_result = TransformResult.success(
+            make_row({"value": 999}, contract=_make_contract()),
+            success_reason={
+                "action": "batch_processed",
+                "metadata": {"quarantined_indices": [0]},
+            },
+        )
+
+        with (
+            patch.object(
+                processor._aggregation_executor,
+                "execute_flush",
+                return_value=(flush_result, [quarantined_token, valid_token], "batch-1"),
+            ),
+            patch.object(factory.data_flow, "record_token_outcome"),
+            patch.object(processor, "_emit_transform_completed"),
+            patch.object(processor, "_emit_token_completed"),
+            patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")) as expand_token,
+        ):
+            processor.handle_timeout_flush(
+                node_id=agg_node,
+                transform=transform,
+                ctx=ctx,
+                trigger_type=TriggerType.TIMEOUT,
+            )
+
+        assert expand_token.call_args is not None
+        assert expand_token.call_args.kwargs["parent_token"] == valid_token
+
+    def test_transform_mode_out_of_range_quarantined_index_fails_before_expansion(self) -> None:
+        """Malformed batch quarantine metadata must fail before child tokens are created."""
+        _db, _factory, processor, transform, _agg_node = self._setup_batch_processor(output_mode="transform")
+        token = make_token_info(row_id="row-a", token_id="token-a", data={"value": 1})
+        fctx = _FlushContext(
+            node_id=NodeID("agg-1"),
+            transform=transform,
+            settings=AggregationSettings(
+                name="batch_agg",
+                plugin="agg-transform",
+                input="default",
+                on_error="discard",
+                trigger={"count": 1},
+                output_mode="transform",
+            ),
+            buffered_tokens=(token,),
+            batch_id="batch-1",
+            error_msg="Batch transform failed",
+            expand_parent_token=token,
+            triggering_token=token,
+            coalesce_node_id=None,
+            coalesce_name=None,
+        )
+        flush_result = TransformResult.success(
+            make_row({"value": 999}, contract=_make_contract()),
+            success_reason={
+                "action": "batch_processed",
+                "metadata": {"quarantined_indices": [1]},
+            },
+        )
+
+        with (
+            patch.object(processor._token_manager, "expand_token") as expand_token,
+            pytest.raises(OrchestrationInvariantError, match="quarantined_indices"),
+        ):
+            processor._route_transform_results(fctx, flush_result)
+
+        expand_token.assert_not_called()
 
 
 class TestTransformModeOutcomeOrdering:
@@ -4114,6 +4243,74 @@ class TestGateSinkRoutingNotifiesCoalesce:
 
         # notify_branch_lost should NOT have been called (no branch_name)
         coalesce.notify_branch_lost.assert_not_called()
+
+    def test_gate_discard_records_terminal_discard_outcome(self) -> None:
+        """Gate route target 'discard' records a terminal audit outcome without a sink."""
+        _db, factory = _make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        source_node = NodeID("source-0")
+        gate_node = NodeID("gate-1")
+
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="drop-gate",
+            node_type=NodeType.GATE,
+            plugin_version="1.0",
+            config={},
+            node_id="gate-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        gate_config = GateSettings(
+            name="drop-gate",
+            input="default",
+            condition="False",
+            routes={"true": "main", "false": "discard"},
+        )
+
+        processor = _make_processor(
+            factory,
+            source_on_success="default",
+            node_step_map={source_node: 0, gate_node: 1},
+            node_to_next={source_node: gate_node, gate_node: None},
+            first_transform_node_id=gate_node,
+            node_to_plugin={gate_node: gate_config},
+            coalesce_executor=Mock(),
+        )
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="tok-1",
+            row_data=make_row({"value": 42}),
+            branch_name=None,
+        )
+        discard_outcome = GateOutcome(
+            result=GateResult(
+                row={"value": 42},
+                action=RoutingAction.route("false"),
+                contract=_make_contract(),
+            ),
+            updated_token=token,
+            discarded=True,
+        )
+
+        with (
+            patch.object(processor._gate_executor, "execute_config_gate", return_value=discard_outcome),
+            patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
+        ):
+            result, _child_items = processor._process_single_token(
+                token=token,
+                ctx=ctx,
+                current_node_id=gate_node,
+            )
+
+        assert result is not None
+        assert not isinstance(result, tuple)
+        _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED)
+        assert result.sink_name is None
+        record_outcome.assert_called_once()
+        assert record_outcome.call_args.kwargs["outcome"] == TerminalOutcome.SUCCESS
+        assert record_outcome.call_args.kwargs["path"] == TerminalPath.GATE_DISCARDED
 
 
 # =============================================================================

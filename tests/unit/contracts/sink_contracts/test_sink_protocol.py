@@ -36,6 +36,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -126,6 +127,32 @@ def _write_rows(
     assert isinstance(result.diversions, tuple), "SinkWriteResult.diversions must be an immutable tuple"
     assert all(isinstance(diversion, RowDiversion) for diversion in result.diversions)
     return result
+
+
+def _sink_boundary_snapshot(sink: SinkProtocol) -> dict[str, Any]:
+    return {
+        "config": dict(sink.config),
+        "declared_required_fields": sink.declared_required_fields,
+        "input_schema": sink.input_schema,
+        "name": sink.name,
+        "needs_resume_field_resolution": sink.needs_resume_field_resolution,
+        "node_id": sink.node_id,
+        "plugin_version": sink.plugin_version,
+        "source_file_hash": sink.source_file_hash,
+        "supports_resume": sink.supports_resume,
+        "write_failure_route": sink._on_write_failure,
+    }
+
+
+def _local_file_artifact_snapshot(result: SinkWriteResult) -> tuple[int, str] | None:
+    artifact = result.artifact
+    if artifact.artifact_type != "file" or artifact.path_or_uri is None:
+        return None
+    path = Path(artifact.path_or_uri)
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    return len(data), hashlib.sha256(data).hexdigest()
 
 
 class SinkContractTestBase(ABC):
@@ -362,12 +389,18 @@ class SinkContractTestBase(ABC):
         sample_rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> None:
-        """Contract: flush() MUST be safe to call multiple times."""
-        _write_rows(sink, sample_rows, ctx)
+        """Contract: repeated flush() preserves sink metadata and written artifacts."""
+        result = _write_rows(sink, sample_rows, ctx)
+        boundary_snapshot = _sink_boundary_snapshot(sink)
+        artifact_snapshot = _local_file_artifact_snapshot(result)
 
-        sink.flush()
-        sink.flush()
-        sink.flush()
+        assert sink.flush() is None
+        assert sink.flush() is None
+        assert sink.flush() is None
+
+        assert _sink_boundary_snapshot(sink) == boundary_snapshot
+        if artifact_snapshot is not None:
+            assert _local_file_artifact_snapshot(result) == artifact_snapshot
 
     def test_close_is_idempotent(
         self,
@@ -375,21 +408,31 @@ class SinkContractTestBase(ABC):
         sample_rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> None:
-        """Contract: close() MUST be safe to call multiple times."""
-        _write_rows(sink, sample_rows, ctx)
-        sink.flush()
+        """Contract: repeated close() preserves sink metadata and written artifacts."""
+        result = _write_rows(sink, sample_rows, ctx)
+        assert sink.flush() is None
+        boundary_snapshot = _sink_boundary_snapshot(sink)
+        artifact_snapshot = _local_file_artifact_snapshot(result)
 
-        sink.close()
-        sink.close()
-        sink.close()
+        assert sink.close() is None
+        assert sink.close() is None
+        assert sink.close() is None
+
+        assert _sink_boundary_snapshot(sink) == boundary_snapshot
+        if artifact_snapshot is not None:
+            assert _local_file_artifact_snapshot(result) == artifact_snapshot
 
     def test_on_start_does_not_raise(
         self,
         sink: SinkProtocol,
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_start() lifecycle hook MUST not raise."""
-        sink.on_start(ctx)
+        """Contract: on_start() lifecycle hook preserves sink contract metadata."""
+        boundary_snapshot = _sink_boundary_snapshot(sink)
+
+        assert sink.on_start(ctx) is None
+
+        assert _sink_boundary_snapshot(sink) == boundary_snapshot
 
     def test_on_complete_does_not_raise(
         self,
@@ -397,9 +440,16 @@ class SinkContractTestBase(ABC):
         sample_rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_complete() lifecycle hook MUST not raise."""
-        _write_rows(sink, sample_rows, ctx)
-        sink.on_complete(ctx)
+        """Contract: on_complete() preserves sink metadata and written artifacts."""
+        result = _write_rows(sink, sample_rows, ctx)
+        boundary_snapshot = _sink_boundary_snapshot(sink)
+        artifact_snapshot = _local_file_artifact_snapshot(result)
+
+        assert sink.on_complete(ctx) is None
+
+        assert _sink_boundary_snapshot(sink) == boundary_snapshot
+        if artifact_snapshot is not None:
+            assert _local_file_artifact_snapshot(result) == artifact_snapshot
 
 
 class SinkDeterminismContractTestBase(SinkContractTestBase):

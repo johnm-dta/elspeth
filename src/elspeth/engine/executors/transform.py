@@ -344,7 +344,7 @@ class TransformExecutor:
             # on the declaration-contract audit surface instead of being diluted
             # into ordinary schema validation failures.
             try:
-                transform.input_schema.model_validate(input_dict)
+                transform.input_schema.model_validate(input_dict, strict=True)
             except ValidationError as e:
                 raise PluginContractViolation(
                     f"Transform '{transform.name}' input validation failed: {e}. This indicates an upstream transform/source schema bug."
@@ -503,7 +503,7 @@ class TransformExecutor:
 
                 for idx, emitted_row in enumerate(emitted_rows):
                     try:
-                        transform.output_schema.model_validate(emitted_row.to_dict())
+                        transform.output_schema.model_validate(emitted_row.to_dict(), strict=True)
                     except ValidationError as e:
                         raise PluginContractViolation(
                             f"Transform '{transform.name}' output validation failed for emitted row {idx}: {e}. "

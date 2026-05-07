@@ -22,7 +22,7 @@ and has no on_error configuration.
 from __future__ import annotations
 
 import copy
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field, field_validator, model_validator
 
@@ -33,6 +33,37 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig, PluginConfigError
 from elspeth.plugins.infrastructure.results import TransformResult
+
+if TYPE_CHECKING:
+    from elspeth.contracts.plugin_assistance import PluginAssistance
+    from elspeth.contracts.plugin_semantics import InputSemanticRequirements
+
+
+def _build_json_explode_input_requirements(
+    *,
+    array_field: str,
+) -> InputSemanticRequirements:
+    from elspeth.contracts.plugin_semantics import (
+        FieldSemanticRequirement,
+        InputSemanticRequirements,
+        SemanticValueType,
+        UnknownSemanticPolicy,
+    )
+
+    return InputSemanticRequirements(
+        fields=(
+            FieldSemanticRequirement(
+                field_name=array_field,
+                accepted_content_kinds=frozenset(),
+                accepted_text_framings=frozenset(),
+                requirement_code="json_explode.array_field.list",
+                accepted_value_types=frozenset({SemanticValueType.LIST}),
+                severity="high",
+                unknown_policy=UnknownSemanticPolicy.FAIL,
+                configured_by=("array_field",),
+            ),
+        ),
+    )
 
 
 class JSONExplodeConfig(DataPluginConfig):
@@ -144,7 +175,7 @@ class JSONExplode(BaseTransform):
 
     name = "json_explode"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f2fde1d176101376"
+    source_file_hash: str | None = "sha256:fba11b274580fc9a"
     config_model = JSONExplodeConfig
     creates_tokens = True  # CRITICAL: enables new token creation for deaggregation
 
@@ -192,6 +223,34 @@ class JSONExplode(BaseTransform):
             adds_fields=True,
         )
         self._output_schema_config = self._build_json_explode_output_schema_config(cfg)
+
+    def input_semantic_requirements(self) -> InputSemanticRequirements:
+        return _build_json_explode_input_requirements(array_field=self._array_field)
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        from elspeth.contracts.plugin_assistance import PluginAssistance
+
+        if issue_code != "json_explode.array_field.list":
+            return None
+        return PluginAssistance(
+            plugin_name="json_explode",
+            issue_code="json_explode.array_field.list",
+            summary=(
+                "json_explode expands a field that is already a real list-shaped "
+                "pipeline value. A string is not a valid array_field, even when it "
+                "contains JSON-looking text."
+            ),
+            suggested_fixes=(
+                "Point array_field at a source or transform output that declares value_type=list.",
+                "If the upstream value is JSON text, insert an explicit parser/validator transform that emits a real list before json_explode.",
+                "For single-query llm output, do not wire response_field directly to json_explode; the response_field is a string.",
+            ),
+        )
 
     def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
         """Exercise the real array-consumption path for the backward invariant."""

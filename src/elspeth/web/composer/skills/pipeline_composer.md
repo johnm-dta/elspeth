@@ -52,6 +52,7 @@ If any tool you intend to call still shows a placeholder signature in a deferred
 - "I tried X but it failed, here's the error" is **not a valid stopping point.** The user wanted a working pipeline; an error message is not a working pipeline. Read the error, decide the next mutation, and call the tool. Only stop after at least 3 distinct corrective mutations (across one or more turns) have failed to converge — and even then, your final reply must name what you tried, not just what broke.
 - "Validation reports a missing field" is **a tool-call trigger, not a reply trigger.** Either patch the producing node's schema or relax the consumer's `required_input_fields`, then re-preview. Do not surrender the turn at the first red preview.
 - "I planned a pipeline with X → Y → Z" without having actually called `set_pipeline` / `upsert_node` / `set_source` is **never** a valid reply. Plans are not pipelines. The user asked for a workflow; build it before describing it.
+- Do not say you set up, tried, attempted, or prepared a build unless at least one mutation tool returned `success: true` in this turn. If `composer_progress.state_exists` is `false` or the state is empty, call the source/blob setup tool (`set_pipeline` with `source.blob_id` or `source.inline_blob`, `set_source_from_blob`, or `set_source` plus `set_output`) or ask for the specific missing file/configuration.
 - The user authorised every tool combination this skill teaches when they made the request. You do not need permission to call `create_blob`, `set_source_from_blob`, `web_scrape`, `line_explode`, `patch_node_options`, `preview_pipeline`, etc. **Asking permission is a stalling pattern; it is forbidden.** See the anti-permission rule under "Tool Failure Recovery" for the explicit phrase list.
 
 This rule overrides any default LLM tendency to "summarise progress so far" before completion. Summaries belong **after** a green preview, not before.
@@ -72,6 +73,8 @@ A connection has **two endpoints**, and the same string value must appear on bot
 | Consumer (sink) | `outputs[].sink_name: "<name>"` | `"sink_name": "lines_out"` |
 
 `node.input` is **NOT** the upstream node's `id`. `node.input` is the connection-name string that some upstream `on_success` (or `routes` value, or `on_error`) **publishes**. The runtime resolves wiring by matching strings, not by graph topology in `edges`.
+
+Gate route target `"discard"` is a virtual terminal destination, not a published connection. Use it only when that branch should stop with an audited `gate_discarded` outcome; do not create a node or sink named `discard`.
 
 The `edges` array in `set_pipeline` carries metadata (id, label) about each connection but does **not** define the wiring. Wiring is exclusively via the `on_success` / `input` / `sink_name` strings above. If you write `edges: [{from_node: "source", to_node: "fetch"}]` but no `on_success` produces a connection named `"fetch"` and no `input: "fetch"` exists on a real node, the wiring is broken regardless of what `edges` says.
 
@@ -206,6 +209,57 @@ Fix — change one to match the other. Renaming the sink is simpler:
 }
 ```
 
+**Example C — two nodes consume the same connection instead of using a fork gate.**
+
+Broken:
+
+```json
+{
+  "source": {"plugin": "csv", "on_success": "classified_rows", "options": {"...": "..."}},
+  "nodes": [
+    {"id": "fraud_filter", "node_type": "transform", "plugin": "value_transform", "input": "classified_rows", "on_success": "fraud_rows", "on_error": "discard", "options": {"...": "..."}},
+    {"id": "regular_filter", "node_type": "transform", "plugin": "value_transform", "input": "classified_rows", "on_success": "regular_rows", "on_error": "discard", "options": {"...": "..."}}
+  ],
+  "outputs": [
+    {"sink_name": "fraud_rows", "plugin": "csv", "options": {"...": "..."}},
+    {"sink_name": "regular_rows", "plugin": "csv", "options": {"...": "..."}}
+  ]
+}
+```
+
+`preview_pipeline` returns:
+
+```
+Duplicate consumer for connection 'classified_rows': node 'fraud_filter' (fraud_filter) and node 'regular_filter' (regular_filter). Use a gate for fan-out.
+```
+
+Why: one connection name can feed one processing node. For fan-out, insert a `gate` node that consumes the shared connection, publishes one `fork_to` branch per downstream consumer, then change each consumer's `input` to its branch.
+
+Fix — insert a fork gate and patch the consumers:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "fork_classified_rows",
+      "node_type": "gate",
+      "plugin": null,
+      "input": "classified_rows",
+      "on_success": null,
+      "on_error": null,
+      "condition": "True",
+      "routes": {},
+      "fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"],
+      "options": {}
+    },
+    {"id": "fraud_filter", "node_type": "transform", "plugin": "value_transform", "input": "classified_rows_to_fraud_filter", "on_success": "fraud_rows", "on_error": "discard", "options": {"...": "..."}},
+    {"id": "regular_filter", "node_type": "transform", "plugin": "value_transform", "input": "classified_rows_to_regular_filter", "on_success": "regular_rows", "on_error": "discard", "options": {"...": "..."}}
+  ]
+}
+```
+
+If the branches must rejoin before a shared downstream step, route each branch to its branch-specific transform, then add a `coalesce` node with `branches` set to the branch output connection names. Do not point both consumers at the original shared connection.
+
 #### Boolean routes — quote them
 
 Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit them quoted:
@@ -215,6 +269,16 @@ Boolean route keys are **strings**, not booleans, in both YAML and JSON — emit
 ```
 
 In YAML: `routes: {"true": high, "false": normal}`. **Never** write `routes: {true: high}` — YAML parses the unquoted `true` as a boolean and the route lookup fails at runtime.
+
+#### Gate discard routes
+
+A gate route value may be `"discard"`:
+
+```json
+{"routes": {"true": "matched_rows", "false": "discard"}}
+```
+
+That branch is terminal and audited as `gate_discarded`; it does not require a sink named `discard`, does not publish a connection, and cannot be consumed downstream.
 
 ---
 
@@ -277,7 +341,7 @@ When `preview_pipeline` returns an unsatisfied `edge_contract`, **name the conce
 
 When the user describes a complete pipeline, build it atomically with `set_pipeline` rather than calling `set_source` + `upsert_node` + `set_output` sequentially. This is faster and avoids intermediate validation errors.
 
-For complete new pipelines with inline/literal source data from the user's message, include `source.inline_blob` in the same `set_pipeline` call. This replaces the serial `create_blob + set_source_from_blob` setup while preserving the same blob-backed source semantics and audit trail inside one atomic mutation.
+For complete new pipelines with an already uploaded file, include `source.blob_id` in the same `set_pipeline` call. This binds the exact ready session blob and lets the tool resolve `path`/`blob_ref` authoritatively. For complete new pipelines with inline/literal source data from the user's message, include `source.inline_blob` instead. `inline_blob` is only for data the user actually provided in the conversation; do not create a header-only inline CSV when a matching uploaded CSV is ready in the session.
 
 **When using `set_pipeline` with external sinks (database, azure_blob, dataverse, chroma_sink), include the companion failsink in the same call.** See "Automatic Failsink Creation" below.
 
@@ -786,10 +850,10 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 | `field_mapper` | Rename fields | no | no | no | Renames specified fields |
 | `truncate` | Truncate text fields to max length | no | no | no | Truncates specified fields in-place |
 | `keyword_filter` | Filter rows by keyword presence | no | no | no | (none — routes matching/non-matching rows) |
-| `json_explode` | Expand nested JSON field into row fields | no | no | no | Adds fields from nested JSON object |
+| `json_explode` | Expand a list-valued field into one row per item | no | no | no | Adds item and optional item_index fields |
 | `line_explode` | Split a string field into one row per line | **yes** | no | no | Emits one row per line with `line`/`line_index` fields |
 | `batch_stats` | Compute statistics over a batch of rows | **yes** | no | no | Emits one aggregate row per batch, or per `group_by` value |
-| `batch_replicate` | Replicate rows for fan-out | no | no | no | Emits multiple copies per input row |
+| `batch_replicate` | Replicate rows for fan-out | **yes** | no | no | Batch deaggregation; use as `node_type: "aggregation"` with `output_mode: "transform"` |
 | `batch_distribution_profile` | Profile numeric distributions over a batch | **yes** | no | no | Emits distribution profile rows, optionally per `group_by` value |
 | `batch_drift_compare` | Compare baseline/current distributions | **yes** | no | no | Emits distribution-distance comparison rows |
 | `batch_paired_preference` | Compare paired variant scores | **yes** | no | no | Emits paired preference comparison rows |
@@ -888,16 +952,16 @@ Gotchas:
 
 **llm** — Send row data to an LLM using a Jinja2 template.
 Gotchas:
-- The response is always a **string** in `llm_response` (or custom `response_field`), even if the model returns JSON. Use `json_explode` after this step to parse structured output.
+- The response is always a **string** in `llm_response` (or custom `response_field`), even if the model returns JSON. Do not wire that string directly to `json_explode.array_field`; `json_explode` requires a real list-valued field. Use a structured-output/parser transform that emits a list first, or call `get_plugin_assistance(plugin_name="json_explode", issue_code="json_explode.array_field.list")` when validation flags the mismatch.
 - Templates use `{{ row['field_name'] }}` syntax. List all referenced fields in `required_input_fields`.
 
 **keyword_filter** — Route rows based on keyword presence in a field.
 Gotchas:
 - Matching is **case-insensitive by default**. Set `case_sensitive: true` if you need exact case matching.
 
-**json_explode** — Expand a nested JSON string field into top-level row fields.
+**json_explode** — Expand a list-valued field into one row per item.
 Gotchas:
-- The `field` must contain a valid JSON string. Typically used after an `llm` step — make sure the LLM template instructs the model to return JSON.
+- The `array_field` must be a real list-valued pipeline field, not a JSON-looking string. Single-query LLM output is a string, so it needs an explicit parser/validator transform before `json_explode`.
 
 **line_explode** — Split one string field into multiple rows, one per line.
 Gotchas:
@@ -909,6 +973,8 @@ Gotchas:
 Gotchas:
 - These transforms are batch-aware. Configure a `trigger` block when you need count/timeout/condition flushing; otherwise they flush at end of source.
 - Most of them are shape-changing: downstream sinks receive the emitted summary/comparison rows, not the original input rows. Use `get_plugin_schema` for the exact required option fields before authoring one.
+- `batch_distribution_profile.value_field` is numeric-only. For categorical "distribution", barrier counts, theme frequency, or category counts, use `batch_top_k` with `field` set to the categorical column and `group_by` set to the partition columns.
+- `batch_replicate` is batch-aware deaggregation. Configure it as an aggregation with `output_mode: "transform"`; do not place it under ordinary `transforms`.
 
 **field_mapper** — Rename fields in each row.
 
@@ -954,7 +1020,7 @@ Gotchas:
 
 ### Blob wiring
 
-When a user uploads a file, use `set_source_from_blob` — it infers the plugin from MIME type:
+When a user uploads a file, bind that exact blob. For complete new pipelines, prefer `set_pipeline` with `source.blob_id`; for incremental source-only edits, use `set_source_from_blob`. Both paths infer the plugin from MIME type when needed and set the source path/blob reference authoritatively:
 - `text/csv` → `csv` source
 - `application/json` → `json` source
 - `text/plain` → `text` source
@@ -970,7 +1036,20 @@ For non-standard MIME types, pass the `plugin` parameter explicitly.
 | `json` | `schema` | `options: {schema: {mode: "observed"}}` |
 | `text` | `column` (output field name), `schema` | `options: {column: "line", schema: {mode: "fixed", fields: ["line: str"]}}` |
 
-**Example — text file upload:**
+**Example — complete CSV upload pipeline source in `set_pipeline`:**
+```json
+"source": {
+  "plugin": "csv",
+  "blob_id": "...",
+  "on_success": "rows",
+  "options": {
+    "schema": {"mode": "observed"}
+  },
+  "on_validation_failure": "quarantine"
+}
+```
+
+**Example — incremental text file source edit:**
 ```json
 set_source_from_blob({
   "blob_id": "...",
@@ -1009,7 +1088,9 @@ See "Schema Configuration" above for full mode reference, field format, and the 
 
 When the user provides data directly in conversation (a URL, a JSON snippet, a few CSV rows), use a blob-backed source instead of asking for a file upload.
 
-For a complete new pipeline, prefer one `set_pipeline` call with `source.inline_blob`:
+For a complete new pipeline from an already uploaded file, prefer one `set_pipeline` call with `source.blob_id`. Use the blob ID from the upload result or call `list_blobs` first if you do not have it. This is the default path for file-backed user requests.
+
+For a complete new pipeline from literal data in the user's message, prefer one `set_pipeline` call with `source.inline_blob`:
 
 1. Put the literal content under `source.inline_blob` with `filename`, `mime_type`, `content`, and optional `description`.
 2. Put the source plugin config under `source.options` exactly as you would for `set_source_from_blob` (for text sources, include `column` and `schema`).
@@ -1073,7 +1154,7 @@ Never ask the user to upload a file when the data is already in the conversation
 **Required inputs:** URL, what to extract (extraction prompt), output fields
 **Ask exactly:** "What URL should I fetch?", "What information should I extract?", "What fields/columns do you want in the output?"
 **Safe defaults:** schema mode `fixed` with `url: str`, `web_scrape` format `markdown` for line-oriented/page-structure tasks, LLM temperature `0.0`, json sink with indent 2
-**Caveats:** LLM returns a string — if you need structured JSON fields downstream, the template must instruct the model to return JSON and you may need `json_explode` after the LLM step.
+**Caveats:** LLM returns a string — if you need structured fields downstream, the template can ask for JSON text, but a parser/validator transform must turn that string into typed fields before list-only plugins such as `json_explode` consume it.
 
 ### 1b. URL → Download → Split into Lines → JSON/CSV
 
@@ -1139,7 +1220,7 @@ Pick any string for `<conn_a>` / `<conn_b>` / `<conn_c>`. The names don't have t
 **Required inputs:** Input file, fields to extract
 **Ask exactly:** "What file should I read?", "What fields do you want to extract from each row?"
 **Safe defaults:** LLM temperature `0.0`, response_field named after the extraction
-**Caveats:** If extracting multiple fields, instruct the LLM to return JSON. Follow with `json_explode` to promote nested fields to row-level columns.
+**Caveats:** If extracting multiple fields, instruct the LLM to return JSON text and add an explicit parser/validator transform before downstream typed consumers. Do not wire the LLM `response_field` string directly to `json_explode.array_field`.
 
 ### 6. Content Moderation Pipeline
 
@@ -1278,13 +1359,13 @@ Always check `list_secret_refs` to see what secrets the user has configured befo
 | `field_mapper` | Row with renamed fields | In-place rename | Row with new field names |
 | `truncate` | Row with truncated text fields | In-place modification | Row with shortened string values |
 | `keyword_filter` | Same row (routing decision only) | Row passes through if matched | Identical to input row |
-| `json_explode` | Row with nested JSON expanded to top-level fields | Nested fields promoted into row | Original fields + exploded fields |
+| `json_explode` | One row per item from a list-valued field | List item promoted into row | Original row plus item/index fields |
 | `line_explode` | One row per line from a string field | Source text field replaced by line fields | Original row minus source field + `line`/`line_index` |
 | `web_scrape` | Row + `content` field (scraped text) | New field added to row | Original fields + `content` string |
 | `llm` | Row + response field (default: `llm_response`) | New field added to row | Original fields + `llm_response` string |
 | `llm` (multi-query) | Row + one field per query | New fields added to row | Original fields + named response fields |
 | `batch_stats` | Aggregate row per batch, or per `group_by` value — NOT input rows | **Replaces** input rows | Aggregate statistics plus `group_by` field when configured |
-| `batch_replicate` | Multiple copies of each input row | Emits N rows per 1 input | Copies of original row |
+| `batch_replicate` | Multiple copies of each input row | Batch deaggregation; must run as aggregation `output_mode: "transform"` | Copies of original row |
 | Batch analytics transforms (`batch_distribution_profile`, `batch_drift_compare`, `batch_paired_preference`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_classifier_metrics`, `batch_threshold_summary`, `batch_experiment_compare`, `batch_effect_size`) | Analytic summary/comparison rows per batch, group, threshold, label, or variant | Usually **replaces** input rows | Declared summary fields for the selected analytic transform |
 | `azure_content_safety` | Row + safety category score fields | New fields added to row | Original fields + safety scores |
 | `azure_prompt_shield` | Row + shield result fields | New fields added to row | Original fields + shield results |
@@ -1296,6 +1377,6 @@ Always check `list_secret_refs` to see what secrets the user has configured befo
 
 - **Most transforms ADD fields** — the original row fields are preserved, and the transform appends its output field(s). The sink receives all accumulated fields.
 - **Batch summary/comparison transforms are exceptions** — `batch_stats` and the batch analytics transforms consume input rows and emit new aggregate/profile/comparison rows. Input row fields are NOT preserved unless the selected plugin explicitly declares them in its output.
-- **LLM response is always a string** — even if the model returns JSON, the `llm_response` field contains a string. Use `json_explode` after the LLM step to parse it into structured fields.
+- **LLM response is always a string** — even if the model returns JSON, the `llm_response` field contains a string. Do not wire it directly to `json_explode.array_field`; insert a parser/validator transform that emits a real list or object first.
 - **Gates don't modify data** — they route the unchanged row to different outputs based on the condition result.
 - **Sinks serialize the full row** — all fields accumulated through the pipeline appear in the output. Use `field_mapper` before the sink to remove unwanted fields.

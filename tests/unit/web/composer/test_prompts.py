@@ -223,6 +223,18 @@ class TestBuildContextString:
         assert "warnings" in validation
         assert "suggestions" in validation
 
+    def test_context_includes_prompt_visible_state_exists_marker(self) -> None:
+        """The model sees empty state as an explicit hard blocker marker."""
+        catalog = _stub_catalog()
+
+        empty_context = build_context_string(_empty_state(), catalog)
+        sourced_context = build_context_string(_blob_source_state(), catalog)
+        empty_parsed = json.loads(empty_context.split("\n", 1)[1])
+        sourced_parsed = json.loads(sourced_context.split("\n", 1)[1])
+
+        assert empty_parsed["composer_progress"]["state_exists"] is False
+        assert sourced_parsed["composer_progress"]["state_exists"] is True
+
 
 class TestBuildSystemPrompt:
     """System prompt composition with optional deployment layer."""
@@ -232,10 +244,13 @@ class TestBuildSystemPrompt:
         assert "Composer MCP tools are deferred" not in SYSTEM_PROMPT
         assert "Do not call discovery tools just to load function signatures" in SYSTEM_PROMPT
 
-    def test_web_prompt_documents_atomic_inline_blob_set_pipeline(self) -> None:
-        """Prompt should steer complete inline-data builds to one atomic tool."""
+    def test_web_prompt_documents_atomic_blob_set_pipeline(self) -> None:
+        """Prompt should steer complete file-backed builds to one atomic tool."""
+        assert "source.blob_id" in SYSTEM_PROMPT
         assert "source.inline_blob" in SYSTEM_PROMPT
-        assert "create_blob + set_source_from_blob" in SYSTEM_PROMPT
+        assert "header-only inline CSV" in SYSTEM_PROMPT
+        assert "success: true" in SYSTEM_PROMPT
+        assert "state is empty" in SYSTEM_PROMPT
 
     def test_no_data_dir_returns_core_skill_only(self) -> None:
         """Without data_dir, returns the core skill unchanged."""

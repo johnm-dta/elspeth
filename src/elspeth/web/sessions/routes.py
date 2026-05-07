@@ -619,9 +619,21 @@ def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
     return True
 
 
+def _is_composer_llm_audit_tool_message(message: ChatMessageRecord) -> bool:
+    """Return true only for persisted composer LLM-call audit sidecars."""
+    if message.role != "tool" or message.tool_calls is None:
+        return False
+    return any("_kind" in tool_call and tool_call["_kind"] == "llm_call_audit" for tool_call in message.tool_calls)
+
+
 def _composer_conversation_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
     """Return persisted messages that are part of the LLM conversation."""
     return [message for message in messages if not _is_composer_audit_tool_message(message)]
+
+
+def _composer_conversation_or_llm_audit_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
+    """Return user-visible conversation plus safe per-LLM-call audit sidecars."""
+    return [message for message in messages if not _is_composer_audit_tool_message(message) or _is_composer_llm_audit_tool_message(message)]
 
 
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
@@ -797,6 +809,7 @@ async def _persist_llm_calls(
                 "model_requested": call.model_requested,
                 "model_returned": call.model_returned,
                 "total_tokens": call.total_tokens,
+                "provider_cost": call.provider_cost,
             }
         )
         try:
@@ -2558,15 +2571,20 @@ def create_session_router() -> APIRouter:
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
+        include_llm_audit: bool = Query(False),
     ) -> list[ChatMessageResponse]:
         """Get conversation history for a session."""
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
         # Fetch before slicing so hidden audit rows cannot skew normal-chat
         # pagination. The service remains the durable audit store; this route
-        # is the user-facing conversation channel.
+        # is the user-facing conversation channel. The eval harness can opt in
+        # to LLM-call sidecars, which contain model/usage/cost metadata but not
+        # raw prompts, tool arguments, or tool results.
         messages = await service.get_messages(session.id, limit=None)
-        conversation_messages = _composer_conversation_messages(messages)
+        conversation_messages = (
+            _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
+        )
         paged_messages = conversation_messages[offset : offset + limit]
         return [_message_response(m) for m in paged_messages]
 
@@ -2793,7 +2811,10 @@ def create_session_router() -> APIRouter:
                 detail = f"{detail} First error: {runtime_validation.errors[0].message}"
             raise HTTPException(status_code=409, detail=detail)
         yaml_str = generate_yaml(state)
-        return {"yaml": yaml_str}
+        response = {"yaml": yaml_str}
+        if state.source is not None and "blob_ref" in state.source.options:
+            response["source_blob_id"] = str(state.source.options["blob_ref"])
+        return response
 
     @router.post(
         "/{session_id}/fork",

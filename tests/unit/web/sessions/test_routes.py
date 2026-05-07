@@ -1815,6 +1815,55 @@ class TestMessageRoutes:
         assert messages_resp.status_code == 200
         assert [message["role"] for message in messages_resp.json()] == ["user", "assistant"]
 
+    def test_get_messages_can_include_llm_audit_sidecars_without_tool_audit_rows(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(
+                service.add_message(
+                    session_id,
+                    "tool",
+                    '{"success": true}',
+                    tool_calls=_audit_tool_calls("call-tool"),
+                )
+            )
+            loop.run_until_complete(
+                service.add_message(
+                    session_id,
+                    "tool",
+                    '{"_kind": "llm_call_audit", "total_tokens": 21, "provider_cost": 0.0037}',
+                    tool_calls=_llm_call_audit_tool_calls(
+                        _llm_call(
+                            provider_request_id="chatcmpl-cost",
+                            provider_cost=0.0037,
+                            provider_cost_source="response_usage.cost",
+                        )
+                    ),
+                )
+            )
+            loop.run_until_complete(service.add_message(session_id, "assistant", "Done."))
+        finally:
+            loop.close()
+
+        hidden_resp = client.get(f"/api/sessions/{session_id}/messages")
+        assert hidden_resp.status_code == 200
+        assert [message["role"] for message in hidden_resp.json()] == ["user", "assistant"]
+
+        audit_resp = client.get(f"/api/sessions/{session_id}/messages?include_llm_audit=true")
+        assert audit_resp.status_code == 200
+        messages = audit_resp.json()
+        assert [message["role"] for message in messages] == ["user", "tool", "assistant"]
+        tool_calls = messages[1]["tool_calls"]
+        assert tool_calls[0]["_kind"] == "llm_call_audit"
+        assert tool_calls[0]["call"]["provider_cost"] == 0.0037
+        assert all("call-tool" not in str(message.get("tool_calls")) for message in messages)
+
     def test_send_message_llm_call_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
         app, service = _make_app(tmp_path)
         composer = AsyncMock()
@@ -2852,6 +2901,51 @@ class TestYamlEndpoint:
         body = resp.json()
         assert "yaml" in body
         assert "csv" in body["yaml"]
+
+    @pytest.mark.asyncio
+    async def test_yaml_response_preserves_source_blob_identity_outside_engine_yaml(self, tmp_path) -> None:
+        """Final YAML artifacts must retain blob custody even though YAML strips blob_ref."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        blob_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
+
+        session = await service.create_session("alice", "Pipeline", "local")
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "on_success": "out",
+                    "options": {
+                        "path": "/data/blobs/session/contact_form_submissions.csv",
+                        "blob_ref": blob_id,
+                        "schema": {"mode": "observed"},
+                    },
+                    "on_validation_failure": "quarantine",
+                },
+                outputs=[
+                    {
+                        "name": "out",
+                        "plugin": "csv",
+                        "options": {"path": "outputs/out.csv", "schema": {"mode": "observed"}},
+                        "on_write_failure": "discard",
+                    }
+                ],
+                metadata_={"name": "Blob-backed source", "description": ""},
+                is_valid=True,
+            ),
+        )
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["source_blob_id"] == blob_id
+        assert blob_id not in body["yaml"]
 
     @pytest.mark.asyncio
     async def test_yaml_allows_connection_valid_state_without_ui_edges(self, tmp_path) -> None:

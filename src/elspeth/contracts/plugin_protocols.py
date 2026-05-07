@@ -269,6 +269,10 @@ class TransformProtocol(Protocol):
     # When True, transform must implement BatchTransformProtocol instead
     is_batch_aware: bool
 
+    # Batch-aware row-mode opt-in. Batch-aware plugins default to aggregation
+    # placement unless they explicitly set this True.
+    supports_row_mode_when_batch_aware: bool
+
     # Token creation flag for deaggregation
     # When True, process() may return TransformResult.success_multi(rows)
     # and new tokens will be created for each output row.
@@ -450,6 +454,10 @@ class BatchTransformProtocol(Protocol):
 
     # Batch support flag (must be True for BatchTransformProtocol)
     is_batch_aware: bool
+
+    # Batch-aware row-mode opt-in. Batch-aware plugins default to aggregation
+    # placement unless they explicitly set this True.
+    supports_row_mode_when_batch_aware: bool
 
     # Token creation flag for deaggregation
     # When True, process() may return TransformResult.success_multi(rows)

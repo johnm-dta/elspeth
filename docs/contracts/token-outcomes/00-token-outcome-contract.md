@@ -18,6 +18,7 @@ It is derived from:
 |---------|----------|-----------------|------------------|
 | COMPLETED | yes | sink_name | Orchestrator (after sink write) |
 | ROUTED | yes | sink_name | RowProcessor (gate route_to_sink, MOVE only) |
+| GATE_DISCARDED | yes | none | RowProcessor (gate route target `"discard"`) |
 | ROUTED_ON_ERROR | yes | sink_name, error_hash | RowProcessor (transform on_error reroute via DIVERT) |
 | FORKED | yes | fork_group_id | RowProcessor (after gate fork) |
 | FAILED | yes | error_hash | RowProcessor or CoalesceExecutor |
@@ -40,10 +41,11 @@ Notes:
 2. No terminal outcome may be missing a required field (see table above).
 3. COMPLETED implies the token has a completed sink node_state.
 4. Completed sink node_state implies a COMPLETED token_outcome with sink_name.
-5. BUFFERED outcomes must be followed by a terminal outcome before run completion.
-6. FORKED outcome implies child tokens exist (token_parents table) sharing fork_group_id.
-7. EXPANDED outcome implies child tokens exist (token_parents table) sharing expand_group_id.
-8. COALESCED outcome implies join_group_id points to the merged token's join_group_id.
+5. GATE_DISCARDED implies the token terminated at a gate route target `"discard"` and has no sink_name.
+6. BUFFERED outcomes must be followed by a terminal outcome before run completion.
+7. FORKED outcome implies child tokens exist (token_parents table) sharing fork_group_id.
+8. EXPANDED outcome implies child tokens exist (token_parents table) sharing expand_group_id.
+9. COALESCED outcome implies join_group_id points to the merged token's join_group_id.
 
 ## Terminal vs non-terminal behavior
 

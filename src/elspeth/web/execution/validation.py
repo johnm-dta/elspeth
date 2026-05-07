@@ -33,7 +33,7 @@ from pydantic import ValidationError as PydanticValidationError
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError
-from elspeth.core.secrets import is_secret_field, resolve_secret_refs, secret_env_ref_name
+from elspeth.core.secrets import collect_credential_field_violations, resolve_secret_refs, secret_env_ref_name
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import (
     RouteValidationError,
@@ -42,7 +42,12 @@ from elspeth.engine.orchestrator.types import (
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
-from elspeth.web.composer.state import CompositionState, _batch_aware_required_input_fields_error
+from elspeth.web.composer.state import (
+    CompositionState,
+    _batch_aware_placement_error,
+    _batch_aware_required_input_fields_error,
+    _batch_distribution_profile_value_field_entries,
+)
 from elspeth.web.execution._semantic_helpers import (
     assistance_suggestion_for,
     serialize_semantic_contracts,
@@ -375,73 +380,6 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     return refs
 
 
-def _value_is_wired_secret(value: Any, env_ref_names: set[str]) -> bool:
-    """A value is "wired" if it is either a ``{secret_ref: NAME}`` marker or
-    an exact ``${NAME}`` env-marker for a NAME present in the secret inventory.
-
-    Anything else placed in a credential-bearing field — a literal placeholder
-    string like ``"WILL_BE_WIRED_FROM_OPENROUTER_API_KEY"``, an env-marker for
-    an unregistered name, etc. — is fabrication: the runtime would treat the
-    value as the literal credential and authentication would fail per-row in a
-    misleading way (issue elspeth-72d1dccd44).
-    """
-    if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value:
-        return isinstance(value["secret_ref"], str)
-    if isinstance(value, str):
-        return secret_env_ref_name(value, env_ref_names) is not None
-    return False
-
-
-def _collect_credential_field_violations(
-    options: Any,
-    env_ref_names: set[str],
-) -> list[str]:
-    """Walk an options tree and return the field names whose value is a
-    fabricated literal sitting in a credential-bearing field.
-
-    Returns the list of offending top-level field names (as discovered by
-    ``is_secret_field``) — caller decides how to surface them. The returned
-    list is intentionally name-only (no value): credential values must never
-    be reflected back into the validation response.
-
-    Skips:
-    - ``{"secret_ref": ...}`` markers (wired)
-    - exact ``${NAME}`` env-markers where NAME is in ``env_ref_names`` (wired)
-    - missing keys, ``None`` values, and empty strings (treated as
-      "not provided" — the runtime config validator decides if the field is
-      required)
-    - non-string values in credential fields (Pydantic at settings_load
-      will reject these with the proper schema-typed error)
-
-    Recurses through nested mappings and sequences so that
-    ``{"auth": {"api_key": "..."}}`` is detected as well as a top-level shape.
-    """
-    violations: list[str] = []
-    if isinstance(options, Mapping):
-        # A ``{"secret_ref": ...}`` marker is itself wired — do not descend
-        # into it (otherwise the literal NAME inside would be evaluated).
-        if len(options) == 1 and "secret_ref" in options:
-            return violations
-        for key, value in options.items():
-            if isinstance(key, str) and is_secret_field(key):
-                if _value_is_wired_secret(value, env_ref_names):
-                    continue
-                if value is None or value == "":
-                    continue
-                if isinstance(value, str):
-                    violations.append(key)
-                    continue
-                # Non-string in a credential field: defer to Pydantic at
-                # settings_load — its error is more precise (shape mismatch
-                # vs. fabrication).
-                continue
-            violations.extend(_collect_credential_field_violations(value, env_ref_names))
-    elif isinstance(options, (list, tuple)):
-        for item in options:
-            violations.extend(_collect_credential_field_violations(item, env_ref_names))
-    return violations
-
-
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,
@@ -588,17 +526,17 @@ def validate_pipeline(
         # Walk source options, node configs, and output options for secret refs
         if state.source is not None:
             all_refs.extend(_collect_secret_refs(state.source.options, env_ref_names))
-            fabricated = _collect_credential_field_violations(state.source.options, env_ref_names)
+            fabricated = collect_credential_field_violations(state.source.options, env_ref_names)
             if fabricated:
                 fabricated_components.append(("source", "source", fabricated))
         for node in state.nodes or ():
             all_refs.extend(_collect_secret_refs(node.options, env_ref_names))
-            fabricated = _collect_credential_field_violations(node.options, env_ref_names)
+            fabricated = collect_credential_field_violations(node.options, env_ref_names)
             if fabricated:
                 fabricated_components.append((node.id, "transform", fabricated))
         for output in state.outputs or ():
             all_refs.extend(_collect_secret_refs(output.options, env_ref_names))
-            fabricated = _collect_credential_field_violations(output.options, env_ref_names)
+            fabricated = collect_credential_field_violations(output.options, env_ref_names)
             if fabricated:
                 fabricated_components.append((output.name, "sink", fabricated))
 
@@ -701,9 +639,15 @@ def validate_pipeline(
 
     batch_option_errors: list[tuple[str, str]] = []
     for node in state.nodes:
+        batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
+        if batch_placement_error is not None:
+            batch_option_errors.append((node.id, batch_placement_error))
         batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
         if batch_required_error is not None:
             batch_option_errors.append((node.id, batch_required_error))
+    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.source, state.nodes)
+    for entry in numeric_contract_errors:
+        batch_option_errors.append((entry.component.removeprefix("node:"), entry.message))
     if batch_option_errors:
         checks.append(
             ValidationCheck(
@@ -718,7 +662,10 @@ def validate_pipeline(
                     component_id=node_id,
                     component_type="transform",
                     message=message,
-                    suggestion="Remove required_input_fields from batch-aware transform options; use schema.required_fields for batch input validation.",
+                    suggestion=(
+                        "Use node_type='aggregation' for batch-aware plugins; remove required_input_fields from batch-aware transform "
+                        "options and use schema.required_fields for batch input validation."
+                    ),
                 )
             )
         checks.extend(_skipped_checks(_CHECK_BATCH_TRANSFORM_OPTIONS))

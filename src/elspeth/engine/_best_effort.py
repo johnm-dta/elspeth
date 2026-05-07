@@ -21,7 +21,7 @@ provider details that do not belong in structured logs.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import structlog
@@ -60,12 +60,16 @@ def best_effort(operation: str, /, **context: Any) -> Iterator[None]:
     try:
         yield
     except Exception as ceremony_failure:
-        _slog.warning(
-            "best-effort ceremony failed during error propagation; original event preserved",
-            operation=operation,
-            error_type=type(ceremony_failure).__name__,
+        fields = {
             **context,
-        )
+            "operation": operation,
+            "error_type": type(ceremony_failure).__name__,
+        }
+        with suppress(Exception):
+            _slog.warning(
+                "best-effort ceremony failed during error propagation; original event preserved",
+                **fields,
+            )
 
 
 __all__ = ["best_effort"]

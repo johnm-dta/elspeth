@@ -204,6 +204,7 @@ class TerminalPath(StrEnum):
 
     DEFAULT_FLOW = "default_flow"
     GATE_ROUTED = "gate_routed"
+    GATE_DISCARDED = "gate_discarded"
     ON_ERROR_ROUTED = "on_error_routed"
     FILTER_DROPPED = "filter_dropped"
     COALESCED = "coalesced"
@@ -226,6 +227,7 @@ _LEGAL_TERMINAL_PAIRS: frozenset[tuple[TerminalOutcome, TerminalPath]] = frozens
     {
         (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
         (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED),
+        (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED),
         (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED),
         (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
         (TerminalOutcome.SUCCESS, TerminalPath.COALESCED),

@@ -134,6 +134,9 @@ def build_context_string(
 
     context = {
         "current_state": serialized,
+        "composer_progress": {
+            "state_exists": state.source is not None or bool(state.nodes) or bool(state.outputs),
+        },
         "available_plugins": {
             "sources": source_names,
             "transforms": transform_names,

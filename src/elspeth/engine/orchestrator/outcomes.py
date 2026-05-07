@@ -319,7 +319,10 @@ def accumulate_row_outcomes(
         elif pair == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED):
             # Aggregated - will be counted when batch flushes
             pass
-        elif pair == (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED):
+        elif pair in {
+            (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
+            (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED),
+        }:
             counters.rows_succeeded += 1
         elif pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
             if result.token.join_group_id is None:

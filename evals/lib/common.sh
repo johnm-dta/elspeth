@@ -23,6 +23,7 @@
 #   evals_get_diagnostics <run_id> <out_file>
 #   evals_get_messages <sid> <out_file>
 #   evals_get_yaml <sid> <out_file>
+#   evals_try_get <url> <out_file> [<code_file>]
 #   evals_poll_run_terminal <run_id> <timeout_sec> <interval_sec> <out_file>
 #
 # Required environment (loaded by evals_load_env from $EVALS_ENV_FILE if present, else process env):
@@ -219,15 +220,40 @@ _evals_http_get() {
   evals_login_if_needed
   local jwt http
   jwt=$(cat "$EVALS_JWT_FILE")
-  http=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
-           -H "Authorization: Bearer $jwt" \
-           -o "$out" -w '%{http_code}' \
-           "$url" || echo "000")
+  if ! http=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
+                -H "Authorization: Bearer $jwt" \
+                -o "$out" -w '%{http_code}' \
+                "$url"); then
+    http=000
+  fi
   if [[ "$http" != 2* ]]; then
     local snippet
     snippet=$(head -c 500 "$out" 2>/dev/null || true)
     evals_die 71 "GET $url failed (HTTP $http): $snippet"
   fi
+}
+
+# evals_try_get <url> <out_file> [<code_file>]
+# Writes body to out_file and returns success for 2xx. Unlike _evals_http_get,
+# non-2xx responses are data for callers to record; this helper must not exit.
+evals_try_get() {
+  local url=$1 out=$2 code_out=${3:-}
+  evals_login_if_needed
+  local jwt http
+  jwt=$(cat "$EVALS_JWT_FILE")
+  if ! http=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
+                -H "Authorization: Bearer $jwt" \
+                -o "$out" -w '%{http_code}' \
+                "$url"); then
+    http=000
+  fi
+  if [[ -n "$code_out" ]]; then
+    printf '%s' "$http" > "$code_out"
+  fi
+  if [[ "$http" == 2* ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # _evals_http_post_json <url> <json_body_file_or_string> <out_file> [code_out_file]

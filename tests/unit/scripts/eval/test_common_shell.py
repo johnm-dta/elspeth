@@ -79,6 +79,92 @@ esac
     fake_curl.chmod(0o755)
 
 
+def _write_fake_finalize_curl(
+    bin_dir: Path,
+    *,
+    state_yaml_http: str = "404",
+    valid: bool = False,
+    llm_audit_cost: str | None = None,
+) -> None:
+    fake_curl = bin_dir / "curl"
+    validate_body = (
+        '{"is_valid": true, "checks": []}'
+        if valid
+        else '{"is_valid": false, "checks": [{"name": "state_exists", "passed": false, "detail": "No state"}], "errors": []}'
+    )
+    messages_body = (
+        f'[{{"role":"user","content":"hello"}},{{"role":"tool","content":"llm audit","tool_calls":[{{"_kind":"llm_call_audit","call":{{"model_requested":"openrouter/openai/gpt-5-mini","prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cached_prompt_tokens":3,"provider_cost":{llm_audit_cost},"provider_cost_source":"response_usage.cost"}}}}]}}]'
+        if llm_audit_cost is not None
+        else '[{"role":"user","content":"hello"}]'
+    )
+    fake_curl.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+
+out=""
+url=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$out" ]]; then
+  echo "fake curl expected -o <path>" >&2
+  exit 2
+fi
+
+case "$url" in
+  */validate)
+    printf '{validate_body}' > "$out"
+    printf '200'
+    ;;
+  */execute)
+    printf '{{"run_id":"run-1"}}' > "$out"
+    printf '202'
+    ;;
+  */runs/run-1/diagnostics)
+    printf '{{"tokens":[{{"states":[{{"success_reason":{{"metadata":{{"model":"openai/gpt-5-mini","prompt_tokens":10,"cached_prompt_tokens":3,"completion_tokens":5,"total_tokens":15}}}}}}]}}]}}' > "$out"
+    printf '200'
+    ;;
+  */runs/run-1)
+    printf '{{"status":"completed","rows_processed":2,"rows_succeeded":2,"rows_routed_success":2,"rows_routed_failure":0,"rows_failed":0,"rows_quarantined":0,"error":null,"landscape_run_id":"run-1"}}' > "$out"
+    printf '200'
+    ;;
+  */state/yaml)
+    printf '{{"detail":"yaml unavailable"}}' > "$out"
+    printf '{state_yaml_http}'
+    ;;
+  */messages*)
+    printf '{messages_body}' > "$out"
+    printf '200'
+    ;;
+  *)
+    printf '{{}}' > "$out"
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
+
+
 def _write_fake_legacy_curl(bin_dir: Path) -> None:
     fake_curl = bin_dir / "curl"
     fake_curl.write_text(
@@ -200,6 +286,223 @@ def test_finalize_scenario_exits_74_when_validate_http_fails(tmp_path: Path) -> 
     assert result.returncode == 74
     assert "validate failed" in result.stderr
     assert not (scenario_dir / "ledger.json").exists()
+
+
+def test_finalize_writes_ledger_when_invalid_state_yaml_is_unavailable(tmp_path: Path) -> None:
+    """Invalid scenarios are data; a missing YAML artifact must not erase the ledger."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_finalize_curl(fake_bin, state_yaml_http="404", valid=False)
+
+    runs_root = tmp_path / "runs"
+    scenario_dir = runs_root / "s1"
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "sid.txt").write_text("session-1")
+    (scenario_dir / "scenario.json").write_text(json.dumps({"persona": "tester", "task_class": "limit", "task_summary": "invalid state"}))
+    (scenario_dir / "metrics.t1.json").write_text(
+        json.dumps({"turn": 1, "wall_seconds": 1.25, "tool_call_count": 0, "in_loop_recovery_count": 0})
+    )
+    (scenario_dir / "run.json").write_text(json.dumps({"status": "completed", "rows_processed": 99}))
+    (scenario_dir / "diagnostics.json").write_text(
+        json.dumps({"metadata": {"model": "stale/model", "prompt_tokens": 99, "completion_tokens": 99, "total_tokens": 198}})
+    )
+    _write_valid_jwt(scenario_dir / "jwt.txt")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "ELSPETH_EVAL_RUNS_DIR": str(runs_root),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(FINALIZE_SCRIPT), "s1"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    ledger = json.loads((scenario_dir / "ledger.json").read_text())
+    assert ledger["is_valid"] is False
+    assert ledger["ran_engine"] is False
+    assert ledger["run_status"] is None
+    assert ledger["rows_processed"] is None
+    assert ledger["provider_usage"]["total_tokens"] == 0
+    assert ledger["provider_usage"]["models"] == []
+    assert ledger["provider_usage"]["token_usage_available"] is False
+    assert ledger["provider_usage"]["source"] == "not_available"
+    assert ledger["failed_validate_checks"] == ["state_exists"]
+    assert ledger["artifact_collection_errors"] == [{"artifact": "final_yaml", "http_code": "404", "path": "final_yaml.json"}]
+    assert json.loads((scenario_dir / "final_yaml.json").read_text()) == {}
+
+
+def test_finalize_preserves_completed_run_when_post_run_yaml_export_fails(tmp_path: Path) -> None:
+    """Post-run artifact collection failures are metadata, not run outcome overrides."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_finalize_curl(fake_bin, state_yaml_http="409", valid=True, llm_audit_cost="0.0037")
+
+    runs_root = tmp_path / "runs"
+    scenario_dir = runs_root / "s1"
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "sid.txt").write_text("session-1")
+    (scenario_dir / "scenario.json").write_text(json.dumps({"persona": "tester", "task_class": "happy", "task_summary": "valid state"}))
+    (scenario_dir / "metrics.t1.json").write_text(
+        json.dumps({"turn": 1, "wall_seconds": 2.0, "tool_call_count": 1, "in_loop_recovery_count": 0})
+    )
+    _write_valid_jwt(scenario_dir / "jwt.txt")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "ELSPETH_EVAL_RUNS_DIR": str(runs_root),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(FINALIZE_SCRIPT), "s1"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    ledger = json.loads((scenario_dir / "ledger.json").read_text())
+    assert ledger["run_status"] == "completed"
+    assert ledger["rows_processed"] == 2
+    assert ledger["rows_succeeded"] == 2
+    assert ledger["artifact_collection_errors"] == [{"artifact": "final_yaml", "http_code": "409", "path": "final_yaml.json"}]
+    assert ledger["provider_usage"] == {
+        "prompt_tokens": 20,
+        "cached_prompt_tokens": 6,
+        "completion_tokens": 10,
+        "total_tokens": 30,
+        "models": ["openai/gpt-5-mini", "openrouter/openai/gpt-5-mini"],
+        "token_usage_available": True,
+        "source": "diagnostics+llm_call_audit",
+    }
+    assert ledger["cost"] == {
+        "actual_usd": 0.0037,
+        "source": "composer_llm_audit.response_usage.cost",
+        "cost_available": True,
+        "costed_call_count": 1,
+    }
+
+
+def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    scenario_dir = runs_root / "s1"
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "ledger.json").write_text(
+        json.dumps(
+            {
+                "scenario_id": "s1",
+                "persona": "tester",
+                "task_class": "happy",
+                "user_turn_count": 1,
+                "is_valid": True,
+                "ran_engine": True,
+                "run_status": "completed",
+                "poll_status": "ok",
+                "rows_processed": 2,
+                "rows_succeeded": 2,
+                "rows_routed_success": 2,
+                "total_wall_seconds": 2.0,
+                "total_tool_calls": 1,
+                "total_in_loop_recoveries": 0,
+                "clarifying_keyword_turns": [],
+                "limit_keyword_turns": [],
+                "failed_validate_checks": [],
+                "run_error": None,
+                "artifact_collection_errors": [{"artifact": "final_yaml", "http_code": "409", "path": "final_yaml.json"}],
+                "provider_usage": {
+                    "prompt_tokens": 10,
+                    "cached_prompt_tokens": 3,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "models": ["openai/gpt-5-mini"],
+                    "token_usage_available": True,
+                    "source": "diagnostics",
+                },
+                "cost": {
+                    "actual_usd": 0.0037,
+                    "source": "composer_llm_audit.response_usage.cost",
+                    "cost_available": True,
+                    "costed_call_count": 1,
+                },
+            }
+        )
+    )
+    legacy_dir = runs_root / "legacy"
+    legacy_dir.mkdir()
+    (legacy_dir / "ledger.json").write_text(
+        json.dumps(
+            {
+                "scenario_id": "legacy",
+                "persona": "tester",
+                "task_class": "limit",
+                "user_turn_count": 1,
+                "is_valid": False,
+                "ran_engine": False,
+                "run_status": None,
+                "poll_status": "ok",
+                "rows_processed": None,
+                "rows_succeeded": None,
+                "total_wall_seconds": 1.0,
+                "total_tool_calls": 0,
+                "total_in_loop_recoveries": 0,
+                "clarifying_keyword_turns": [],
+                "limit_keyword_turns": [],
+                "failed_validate_checks": ["state_exists"],
+                "run_error": None,
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "aggregate.sh"), str(runs_root)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    aggregate = json.loads((runs_root / "aggregate.json").read_text())
+    by_id = {row["scenario_id"]: row for row in aggregate}
+    assert by_id["s1"]["artifact_collection_error_count"] == 1
+    assert by_id["s1"]["provider_usage"]["total_tokens"] == 15
+    assert by_id["s1"]["provider_usage"]["token_usage_available"] is True
+    assert by_id["s1"]["cost"]["actual_usd"] == 0.0037
+    assert by_id["s1"]["cost"]["source"] == "composer_llm_audit.response_usage.cost"
+    assert by_id["legacy"]["provider_usage"]["token_usage_available"] is False
+    summary = json.loads((runs_root / "aggregate_summary.json").read_text())
+    assert summary["provider_usage"]["token_usage_available_scenarios"] == 1
+    assert summary["provider_usage"]["token_usage_unavailable_scenarios"] == 1
+    assert summary["provider_usage"]["total_tokens"] == 15
+    assert summary["cost"]["actual_usd"] == 0.0037
+    assert summary["cost"]["cost_available_scenarios"] == 1
+    assert summary["cost"]["cost_unavailable_scenarios"] == 1
+    scorecard = (runs_root / "SCORECARD.md").read_text()
+    assert "Artifact errors" in scorecard
+    assert "Tokens" in scorecard
+    assert "Cost" in scorecard
+    assert "| legacy | tester | limit | 1 | 1.0 | — | — |" in scorecard
 
 
 @pytest.mark.parametrize(

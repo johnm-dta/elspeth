@@ -34,6 +34,20 @@ class TestBatchDistributionProfile:
         assert BatchDistributionProfile.name == "batch_distribution_profile"
         assert BatchDistributionProfile.is_batch_aware is True
 
+    def test_returns_assistance_for_numeric_value_field_issue(self) -> None:
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        assistance = BatchDistributionProfile.get_agent_assistance(
+            issue_code="batch_distribution_profile.value_field.numeric",
+        )
+
+        assert assistance is not None
+        assert assistance.plugin_name == "batch_distribution_profile"
+        assert assistance.issue_code == "batch_distribution_profile.value_field.numeric"
+        assert "numeric" in assistance.summary
+        assert any("batch_top_k" in fix for fix in assistance.suggested_fixes)
+        assert any("theme frequency" in hint for hint in assistance.composer_hints)
+
     def test_computes_distribution_summary_for_single_field(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
 

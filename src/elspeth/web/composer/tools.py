@@ -9,7 +9,9 @@ L3 (web/composer/state, web/catalog/protocol).
 
 from __future__ import annotations
 
+import csv
 import hmac
+import io
 import os
 import re
 import tempfile
@@ -28,6 +30,7 @@ from sqlalchemy import Engine, delete, func, select, update
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.config import TriggerConfig
+from elspeth.core.secrets import collect_credential_field_violations
 from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import _guard_blob_row_literals, _source_references_blob, content_hash, sanitize_filename
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
@@ -41,6 +44,7 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
     ValidationSummary,
+    _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _source_options_have_schema,
     _validate_gate_expression,
@@ -74,6 +78,26 @@ class _SemanticEdgeContractPayload(TypedDict):
     consumer_field: str
     outcome: str
     requirement_code: str
+
+
+class _RepairToolCall(TypedDict):
+    tool: str
+    arguments: Mapping[str, object]
+
+
+class _AffectedConsumer(TypedDict):
+    id: str
+    current_input: str
+    new_input: str
+
+
+class _GraphRepairSuggestion(TypedDict):
+    code: str
+    connection: str
+    strategy: str
+    reason: str
+    affected_consumers: list[_AffectedConsumer]
+    tool_sequence: list[_RepairToolCall]
 
 
 def _semantic_contracts_payload(
@@ -132,6 +156,146 @@ def _compute_validation_delta(
     }
 
 
+def _repair_identifier_fragment(value: str, *, fallback: str) -> str:
+    """Return a connection-safe identifier fragment for generated repair skeletons."""
+    fragment = re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_-")
+    if not fragment:
+        return fallback
+    if not fragment[0].isalnum():
+        return f"{fallback}_{fragment}"
+    return fragment
+
+
+def _unique_name(candidate: str, reserved: set[str]) -> str:
+    """Return candidate or a suffixed variant that does not collide with reserved."""
+    if candidate not in reserved:
+        reserved.add(candidate)
+        return candidate
+
+    index = 2
+    while f"{candidate}_{index}" in reserved:
+        index += 1
+    unique = f"{candidate}_{index}"
+    reserved.add(unique)
+    return unique
+
+
+def _reserved_connection_names(state: CompositionState) -> set[str]:
+    """Collect existing route/connection/sink names a repair branch must avoid."""
+    names: set[str] = {output.name for output in state.outputs}
+    if state.source is not None:
+        names.add(state.source.on_success)
+        if state.source.on_validation_failure != "discard":
+            names.add(state.source.on_validation_failure)
+
+    for node in state.nodes:
+        names.add(node.input)
+        if node.on_success is not None:
+            names.add(node.on_success)
+        if node.on_error is not None and node.on_error != "discard":
+            names.add(node.on_error)
+        if node.routes is not None:
+            names.update(node.routes.values())
+        if node.fork_to is not None:
+            names.update(node.fork_to)
+        if node.branches is not None:
+            names.update(node.branches)
+    return names
+
+
+def _duplicate_consumer_repair_suggestions(
+    state: CompositionState,
+    validation: ValidationSummary,
+) -> list[_GraphRepairSuggestion]:
+    """Build copyable repair skeletons for duplicate-consumer validation failures."""
+    duplicate_error_components = {
+        error.component
+        for error in validation.errors
+        if error.component.startswith("connection:") and error.message.startswith("Duplicate consumer for connection ")
+    }
+    if not duplicate_error_components:
+        return []
+
+    consumers_by_connection: dict[str, list[NodeSpec]] = {}
+    for node in state.nodes:
+        if node.node_type == "coalesce":
+            continue
+        if node.input not in consumers_by_connection:
+            consumers_by_connection[node.input] = []
+        consumers_by_connection[node.input].append(node)
+
+    reserved_node_ids = {node.id for node in state.nodes}
+    reserved_connection_names = _reserved_connection_names(state)
+    suggestions: list[_GraphRepairSuggestion] = []
+
+    for connection_name, consumer_nodes in sorted(consumers_by_connection.items()):
+        if len(consumer_nodes) < 2 or f"connection:{connection_name}" not in duplicate_error_components:
+            continue
+
+        connection_fragment = _repair_identifier_fragment(connection_name, fallback="connection")
+        gate_id = _unique_name(f"fork_{connection_fragment}", reserved_node_ids)
+        branch_names = [
+            _unique_name(
+                f"{connection_fragment}_to_{_repair_identifier_fragment(node.id, fallback='node')}",
+                reserved_connection_names,
+            )
+            for node in consumer_nodes
+        ]
+        gate_args: dict[str, object] = {
+            "id": gate_id,
+            "node_type": "gate",
+            "plugin": None,
+            "input": connection_name,
+            "on_success": None,
+            "on_error": None,
+            "options": {},
+            "condition": "True",
+            "routes": {},
+            "fork_to": branch_names,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+            "trigger": None,
+            "output_mode": None,
+            "expected_output_count": None,
+        }
+        tool_sequence: list[_RepairToolCall] = []
+        affected_consumers: list[_AffectedConsumer] = []
+        for node, branch_name in zip(consumer_nodes, branch_names, strict=True):
+            patched_consumer = _serialize_node(node)
+            patched_consumer["input"] = branch_name
+            tool_sequence.append({"tool": "upsert_node", "arguments": patched_consumer})
+            affected_consumers.append(
+                {
+                    "id": node.id,
+                    "current_input": connection_name,
+                    "new_input": branch_name,
+                }
+            )
+        tool_sequence.append({"tool": "upsert_node", "arguments": gate_args})
+        tool_sequence.append({"tool": "preview_pipeline", "arguments": {}})
+        suggestions.append(
+            {
+                "code": "duplicate_consumer_connection",
+                "connection": connection_name,
+                "strategy": "insert_fork_gate",
+                "reason": "One connection can feed one processing node. Give each consumer a unique branch input, then insert a fork gate that consumes the shared connection and publishes those branch inputs from gate.fork_to.",
+                "affected_consumers": affected_consumers,
+                "tool_sequence": tool_sequence,
+            }
+        )
+
+    return suggestions
+
+
+def _graph_repair_suggestions(
+    state: CompositionState,
+    validation: ValidationSummary,
+) -> list[_GraphRepairSuggestion]:
+    """Return structured graph repair suggestions for validation failures."""
+    return _duplicate_consumer_repair_suggestions(state, validation)
+
+
 @dataclass(frozen=True, slots=True)
 class ToolResult:
     """Result of a tool execution.
@@ -181,6 +345,10 @@ class ToolResult:
                 "suggestions": [e.to_dict() for e in self.validation.suggestions],
                 "semantic_contracts": _semantic_contracts_payload(
                     self.validation.semantic_contracts,
+                ),
+                "graph_repair_suggestions": _graph_repair_suggestions(
+                    self.updated_state,
+                    self.validation,
                 ),
             },
             "affected_nodes": list(self.affected_nodes),
@@ -487,7 +655,11 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "condition": {"type": ["string", "null"], "description": "Boolean expression (gate only). Evaluated per row."},
                     "routes": {
                         "type": ["object", "null"],
-                        "description": "Route mapping {true: sink_or_node, false: sink_or_node} (gate only, mutually exclusive with fork_to).",
+                        "description": (
+                            "Route mapping {true: sink_or_connection_or_discard, false: sink_or_connection_or_discard} "
+                            "(gate only, mutually exclusive with fork_to). Use 'discard' to drop that route with "
+                            "an audited gate_discarded terminal outcome."
+                        ),
                     },
                     "fork_to": {
                         "type": ["array", "null"],
@@ -706,11 +878,19 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "source": {
                         "type": "object",
                         "description": (
-                            "Source configuration: {plugin, options, on_success, on_validation_failure?, inline_blob?}. "
-                            "Use inline_blob to materialize user-provided literal data while atomically setting the full pipeline."
+                            "Source configuration: {plugin, options, on_success, on_validation_failure?, blob_id?, inline_blob?}. "
+                            "Use blob_id to bind an already uploaded session blob, or inline_blob to "
+                            "materialize user-provided literal data while atomically setting the full pipeline."
                         ),
                         "properties": {
                             "plugin": {"type": "string"},
+                            "blob_id": {
+                                "type": "string",
+                                "description": (
+                                    "Existing ready session blob ID to bind as this source. "
+                                    "The tool resolves path/blob_ref authoritatively exactly like set_source_from_blob."
+                                ),
+                            },
                             "options": {"type": "object"},
                             "on_success": {
                                 "type": "string",
@@ -783,7 +963,13 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                 "on_error": {"type": "string"},
                                 "options": {"type": "object"},
                                 "condition": {"type": "string"},
-                                "routes": {"type": "object"},
+                                "routes": {
+                                    "type": "object",
+                                    "description": (
+                                        "Gate route mapping to sink names, downstream connection names, 'fork', or "
+                                        "'discard' for an audited terminal drop."
+                                    ),
+                                },
                                 "fork_to": {"type": "array", "items": {"type": "string"}},
                                 "branches": {"type": "array", "items": {"type": "string"}},
                                 "policy": {"type": "string"},
@@ -1360,6 +1546,53 @@ def _failure_result(
     )
 
 
+def _credential_wiring_contract_failure(
+    state: CompositionState,
+    *,
+    component_id: str,
+    component_type: str,
+    options: Any,
+) -> ToolResult | None:
+    """Reject literal credentials before a mutation writes them into state."""
+    fields = tuple(dict.fromkeys(collect_credential_field_violations(options)))
+    if not fields:
+        return None
+
+    credential_fields = tuple(f"{component_id}:{field}" for field in fields)
+    field_list = ", ".join(credential_fields)
+    repair_sequence = ("list_secret_refs", "validate_secret_ref", "wire_secret_ref")
+    repair_text = "list_secret_refs -> validate_secret_ref -> wire_secret_ref"
+    validation = state.validate()
+    return ToolResult(
+        success=False,
+        updated_state=state,
+        validation=validation,
+        affected_nodes=(),
+        data={
+            "error": (
+                f"Credential field(s) contain literal value(s): {field_list}. "
+                "Literal credential values were not stored. "
+                f"Use {repair_text} to attach a deferred {{secret_ref: NAME}} marker."
+            ),
+            "credential_fields": credential_fields,
+            "components": (
+                {
+                    "component_id": component_id,
+                    "component_type": component_type,
+                    "fields": fields,
+                },
+            ),
+            "repair": {
+                "required_tool_sequence": repair_sequence,
+                "instruction": (
+                    "List available secret refs, validate the chosen name, then wire it "
+                    "to the named credential field. Do not type credential values into options."
+                ),
+            },
+        },
+    )
+
+
 def _mutation_result(
     new_state: CompositionState,
     affected: tuple[str, ...],
@@ -1480,6 +1713,23 @@ class BlobCreatePayload(TypedDict):
     content_hash: str
 
 
+class SourceBlobPayload(TypedDict):
+    """LLM/audit-safe source blob metadata for set_pipeline/set_source_from_blob."""
+
+    blob_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    content_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedSourceBlob:
+    plugin: str
+    options: Mapping[str, Any]
+    payload: SourceBlobPayload
+
+
 def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
     """Serialize a validated blobs row to the tool-layer dict shape."""
     _guard_blob_row_literals(row)
@@ -1495,6 +1745,72 @@ def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
         "source_description": row.source_description,
         "status": row.status,
     }
+
+
+def _source_blob_payload(blob: BlobToolRecord) -> SourceBlobPayload:
+    """Return source-blob metadata without leaking storage_path."""
+    return {
+        "blob_id": blob["id"],
+        "filename": blob["filename"],
+        "mime_type": blob["mime_type"],
+        "size_bytes": blob["size_bytes"],
+        "content_hash": blob["content_hash"],
+    }
+
+
+def _resolve_source_blob(
+    *,
+    blob_id: str,
+    explicit_plugin: str | None,
+    caller_options: Mapping[str, Any],
+    on_validation_failure: str,
+    state: CompositionState,
+    catalog: CatalogService,
+    session_engine: Engine | None,
+    session_id: str | None,
+) -> _ResolvedSourceBlob | ToolResult:
+    """Resolve an existing ready blob into authoritative source options."""
+    if session_engine is None or session_id is None:
+        return _failure_result(state, "Blob tools require session context.")
+    blob = _sync_get_blob(session_engine, blob_id, session_id)
+    if blob is None:
+        return _failure_result(state, f"Blob '{blob_id}' not found.")
+
+    if blob["status"] != "ready":
+        return _failure_result(state, f"Blob is not ready (status: {blob['status']}).")
+
+    mime_extra: dict[str, str] = {}
+    if explicit_plugin:
+        plugin = explicit_plugin
+    else:
+        mime_entry = _MIME_TO_SOURCE.get(blob["mime_type"])
+        if mime_entry is None:
+            return _failure_result(
+                state,
+                f"Cannot infer source plugin for MIME type '{blob['mime_type']}'. Please specify the 'plugin' parameter explicitly.",
+            )
+        plugin, mime_extra = mime_entry
+
+    try:
+        catalog.get_schema("source", plugin)
+    except (ValueError, KeyError) as exc:
+        return _failure_result(state, f"Unknown source plugin '{plugin}': {exc}")
+
+    merged_options = {
+        **caller_options,
+        **mime_extra,
+        "path": blob["storage_path"],
+        "blob_ref": blob["id"],
+    }
+    prevalidation_error = _prevalidate_source(plugin, merged_options, on_validation_failure)
+    if prevalidation_error is not None:
+        return _failure_result(state, prevalidation_error)
+
+    return _ResolvedSourceBlob(
+        plugin=plugin,
+        options=merged_options,
+        payload=_source_blob_payload(blob),
+    )
 
 
 def _sync_get_blob(engine: Engine, blob_id: str, session_id: str | None = None) -> BlobToolRecord | None:
@@ -1529,7 +1845,7 @@ def _sync_list_blobs(engine: Engine, session_id: str) -> list[dict[str, Any]]:
 
 
 def _validate_source_path(
-    options: dict[str, Any],
+    options: Mapping[str, Any],
     data_dir: str | None,
 ) -> str | None:
     """S2: Validate that path/file options are under allowed source directories.
@@ -1692,6 +2008,31 @@ _WRITE_COLLISION_POLICIES = frozenset({"fail_if_exists", "auto_increment"})
 _APPEND_COLLISION_POLICIES = frozenset({"append_or_create"})
 
 
+def _manual_source_blob_ref_error(*, tool_name: str, inline_blob_supported: bool = False) -> str:
+    """Return the source-options error for tools that reject manual blob_ref."""
+    if inline_blob_supported:
+        bind_path = "set_source_from_blob, source.blob_id, or source.inline_blob"
+    else:
+        bind_path = "set_source_from_blob"
+    return (
+        f"Use {bind_path} to bind a blob to the source. "
+        f"{tool_name} must not be called with 'blob_ref' in source.options "
+        "because it cannot enforce that 'path' equals the blob's canonical storage_path."
+    )
+
+
+def _reject_manual_source_blob_ref(
+    options: Mapping[str, Any],
+    *,
+    tool_name: str,
+    inline_blob_supported: bool = False,
+) -> str | None:
+    """Reject caller-supplied blob_ref outside authoritative blob-binding tools."""
+    if "blob_ref" not in options:
+        return None
+    return _manual_source_blob_ref_error(tool_name=tool_name, inline_blob_supported=inline_blob_supported)
+
+
 def validate_composer_file_sink_collision_policy(
     plugin_name: str,
     options: Mapping[str, Any],
@@ -1727,7 +2068,7 @@ def validate_composer_file_sink_collision_policy(
 
 def _prevalidate_source(
     plugin_name: str,
-    options: dict[str, Any],
+    options: Mapping[str, Any],
     on_validation_failure: str = "quarantine",
 ) -> str | None:
     """Pre-validate source options, injecting on_validation_failure and filtering web-only keys."""
@@ -1770,14 +2111,17 @@ def _execute_set_source(
     # blob's canonical storage_path, breaking runtime resolution and
     # composer/runtime agreement.  See elspeth-07089fbaa3.
     options = args.get("options", {})
-    if "blob_ref" in options:
-        return _failure_result(
-            state,
-            "Use set_source_from_blob to bind a blob to the source. "
-            "set_source must not be called with 'blob_ref' in options "
-            "because it cannot enforce that 'path' equals the blob's "
-            "canonical storage_path.",
-        )
+    manual_blob_ref_error = _reject_manual_source_blob_ref(options, tool_name="set_source")
+    if manual_blob_ref_error is not None:
+        return _failure_result(state, manual_blob_ref_error)
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id="source",
+        component_type="source",
+        options=options,
+    )
+    if credential_error is not None:
+        return credential_error
 
     # S2: Validate source path allowlist
     path_error = _validate_source_path(options, data_dir)
@@ -1805,8 +2149,18 @@ def _execute_upsert_node(
     catalog: CatalogService,
 ) -> ToolResult:
     """Add or update a pipeline node."""
+    node_id = args["id"]
     node_type = args["node_type"]
     plugin = args.get("plugin")
+    node_options = args.get("options", {})
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id=node_id,
+        component_type="node",
+        options=node_options,
+    )
+    if credential_error is not None:
+        return credential_error
 
     # Validate plugin for types that require one.
     # Gates and coalesces intentionally have plugin=None (they're expression-based or
@@ -1817,7 +2171,10 @@ def _execute_upsert_node(
         if plugin_error is not None:
             return _failure_result(state, plugin_error)
 
-        node_options = args.get("options", {})
+        batch_placement_error = _batch_aware_placement_error(args["id"], node_type, plugin, args.get("output_mode"))
+        if batch_placement_error is not None:
+            return _failure_result(state, batch_placement_error)
+
         batch_required_error = _batch_aware_required_input_fields_error(args["id"], plugin, node_options)
         if batch_required_error is not None:
             return _failure_result(state, batch_required_error)
@@ -1853,7 +2210,7 @@ def _execute_upsert_node(
         input=args["input"],
         on_success=args.get("on_success"),
         on_error=args.get("on_error") or ("discard" if node_type in ("transform", "aggregation") else None),
-        options=args.get("options", {}),
+        options=node_options,
         condition=args.get("condition"),
         routes=args.get("routes"),
         fork_to=fork_to,
@@ -1865,7 +2222,6 @@ def _execute_upsert_node(
         expected_output_count=args.get("expected_output_count"),
     )
 
-    node_id = args["id"]
     new_state = state.with_node(node)
 
     # Affected: the node itself plus nodes with edges referencing it
@@ -2011,6 +2367,14 @@ def _execute_set_output(
 
     # S2: Validate sink path allowlist (mirrors source path check)
     sink_options = args.get("options", {})
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id=args["sink_name"],
+        component_type="output",
+        options=sink_options,
+    )
+    if credential_error is not None:
+        return credential_error
     path_error = _validate_sink_path(sink_options, data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
@@ -2094,39 +2458,6 @@ def _execute_set_source_from_blob(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> ToolResult:
-    if session_engine is None or session_id is None:
-        return _failure_result(state, "Blob tools require session context.")
-    blob = _sync_get_blob(session_engine, arguments["blob_id"], session_id)
-    if blob is None:
-        return _failure_result(state, f"Blob '{arguments['blob_id']}' not found.")
-
-    if blob["status"] != "ready":
-        return _failure_result(state, f"Blob is not ready (status: {blob['status']}).")
-
-    # Determine source plugin and any format-specific options
-    mime_extra: dict[str, str] = {}
-    explicit_plugin = arguments.get("plugin")
-    if explicit_plugin:
-        plugin = explicit_plugin
-    else:
-        mime_entry = _MIME_TO_SOURCE.get(blob["mime_type"])
-        if mime_entry is None:
-            return _failure_result(
-                state,
-                f"Cannot infer source plugin for MIME type '{blob['mime_type']}'. Please specify the 'plugin' parameter explicitly.",
-            )
-        plugin, mime_extra = mime_entry
-
-    # Validate plugin exists
-    try:
-        catalog.get_schema("source", plugin)
-    except (ValueError, KeyError) as exc:
-        return _failure_result(state, f"Unknown source plugin '{plugin}': {exc}")
-
-    # Merge caller-provided options with blob-derived options.
-    # Caller options come first, then we overlay the authoritative blob fields.
-    # This allows callers to provide plugin-specific config (schema, column, etc.)
-    # while ensuring path and blob_ref always reflect the actual blob.
     caller_options = arguments.get("options", {})
     if not isinstance(caller_options, dict):
         raise ToolArgumentError(
@@ -2134,27 +2465,29 @@ def _execute_set_source_from_blob(
             expected="an object",
             actual_type=type(caller_options).__name__,
         )
-    merged_options = {
-        **caller_options,
-        **mime_extra,
-        "path": blob["storage_path"],
-        "blob_ref": blob["id"],
-    }
-
-    # Pre-validate options against the plugin's config model.
     on_vf = arguments.get("on_validation_failure", "quarantine")
-    prevalidation_error = _prevalidate_source(plugin, merged_options, on_vf)
-    if prevalidation_error is not None:
-        return _failure_result(state, prevalidation_error)
+    resolved = _resolve_source_blob(
+        blob_id=arguments["blob_id"],
+        explicit_plugin=arguments.get("plugin"),
+        caller_options=caller_options,
+        on_validation_failure=on_vf,
+        state=state,
+        catalog=catalog,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+    if isinstance(resolved, ToolResult):
+        return resolved
 
     source = SourceSpec(
-        plugin=plugin,
+        plugin=resolved.plugin,
         on_success=arguments["on_success"],
-        options=merged_options,
+        options=resolved.options,
         on_validation_failure=on_vf,
     )
     new_state = state.with_source(source)
-    return _mutation_result(new_state, ("source",), data=_vf_destination_note(new_state, on_vf))
+    data = _vf_destination_note(new_state, on_vf) or {}
+    return _mutation_result(new_state, ("source",), data={**data, "source_blob": resolved.payload})
 
 
 _ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
@@ -2277,6 +2610,68 @@ def _prepare_blob_create(
         content_hash=file_hash,
         storage_path=_blob_storage_path(data_dir, session_id, blob_id, safe_filename),
         description=arguments.get("description"),
+    )
+
+
+def _first_nonempty_csv_row(content: str) -> tuple[str, ...] | None:
+    """Return the first non-empty CSV row, if any."""
+    for row in csv.reader(io.StringIO(content)):
+        if any(cell.strip() for cell in row):
+            return tuple(row)
+    return None
+
+
+def _is_header_only_csv(content: str) -> tuple[str, ...] | None:
+    """Return the sole CSV row when content is header-only, otherwise None."""
+    nonempty_rows = [tuple(row) for row in csv.reader(io.StringIO(content)) if any(cell.strip() for cell in row)]
+    if len(nonempty_rows) != 1:
+        return None
+    return nonempty_rows[0]
+
+
+def _header_only_inline_csv_conflict(
+    prepared: _PreparedBlobCreate,
+    *,
+    session_engine: Engine,
+    session_id: str,
+) -> str | None:
+    """Reject schema-only CSV blobs when a matching uploaded CSV is ready."""
+    if prepared.mime_type != "text/csv":
+        return None
+    header = _is_header_only_csv(prepared.content_bytes.decode("utf-8"))
+    if header is None:
+        return None
+
+    with session_engine.connect() as conn:
+        rows = conn.execute(
+            select(blobs_table).where(
+                blobs_table.c.session_id == session_id,
+                blobs_table.c.mime_type == "text/csv",
+                blobs_table.c.status == "ready",
+                blobs_table.c.created_by == "user",
+            )
+        ).fetchall()
+
+    matches: list[BlobToolRecord] = []
+    for row in rows:
+        blob = _blob_row_to_tool_dict(row)
+        try:
+            candidate_header = _first_nonempty_csv_row(Path(blob["storage_path"]).read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise AuditIntegrityError(
+                f"Ready uploaded blob '{blob['id']}' storage_path could not be read during set_pipeline inline CSV custody check"
+            ) from exc
+        if candidate_header == header and blob["size_bytes"] > len(prepared.content_bytes):
+            matches.append(blob)
+
+    if not matches:
+        return None
+
+    choices = ", ".join(f"{blob['filename']} ({blob['id']}, {blob['size_bytes']} bytes)" for blob in matches)
+    return (
+        "Refusing header-only inline CSV for set_pipeline because ready uploaded CSV blob(s) "
+        f"with matching headers already exist in this session: {choices}. "
+        "Bind the uploaded file with source.blob_id or call list_blobs then set_source_from_blob."
     )
 
 
@@ -3131,15 +3526,56 @@ def _execute_set_pipeline(
     # authoritative exactly as if create_blob + set_source_from_blob had been
     # called, but the LLM gets one audited tool decision instead of a serial
     # blob-then-source-then-pipeline conversation.
-    src_options = src_args.get("options", {})
+    src_options: Mapping[str, Any] = src_args.get("options", {})
     if not isinstance(src_options, dict):
         raise ToolArgumentError(
             argument="source.options",
             expected="an object",
             actual_type=type(src_options).__name__,
         )
+    manual_blob_ref_error = _reject_manual_source_blob_ref(
+        src_options,
+        tool_name="set_pipeline",
+        inline_blob_supported=True,
+    )
+    if manual_blob_ref_error is not None:
+        return _failure_result(state, manual_blob_ref_error)
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id="source",
+        component_type="source",
+        options=src_options,
+    )
+    if credential_error is not None:
+        return credential_error
     prepared_inline_blob: _PreparedBlobCreate | None = None
+    resolved_source_blob: _ResolvedSourceBlob | None = None
+    source_blob_id = src_args.get("blob_id")
     inline_blob = src_args.get("inline_blob")
+    if source_blob_id is not None and inline_blob is not None:
+        return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
+    if source_blob_id is not None:
+        if not isinstance(source_blob_id, str):
+            raise ToolArgumentError(
+                argument="source.blob_id",
+                expected="a string",
+                actual_type=type(source_blob_id).__name__,
+            )
+        resolved = _resolve_source_blob(
+            blob_id=source_blob_id,
+            explicit_plugin=src_plugin,
+            caller_options=src_options,
+            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            state=state,
+            catalog=catalog,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        if isinstance(resolved, ToolResult):
+            return resolved
+        resolved_source_blob = resolved
+        src_plugin = resolved.plugin
+        src_options = resolved.options
     if inline_blob is not None:
         if session_engine is None or session_id is None:
             return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
@@ -3156,6 +3592,13 @@ def _execute_set_pipeline(
         # compose loop's ARG_ERROR branch rather than masking as
         # SUCCESS-with-success=False.
         prepared_inline_blob = _prepare_blob_create(inline_blob, data_dir=data_dir, session_id=session_id)
+        header_conflict = _header_only_inline_csv_conflict(
+            prepared_inline_blob,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        if header_conflict is not None:
+            return _failure_result(state, header_conflict)
 
         mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)
         mime_options: dict[str, str] = {}
@@ -3185,11 +3628,22 @@ def _execute_set_pipeline(
         node_id = node_args.get("id", "?")
         node_type = node_args["node_type"]
         node_plugin = node_args.get("plugin")
+        node_options = node_args.get("options", {})
+        credential_error = _credential_wiring_contract_failure(
+            state,
+            component_id=node_id,
+            component_type="node",
+            options=node_options,
+        )
+        if credential_error is not None:
+            return credential_error
         if node_type in ("transform", "aggregation") and node_plugin is not None:
             plugin_error = _validate_plugin_name(catalog, "transform", node_plugin)
             if plugin_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {plugin_error}")
-            node_options = node_args.get("options", {})
+            batch_placement_error = _batch_aware_placement_error(node_id, node_type, node_plugin, node_args.get("output_mode"))
+            if batch_placement_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {batch_placement_error}")
             batch_required_error = _batch_aware_required_input_fields_error(node_id, node_plugin, node_options)
             if batch_required_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {batch_required_error}")
@@ -3214,6 +3668,14 @@ def _execute_set_pipeline(
             return _failure_result(state, f"Output '{out_name}': {plugin_error}")
         # S2: Validate sink path allowlist (mirrors source path check)
         out_options = out_args.get("options", {})
+        credential_error = _credential_wiring_contract_failure(
+            state,
+            component_id=out_name,
+            component_type="output",
+            options=out_options,
+        )
+        if credential_error is not None:
+            return credential_error
         out_path_error = _validate_sink_path(out_options, data_dir)
         if out_path_error is not None:
             return _failure_result(state, f"Output '{out_name}': {out_path_error}")
@@ -3330,6 +3792,9 @@ def _execute_set_pipeline(
     # 6. Report all nodes + source + outputs as affected
     affected = ("source", *(n.id for n in node_specs), *(o.name for o in output_specs))
     data: dict[str, Any] | None = _vf_destination_note(new_state, src_on_vf)
+    if resolved_source_blob is not None:
+        source_blob_payload = {"source_blob": resolved_source_blob.payload}
+        data = source_blob_payload if data is None else {**data, **source_blob_payload}
     if prepared_inline_blob is not None:
         inline_payload = {"inline_blob": _blob_create_payload(prepared_inline_blob)}
         data = inline_payload if data is None else {**data, **inline_payload}
@@ -3382,6 +3847,14 @@ def _execute_patch_source_options(
             )
 
     new_options = _apply_merge_patch(state.source.options, patch)
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id="source",
+        component_type="source",
+        options=new_options,
+    )
+    if credential_error is not None:
+        return credential_error
 
     # S2: Validate patched source paths against allowlist
     path_error = _validate_source_path(new_options, data_dir)
@@ -3428,6 +3901,14 @@ def _execute_patch_node_options(
     if current is None:
         return _failure_result(state, f"Node '{node_id}' not found.")
     new_options = _apply_merge_patch(current.options, patch)
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id=node_id,
+        component_type="node",
+        options=new_options,
+    )
+    if credential_error is not None:
+        return credential_error
 
     if current.node_type in ("transform", "aggregation") and current.plugin is not None:
         prevalidation_error = _prevalidate_transform(current.plugin, new_options)
@@ -3478,6 +3959,14 @@ def _execute_patch_output_options(
     if current is None:
         return _failure_result(state, f"Output '{sink_name}' not found.")
     new_options = _apply_merge_patch(current.options, patch)
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id=sink_name,
+        component_type="output",
+        options=new_options,
+    )
+    if credential_error is not None:
+        return credential_error
 
     # S2: Validate patched sink paths against allowlist
     path_error = _validate_sink_path(new_options, data_dir)
@@ -3933,7 +4422,7 @@ def _execute_get_pipeline_state(
     return _discovery_result(state, data)
 
 
-def _authoring_validation_payload(validation: ValidationSummary) -> dict[str, Any]:
+def _authoring_validation_payload(state: CompositionState, validation: ValidationSummary) -> dict[str, Any]:
     return {
         "is_valid": validation.is_valid,
         "errors": [e.to_dict() for e in validation.errors],
@@ -3941,6 +4430,7 @@ def _authoring_validation_payload(validation: ValidationSummary) -> dict[str, An
         "suggestions": [e.to_dict() for e in validation.suggestions],
         "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
         "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
+        "graph_repair_suggestions": _graph_repair_suggestions(state, validation),
     }
 
 
@@ -3963,7 +4453,7 @@ def _execute_preview_pipeline(
         1,
         {"outcome": "valid" if validation.is_valid else "invalid"},
     )
-    authoring_payload = _authoring_validation_payload(validation)
+    authoring_payload = _authoring_validation_payload(state, validation)
     runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
 
     summary: dict[str, Any] = {
@@ -3973,6 +4463,7 @@ def _execute_preview_pipeline(
         "suggestions": authoring_payload["suggestions"],
         "edge_contracts": authoring_payload["edge_contracts"],
         "semantic_contracts": authoring_payload["semantic_contracts"],
+        "graph_repair_suggestions": authoring_payload["graph_repair_suggestions"],
         "authoring_validation": authoring_payload,
         "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
         "source": None,

@@ -7,7 +7,7 @@ Verifies CSVSource honors the SourceProtocol contract.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -81,11 +81,18 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
 
         Note: After the csv.reader refactor, empty files are handled
         gracefully by detecting StopIteration on the first next() call
-        (no headers available). This is better than raising EmptyDataError.
+        (no headers available). No schema contract or validation error is
+        fabricated because there is no header or row payload to audit.
         """
         empty_file = tmp_path / "empty.csv"
         empty_file.write_text("")
 
+        setup = make_recorder_with_run(
+            run_id="test-empty-file",
+            source_node_id="csv_source",
+            source_plugin_name="csv",
+            canonical_version=CANONICAL_VERSION,
+        )
         source = CSVSource(
             {
                 "path": str(empty_file),
@@ -94,13 +101,17 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
             }
         )
         source.on_success = "output"
-        db = make_landscape_db()
-        factory = make_factory(db)
-        ctx = make_context(landscape=factory.plugin_audit_writer())
+        ctx = make_context(
+            run_id=setup.run_id,
+            landscape=setup.factory.plugin_audit_writer(),
+            node_id=setup.source_node_id,
+        )
 
-        # Empty file returns no rows gracefully (no error)
         rows = list(source.load(ctx))
-        assert len(rows) == 0
+        assert rows == []
+        assert source.get_schema_contract() is None
+        assert source.get_field_resolution() is None
+        assert setup.factory.data_flow.get_validation_errors_for_run(setup.run_id) == []
 
     def test_csv_source_handles_header_only(self, tmp_path: Path) -> None:
         """CSVSource MUST handle files with only headers."""
@@ -121,6 +132,50 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
 
         rows = list(source.load(ctx))
         assert rows == []
+        contract = source.get_schema_contract()
+        assert contract is not None
+        assert contract.mode == "OBSERVED"
+        assert contract.locked is True
+        assert contract.fields == ()
+        assert source.get_field_resolution() == (
+            {"id": "id", "name": "name", "value": "value"},
+            "1.0.0",
+        )
+
+    def test_csv_source_load_is_deterministic_for_same_file(self, source_data: Path) -> None:
+        """CSVSource MUST emit stable row and contract data for the same file."""
+
+        def load_snapshot(run_id: str) -> list[tuple[Any, bool, dict[str, Any] | None]]:
+            setup = make_recorder_with_run(
+                run_id=run_id,
+                source_node_id="csv_source",
+                source_plugin_name="csv",
+                canonical_version=CANONICAL_VERSION,
+            )
+            source = CSVSource(
+                {
+                    "path": str(source_data),
+                    "schema": {"mode": "observed"},
+                    "on_validation_failure": "discard",
+                }
+            )
+            source.on_success = "output"
+            ctx = make_context(
+                run_id=setup.run_id,
+                landscape=setup.factory.plugin_audit_writer(),
+                node_id=setup.source_node_id,
+            )
+
+            return [
+                (
+                    row.row,
+                    row.is_quarantined,
+                    row.contract.to_checkpoint_format() if row.contract is not None else None,
+                )
+                for row in source.load(ctx)
+            ]
+
+        assert load_snapshot("test-determinism-a") == load_snapshot("test-determinism-b")
 
 
 class TestCSVSourceQuarantineContract(SourceContractPropertyTestBase):
@@ -203,6 +258,8 @@ class TestCSVSourceQuarantineContract(SourceContractPropertyTestBase):
         assert len(errors) == 1
         assert errors[0].schema_mode == "fixed"
         assert errors[0].destination == "quarantine_sink"
+        assert ctx.pop_pending_quarantine_validation_error_id(q_row.row) == errors[0].error_id
+        assert ctx.pop_pending_quarantine_validation_error_id(q_row.row) is None
 
 
 class TestCSVSourceDiscardContract:

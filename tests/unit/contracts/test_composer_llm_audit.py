@@ -74,6 +74,15 @@ def test_token_none_values_are_preserved() -> None:
     assert payload["total_tokens"] is None
 
 
+def test_provider_cost_fields_are_serialized_without_fabricating_cost() -> None:
+    call = _make_call(provider_cost=0.0037, provider_cost_source="response_usage.cost")
+
+    payload = call.to_dict()
+
+    assert payload["provider_cost"] == 0.0037
+    assert payload["provider_cost_source"] == "response_usage.cost"
+
+
 def test_model_drift_preserves_requested_and_returned_models() -> None:
     call = _make_call(model_requested="anthropic/claude-sonnet-4.5", model_returned="anthropic/claude-sonnet-4.5-20260501")
 

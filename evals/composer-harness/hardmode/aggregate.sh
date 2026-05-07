@@ -29,16 +29,84 @@ fi
 evals_log INFO "aggregating ledgers under $runs_root"
 
 python3 - "$runs_root" <<'PY'
-import json, pathlib, sys
+import json, math, pathlib, sys
 
 runs = pathlib.Path(sys.argv[1])
 ledgers = sorted(runs.glob("*/ledger.json"))
 agg = []
+summary_usage = {
+    "prompt_tokens": 0,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "models": set(),
+    "token_usage_available_scenarios": 0,
+    "token_usage_unavailable_scenarios": 0,
+}
+total_artifact_errors = 0
+summary_cost = {
+    "actual_usd": 0.0,
+    "cost_available_scenarios": 0,
+    "cost_unavailable_scenarios": 0,
+    "costed_call_count": 0,
+    "sources": set(),
+}
+
+def as_int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+def as_cost(value):
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value)) and value >= 0 else None
+
 for p in ledgers:
     try:
         L = json.loads(p.read_text())
     except json.JSONDecodeError:
         continue
+    raw_provider_usage = L.get("provider_usage")
+    provider_usage = raw_provider_usage if isinstance(raw_provider_usage, dict) else {}
+    token_fields = ("prompt_tokens", "cached_prompt_tokens", "completion_tokens", "total_tokens")
+    legacy_usage_available = any(as_int(provider_usage.get(field)) for field in token_fields)
+    token_usage_available = bool(provider_usage.get("token_usage_available"))
+    if "token_usage_available" not in provider_usage:
+        token_usage_available = legacy_usage_available
+    usage = {
+        "prompt_tokens": as_int(provider_usage.get("prompt_tokens")),
+        "cached_prompt_tokens": as_int(provider_usage.get("cached_prompt_tokens")),
+        "completion_tokens": as_int(provider_usage.get("completion_tokens")),
+        "total_tokens": as_int(provider_usage.get("total_tokens")),
+        "models": sorted(m for m in (provider_usage.get("models") or []) if isinstance(m, str)),
+        "token_usage_available": token_usage_available,
+        "source": provider_usage.get("source") or ("diagnostics" if token_usage_available else "not_available"),
+    }
+    if usage["token_usage_available"]:
+        for field in token_fields:
+            summary_usage[field] += usage[field]
+        summary_usage["models"].update(usage["models"])
+        summary_usage["token_usage_available_scenarios"] += 1
+    else:
+        summary_usage["token_usage_unavailable_scenarios"] += 1
+    artifact_errors = L.get("artifact_collection_errors") or []
+    artifact_error_count = len(artifact_errors)
+    total_artifact_errors += artifact_error_count
+    raw_cost = L.get("cost")
+    cost_in = raw_cost if isinstance(raw_cost, dict) else {}
+    actual_usd = as_cost(cost_in.get("actual_usd"))
+    cost_available = actual_usd is not None
+    cost = {
+        "actual_usd": actual_usd,
+        "source": cost_in.get("source") or ("composer_llm_audit.response_usage.cost" if cost_available else "not_available"),
+        "cost_available": cost_available,
+        "costed_call_count": as_int(cost_in.get("costed_call_count")),
+    }
+    if cost_available:
+        summary_cost["actual_usd"] += actual_usd
+        summary_cost["cost_available_scenarios"] += 1
+        summary_cost["costed_call_count"] += cost["costed_call_count"]
+        if isinstance(cost["source"], str):
+            summary_cost["sources"].add(cost["source"])
+    else:
+        summary_cost["cost_unavailable_scenarios"] += 1
     agg.append({
         "scenario_id": L.get("scenario_id"),
         "persona": L.get("persona"),
@@ -58,10 +126,37 @@ for p in ledgers:
         "limit_keyword_turns": L.get("limit_keyword_turns"),
         "failed_validate_checks": L.get("failed_validate_checks"),
         "run_error": L.get("run_error"),
+        "artifact_collection_error_count": artifact_error_count,
+        "artifact_collection_errors": artifact_errors,
+        "provider_usage": usage,
+        "cost": cost,
     })
 
 agg.sort(key=lambda r: (r.get("persona") or "", r.get("task_class") or "", r.get("scenario_id") or ""))
 (runs / "aggregate.json").write_text(json.dumps(agg, indent=2))
+(runs / "aggregate_summary.json").write_text(json.dumps({
+    "scenario_count": len(agg),
+    "total_wall_seconds": round(sum(r.get("total_wall_seconds") or 0 for r in agg), 1),
+    "artifact_collection_error_count": total_artifact_errors,
+    "provider_usage": {
+        "prompt_tokens": summary_usage["prompt_tokens"] if summary_usage["token_usage_available_scenarios"] else None,
+        "cached_prompt_tokens": (
+            summary_usage["cached_prompt_tokens"] if summary_usage["token_usage_available_scenarios"] else None
+        ),
+        "completion_tokens": summary_usage["completion_tokens"] if summary_usage["token_usage_available_scenarios"] else None,
+        "total_tokens": summary_usage["total_tokens"] if summary_usage["token_usage_available_scenarios"] else None,
+        "models": sorted(summary_usage["models"]),
+        "token_usage_available_scenarios": summary_usage["token_usage_available_scenarios"],
+        "token_usage_unavailable_scenarios": summary_usage["token_usage_unavailable_scenarios"],
+    },
+    "cost": {
+        "actual_usd": round(summary_cost["actual_usd"], 10) if summary_cost["cost_available_scenarios"] else None,
+        "source": "+".join(sorted(summary_cost["sources"])) if summary_cost["sources"] else "not_available",
+        "cost_available_scenarios": summary_cost["cost_available_scenarios"],
+        "cost_unavailable_scenarios": summary_cost["cost_unavailable_scenarios"],
+        "costed_call_count": summary_cost["costed_call_count"],
+    },
+}, indent=2))
 
 # Human-readable scorecard.
 def fmt_outcome(r):
@@ -86,20 +181,53 @@ lines = [
     "",
     f"_Generated from `{runs.name}/aggregate.json` ({len(agg)} scenarios)._",
     "",
-    "| Scenario | Persona | Class | Turns | Wall (s) | Outcome | Rows ok / proc |",
-    "|---|---|---|---|---|---|---|",
+    "| Scenario | Persona | Class | Turns | Wall (s) | Tokens | Cost | Artifact errors | Outcome | Rows ok / proc |",
+    "|---|---|---|---|---|---|---|---|---|---|",
 ]
 for r in agg:
     rows = f"{r.get('rows_succeeded')}/{r.get('rows_processed')}" if r.get("ran_engine") else "—"
-    lines.append("| {sid} | {p} | {c} | {t} | {w} | {o} | {r} |".format(
+    usage = r.get("provider_usage") or {}
+    tokens = usage.get("total_tokens") if usage.get("token_usage_available") else "—"
+    cost = r.get("cost") or {}
+    cost_cell = f"${cost.get('actual_usd'):.4f}" if cost.get("cost_available") else "—"
+    lines.append("| {sid} | {p} | {c} | {t} | {w} | {tokens} | {cost} | {artifact_errors} | {o} | {r} |".format(
         sid=r["scenario_id"] or "?",
         p=r["persona"] or "?",
         c=r["task_class"] or "?",
         t=r["user_turns"] or "?",
         w=r["total_wall_seconds"] or 0,
+        tokens=tokens,
+        cost=cost_cell,
+        artifact_errors=r.get("artifact_collection_error_count") or 0,
         o=fmt_outcome(r),
         r=rows,
     ))
+
+lines += [
+    "",
+    "## Run Summary",
+    "",
+    "- Provider tokens: "
+    + (
+        f"{summary_usage['total_tokens']} total "
+        f"({summary_usage['prompt_tokens']} prompt, {summary_usage['completion_tokens']} completion, "
+        f"{summary_usage['cached_prompt_tokens']} cached prompt)"
+        if summary_usage["token_usage_available_scenarios"]
+        else "not available"
+    ),
+    f"- Provider usage coverage: {summary_usage['token_usage_available_scenarios']} available, "
+    f"{summary_usage['token_usage_unavailable_scenarios']} unavailable",
+    f"- Models observed: {', '.join(sorted(summary_usage['models'])) if summary_usage['models'] else '—'}",
+    f"- Artifact collection errors: {total_artifact_errors}",
+    "- Cost: "
+    + (
+        f"${summary_cost['actual_usd']:.4f} from {summary_cost['costed_call_count']} provider-priced calls"
+        if summary_cost["cost_available_scenarios"]
+        else "not available from harness metadata"
+    ),
+    f"- Cost coverage: {summary_cost['cost_available_scenarios']} available, "
+    f"{summary_cost['cost_unavailable_scenarios']} unavailable",
+]
 
 lines += ["", "## Persona-class matrix", ""]
 personas = sorted({r["persona"] for r in agg if r.get("persona")})
@@ -119,5 +247,6 @@ for p in personas:
 
 (runs / "SCORECARD.md").write_text("\n".join(lines) + "\n")
 print(f"wrote {runs/'aggregate.json'}")
+print(f"wrote {runs/'aggregate_summary.json'}")
 print(f"wrote {runs/'SCORECARD.md'}")
 PY

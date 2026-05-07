@@ -298,6 +298,17 @@ def test_skill_advisor_examples_include_required_trigger_values() -> None:
     assert "proactive_red_listed_plugin" in skill_text
 
 
+def test_skill_wiring_examples_include_duplicate_consumer_fork_repair() -> None:
+    """The skill must teach the duplicate-consumer repair pattern from P1 stress."""
+    from importlib.resources import files
+
+    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
+    assert "Example C" in skill_text
+    assert "Duplicate consumer for connection 'classified_rows'" in skill_text
+    assert '"id": "fork_classified_rows"' in skill_text
+    assert '"fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"]' in skill_text
+
+
 # --- 4. Compose-loop happy path (advisor returns guidance) ---
 
 

@@ -162,6 +162,61 @@ class TestAmbiguousContinueFallthrough:
         continue_edges = [e for e in edges if str(e.from_node) == str(router_id) and e.label == "continue"]
         assert continue_edges == [], f"Gate with ambiguous multi-route should have no continue edge, but found: {continue_edges}"
 
+    def test_gate_discard_route_builds_virtual_route_destination(self, plugin_manager: Any) -> None:
+        """Gate route destination 'discard' is terminal and must not need a sink node."""
+        from elspeth.cli_helpers import instantiate_plugins_from_config
+        from elspeth.contracts import RouteDestination
+        from elspeth.contracts.types import GateName, NodeID
+        from elspeth.core.config import (
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+            SourceSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            source=SourceSettings(
+                plugin="csv",
+                on_success="source_out",
+                options={
+                    "path": "test.csv",
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            ),
+            gates=[
+                GateSettings(
+                    name="drop_nonmatches",
+                    input="source_out",
+                    condition="True",
+                    routes={"true": "output", "false": "discard"},
+                ),
+            ],
+            sinks={
+                "output": SinkSettings(
+                    plugin="json",
+                    on_write_failure="discard",
+                    options={"path": "output.json", "schema": {"mode": "observed"}},
+                ),
+            },
+        )
+
+        plugins = instantiate_plugins_from_config(settings)
+        graph = ExecutionGraph.from_plugin_instances(
+            source=plugins.source,
+            source_settings=plugins.source_settings,
+            transforms=plugins.transforms,
+            sinks=plugins.sinks,
+            aggregations=plugins.aggregations,
+            gates=list(settings.gates),
+        )
+
+        gate_id = graph.get_config_gate_id_map()[GateName("drop_nonmatches")]
+        assert graph.get_route_resolution_map()[(gate_id, "false")] == RouteDestination.discard()
+        discard_edges = [edge for edge in graph.get_edges() if edge.label == "false" and edge.to_node == NodeID("discard")]
+        assert discard_edges == []
+
 
 class TestCoalesceOnSuccessRejectsConnection:
     """Coalesce on_success must point to a sink, not a connection name.

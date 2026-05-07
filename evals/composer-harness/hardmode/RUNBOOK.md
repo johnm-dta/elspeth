@@ -128,12 +128,25 @@ Outputs:
 runs/<date>-hardmode/p1_t1_happy/
   validate.json        # the 9-check matrix
   execute.{json,code}  # the run trigger
-  run.json             # final run row (status, rows_processed, etc.)
-  diagnostics.json     # per-token engine diagnostics
-  final_yaml.json      # the YAML the composer rendered
-  messages.json        # full conversation as the API records it
-  ledger.json          # consolidated per-scenario summary
+  run.json             # final run row, or {} if the engine did not run
+  diagnostics.json     # per-token engine diagnostics, or {} if unavailable
+  diagnostics.json.code
+  final_yaml.json      # the YAML the composer rendered, or {} if unavailable
+  final_yaml.json.code
+  messages.json        # conversation plus safe LLM-call audit sidecars, or [] if unavailable
+  messages.json.code
+  artifact_collection_errors.json
+  ledger.json          # consolidated summary, including provider usage/cost metadata
 ```
+
+`/validate` is required infrastructure: if it returns non-2xx, finalization
+exits 74 and no ledger is written. Post-validate artifacts are best-effort
+evidence collection. If diagnostics, final YAML export, or message export fails,
+the finalizer writes a typed fallback, records the HTTP code in
+`artifact_collection_errors.json`, and still emits `ledger.json`.
+The message export uses `include_llm_audit=true`; those sidecars expose model,
+token, and provider-cost metadata, but not raw prompts, tool arguments, or tool
+results.
 
 ### Step 6 (optional): persona-character check
 
@@ -165,10 +178,20 @@ hardmode/aggregate.sh
 cat runs/$(date -u +%Y-%m-%d)-hardmode/SCORECARD.md
 ```
 
+`aggregate.sh` writes three run-root artifacts:
+
+- `aggregate.json` — one record per scenario, including artifact errors,
+  provider usage metadata, and cost metadata.
+- `aggregate_summary.json` — suite-level wall time, artifact error totals,
+  provider token totals, token-usage coverage, provider-reported cost, and cost
+  coverage.
+- `SCORECARD.md` — human-readable table plus persona/class matrix.
+
 The persona loop in the middle is *not* automatable from bash alone — it
 requires the parent agent to dispatch subagents per turn. Plan for ~10
 minutes of supervised dispatch per scenario; a full 15-scenario run is a
-2-3 hour activity for the parent agent + ~$8-12 of OpenRouter credit.
+2-3 hour activity for the parent agent. Use provider billing for actual spend;
+the 2026-05-07 full run cost about $3.
 
 ## Replaying engine-only
 
@@ -189,15 +212,22 @@ with a `replay_summary.json` showing original-vs-replay status delta.
 | `harness.sh` says output dir already exists | re-running same scenario | `--fresh` to reset, or `--reuse-sid` to continue |
 | `post_message.sh` fails with 401 | JWT expired mid-scenario | The harness auto-refreshes; if it doesn't, re-run `hardmode/harness.sh <sid> --reuse-sid` to force a new login |
 | `finalize_scenario.sh` exits 75 (poll timeout) | Engine still running at 300s | Raise `ELSPETH_EVAL_RUN_TIMEOUT_SEC` or read partial run.json |
+| `artifact_collection_errors.json` lists `final_yaml`, `messages`, or `diagnostics` | Optional artifact endpoint failed after validate | Keep the ledger; classify the scenario from `validate.json`, `run.json`, and the recorded artifact error |
 | `replay.sh` says YAML import failed | Composer API renamed the import endpoint | Check `lib/common.sh` `_evals_http_post_json` calls — endpoint candidates are `/state/yaml` then `/import-yaml` |
 | Persona-subagent breaks character | Subagent saw too much context | Spawn a *fresh* general-purpose subagent each turn — never re-use one across turns |
 
-## Cost estimate (rough, based on 2026-05-03 baseline)
+## Cost accounting
 
-- Bootstrap-only scenarios (refusal probes, 1 turn): negligible.
-- Single-turn happy paths: $0.20-0.50.
-- Multi-turn edge cases that converge: $0.50-1.20.
-- Convergence-timeouts (180s × multi-step): $1.50-2.00 each.
+The harness does not estimate dollars from wall time. That heuristic overstated
+the 2026-05-07 run: the actual operator-observed provider spend was about $3.
 
-A full 15-scenario run with the current matrix: **~$8-12** at openai/gpt-5-mini
-rates (the model under test for this re-run).
+Use OpenRouter/provider billing as the source of truth for USD. The harness
+records best-effort provider token metadata in each `ledger.json` and totals it
+in `aggregate_summary.json` when diagnostics expose usage. Check
+`provider_usage.token_usage_available`; unavailable usage is rendered as `—` in
+the scorecard, not as zero.
+
+When the server exposes LLM-call audit sidecars, `ledger.json` also sums
+provider-reported `response.usage.cost` into `cost.actual_usd`. Missing cost is
+rendered as `—` and counted in `cost_unavailable_scenarios`; it is never
+estimated from wall time.

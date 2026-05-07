@@ -502,7 +502,7 @@ class GateSettings(BaseModel):
     condition: str = Field(description="Expression to evaluate (validated by ExpressionParser)")
     routes: dict[str, str] = Field(
         max_length=32,
-        description="Maps route labels to destinations (connection name, sink name, or 'fork')",
+        description="Maps route labels to destinations (connection name, sink name, 'fork', or virtual 'discard')",
     )
     fork_to: list[str] | None = Field(
         default=None,
@@ -574,8 +574,9 @@ class GateSettings(BaseModel):
                 raise ValueError("Route labels must not be empty")
             _validate_connection_or_sink_name(label, field_label="Route label")
 
-            # "fork" is a special routing action consumed by fork_to branch wiring.
-            if destination == "fork":
+            # "fork" is consumed by fork_to branch wiring; "discard" is a
+            # virtual terminal gate destination resolved during DAG build.
+            if destination in {"fork", "discard"}:
                 continue
             if destination == "continue":
                 raise ValueError("Route destination 'continue' has been removed. Use an explicit connection name or sink name.")
@@ -1046,8 +1047,8 @@ class LandscapeSettings(BaseModel):
         default="sqlite",
         description="Database backend type (sqlcipher requires the 'security' extra)",
     )
-    # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs like
-    # "postgresql://user:pass@host/db" (pathlib interprets // as UNC path)
+    # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs
+    # (pathlib interprets // as a UNC path).
     url: str = Field(
         default="sqlite:///./state/audit.db",
         description="Full SQLAlchemy database URL",
@@ -1663,7 +1664,7 @@ def _sanitize_dsn(
                                 and fail_if_no_key=True
 
     Example:
-        >>> _sanitize_dsn("postgresql://user:secret@host/db")
+        >>> _sanitize_dsn("postgresql://user:secret@host/db")  # secret-scan: allow-this-line
         ("postgresql://user@host/db", "abc123...", True)
     """
     from sqlalchemy.engine import URL

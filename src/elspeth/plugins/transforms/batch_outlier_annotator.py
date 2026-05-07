@@ -139,7 +139,7 @@ class BatchOutlierAnnotator(BaseTransform):
 
     name = "batch_outlier_annotator"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:21b26c9879a4481d"
+    source_file_hash: str | None = "sha256:5416806e37606b21"
     config_model = BatchOutlierAnnotatorConfig
     is_batch_aware = True
     passes_through_input = False
@@ -294,6 +294,24 @@ class BatchOutlierAnnotator(BaseTransform):
             raise OverflowError(operation)
         return value
 
+    @classmethod
+    def _coerce_finite_float(cls, value: int | float, *, operation: str) -> float:
+        try:
+            coerced = float(value)
+        except OverflowError as exc:
+            raise OverflowError(operation) from exc
+        return cls._require_finite_float(coerced, operation=operation)
+
+    @staticmethod
+    def _float_overflow_error(*, operation: str, batch_size: int, valid_count: int) -> TransformResult:
+        reason: TransformErrorReason = {
+            "reason": "float_overflow",
+            "operation": operation or "outlier_annotation",
+            "batch_size": batch_size,
+            "valid_count": valid_count,
+        }
+        return TransformResult.error(reason, retryable=False)
+
     @staticmethod
     def _median(values: list[float]) -> float:
         return float(statistics.median(values))
@@ -306,20 +324,14 @@ class BatchOutlierAnnotator(BaseTransform):
         missing_indices: tuple[int, ...],
         non_finite_indices: tuple[int, ...],
     ) -> tuple[_BatchStats, TransformResult | None]:
-        values = [float(entry.value) for entry in entries]
         try:
+            values = [self._coerce_finite_float(entry.value, operation="float_conversion") for entry in entries]
             mean = self._require_finite_float(sum(values) / len(values), operation="mean")
             median = self._require_finite_float(self._median(values), operation="median")
             deviations = [abs(value - median) for value in values]
             mad = self._require_finite_float(self._median(deviations), operation="mad")
             stdev = 0.0 if len(values) == 1 else self._require_finite_float(statistics.stdev(values), operation="stdev")
         except OverflowError as exc:
-            reason: TransformErrorReason = {
-                "reason": "float_overflow",
-                "operation": str(exc) or "outlier_annotation",
-                "batch_size": batch_size,
-                "valid_count": len(entries),
-            }
             return (
                 _BatchStats(
                     batch_size=batch_size,
@@ -330,7 +342,11 @@ class BatchOutlierAnnotator(BaseTransform):
                     missing_indices=missing_indices,
                     non_finite_indices=non_finite_indices,
                 ),
-                TransformResult.error(reason, retryable=False),
+                self._float_overflow_error(
+                    operation=str(exc),
+                    batch_size=batch_size,
+                    valid_count=len(entries),
+                ),
             )
 
         return (
@@ -350,7 +366,7 @@ class BatchOutlierAnnotator(BaseTransform):
         return f"{self._output_prefix}_{suffix}"
 
     def _annotation_for(self, entry: _FiniteEntry, stats: _BatchStats) -> dict[str, object]:
-        value = float(entry.value)
+        value = self._coerce_finite_float(entry.value, operation="float_conversion")
         z_score = 0.0 if stats.stdev == 0.0 else self._require_finite_float((value - stats.mean) / stats.stdev, operation="z_score")
         robust_z_score = (
             0.0 if stats.mad == 0.0 else self._require_finite_float(0.6745 * (value - stats.median) / stats.mad, operation="robust_z_score")
@@ -445,16 +461,23 @@ class BatchOutlierAnnotator(BaseTransform):
 
         output_contract = self._output_contract_for(entries)
         fields_added = sorted(self.declared_output_fields)
-        pipeline_rows = [
-            PipelineRow(
-                {
-                    **entry.row.to_dict(),
-                    **self._annotation_for(entry, stats),
-                },
-                output_contract,
+        try:
+            pipeline_rows = [
+                PipelineRow(
+                    {
+                        **entry.row.to_dict(),
+                        **self._annotation_for(entry, stats),
+                    },
+                    output_contract,
+                )
+                for entry in entries
+            ]
+        except OverflowError as exc:
+            return self._float_overflow_error(
+                operation=str(exc),
+                batch_size=len(rows),
+                valid_count=len(entries),
             )
-            for entry in entries
-        ]
 
         if len(pipeline_rows) > 1:
             return TransformResult.success_multi(

@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # Project root — the cwd for all subprocess invocations.  The scanner is
 # resolved relative to this directory, matching how CI runs it.
 _RUN_CWD = str(Path(__file__).resolve().parents[3])
@@ -108,6 +110,39 @@ def test_scanner_accepts_qualified_decorator(tmp_path: Path) -> None:
     allowlist_dir.mkdir()
     result = _run(["check", "--file", str(good), "--allowlist", str(allowlist_dir)])
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("decorator", "expected_detail"),
+    [
+        (
+            "@tier_1_error(reason='framework bug')",
+            "missing caller_module kwarg",
+        ),
+        (
+            "@tier_1_error(reason='framework bug', caller_module='')",
+            "caller_module value must be the __name__ literal",
+        ),
+    ],
+)
+def test_scanner_rejects_missing_or_spoofable_caller_module(
+    tmp_path: Path,
+    decorator: str,
+    expected_detail: str,
+) -> None:
+    """caller_module must be the literal __name__ identifier, not absent or fabricated."""
+    bad = tmp_path / "errors.py"
+    bad.write_text(
+        f"from elspeth.contracts.tier_registry import tier_1_error\n\n{decorator}\nclass BadCallerModuleError(Exception):\n    pass\n"
+    )
+    allowlist_dir = tmp_path / "allowlist"
+    allowlist_dir.mkdir()
+
+    result = _run(["check", "--file", str(bad), "--allowlist", str(allowlist_dir)])
+
+    assert result.returncode != 0
+    assert "TDE2 VIOLATIONS FOUND: 1" in result.stdout
+    assert expected_detail in result.stdout
 
 
 def test_scanner_read_error_exits_nonzero(tmp_path: Path) -> None:

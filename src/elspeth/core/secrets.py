@@ -115,6 +115,58 @@ def secret_env_ref_name(value: Any, env_ref_names: Collection[str]) -> str | Non
     return _is_secret_env_ref(value, env_ref_names)
 
 
+def is_secret_ref_marker(value: Any) -> bool:
+    """Return True when value is exactly a wired ``{"secret_ref": NAME}`` marker."""
+    return _is_secret_ref(value) is not None
+
+
+def is_wired_secret_value(value: Any, env_ref_names: Collection[str] = frozenset()) -> bool:
+    """Return True when value uses an approved deferred-secret syntax.
+
+    Valid wired forms are:
+    - ``{"secret_ref": "NAME"}``
+    - exact ``${NAME}`` / ``${NAME:-default}`` strings where NAME is present
+      in the caller-provided secret inventory.
+    """
+    if is_secret_ref_marker(value):
+        return True
+    if isinstance(value, str):
+        return _is_secret_env_ref(value, env_ref_names) is not None
+    return False
+
+
+def collect_credential_field_violations(
+    options: Any,
+    env_ref_names: Collection[str] = frozenset(),
+) -> list[str]:
+    """Return credential-bearing field names that contain literal strings.
+
+    The returned list intentionally names fields only, never values. It uses
+    the same field-name predicate as runtime fingerprinting, and treats only
+    deferred-secret markers as provisioned. Missing, empty, ``None``, and
+    non-string values are left for plugin config validation to classify.
+    """
+    violations: list[str] = []
+    if isinstance(options, Mapping):
+        if is_secret_ref_marker(options):
+            return violations
+        for key, value in options.items():
+            if isinstance(key, str) and is_secret_field(key):
+                if is_wired_secret_value(value, env_ref_names):
+                    continue
+                if value is None or value == "":
+                    continue
+                if isinstance(value, str):
+                    violations.append(key)
+                    continue
+                continue
+            violations.extend(collect_credential_field_violations(value, env_ref_names))
+    elif isinstance(options, (list, tuple)):
+        for item in options:
+            violations.extend(collect_credential_field_violations(item, env_ref_names))
+    return violations
+
+
 def _walk(
     obj: Any,
     resolver: WebSecretResolver,

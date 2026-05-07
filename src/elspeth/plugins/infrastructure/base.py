@@ -178,6 +178,11 @@ class BaseTransform(ABC):
     # When True, engine may pass list[dict] instead of single dict to process()
     is_batch_aware: bool = False
 
+    # Batch-aware transforms are aggregation-stage by default. A plugin that
+    # intentionally supports both list-mode and row-mode dispatch must opt in
+    # explicitly so composer/tool validation can reject accidental placement.
+    supports_row_mode_when_batch_aware: bool = False
+
     # Token creation flag for deaggregation transforms
     # When True AND process() returns success_multi(), the processor creates
     # new token_ids for each output row with parent linkage to input token.

@@ -38,7 +38,7 @@ evals/
     │   ├── post_message.sh           per-turn driver (POST /messages + metrics)
     │   ├── finalize_scenario.sh      validate → execute → poll-to-terminal → ledger
     │   ├── replay.sh                 engine-only re-run (no LLM)
-    │   ├── aggregate.sh              cross-scenario aggregate.json + SCORECARD.md
+    │   ├── aggregate.sh              cross-scenario aggregate/summary + SCORECARD.md
     │   ├── validate_persona.sh       linguistic-constraint check on turns
     │   └── RUNBOOK.md                step-by-step
     └── runs/                         outputs (gitignored at this level)
@@ -50,8 +50,10 @@ evals/
                 ├── state.{before,after}.t{N}.json
                 ├── progress.t{N}.json, metrics.t{N}.json
                 ├── validate.json, execute.{json,code}
-                ├── run.json, diagnostics.json
-                ├── final_yaml.json, messages.json
+                ├── run.json, diagnostics.json, diagnostics.json.code
+                ├── final_yaml.json, final_yaml.json.code
+                ├── messages.json, messages.json.code
+                ├── artifact_collection_errors.json
                 ├── ledger.json
                 ├── persona_check.json    (after validate_persona.sh)
                 └── replays/<utc-ts>/     (after replay.sh)
@@ -82,6 +84,7 @@ hardmode/finalize_scenario.sh p1_t1_happy
 # After all 9-15 scenarios done:
 hardmode/aggregate.sh
 cat runs/$(date -u +%Y-%m-%d)-hardmode/SCORECARD.md
+# Also writes aggregate.json and aggregate_summary.json in that run root.
 ```
 
 Full step-by-step is in [`hardmode/RUNBOOK.md`](hardmode/RUNBOOK.md).
@@ -136,6 +139,8 @@ done
 - The validate matrix (`validate.json` → `.checks[]`)
 - Run outcome (`run.json` → `.status`, `.rows_succeeded`, `.error`)
 - Per-row engine errors (`diagnostics.json`)
+- Optional-artifact failures (`artifact_collection_errors.json` and
+  `ledger.json` → `.artifact_collection_errors[]`)
 
 **Heuristic signals** (read with appropriate skepticism):
 - `metrics.t{N}.json`'s `*_keyword_match` fields are **noisy** — keyword-based
@@ -144,6 +149,16 @@ done
 - `persona_check.json` extracts MUST USE / MUST AVOID phrases from a persona
   spec via regex on quoted/backticked phrases — won't catch prose-style
   constraints like "avoid hedges".
+- `provider_usage` in `ledger.json` and `aggregate_summary.json` is
+  best-effort metadata extracted from diagnostics. It is useful for token
+  accounting when the composer exposes provider usage, but it is not a billing
+  statement. Check `token_usage_available` before treating token totals as
+  observed data; legacy ledgers and diagnostics without usage metadata are
+  reported as unavailable, not zero.
+- `cost` in `ledger.json` and `aggregate_summary.json` is populated only when
+  the composer LLM audit sidecars expose provider-reported cost metadata
+  (`response.usage.cost` on the OpenRouter/LiteLLM response path). Missing
+  cost remains explicit metadata, not a wall-time estimate.
 
 **Things the harness deliberately does not do**:
 - It does not assert a pass/fail outcome — `pass_criterion` is in the fixture
@@ -152,9 +167,10 @@ done
   verdicts.
 - It does not score the composer's responses against a rubric. That's a
   follow-up evaluation step you can add by reading the captured ledgers.
-- It does not check for cost overruns. OpenRouter cost is observable through
-  the composer's audit DB; the harness deliberately doesn't reach into that
-  side-channel.
+- It does not fabricate dollar cost from wall-clock time. The harness records
+  OpenRouter/LiteLLM response cost when the server exposes it via LLM-call audit
+  sidecars; otherwise `cost.source = "not_available"`. Use provider billing as
+  the reconciliation source for any suite where cost coverage is incomplete.
 
 ## When to use replay.sh
 
@@ -176,6 +192,17 @@ LLM credit.
   than overwriting. Use `--fresh` to reset a single scenario.
 - All script invocations append to `runs/.../<scenario_id>/harness.log`
   with timestamped events.
+- `finalize_scenario.sh` treats optional artifact collection failures
+  (`diagnostics`, final YAML export, message export) as evidence metadata:
+  fallback JSON is written, the HTTP code is preserved in `<artifact>.code`,
+  and the scenario ledger is still emitted.
+- `finalize_scenario.sh` requests `messages?include_llm_audit=true` so
+  `messages.json` can include safe LLM-call sidecars with model, token, and
+  provider-cost metadata. Full tool-dispatch audit rows remain hidden from the
+  HTTP response.
+- Each finalize starts by resetting generated `run.json`, `diagnostics.json`,
+  and `artifact_collection_errors.json` so a reused run directory cannot leak
+  stale engine or usage data into the new ledger.
 
 ## Adding a new scenario
 

@@ -90,7 +90,7 @@ def _insert_run(
     conn: Connection,
     run_id: str,
     *,
-    status: RunStatus,
+    status: RunStatus | str,
     with_contract: bool = False,
     contract_json_override: str | None = None,
 ) -> None:
@@ -194,6 +194,7 @@ def _create_failed_run_with_checkpoint(
     checkpoint_manager: CheckpointManager,
     run_id: str,
     *,
+    status: RunStatus | str = RunStatus.FAILED,
     checkpoint_node_id: str = "checkpoint-node",
     with_contract: bool = True,
     aggregation_state: AggregationCheckpointState | None = None,
@@ -203,7 +204,7 @@ def _create_failed_run_with_checkpoint(
     active_graph = graph or _create_graph(node_id=checkpoint_node_id)
 
     with db.connection() as conn:
-        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=with_contract)
+        _insert_run(conn, run_id, status=status, with_contract=with_contract)
         _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, checkpoint_node_id)
         _insert_row(conn, run_id, "row-0", row_index=0, source_data_ref=None)
@@ -243,6 +244,37 @@ def test_can_resume_rejects_running_run(db: LandscapeDB, recovery_manager: Recov
     check = recovery_manager.can_resume("run-running", _create_graph())
     assert check.can_resume is False
     assert check.reason == "Run is still in progress"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY],
+)
+def test_can_resume_rejects_terminal_statuses_even_when_checkpoint_exists(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    status: RunStatus,
+) -> None:
+    run_id = f"run-terminal-{status.value}"
+    graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id, status=status)
+
+    check = recovery_manager.can_resume(run_id, graph)
+
+    assert check.can_resume is False
+    assert check.reason == f"Run status {status.value!r} is not resumable"
+
+
+def test_can_resume_rejects_corrupt_stored_run_status(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    run_id = "run-corrupt-status"
+    graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id, status="bogus")
+
+    with pytest.raises(CheckpointCorruptionError, match="invalid status 'bogus'"):
+        recovery_manager.can_resume(run_id, graph)
 
 
 def test_can_resume_rejects_failed_run_without_checkpoint(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:

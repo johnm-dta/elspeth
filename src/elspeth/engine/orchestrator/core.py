@@ -462,6 +462,7 @@ class Orchestrator:
                     (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
                     | (TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
                     | (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)
+                    | (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED)
                 ):
                     rows_succeeded += 1
                     rows_processed += 1

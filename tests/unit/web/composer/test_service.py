@@ -174,6 +174,22 @@ def _make_settings(**overrides: Any) -> WebSettings:
     return WebSettings(**defaults)
 
 
+def _assert_no_mutation_empty_state_blocker(
+    result: ComposerResult,
+    *,
+    tool_name: str,
+    expected_detail: str,
+) -> None:
+    assert result.runtime_preflight is not None
+    assert result.runtime_preflight.is_valid is False
+    assert [check.name for check in result.runtime_preflight.checks] == ["state_exists"]
+    assert result.raw_assistant_content is not None
+    assert "No composer mutation tool returned success=true" in result.message
+    assert "state_exists=false" in result.message
+    assert f"Blocking result: {tool_name}" in result.message
+    assert expected_detail in result.message
+
+
 def _session_engine_with_session() -> tuple[Any, str]:
     engine = create_session_engine(
         "sqlite:///:memory:",
@@ -245,8 +261,8 @@ def _composer_to_thread_uses_test_worker(monkeypatch: pytest.MonkeyPatch) -> Non
 
 class TestComposerTextOnlyResponse:
     @pytest.mark.asyncio
-    async def test_text_only_returns_immediately(self) -> None:
-        """LLM responds with text only — no tool calls, loop terminates."""
+    async def test_non_build_text_only_returns_immediately(self) -> None:
+        """Non-build text-only replies still terminate without mutation."""
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(
@@ -259,11 +275,73 @@ class TestComposerTextOnlyResponse:
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = llm_response
-            result = await service.compose("Build me a CSV pipeline", [], state)
+            result = await service.compose("What can this composer do?", [], state)
 
         assert isinstance(result, ComposerResult)
         assert result.message == "I'll help you build a pipeline!"
         assert result.state.version == 1  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_build_request_text_only_on_empty_state_returns_no_mutation_blocker(self) -> None:
+        """A build request cannot end with conceptual prose when no mutation ran."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        model_prose = "I set up the workflow conceptually and can continue."
+        llm_response = _make_llm_response(content=model_prose)
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = llm_response
+            result = await service.compose("Set this up to actually run from leads_q3.csv.", [], state)
+
+        assert result.state.version == state.version
+        assert result.raw_assistant_content == model_prose
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert [check.name for check in result.runtime_preflight.checks] == ["state_exists"]
+        assert "No composer mutation tool returned success=true" in result.message
+        assert "state_exists=false" in result.message
+        assert "the model ended the turn without calling any build/edit tool" in result.message
+        assert "set_pipeline" in result.message
+        assert "set_source_from_blob" in result.message
+
+    @pytest.mark.asyncio
+    async def test_failed_mutation_then_empty_state_reply_names_blocking_tool_error(self) -> None:
+        """A failed mutation followed by final prose must surface the tool error."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        failed_set_pipeline = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_bad_pipeline",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {"on_success": "rows", "options": {}},
+                        "nodes": [],
+                        "edges": [],
+                        "outputs": [],
+                    },
+                }
+            ],
+        )
+        final_prose = "I tried to build it, but the workflow is still conceptual."
+        text_response = _make_llm_response(content=final_prose)
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [failed_set_pipeline, text_response]
+            result = await service.compose("Build the CSV workflow now.", [], state)
+
+        assert result.state.version == state.version
+        assert result.raw_assistant_content == final_prose
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert "No composer mutation tool returned success=true" in result.message
+        assert "Blocking result: set_pipeline failed before mutation" in result.message
+        assert "MissingRequiredPaths" in result.message
+        assert "source.plugin" in result.message
 
 
 class TestComposerSingleToolCall:
@@ -811,7 +889,11 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.message == "Fixed."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="set_source",
+            expected_detail="on_success, options, on_validation_failure",
+        )
 
     @pytest.mark.asyncio
     async def test_wrong_type_tool_arg_returns_error(self) -> None:
@@ -834,7 +916,12 @@ class TestComposerErrorHandling:
                 {
                     "id": "call_bad",
                     "name": "set_source",
-                    "arguments": {"plugin": "csv", "on_success": "out"},
+                    "arguments": {
+                        "plugin": "csv",
+                        "on_success": "out",
+                        "options": {},
+                        "on_validation_failure": "quarantine",
+                    },
                 }
             ],
         )
@@ -855,7 +942,11 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.message == "Fixed."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="set_source",
+            expected_detail="'content' must be a string, got int",
+        )
 
     @pytest.mark.asyncio
     async def test_malformed_set_pipeline_missing_top_level_required_field_returns_error(self) -> None:
@@ -916,7 +1007,11 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.message == "Recovered."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="set_pipeline",
+            expected_detail="source.plugin",
+        )
         tool_msg = mock_llm.call_args_list[1][0][0][-1]
         error_content = json.loads(tool_msg["content"])
         assert "source.plugin" in error_content["error"]
@@ -1070,7 +1165,11 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [partial_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.message == "Adjusted."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="set_pipeline",
+            expected_detail="source.inline_blob.mime_type, source.inline_blob.content",
+        )
         tool_msg = mock_llm.call_args_list[1][0][0][-1]
         error_content = json.loads(tool_msg["content"])
         assert "source.inline_blob.mime_type" in error_content["error"]
@@ -1185,7 +1284,11 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.message == "Recovered."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="set_source",
+            expected_detail="arguments (",
+        )
         mock_execute_tool.assert_not_called()
         tool_msg = mock_llm.call_args_list[1][0][0][-1]
         error_content = json.loads(tool_msg["content"])
@@ -3509,7 +3612,11 @@ class TestToolArgumentErrorAcrossThreadBoundary:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state, session_id=self.session_id)
 
-        assert result.message == "Fixed."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="create_blob",
+            expected_detail="'content' must be a string, got int",
+        )
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1
@@ -3559,7 +3666,11 @@ class TestToolArgumentErrorAcrossThreadBoundary:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state, session_id=self.session_id)
 
-        assert result.message == "Fixed."
+        _assert_no_mutation_empty_state_blocker(
+            result,
+            tool_name="set_source_from_blob",
+            expected_detail="'options' must be an object, got str",
+        )
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 from urllib.parse import urlparse
 
@@ -40,6 +40,7 @@ logger = structlog.get_logger(__name__)
 
 _CAPACITY_RETRY_INITIAL_DELAY_SECONDS = 0.05
 _CAPACITY_RETRY_MAX_DELAY_SECONDS = 1.0
+_AZURE_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _warn_telemetry_before_start(event: Any) -> None:
@@ -129,6 +130,10 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         self._fields = cfg.fields
         self._max_capacity_retry_seconds = cfg.max_capacity_retry_seconds
         self._batch_wait_timeout_seconds = cfg.batch_wait_timeout_seconds
+        self._effective_batch_wait_timeout_seconds = max(
+            float(self._batch_wait_timeout_seconds),
+            float(self._max_capacity_retry_seconds) + _AZURE_HTTP_TIMEOUT_SECONDS,
+        )
 
         schema = create_schema_from_config(cfg.schema_config, schema_name, allow_coercion=False)
         self.input_schema = schema
@@ -141,6 +146,7 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
 
         self._http_clients: dict[str, Any] = {}  # state_id -> AuditedHTTPClient
         self._http_clients_lock = Lock()
+        self._capacity_retry_shutdown = Event()
 
         self._batch_initialized = False
 
@@ -177,7 +183,7 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
             output=output,
             name=self.name,
             max_workers=max_pending,  # Match workers to max_pending
-            batch_wait_timeout=float(self._batch_wait_timeout_seconds),
+            batch_wait_timeout=self._effective_batch_wait_timeout_seconds,
         )
         self._batch_initialized = True
 
@@ -329,8 +335,18 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
 
             validated_fields.append((field_name, value))
 
+        capacity_retry_started_at = time.monotonic()
+        capacity_retry_deadline = capacity_retry_started_at + float(self._max_capacity_retry_seconds)
+
         for field_name, value in validated_fields:
-            violation = self._analyze_field_with_capacity_retry(value, field_name, state_id, token_id=token_id)
+            violation = self._analyze_field_with_capacity_retry(
+                value,
+                field_name,
+                state_id,
+                token_id=token_id,
+                retry_started_at=capacity_retry_started_at,
+                retry_deadline=capacity_retry_deadline,
+            )
             if violation is not None:
                 return violation
 
@@ -387,27 +403,48 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         state_id: str,
         *,
         token_id: str | None = None,
+        retry_started_at: float | None = None,
+        retry_deadline: float | None = None,
     ) -> TransformResult | None:
-        """Retry Azure capacity responses within max_capacity_retry_seconds."""
-        started_at = time.monotonic()
-        deadline = started_at + float(self._max_capacity_retry_seconds)
+        """Retry Azure capacity responses within the row-scoped retry budget."""
+        started_at = retry_started_at if retry_started_at is not None else time.monotonic()
+        deadline = retry_deadline if retry_deadline is not None else started_at + float(self._max_capacity_retry_seconds)
         retry_delay = _CAPACITY_RETRY_INITIAL_DELAY_SECONDS
 
         while True:
+            if self._capacity_retry_shutdown.is_set():
+                return self._capacity_retry_shutdown_result(started_at)
+
             try:
                 return self._analyze_field_once(value, field_name, state_id, token_id=token_id)
             except CapacityError as e:
+                if self._capacity_retry_shutdown.is_set():
+                    return self._capacity_retry_shutdown_result(started_at)
+
                 now = time.monotonic()
                 if now >= deadline:
                     return self._capacity_retry_timeout_result(e, started_at)
 
                 sleep_seconds = min(retry_delay, deadline - now)
-                if sleep_seconds > 0:
-                    time.sleep(sleep_seconds)
+                if sleep_seconds > 0 and self._capacity_retry_shutdown.wait(timeout=sleep_seconds):
+                    return self._capacity_retry_shutdown_result(started_at)
                 if time.monotonic() >= deadline:
                     return self._capacity_retry_timeout_result(e, started_at)
 
                 retry_delay = min(retry_delay * 2.0, _CAPACITY_RETRY_MAX_DELAY_SECONDS)
+
+    def _capacity_retry_shutdown_result(self, started_at: float) -> TransformResult:
+        """Build a row result for transform shutdown during capacity backoff."""
+        elapsed = time.monotonic() - started_at
+        return TransformResult.error(
+            {
+                "reason": "shutdown_requested",
+                "error": "Azure safety capacity retry stopped because transform shutdown was requested",
+                "elapsed_seconds": elapsed,
+                "max_seconds": self._max_capacity_retry_seconds,
+            },
+            retryable=False,
+        )
 
     def _capacity_retry_timeout_result(
         self,
@@ -465,7 +502,7 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
                     state_id=state_id,
                     run_id=self._run_id,
                     telemetry_emit=self._telemetry_emit,
-                    timeout=30.0,
+                    timeout=_AZURE_HTTP_TIMEOUT_SECONDS,
                     headers={
                         "Ocp-Apim-Subscription-Key": self._api_key,
                         "Content-Type": "application/json",
@@ -477,6 +514,8 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
 
     def close(self) -> None:
         """Release resources."""
+        self._capacity_retry_shutdown.set()
+
         # Shutdown batch processing infrastructure first
         if self._batch_initialized:
             self.shutdown_batch_processing()

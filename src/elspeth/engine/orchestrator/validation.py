@@ -72,7 +72,12 @@ def validate_route_destinations(
 
     # Check each route destination
     for (gate_node_id, route_label), destination in route_resolution_map.items():
-        if destination.kind in (RouteDestinationKind.CONTINUE, RouteDestinationKind.FORK, RouteDestinationKind.PROCESSING_NODE):
+        if destination.kind in (
+            RouteDestinationKind.CONTINUE,
+            RouteDestinationKind.FORK,
+            RouteDestinationKind.PROCESSING_NODE,
+            RouteDestinationKind.DISCARD,
+        ):
             continue
 
         if destination.sink_name is None:

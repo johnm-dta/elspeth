@@ -65,6 +65,12 @@ class LineageResult:
                 f"'{self.token.row_id}' but source_row has row_id '{self.source_row.row_id}'. "
                 f"This indicates an audit integrity violation."
             )
+        if self.token.run_id != self.source_row.run_id:
+            raise AuditIntegrityError(
+                f"Token run_id mismatch: token '{self.token.token_id}' belongs to run "
+                f"'{self.token.run_id}' but source_row belongs to run '{self.source_row.run_id}'. "
+                f"This indicates an audit integrity violation."
+            )
 
 
 def explain(

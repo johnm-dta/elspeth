@@ -1,5 +1,8 @@
 """Unit tests for narrow_contract_to_output function."""
 
+import pytest
+from structlog.testing import capture_logs
+
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.testing import make_field
@@ -172,8 +175,8 @@ def test_narrow_contract_preserves_decimal_as_object():
     assert price_field.python_type is object
 
 
-def test_narrow_contract_skips_non_finite_float():
-    """Non-finite floats remain excluded in narrowing inference."""
+def test_narrow_contract_rejects_non_finite_float():
+    """Narrowing uses the same non-finite inference policy as propagation."""
     input_contract = SchemaContract(
         mode="FLEXIBLE",
         fields=(make_field("a", str, original_name="a", required=True, source="declared"),),
@@ -182,10 +185,31 @@ def test_narrow_contract_skips_non_finite_float():
 
     output_row = {"a": "value", "bad": float("nan")}
 
-    result = narrow_contract_to_output(input_contract, output_row)
+    with pytest.raises(ValueError, match="non-finite float"):
+        narrow_contract_to_output(input_contract, output_row)
 
-    assert len(result.fields) == 1
-    assert result.fields[0].normalized_name == "a"
+
+def test_narrow_contract_does_not_log_field_level_decisions():
+    """Contracts L0 does not emit row/field narrowing decisions to structlog."""
+    input_contract = SchemaContract(
+        mode="FLEXIBLE",
+        fields=(
+            make_field("a", str, original_name="a", required=True, source="declared"),
+            make_field("old", int, original_name="Original Old", required=True, source="declared"),
+        ),
+        locked=True,
+    )
+    output_row = {"a": "value", "new": 42}
+
+    with capture_logs() as logs:
+        result = narrow_contract_to_output(
+            input_contract,
+            output_row,
+            renamed_fields={"Original Old": "new"},
+        )
+
+    assert logs == []
+    assert {field.normalized_name for field in result.fields} == {"a", "new"}
 
 
 def test_narrow_contract_preserves_mode():

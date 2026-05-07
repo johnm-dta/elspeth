@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,15 @@ from elspeth.plugins.transforms.passthrough import PassThrough
 
 PluginFactory = Callable[[dict[str, Any]], object]
 ConfigFactory = Callable[[Path, dict[str, Any]], dict[str, Any]]
-PluginVerifier = Callable[[object], None]
+PluginVerifier = Callable[[object, "SchemaExpectation"], None]
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaExpectation:
+    schema: dict[str, Any]
+    source_guarantees: frozenset[str]
+    transform_static_contract: frozenset[str]
+    sink_requirements: frozenset[str]
 
 
 def _source_config(tmp_path: Path, schema: dict[str, Any]) -> dict[str, Any]:
@@ -44,36 +53,78 @@ def _sink_config(tmp_path: Path, schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _verify_source(plugin: object) -> None:
+def _verify_source(plugin: object, expectation: SchemaExpectation) -> None:
     assert isinstance(plugin, CSVSource)
     assert issubclass(plugin.output_schema, PluginSchema)
-    assert isinstance(plugin.declared_guaranteed_fields, frozenset)
+    assert plugin.declared_guaranteed_fields == expectation.source_guarantees
 
 
-def _verify_transform(plugin: object) -> None:
+def _verify_transform(plugin: object, expectation: SchemaExpectation) -> None:
     assert isinstance(plugin, PassThrough)
     assert issubclass(plugin.input_schema, PluginSchema)
     assert issubclass(plugin.output_schema, PluginSchema)
-    assert isinstance(plugin.declared_input_fields, frozenset)
+    assert plugin.declared_input_fields == frozenset()
+    assert plugin.effective_static_contract() == expectation.transform_static_contract
 
 
-def _verify_sink(plugin: object) -> None:
+def _verify_sink(plugin: object, expectation: SchemaExpectation) -> None:
     assert isinstance(plugin, CSVSink)
     assert issubclass(plugin.input_schema, PluginSchema)
-    assert isinstance(plugin.declared_required_fields, frozenset)
+    assert plugin.declared_required_fields == expectation.sink_requirements
 
 
 PLUGIN_CASES = (
-    pytest.param("source", CSVSource, _source_config, _verify_source, id="source"),
-    pytest.param("transform", PassThrough, _transform_config, _verify_transform, id="transform"),
-    pytest.param("sink", CSVSink, _sink_config, _verify_sink, id="sink"),
+    pytest.param(CSVSource, _source_config, _verify_source, id="source"),
+    pytest.param(PassThrough, _transform_config, _verify_transform, id="transform"),
+    pytest.param(CSVSink, _sink_config, _verify_sink, id="sink"),
 )
 
-VALID_SCHEMAS = (
-    pytest.param({"mode": "observed"}, id="observed"),
-    pytest.param({"mode": "observed", "guaranteed_fields": ["id"]}, id="observed-guarantees"),
-    pytest.param({"mode": "fixed", "fields": ["id: int", "name: str"]}, id="fixed"),
-    pytest.param({"mode": "flexible", "fields": ["id: int"]}, id="flexible"),
+VALID_SCHEMA_EXPECTATIONS = (
+    pytest.param(
+        SchemaExpectation(
+            schema={"mode": "observed"},
+            source_guarantees=frozenset(),
+            transform_static_contract=frozenset(),
+            sink_requirements=frozenset(),
+        ),
+        id="observed",
+    ),
+    pytest.param(
+        SchemaExpectation(
+            schema={"mode": "observed", "guaranteed_fields": ["id"]},
+            source_guarantees=frozenset({"id"}),
+            transform_static_contract=frozenset({"id"}),
+            sink_requirements=frozenset(),
+        ),
+        id="observed-guarantees",
+    ),
+    pytest.param(
+        SchemaExpectation(
+            schema={"mode": "observed", "required_fields": ["id"]},
+            source_guarantees=frozenset(),
+            transform_static_contract=frozenset(),
+            sink_requirements=frozenset({"id"}),
+        ),
+        id="observed-requirements",
+    ),
+    pytest.param(
+        SchemaExpectation(
+            schema={"mode": "fixed", "fields": ["id: int", "name: str"]},
+            source_guarantees=frozenset({"id", "name"}),
+            transform_static_contract=frozenset({"id", "name"}),
+            sink_requirements=frozenset({"id", "name"}),
+        ),
+        id="fixed",
+    ),
+    pytest.param(
+        SchemaExpectation(
+            schema={"mode": "flexible", "fields": ["id: int"]},
+            source_guarantees=frozenset({"id"}),
+            transform_static_contract=frozenset({"id"}),
+            sink_requirements=frozenset({"id"}),
+        ),
+        id="flexible",
+    ),
 )
 
 INVALID_SCHEMAS = (
@@ -85,27 +136,24 @@ INVALID_SCHEMAS = (
 )
 
 
-@pytest.mark.parametrize(("role", "plugin_factory", "config_factory", "verify_plugin"), PLUGIN_CASES)
-@pytest.mark.parametrize("schema", VALID_SCHEMAS)
+@pytest.mark.parametrize(("plugin_factory", "config_factory", "verify_plugin"), PLUGIN_CASES)
+@pytest.mark.parametrize("expectation", VALID_SCHEMA_EXPECTATIONS)
 def test_data_plugins_accept_valid_schema_on_init(
-    role: str,
     plugin_factory: PluginFactory,
     config_factory: ConfigFactory,
     verify_plugin: PluginVerifier,
-    schema: dict[str, Any],
+    expectation: SchemaExpectation,
     tmp_path: Path,
 ) -> None:
-    """Source, transform, and sink roles must all parse supported schema modes at construction."""
-    plugin = plugin_factory(config_factory(tmp_path, deepcopy(schema)))
+    """Supported schema modes must produce the role's runtime declaration surface."""
+    plugin = plugin_factory(config_factory(tmp_path, deepcopy(expectation.schema)))
 
-    assert role in {"source", "transform", "sink"}
-    verify_plugin(plugin)
+    verify_plugin(plugin, expectation)
 
 
-@pytest.mark.parametrize(("role", "plugin_factory", "config_factory", "verify_plugin"), PLUGIN_CASES)
+@pytest.mark.parametrize(("plugin_factory", "config_factory", "verify_plugin"), PLUGIN_CASES)
 @pytest.mark.parametrize(("schema", "error_match"), INVALID_SCHEMAS)
 def test_data_plugins_reject_invalid_schema_on_init(
-    role: str,
     plugin_factory: PluginFactory,
     config_factory: ConfigFactory,
     verify_plugin: PluginVerifier,
@@ -114,7 +162,7 @@ def test_data_plugins_reject_invalid_schema_on_init(
     tmp_path: Path,
 ) -> None:
     """Malformed schema declarations must fail before plugin operation begins."""
-    _ = role, verify_plugin
+    _ = verify_plugin
 
     with pytest.raises(PluginConfigError, match=error_match):
         plugin_factory(config_factory(tmp_path, deepcopy(schema)))

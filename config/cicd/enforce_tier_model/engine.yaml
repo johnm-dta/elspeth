@@ -220,7 +220,7 @@ allow_hits:
     at loop end; no silent drops. AggregateDeclarationContractViolation is a Tier-1 class, preserving
     the propagation guarantee.
   expires: null
-- key: engine/_best_effort.py:R4:best_effort:fp=b3699c289a4ed172
+- key: engine/_best_effort.py:R4:best_effort:fp=c48026df1d344433
   owner: architecture
   reason: "best_effort() is the canonical post-audit ceremony helper for the engine
     layer. Its single broad-except is the entire reason this helper exists \u2014 it
@@ -231,10 +231,22 @@ allow_hits:
     in-flight event. CLAUDE.md logging-telemetry-policy: logger is the recovery
     path of last resort when telemetry/ceremony itself is the failing system."
   safety: "Failures are logged with structured context (operation label + caller-
-    supplied kwargs) and exception class at warning level; raw exception strings
-    are deliberately not logged. The in-flight exception (if any) continues to
-    propagate unchanged. The helper performs no work itself \u2014 only the body can
-    fail. Burndown: filigree elspeth-550362f760 (closed)."
+    supplied kwargs) and exception class at warning level; reserved log fields
+    override caller context so duplicate keyword failures cannot mask the ceremony
+    failure. Raw exception strings are deliberately not logged. The in-flight
+    exception (if any) continues to propagate unchanged. Burndown: filigree
+    elspeth-550362f760 (closed), elspeth-17fbac339f."
+  expires: null
+- key: engine/_best_effort.py:R7:best_effort:fp=437c71e49d86fee5
+  owner: architecture
+  reason: "best_effort() is already the logger-of-last-resort boundary for post-audit
+    ceremony. If the logger backend or structlog processor itself fails while
+    reporting a ceremony failure, that secondary logger failure must not replace
+    the original audit-load-bearing event."
+  safety: "The suppress wraps only the _slog.warning call after the ceremony
+    exception has already been caught and normalized to structured fields. It does
+    not hide primary pipeline work, does not log raw exception text, and is covered
+    by tests/unit/engine/test_best_effort.py::test_best_effort_suppresses_logger_failures."
   expires: null
 - key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=64aa6bffa9e759d1
   owner: architecture

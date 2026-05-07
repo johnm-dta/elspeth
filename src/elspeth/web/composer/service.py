@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import sys
 import time
@@ -29,8 +30,14 @@ from opentelemetry import metrics
 from sqlalchemy import Engine, update
 from sqlalchemy.exc import SQLAlchemyError
 
-from elspeth.contracts.composer_audit import ComposerToolInvocation
-from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
+from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.contracts.composer_llm_audit import (
+    PROVIDER_COST_SOURCE_NOT_AVAILABLE,
+    PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST,
+    ComposerLLMCall,
+    ComposerLLMCallStatus,
+    ComposerLLMProviderCostSource,
+)
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.core.canonical import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
@@ -79,7 +86,7 @@ from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightFailure,
     RuntimePreflightKey,
 )
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.sessions.models import sessions_table
 
@@ -233,6 +240,29 @@ def _token_usage_from_response(response: Any | None) -> TokenUsage:
     return TokenUsage.from_dict(usage_data)
 
 
+def _provider_cost_from_response(response: Any | None) -> tuple[float | None, ComposerLLMProviderCostSource]:
+    """Extract provider-reported request cost without fabricating a value.
+
+    OpenRouter exposes request cost as ``response.usage.cost`` through the
+    LiteLLM response object. This is external provider metadata, so malformed,
+    negative, non-finite, or absent values are treated as unavailable rather
+    than propagated into the audit row.
+    """
+    if response is None:
+        return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    usage = getattr(response, "usage", None)
+    if isinstance(usage, Mapping):
+        raw_cost = usage["cost"] if "cost" in usage else None
+    else:
+        raw_cost = getattr(usage, "cost", None)
+    if type(raw_cost) is bool or type(raw_cost) not in (int, float):
+        return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    cost = float(cast(int | float, raw_cost))
+    if not math.isfinite(cost) or cost < 0:
+        return None, PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    return cost, PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST
+
+
 def _safe_response_model(response: Any | None) -> str | None:
     if response is None:
         return None
@@ -267,6 +297,7 @@ def _build_llm_call_record(
     error_message: str | None = None,
 ) -> ComposerLLMCall:
     usage = _token_usage_from_response(response)
+    provider_cost, provider_cost_source = _provider_cost_from_response(response)
     return ComposerLLMCall(
         model_requested=model_requested,
         model_returned=_safe_response_model(response),
@@ -277,6 +308,8 @@ def _build_llm_call_record(
         cached_prompt_tokens=usage.cached_prompt_tokens,
         cache_creation_input_tokens=usage.cache_creation_input_tokens,
         cache_read_input_tokens=usage.cache_read_input_tokens,
+        provider_cost=provider_cost,
+        provider_cost_source=provider_cost_source,
         latency_ms=(time.monotonic_ns() - started_ns) // 1_000_000,
         provider_request_id=_safe_provider_request_id(response),
         messages_hash=stable_hash(messages),
@@ -590,6 +623,41 @@ _EMPTY_STATE_FINALIZE_SUFFIX = (
 )
 
 
+_BUILD_INTENT_PHRASES: Final[tuple[str, ...]] = (
+    "set up",
+    "setup",
+    "build",
+    "create",
+    "make",
+    "wire",
+    "add",
+    "update",
+    "modify",
+    "change",
+    "run",
+    "execute",
+    "process",
+    "route",
+    "split",
+    "save",
+    "workflow",
+    "automation",
+    "pipeline",
+    "runnable",
+)
+_INFORMATION_ONLY_PREFIXES: Final[tuple[str, ...]] = (
+    "what ",
+    "what's ",
+    "which ",
+    "why ",
+    "how ",
+    "explain ",
+    "tell me ",
+    "show me ",
+    "list ",
+)
+
+
 def _compose_empty_state_message(content: str) -> str:
     """Build the user-facing message for the empty-state finalize path.
 
@@ -604,6 +672,80 @@ def _compose_empty_state_message(content: str) -> str:
     if not content:
         return _EMPTY_STATE_FINALIZE_SUFFIX.lstrip("\n").lstrip("-").lstrip()
     return content + _EMPTY_STATE_FINALIZE_SUFFIX
+
+
+def _user_request_expects_pipeline_mutation(message: str) -> bool:
+    """Return True when the user is asking the composer to build/edit/run."""
+    normalized = " ".join(message.lower().split())
+    if not normalized:
+        return False
+    if normalized.startswith(_INFORMATION_ONLY_PREFIXES) and "set up" not in normalized and "setup" not in normalized:
+        return False
+    return any(f" {phrase} " in f" {normalized} " for phrase in _BUILD_INTENT_PHRASES)
+
+
+def _tool_failure_detail(payload: Mapping[str, Any]) -> str:
+    """Extract a concise semantic failure detail from a ToolResult payload."""
+    match payload:
+        case {"data": {"error": error}}:
+            return f": {error}"
+        case {"validation": {"errors": [first_error, *_]}}:
+            match first_error:
+                case {"message": message}:
+                    return f": {message}"
+    if "error" in payload:
+        return f": {payload['error']}"
+    return "."
+
+
+def _blocking_result_from_tool_invocations(tool_invocations: tuple[ComposerToolInvocation, ...]) -> str:
+    """Name the most recent failed build/edit tool result, if one exists."""
+    for invocation in reversed(tool_invocations):
+        if invocation.status is ComposerToolStatus.ARG_ERROR:
+            return f"{invocation.tool_name} failed before mutation ({invocation.error_class}: {invocation.error_message})."
+        if invocation.status is ComposerToolStatus.PLUGIN_CRASH:
+            return (
+                f"{invocation.tool_name} crashed before a safe mutation completed ({invocation.error_class}: {invocation.error_message})."
+            )
+        if invocation.status is ComposerToolStatus.SUCCESS and invocation.result_canonical is not None:
+            payload = json.loads(invocation.result_canonical)
+            if type(payload) is dict and "success" in payload and payload["success"] is False:
+                return f"{invocation.tool_name} returned success=false{_tool_failure_detail(payload)}"
+    return "the model ended the turn without calling any build/edit tool."
+
+
+def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
+    """Build the synthetic final-gate result for empty-state no-mutation replies."""
+    detail = f"No composer mutation tool returned success=true; state_exists=false. Blocking result: {blocker}"
+    suggestion = (
+        "Call set_pipeline with source.blob_id or source.inline_blob, call "
+        "set_source_from_blob/set_source plus set_output, or ask for the specific "
+        "missing file/configuration."
+    )
+    return ValidationResult(
+        is_valid=False,
+        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail)],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message=detail,
+                suggestion=suggestion,
+            )
+        ],
+    )
+
+
+def _compose_no_mutation_empty_state_message(blocker: str) -> str:
+    """Build a concrete blocker message for no-mutation empty-state finalization."""
+    return (
+        "[ELSPETH-SYSTEM] No composer mutation tool returned success=true, "
+        "so the pipeline state is still empty (state_exists=false). "
+        f"Blocking result: {blocker}\n\n"
+        "Next action: call set_pipeline with source.blob_id or source.inline_blob, "
+        "call set_source_from_blob/set_source plus set_output, or ask for the "
+        "specific missing file/configuration."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,6 +951,8 @@ class ComposerServiceImpl:
         last_runtime_preflight: ValidationResult | None,
         runtime_preflight_cache: _RuntimePreflightCache,
         session_scope: str,
+        user_message: str = "",
+        mutation_success_seen: bool = False,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> ComposerResult:
@@ -830,7 +974,19 @@ class ComposerServiceImpl:
         partial-state preservation by the coordinator's exception handling
         path — they are not caught here.
         """
-        runtime_result = last_runtime_preflight
+        if _user_request_expects_pipeline_mutation(user_message) and not mutation_success_seen and _state_is_structurally_empty(state):
+            blocker = _blocking_result_from_tool_invocations(tool_invocations)
+            empty_state_runtime_result = _no_mutation_empty_state_validation(blocker)
+            return ComposerResult(
+                message=_compose_no_mutation_empty_state_message(blocker),
+                state=state,
+                runtime_preflight=empty_state_runtime_result,
+                raw_assistant_content=content,
+                tool_invocations=tool_invocations,
+                llm_calls=llm_calls,
+            )
+
+        runtime_result: ValidationResult | None = last_runtime_preflight
         if state.version > initial_version:
             runtime_result = await self._cached_runtime_preflight(
                 state,
@@ -1097,6 +1253,7 @@ class ComposerServiceImpl:
 
         composition_turns_used = 0
         discovery_turns_used = 0
+        mutation_success_seen = False
 
         # Discovery cache: local variable scoped to this compose() call.
         # Keyed by (tool_name, canonical_args_json). Each concurrent
@@ -1167,6 +1324,8 @@ class ComposerServiceImpl:
                     last_runtime_preflight=last_runtime_preflight,
                     runtime_preflight_cache=runtime_preflight_cache,
                     session_scope=session_scope,
+                    user_message=message,
+                    mutation_success_seen=mutation_success_seen,
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
@@ -2009,6 +2168,7 @@ class ComposerServiceImpl:
                 # progressed on the anchored mutation).
                 if result.success:
                     if not is_discovery_tool(tool_name):
+                        mutation_success_seen = True
                         anti_anchor.record_success()
                 else:
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
@@ -2104,6 +2264,8 @@ class ComposerServiceImpl:
                             last_runtime_preflight=last_runtime_preflight,
                             runtime_preflight_cache=runtime_preflight_cache,
                             session_scope=session_scope,
+                            user_message=message,
+                            mutation_success_seen=mutation_success_seen,
                             tool_invocations=recorder.invocations,
                             llm_calls=recorder.llm_calls,
                         )

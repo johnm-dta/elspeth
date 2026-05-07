@@ -37,7 +37,7 @@ def test_plugin_contract_violation_is_audit_evidence() -> None:
     assert issubclass(PluginContractViolation, AuditEvidenceBase)
 
 
-def test_errors_module_tier_1_errors_is_live_view_not_snapshot() -> None:
+def test_errors_module_tier_1_errors_is_live_view_not_snapshot(reset_tier_registry: None) -> None:
     """Regression test for reviewer B8.
 
     Before v1: from elspeth.contracts.errors import TIER_1_ERRORS captured a
@@ -48,28 +48,18 @@ def test_errors_module_tier_1_errors_is_live_view_not_snapshot() -> None:
     from elspeth.contracts import tier_registry
 
     before = errors_mod.TIER_1_ERRORS
-    # Cannot register after freeze; simulate a non-frozen scenario by
-    # temporarily flipping the freeze flag.
-    prior_frozen = tier_registry._FROZEN
-    tier_registry._FROZEN = False
-    try:
 
-        class _TempViolation(Exception):
-            pass
+    class _TempViolation(Exception):
+        pass
 
-        tier_registry._register_with_module_prefix(
-            cls=_TempViolation,
-            reason="regression test for live view",
-            caller_module="elspeth.contracts.test_only",
-        )
-        after = errors_mod.TIER_1_ERRORS
-        assert _TempViolation in after, "errors.TIER_1_ERRORS did not reflect late registration"
-        assert _TempViolation not in before, "Test setup error — class pre-existed"
-    finally:
-        # Rollback: pop the temp registration.
-        tier_registry._REGISTRY.remove(_TempViolation)
-        tier_registry._REASONS.pop(_TempViolation, None)
-        tier_registry._FROZEN = prior_frozen
+    tier_registry._register_with_module_prefix(
+        cls=_TempViolation,
+        reason="regression test for live view",
+        caller_module="elspeth.contracts.test_only",
+    )
+    after = errors_mod.TIER_1_ERRORS
+    assert _TempViolation in after, "errors.TIER_1_ERRORS did not reflect late registration"
+    assert _TempViolation not in before, "Test setup error — class pre-existed"
 
 
 def test_contracts_package_root_does_not_expose_tier_1_errors() -> None:

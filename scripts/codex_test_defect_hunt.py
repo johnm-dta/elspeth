@@ -27,6 +27,7 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     get_git_commit,
     is_cache_path,
     load_context,
+    make_codex_rate_limiter,
     print_summary,
     resolve_path,
     run_codex_with_retry_and_logging,
@@ -35,7 +36,6 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     write_run_metadata,
     write_summary_file,
 )
-from pyrate_limiter import Duration, Limiter, Rate
 
 
 def _is_test_file(path: Path) -> bool:
@@ -222,8 +222,7 @@ async def _run_batches(
     failed_files: list[tuple[Path, Exception]] = []
     total_gated = 0
 
-    # Use pyrate-limiter for rate limiting
-    rate_limiter = Limiter(Rate(rate_limit, Duration.MINUTE)) if rate_limit else None
+    rate_limiter = make_codex_rate_limiter(rate_limit)
     pbar = AsyncTqdm(total=len(files), desc="Analyzing test files", unit="file")
 
     for batch in chunked(files, batch_size):

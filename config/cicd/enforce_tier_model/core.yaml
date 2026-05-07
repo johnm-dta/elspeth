@@ -163,25 +163,25 @@ allow_hits:
 - key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=455e3f20c68fa667
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=90701a15f81f120d
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=1ef96f8297c0018e
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=d13bff181e8c8c4b
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2fbf8ece4fc84429
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=77d4ada8a0a3c91c
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=5a4bcca49c9562cc
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=9f2474980b6bfbcd
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=0d39d40f3b603a68
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=54647a782c1117e1
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=1e4573ff84803165
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=d9d2d4f0e34017bd
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=aa4d3aa685d51b84
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2c0214fa9a261b33
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=fe6db82976e6fa39
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=60affc486e53170e

@@ -124,7 +124,7 @@ class BatchDriftCompare(BaseTransform):
 
     name = "batch_drift_compare"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9ccbfc6148453519"
+    source_file_hash: str | None = "sha256:c9350885fc4f8118"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
 
@@ -270,6 +270,12 @@ class BatchDriftCompare(BaseTransform):
         return TransformResult.error(reason, retryable=False)
 
     @staticmethod
+    def _require_finite(value: float, *, operation: str) -> float:
+        if not math.isfinite(value):
+            raise OverflowError(operation)
+        return value
+
+    @staticmethod
     def _ks_statistic(left: tuple[int | float, ...], right: tuple[int | float, ...]) -> float:
         left_values = sorted(float(value) for value in left)
         right_values = sorted(float(value) for value in right)
@@ -339,15 +345,23 @@ class BatchDriftCompare(BaseTransform):
     def _numeric_result(self, *, baseline: _CohortValues, cohort: _CohortValues, batch_size: int) -> BatchDriftCompareRow:
         baseline_values = cast("tuple[int | float, ...]", baseline.values)
         cohort_values = cast("tuple[int | float, ...]", cohort.values)
-        baseline_mean = sum(float(value) for value in baseline_values) / baseline.count
-        cohort_mean = sum(float(value) for value in cohort_values) / cohort.count
+        baseline_mean = self._require_finite(
+            sum(float(value) for value in baseline_values) / baseline.count,
+            operation="baseline_mean",
+        )
+        cohort_mean = self._require_finite(
+            sum(float(value) for value in cohort_values) / cohort.count,
+            operation="cohort_mean",
+        )
+        mean_delta = self._require_finite(cohort_mean - baseline_mean, operation="mean_delta")
+        ks_statistic = self._require_finite(self._ks_statistic(baseline_values, cohort_values), operation="ks_statistic")
         result = self._base_result(baseline=baseline, cohort=cohort, batch_size=batch_size)
         result.update(
             {
                 "baseline_mean": baseline_mean,
                 "cohort_mean": cohort_mean,
-                "mean_delta": cohort_mean - baseline_mean,
-                "ks_statistic": self._ks_statistic(baseline_values, cohort_values),
+                "mean_delta": mean_delta,
+                "ks_statistic": ks_statistic,
             }
         )
         return result
@@ -378,7 +392,16 @@ class BatchDriftCompare(BaseTransform):
         if cohort.count == 0:
             return {}, self._error_for_no_values(cohort, batch_size=batch_size)
         if self._value_type == "numeric":
-            return self._numeric_result(baseline=baseline, cohort=cohort, batch_size=batch_size), None
+            try:
+                return self._numeric_result(baseline=baseline, cohort=cohort, batch_size=batch_size), None
+            except OverflowError as exc:
+                reason: TransformErrorReason = {
+                    "reason": "float_overflow",
+                    "operation": str(exc) or "numeric_drift",
+                    "group_value": cohort.cohort,
+                    "value": str(baseline.cohort),
+                }
+                return {}, TransformResult.error(reason, retryable=False)
         return self._categorical_result(baseline=baseline, cohort=cohort, batch_size=batch_size), None
 
     def _output_contract_for(self, results: list[BatchDriftCompareRow]) -> SchemaContract:

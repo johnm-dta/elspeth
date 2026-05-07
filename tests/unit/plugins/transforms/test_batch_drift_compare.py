@@ -134,6 +134,25 @@ class TestBatchDriftCompare:
         assert result.row["baseline_missing_count"] == 1
         assert result.row["cohort_non_finite_count"] == 1
 
+    def test_numeric_mean_overflow_returns_transform_error(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
+
+        transform = BatchDriftCompare({"schema": DYNAMIC_SCHEMA, "cohort_field": "cohort", "value_field": "score"})
+
+        rows = [
+            _make_row({"cohort": "baseline", "score": 1e308}),
+            _make_row({"cohort": "baseline", "score": 1e308}),
+            _make_row({"cohort": "current", "score": 1.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "float_overflow"
+        assert result.reason["operation"] == "baseline_mean"
+        assert result.reason["group_value"] == "current"
+
     def test_categorical_drift_uses_total_variation_and_chi_square_summary(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_drift_compare import BatchDriftCompare
 

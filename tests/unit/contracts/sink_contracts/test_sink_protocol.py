@@ -32,18 +32,100 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+from elspeth.contracts import (
+    ArtifactDescriptor,
+    Determinism,
+    OutputValidationResult,
+    PluginSchema,
+    RowDiversion,
+    SinkWriteResult,
+)
+from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.plugins.infrastructure.base import BaseSink
 from tests.fixtures.factories import make_context
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
+
+
+class _SinkContractRowSchema(PluginSchema):
+    id: int
+    name: str
+
+
+class _SinkContractExemplarSink(BaseSink):
+    """Concrete sink proving this contract base is executable in isolation."""
+
+    name = "sink_contract_exemplar"
+    input_schema: type[PluginSchema] = _SinkContractRowSchema
+    idempotent = True
+    determinism = Determinism.DETERMINISTIC
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:sink-contract-exemplar"
+    supports_resume = True
+    declared_required_fields = frozenset({"id", "name"})
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+        self._on_write_failure = "discard"
+        self._written_batches: list[list[dict[str, Any]]] = []
+        self._resume_configured = False
+        self._closed = False
+
+    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
+        _ = ctx
+        self._written_batches.append([dict(row) for row in rows])
+        payload = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+        return SinkWriteResult(
+            artifact=ArtifactDescriptor.for_file(
+                path="/virtual/sink-contract-exemplar",
+                content_hash=hashlib.sha256(payload).hexdigest(),
+                size_bytes=len(payload),
+            ),
+            diversions=self._get_diversions(),
+        )
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self._closed = True
+
+    def configure_for_resume(self) -> None:
+        self._resume_configured = True
+
+
+def _require_sample_rows(sample_rows: list[dict[str, Any]]) -> None:
+    assert sample_rows, (
+        "Sink contract fixtures must include at least one row; otherwise write() "
+        "and hash contract tests can pass without exercising a meaningful payload."
+    )
+    for row in sample_rows:
+        assert isinstance(row, dict)
+        assert row, "Sink contract fixture rows must be non-empty so hash tests can mutate payload content"
+
+
+def _write_rows(
+    sink: SinkProtocol,
+    sample_rows: list[dict[str, Any]],
+    ctx: PluginContext,
+) -> SinkWriteResult:
+    _require_sample_rows(sample_rows)
+    result = sink.write(sample_rows, ctx)
+    assert isinstance(result, SinkWriteResult), f"write() returned {type(result).__name__}, expected SinkWriteResult"
+    assert isinstance(result.artifact, ArtifactDescriptor), "SinkWriteResult.artifact must be an ArtifactDescriptor"
+    assert isinstance(result.diversions, tuple), "SinkWriteResult.diversions must be an immutable tuple"
+    assert all(isinstance(diversion, RowDiversion) for diversion in result.diversions)
+    return result
 
 
 class SinkContractTestBase(ABC):
@@ -103,6 +185,46 @@ class SinkContractTestBase(ABC):
         """Contract: Sink MUST have an 'idempotent' attribute."""
         assert isinstance(sink.idempotent, bool)
 
+    def test_sink_has_config(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose its configuration dict."""
+        assert isinstance(sink.config, dict)
+
+    def test_sink_has_optional_node_id(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose the orchestrator-assigned node id slot."""
+        assert sink.node_id is None or isinstance(sink.node_id, str)
+
+    def test_sink_has_optional_file_hash(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose source-file hash audit metadata."""
+        assert sink.source_file_hash is None or isinstance(sink.source_file_hash, str)
+
+    def test_sink_has_resume_capability_flag(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST declare whether it supports resume."""
+        assert isinstance(sink.supports_resume, bool)
+
+    def test_sink_has_declared_required_fields(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose required-field declarations for the executor."""
+        assert isinstance(sink.declared_required_fields, frozenset)
+        assert all(isinstance(field, str) for field in sink.declared_required_fields)
+
+    def test_sink_has_optional_write_failure_route(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose write-failure routing injected by the orchestrator."""
+        assert sink._on_write_failure is None or isinstance(sink._on_write_failure, str)
+
+    def test_sink_can_reset_diversion_log(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose diversion-log reset for SinkExecutor."""
+        sink._reset_diversion_log()
+
+    def test_sink_exposes_config_model(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose its optional config validation model."""
+        config_model = sink.get_config_model(sink.config)
+        if config_model is None:
+            return
+        assert isinstance(config_model.model_json_schema(), dict)
+
+    def test_sink_exposes_config_schema(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose complete JSON Schema for plugin discovery."""
+        assert isinstance(sink.get_config_schema(), dict)
+
     # =========================================================================
     # write() Method Contracts
     # =========================================================================
@@ -113,9 +235,8 @@ class SinkContractTestBase(ABC):
         sample_rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> None:
-        """Contract: write() MUST return ArtifactDescriptor."""
-        result = sink.write(sample_rows, ctx)
-        assert isinstance(result.artifact, ArtifactDescriptor), f"write() returned {type(result).__name__}, expected ArtifactDescriptor"
+        """Contract: write() MUST return SinkWriteResult with ArtifactDescriptor."""
+        _write_rows(sink, sample_rows, ctx)
 
     def test_artifact_has_content_hash(
         self,
@@ -124,7 +245,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: ArtifactDescriptor MUST have content_hash (audit integrity!)."""
-        result = sink.write(sample_rows, ctx)
+        result = _write_rows(sink, sample_rows, ctx)
 
         assert result.artifact.content_hash is not None, "ArtifactDescriptor.content_hash is None - REQUIRED for audit integrity"
         assert isinstance(result.artifact.content_hash, str)
@@ -136,7 +257,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: content_hash MUST be a valid SHA-256 hex string (64 chars)."""
-        result = sink.write(sample_rows, ctx)
+        result = _write_rows(sink, sample_rows, ctx)
 
         assert len(result.artifact.content_hash) == 64, (
             f"content_hash has {len(result.artifact.content_hash)} chars, expected 64 for SHA-256"
@@ -152,7 +273,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: ArtifactDescriptor MUST have size_bytes."""
-        result = sink.write(sample_rows, ctx)
+        result = _write_rows(sink, sample_rows, ctx)
 
         assert result.artifact.size_bytes is not None, "ArtifactDescriptor.size_bytes is None - REQUIRED for verification"
         assert isinstance(result.artifact.size_bytes, int)
@@ -165,7 +286,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: ArtifactDescriptor MUST have artifact_type."""
-        result = sink.write(sample_rows, ctx)
+        result = _write_rows(sink, sample_rows, ctx)
 
         assert result.artifact.artifact_type is not None
         assert result.artifact.artifact_type in ("file", "database", "webhook")
@@ -177,11 +298,22 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: ArtifactDescriptor MUST have path_or_uri."""
-        result = sink.write(sample_rows, ctx)
+        result = _write_rows(sink, sample_rows, ctx)
 
         assert result.artifact.path_or_uri is not None
         assert isinstance(result.artifact.path_or_uri, str)
         assert len(result.artifact.path_or_uri) > 0
+
+    def test_write_result_has_diversion_tuple(
+        self,
+        sink: SinkProtocol,
+        sample_rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> None:
+        """Contract: write() MUST return immutable diversion records."""
+        result = _write_rows(sink, sample_rows, ctx)
+        assert isinstance(result.diversions, tuple)
+        assert all(isinstance(diversion, RowDiversion) for diversion in result.diversions)
 
     # =========================================================================
     # Empty Batch Contracts
@@ -195,10 +327,30 @@ class SinkContractTestBase(ABC):
         """Contract: write([]) MUST return a valid ArtifactDescriptor."""
         result = sink.write([], ctx)
 
+        assert isinstance(result, SinkWriteResult)
         assert isinstance(result.artifact, ArtifactDescriptor)
         assert result.artifact.content_hash is not None
         assert result.artifact.size_bytes is not None
         assert result.artifact.size_bytes >= 0
+        assert isinstance(result.diversions, tuple)
+
+    # =========================================================================
+    # Resume Contracts
+    # =========================================================================
+
+    def test_validate_output_target_returns_result(self, sink: SinkProtocol) -> None:
+        """Contract: validate_output_target() MUST return OutputValidationResult."""
+        assert isinstance(sink.validate_output_target(), OutputValidationResult)
+
+    def test_resume_field_resolution_surface(self, sink: SinkProtocol) -> None:
+        """Contract: Sink MUST expose resume field-resolution hooks."""
+        assert isinstance(sink.needs_resume_field_resolution, bool)
+        sink.set_resume_field_resolution({"Original ID": "id"})
+
+    def test_resume_configuration_for_resumable_sinks(self, sink: SinkProtocol) -> None:
+        """Contract: Sinks that claim resume support MUST configure without raising."""
+        if sink.supports_resume:
+            sink.configure_for_resume()
 
     # =========================================================================
     # Lifecycle Contracts
@@ -211,7 +363,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: flush() MUST be safe to call multiple times."""
-        sink.write(sample_rows, ctx)
+        _write_rows(sink, sample_rows, ctx)
 
         sink.flush()
         sink.flush()
@@ -224,7 +376,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: close() MUST be safe to call multiple times."""
-        sink.write(sample_rows, ctx)
+        _write_rows(sink, sample_rows, ctx)
         sink.flush()
 
         sink.close()
@@ -246,7 +398,7 @@ class SinkContractTestBase(ABC):
         ctx: PluginContext,
     ) -> None:
         """Contract: on_complete() lifecycle hook MUST not raise."""
-        sink.write(sample_rows, ctx)
+        _write_rows(sink, sample_rows, ctx)
         sink.on_complete(ctx)
 
 
@@ -270,12 +422,12 @@ class SinkDeterminismContractTestBase(SinkContractTestBase):
         trail cannot be verified because hashes won't match.
         """
         first_sink = sink_factory()
-        first_result = first_sink.write(sample_rows, ctx)
+        first_result = _write_rows(first_sink, sample_rows, ctx)
         first_hash = first_result.artifact.content_hash
         first_sink.close()
 
         second_sink = sink_factory()
-        second_result = second_sink.write(sample_rows, ctx)
+        second_result = _write_rows(second_sink, sample_rows, ctx)
         second_hash = second_result.artifact.content_hash
         second_sink.close()
 
@@ -295,42 +447,33 @@ class SinkDeterminismContractTestBase(SinkContractTestBase):
         This test verifies the hash is computed from actual content.
         """
         first_sink = sink_factory()
-        first_result = first_sink.write(sample_rows, ctx)
+        first_result = _write_rows(first_sink, sample_rows, ctx)
         first_hash = first_result.artifact.content_hash
         first_sink.close()
 
+        _require_sample_rows(sample_rows)
         modified_rows = [row.copy() for row in sample_rows]
-        if modified_rows:
-            first_key = next(iter(modified_rows[0].keys()))
-            modified_rows[0][first_key] = "MODIFIED_VALUE_FOR_HASH_TEST"
+        first_key = next(iter(modified_rows[0].keys()))
+        modified_rows[0][first_key] = "MODIFIED_VALUE_FOR_HASH_TEST"
 
         second_sink = sink_factory()
-        second_result = second_sink.write(modified_rows, ctx)
+        second_result = _write_rows(second_sink, modified_rows, ctx)
         second_hash = second_result.artifact.content_hash
         second_sink.close()
 
         assert first_hash != second_hash, f"Different data produced same hash - hash not computed from content! hash={first_hash}"
 
 
-# =============================================================================
-# Protocol Attribute Tests (standalone - don't need sink instance)
-# =============================================================================
+class TestSinkProtocolContractBase(SinkDeterminismContractTestBase):
+    """Self-test for the reusable sink contract base."""
 
+    @pytest.fixture
+    def sink_factory(self) -> Callable[[], SinkProtocol]:
+        return lambda: _SinkContractExemplarSink({})
 
-def test_sink_protocol_requires_supports_resume() -> None:
-    """SinkProtocol must declare supports_resume attribute."""
-    from elspeth.contracts import SinkProtocol
-
-    # Verify protocol has supports_resume in annotations
-    assert "supports_resume" in SinkProtocol.__annotations__, (
-        "SinkProtocol must declare 'supports_resume: bool' attribute for resume capability"
-    )
-
-
-def test_sink_protocol_requires_configure_for_resume() -> None:
-    """SinkProtocol must declare configure_for_resume method."""
-    from elspeth.contracts import SinkProtocol
-
-    # Verify protocol has configure_for_resume method
-    assert hasattr(SinkProtocol, "configure_for_resume"), "SinkProtocol must declare 'configure_for_resume()' method for resume capability"
-    assert callable(SinkProtocol.configure_for_resume), "SinkProtocol.configure_for_resume must be a callable method"
+    @pytest.fixture
+    def sample_rows(self) -> list[dict[str, Any]]:
+        return [
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"},
+        ]

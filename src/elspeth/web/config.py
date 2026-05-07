@@ -14,6 +14,8 @@ from elspeth.web.validation import (
 )
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS = 300.0
+_DEFAULT_COMPOSER_TRANSPORT_HEADROOM_SECONDS = 30.0
 
 
 class WebSettings(BaseModel):
@@ -39,6 +41,14 @@ class WebSettings(BaseModel):
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
     composer_timeout_seconds: float = Field(..., gt=0)
+    composer_transport_idle_ceiling_seconds: float = Field(
+        default=_DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS,
+        gt=0,
+    )
+    composer_transport_headroom_seconds: float = Field(
+        default=_DEFAULT_COMPOSER_TRANSPORT_HEADROOM_SECONDS,
+        gt=0,
+    )
     composer_runtime_preflight_timeout_seconds: float = Field(default=5.0, gt=0)
     composer_rate_limit_per_minute: int = Field(..., ge=1)
     composer_expose_provider_errors: bool = False
@@ -210,6 +220,21 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"Entra auth requires: {', '.join(missing)}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_composer_timeout_transport_headroom(self) -> WebSettings:
+        """Keep composer wall-clock failures ahead of browser/proxy aborts."""
+        max_backend_timeout_seconds = self.composer_transport_idle_ceiling_seconds - self.composer_transport_headroom_seconds
+        if max_backend_timeout_seconds <= 0:
+            raise ValueError("composer_transport_headroom_seconds must be less than composer_transport_idle_ceiling_seconds")
+        if self.composer_timeout_seconds > max_backend_timeout_seconds:
+            raise ValueError(
+                "composer_timeout_seconds must leave transport idle ceiling headroom: "
+                f"got {self.composer_timeout_seconds}s, maximum {max_backend_timeout_seconds}s "
+                f"(transport idle ceiling {self.composer_transport_idle_ceiling_seconds}s - "
+                f"headroom {self.composer_transport_headroom_seconds}s)"
+            )
         return self
 
     @model_validator(mode="after")

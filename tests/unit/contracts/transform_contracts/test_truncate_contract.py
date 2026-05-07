@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.transforms.truncate import Truncate
 from elspeth.testing import make_field, make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -38,8 +39,29 @@ class TestTruncateContract(TransformContractPropertyTestBase):
 
     @pytest.fixture
     def valid_input(self) -> dict[str, Any]:
-        """Return input that should process successfully."""
-        return {"title": "Short title", "description": "Short description", "id": 1}
+        """Return input that should process successfully and exercise truncation."""
+        return {
+            "title": "This title is deliberately longer than twenty characters",
+            "description": "This description is deliberately longer than fifty characters so the configured max is exercised.",
+            "id": 1,
+        }
+
+    def test_truncates_configured_fields_and_reports_them(
+        self,
+        transform: TransformProtocol,
+        valid_input: dict[str, Any],
+        ctx: Any,
+    ) -> None:
+        pipeline_row = make_pipeline_row(valid_input)
+        result = transform.process(pipeline_row, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["title"] == "This title is delibe"
+        assert result.row["description"] == "This description is deliberately longer than fifty"
+        assert result.row["id"] == 1
+        assert result.success_reason is not None
+        assert result.success_reason["fields_modified"] == ["title", "description"]
 
 
 class TestTruncateWithSuffixContract(TransformContractPropertyTestBase):
@@ -58,8 +80,52 @@ class TestTruncateWithSuffixContract(TransformContractPropertyTestBase):
 
     @pytest.fixture
     def valid_input(self) -> dict[str, Any]:
-        """Return input that should process successfully."""
-        return {"title": "Short", "id": 1}
+        """Return input that should process successfully and exercise suffix truncation."""
+        return {"title": "This title is deliberately longer than twenty characters", "id": 1}
+
+    def test_truncates_with_suffix_inside_max_length(
+        self,
+        transform: TransformProtocol,
+        valid_input: dict[str, Any],
+        ctx: Any,
+    ) -> None:
+        pipeline_row = make_pipeline_row(valid_input)
+        result = transform.process(pipeline_row, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["title"] == "This title is del..."
+        assert len(result.row["title"]) == 20
+        assert result.success_reason is not None
+        assert result.success_reason["fields_modified"] == ["title"]
+
+    @pytest.mark.parametrize(
+        ("config", "message"),
+        [
+            (
+                {
+                    "fields": {"title": 0},
+                    "schema": {"mode": "observed"},
+                },
+                r"max_len for field 'title' must be >= 1",
+            ),
+            (
+                {
+                    "fields": {"title": 3},
+                    "suffix": "...",
+                    "schema": {"mode": "observed"},
+                },
+                r"suffix length \(3\) must be less than max_len for field 'title' \(3\)",
+            ),
+        ],
+    )
+    def test_invalid_truncation_config_fails_at_construction(
+        self,
+        config: dict[str, Any],
+        message: str,
+    ) -> None:
+        with pytest.raises(PluginConfigError, match=message):
+            Truncate(config)
 
 
 class TestTruncateStrictContract(TransformErrorContractTestBase):

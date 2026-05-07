@@ -207,6 +207,45 @@ class TestI1cFailsinkPaired:
                 error_hash=_ERROR_HASH,
             )
 
+    def test_failsink_same_sink_artifact_from_different_token_passes(
+        self,
+        landscape_factory: RecorderFactory,
+    ) -> None:
+        run_id, source_node_id, token_id = _build_base_run(landscape_factory)
+        failsink_node_id = _register_sink_node(landscape_factory, run_id)
+        _state_id, _correct_artifact_id = _record_completed_sink_state_with_artifact(
+            landscape_factory,
+            run_id=run_id,
+            token_id=token_id,
+            sink_node_id=failsink_node_id,
+        )
+        other_row = landscape_factory.data_flow.create_row(
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=1,
+            data={"x": 2},
+        )
+        other_token = landscape_factory.data_flow.create_token(row_id=other_row.row_id)
+        _other_state_id, wrong_artifact_id = _record_completed_sink_state_with_artifact(
+            landscape_factory,
+            run_id=run_id,
+            token_id=other_token.token_id,
+            sink_node_id=failsink_node_id,
+            step_index=1,
+        )
+
+        outcome_id = landscape_factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+            sink_name="failsink",
+            sink_node_id=failsink_node_id,
+            artifact_id=wrong_artifact_id,
+            error_hash=_ERROR_HASH,
+        )
+
+        assert outcome_id.startswith("out_")
+
 
 class TestI3DiscardNoFailsink:
     """I3: discard means the row was not absorbed by a completed failsink."""

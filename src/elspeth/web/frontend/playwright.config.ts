@@ -74,7 +74,9 @@ export default defineConfig({
         `--host 127.0.0.1 --port ${BACKEND_PORT}`,
       cwd: REPO_ROOT_FROM_FRONTEND,
       url: BACKEND_HEALTH_URL,
-      reuseExistingServer: !isCI,
+      // The backend must be the Playwright-managed process so
+      // composerSettingsEnv controls auth policy and .e2e-data isolation.
+      reuseExistingServer: false,
       timeout: 60_000,
       stdout: "pipe",
       stderr: "pipe",

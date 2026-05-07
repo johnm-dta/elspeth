@@ -424,6 +424,59 @@ class TestRecordTokenOutcomeTwoAxis:
                 error_hash=_ERROR_HASH,
             )
 
+    def test_record_failsink_fallback_accepts_shared_batch_artifact_witness(self) -> None:
+        _db, repo, fac, _row, first_tok = _make_repo_with_token()
+        second_row = repo.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2")
+        second_tok = repo.create_token(second_row.row_id, token_id="tok-2")
+
+        first_state = fac.execution.begin_node_state(
+            token_id=first_tok,
+            node_id="sink-0",
+            run_id="run-1",
+            step_index=0,
+            input_data={},
+        )
+        fac.execution.complete_node_state(
+            state_id=first_state.state_id,
+            status=NodeStateStatus.COMPLETED,
+            output_data={"written": True},
+            duration_ms=1.0,
+        )
+        second_state = fac.execution.begin_node_state(
+            token_id=second_tok.token_id,
+            node_id="sink-0",
+            run_id="run-1",
+            step_index=0,
+            input_data={},
+        )
+        fac.execution.complete_node_state(
+            state_id=second_state.state_id,
+            status=NodeStateStatus.COMPLETED,
+            output_data={"written": True},
+            duration_ms=1.0,
+        )
+        shared_artifact = fac.execution.register_artifact(
+            run_id="run-1",
+            state_id=first_state.state_id,
+            sink_node_id="sink-0",
+            artifact_type="test",
+            path="memory://unit/failsink-batch",
+            content_hash="deadbeef" * 8,
+            size_bytes=0,
+        )
+
+        outcome_id = repo.record_token_outcome(
+            ref=TokenRef(token_id=second_tok.token_id, run_id="run-1"),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+            sink_name="sink-0",
+            sink_node_id="sink-0",
+            artifact_id=shared_artifact.artifact_id,
+            error_hash=_ERROR_HASH,
+        )
+
+        assert outcome_id.startswith("out_")
+
     def test_record_discard_rejects_completed_sink_state(self) -> None:
         _db, repo, fac, _row, tok = _make_repo_with_token()
         _record_completed_sink_state_with_artifact(fac, run_id="run-1", token_id=tok)

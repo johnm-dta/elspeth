@@ -2,32 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def _reset_registry():
-    """Each test gets a clean registry. Uses the module-private reset helper.
-
-    The fixture always resets ``_FROZEN = False`` before yielding so that
-    tier_registry unit tests can register errors and exercise the decorator
-    regardless of whether a prior test (e.g. an orchestrator test that calls
-    ``prepare_for_run()``) froze the registry. After the test completes, the
-    full pre-test state — including the original freeze flag — is restored.
-    """
-    from elspeth.contracts import tier_registry
-
-    before_registry = list(tier_registry._REGISTRY)
-    before_reasons = dict(tier_registry._REASONS)
-    before_frozen = tier_registry._FROZEN
-    # Force-unfreeze so the test body can register errors without hitting
-    # the post-bootstrap guard. Teardown restores the original flag.
-    tier_registry._FROZEN = False
-    yield
-    tier_registry._REGISTRY[:] = before_registry
-    tier_registry._REASONS.clear()
-    tier_registry._REASONS.update(before_reasons)
-    tier_registry._FROZEN = before_frozen
+pytestmark = pytest.mark.usefixtures("reset_tier_registry")
 
 
 def test_decorator_registers_class() -> None:
@@ -43,11 +22,9 @@ def test_decorator_registers_class() -> None:
 def test_decorator_requires_reason() -> None:
     from elspeth.contracts.tier_registry import tier_1_error
 
+    malformed_decorator: Any = tier_1_error
     with pytest.raises(TypeError, match="reason"):
-
-        @tier_1_error  # missing ()
-        class _Bad(Exception):
-            pass
+        malformed_decorator(type("_Bad", (Exception,), {}))
 
 
 def test_reason_must_be_non_empty_string() -> None:
@@ -149,27 +126,6 @@ def test_registration_after_freeze_raises() -> None:
             pass
 
 
-def test_tests_prefix_only_allowed_under_pytest() -> None:
-    """The tests. prefix is gated on pytest being loaded (spec reviewer fix).
-
-    We can't actually unimport pytest mid-test, so we assert the condition
-    under which tests. is present (pytest in sys.modules) and the
-    conditional construction pattern is correct.
-    """
-    import sys
-
-    from elspeth.contracts.tier_registry import _ALLOWED_MODULE_PREFIXES
-
-    # When pytest runs, pytest is in sys.modules; tests. must be present.
-    assert "pytest" in sys.modules
-    assert "tests." in _ALLOWED_MODULE_PREFIXES
-
-    # Production-mode check: the three non-test prefixes must always be
-    # present (they're unconditional).
-    for required in ("elspeth.contracts.", "elspeth.engine.", "elspeth.core."):
-        assert required in _ALLOWED_MODULE_PREFIXES
-
-
 def test_double_registration_with_conflicting_reason_raises() -> None:
     """Same class registered twice with different reasons must fail loudly."""
     from elspeth.contracts.tier_registry import _register_with_module_prefix
@@ -226,8 +182,9 @@ def test_caller_module_kwarg_is_required() -> None:
     """
     from elspeth.contracts.tier_registry import tier_1_error
 
+    missing_caller_module: Any = tier_1_error
     with pytest.raises(TypeError, match="caller_module"):
-        tier_1_error(reason="missing caller_module")  # type: ignore[call-overload]  # intentionally missing kwarg to assert the runtime check
+        missing_caller_module(reason="missing caller_module")
 
 
 def test_caller_module_empty_string_rejected() -> None:

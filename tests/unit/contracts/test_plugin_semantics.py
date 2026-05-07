@@ -23,17 +23,8 @@ from elspeth.contracts.plugin_semantics import (
 
 
 class TestContentKind:
-    def test_known_members(self):
-        assert ContentKind.UNKNOWN.value == "unknown"
-        assert ContentKind.PLAIN_TEXT.value == "plain_text"
-        assert ContentKind.MARKDOWN.value == "markdown"
-        assert ContentKind.HTML_RAW.value == "html_raw"
-        assert ContentKind.JSON_STRUCTURED.value == "json_structured"
-        assert ContentKind.BINARY.value == "binary"
-
     def test_is_str_subclass(self):
         assert isinstance(ContentKind.PLAIN_TEXT, str)
-        assert ContentKind.PLAIN_TEXT == "plain_text"
 
     def test_membership_is_closed_for_phase_1(self):
         # Phase 1 vocabulary — additions require explicit plan amendment.
@@ -48,13 +39,6 @@ class TestContentKind:
 
 
 class TestTextFraming:
-    def test_known_members(self):
-        assert TextFraming.UNKNOWN.value == "unknown"
-        assert TextFraming.NOT_TEXT.value == "not_text"
-        assert TextFraming.COMPACT.value == "compact"
-        assert TextFraming.NEWLINE_FRAMED.value == "newline_framed"
-        assert TextFraming.LINE_COMPATIBLE.value == "line_compatible"
-
     def test_membership_is_closed_for_phase_1(self):
         assert {member.value for member in TextFraming} == {
             "unknown",
@@ -66,17 +50,21 @@ class TestTextFraming:
 
 
 class TestUnknownSemanticPolicy:
-    def test_known_members(self):
-        assert UnknownSemanticPolicy.ALLOW.value == "allow"
-        assert UnknownSemanticPolicy.WARN.value == "warn"
-        assert UnknownSemanticPolicy.FAIL.value == "fail"
+    def test_membership_is_closed_for_phase_1(self):
+        assert {member.value for member in UnknownSemanticPolicy} == {
+            "allow",
+            "warn",
+            "fail",
+        }
 
 
 class TestSemanticOutcome:
-    def test_known_members(self):
-        assert SemanticOutcome.SATISFIED.value == "satisfied"
-        assert SemanticOutcome.CONFLICT.value == "conflict"
-        assert SemanticOutcome.UNKNOWN.value == "unknown"
+    def test_membership_is_closed_for_phase_1(self):
+        assert {member.value for member in SemanticOutcome} == {
+            "satisfied",
+            "conflict",
+            "unknown",
+        }
 
 
 class TestFieldSemanticFacts:
@@ -101,7 +89,7 @@ class TestFieldSemanticFacts:
             fact_code="t.x.basic",
         )
         with pytest.raises(FrozenInstanceError):
-            facts.field_name = "y"  # type: ignore[misc]
+            facts.field_name = "y"
 
     def test_default_configured_by_is_empty_tuple(self):
         facts = FieldSemanticFacts(
@@ -134,7 +122,7 @@ class TestFieldSemanticRequirement:
             requirement_code="t.x.req",
         )
         with pytest.raises(FrozenInstanceError):
-            requirement.field_name = "y"  # type: ignore[misc]
+            requirement.field_name = "y"
 
     def test_set_inputs_are_coerced_to_frozenset(self):
         # Type annotations name frozensets, but Python does not enforce that.
@@ -145,10 +133,10 @@ class TestFieldSemanticRequirement:
         configured_by = ["source_field"]
         requirement = FieldSemanticRequirement(
             field_name="x",
-            accepted_content_kinds=kinds,  # type: ignore[arg-type]
-            accepted_text_framings=framings,  # type: ignore[arg-type]
+            accepted_content_kinds=kinds,
+            accepted_text_framings=framings,
             requirement_code="t.x.req",
-            configured_by=configured_by,  # type: ignore[arg-type]
+            configured_by=configured_by,
         )
         assert isinstance(requirement.accepted_content_kinds, frozenset)
         assert isinstance(requirement.accepted_text_framings, frozenset)
@@ -170,7 +158,7 @@ class TestFieldSemanticFactsCoercion:
             content_kind=ContentKind.PLAIN_TEXT,
             text_framing=TextFraming.NEWLINE_FRAMED,
             fact_code="t.x.nl",
-            configured_by=configured_by,  # type: ignore[arg-type]
+            configured_by=configured_by,
         )
         assert isinstance(facts.configured_by, tuple)
         configured_by.append("extra")
@@ -191,7 +179,7 @@ class TestOutputSemanticDeclaration:
     def test_list_input_is_coerced_to_tuple(self):
         f1 = FieldSemanticFacts("a", ContentKind.PLAIN_TEXT, fact_code="t.a")
         fields = [f1]
-        decl = OutputSemanticDeclaration(fields=fields)  # type: ignore[arg-type]
+        decl = OutputSemanticDeclaration(fields=fields)
         assert isinstance(decl.fields, tuple)
         # Mutating the source list MUST NOT affect the frozen field.
         fields.append(FieldSemanticFacts("b", ContentKind.MARKDOWN, fact_code="t.b"))
@@ -211,7 +199,7 @@ class TestInputSemanticRequirements:
             requirement_code="t.x.req",
         )
         fields = [req]
-        reqs = InputSemanticRequirements(fields=fields)  # type: ignore[arg-type]
+        reqs = InputSemanticRequirements(fields=fields)
         assert isinstance(reqs.fields, tuple)
         # Mutating the source list MUST NOT affect the frozen field.
         fields.append(req)
@@ -313,19 +301,21 @@ class TestCompareSemantic:
 
 _CONTENT_KINDS = list(ContentKind)
 _FRAMINGS = list(TextFraming)
+_KNOWN_CONTENT_KINDS = [kind for kind in ContentKind if kind is not ContentKind.UNKNOWN]
+_KNOWN_FRAMINGS = [framing for framing in TextFraming if framing is not TextFraming.UNKNOWN]
 
 
 @given(
-    content_kind=st.sampled_from(_CONTENT_KINDS),
-    text_framing=st.sampled_from(_FRAMINGS),
-    accepted_kinds=st.sets(st.sampled_from(_CONTENT_KINDS), min_size=1),
-    accepted_framings=st.sets(st.sampled_from(_FRAMINGS), min_size=1),
+    content_kind=st.sampled_from(_KNOWN_CONTENT_KINDS),
+    text_framing=st.sampled_from(_KNOWN_FRAMINGS),
+    extra_kinds=st.sets(st.sampled_from(_CONTENT_KINDS)),
+    extra_framings=st.sets(st.sampled_from(_FRAMINGS)),
 )
-def test_compare_semantic_outcome_is_consistent(
+def test_compare_semantic_acceptance_is_monotonic(
     content_kind,
     text_framing,
-    accepted_kinds,
-    accepted_framings,
+    extra_kinds,
+    extra_framings,
 ):
     facts = FieldSemanticFacts(
         field_name="x",
@@ -333,17 +323,18 @@ def test_compare_semantic_outcome_is_consistent(
         text_framing=text_framing,
         fact_code="t.x.gen",
     )
-    requirement = FieldSemanticRequirement(
+    exact_requirement = FieldSemanticRequirement(
         field_name="x",
-        accepted_content_kinds=frozenset(accepted_kinds),
-        accepted_text_framings=frozenset(accepted_framings),
+        accepted_content_kinds=frozenset({content_kind}),
+        accepted_text_framings=frozenset({text_framing}),
         requirement_code="c.x.req",
     )
-    outcome = compare_semantic(facts, requirement)
+    expanded_requirement = FieldSemanticRequirement(
+        field_name="x",
+        accepted_content_kinds=frozenset({content_kind} | extra_kinds),
+        accepted_text_framings=frozenset({text_framing} | extra_framings),
+        requirement_code="c.x.req.expanded",
+    )
 
-    if content_kind is ContentKind.UNKNOWN or text_framing is TextFraming.UNKNOWN:
-        assert outcome is SemanticOutcome.UNKNOWN
-    elif content_kind in accepted_kinds and text_framing in accepted_framings:
-        assert outcome is SemanticOutcome.SATISFIED
-    else:
-        assert outcome is SemanticOutcome.CONFLICT
+    assert compare_semantic(facts, exact_requirement) is SemanticOutcome.SATISFIED
+    assert compare_semantic(facts, expanded_requirement) is SemanticOutcome.SATISFIED

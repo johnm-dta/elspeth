@@ -103,9 +103,9 @@ per_file_rules:
 - pattern: contracts/results.py
   rules:
   - R5
-  reason: SanitizedUrl type validation at Tier 3 boundary; strict isinstance(error, FailureInfo) guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit attributability)
+  reason: Strict PipelineRow output guards for transform result construction, SanitizedUrl type validation at Tier 3 boundary, and strict isinstance(error, FailureInfo) guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit attributability)
   expires: null
-  max_hits: 3
+  max_hits: 4
 - pattern: contracts/diversion.py
   rules:
   - R5

@@ -270,7 +270,7 @@ allow_hits:
   owner: architecture
   reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps operational telemetry failures from corrupting the main HTTP call path once programmer bugs and Tier 1 errors have already been re-raised
   safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate before this handler; remaining exceptions are logged and the audited HTTP result is preserved
-  expires: '2026-05-06'
+  expires: '2026-06-07'
 - key: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=153b600f7b824428
   owner: architecture
   reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes the payload

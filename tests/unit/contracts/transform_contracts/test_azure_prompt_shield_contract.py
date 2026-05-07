@@ -9,15 +9,17 @@ tests (name, schema, determinism) are now included in BatchTransformContractTest
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
-from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
 from .test_batch_transform_protocol import BatchTransformContractTestBase
+
+_HTTPX_CLIENT_CLASS = httpx.Client
 
 
 def _make_clean_response() -> dict[str, Any]:
@@ -27,24 +29,12 @@ def _make_clean_response() -> dict[str, Any]:
     }
 
 
-def _create_mock_http_response(response_data: dict[str, Any]) -> Mock:
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = response_data
-    response.raise_for_status = Mock()
-    response.headers = {"content-type": "application/json"}
-    response.content = b"{}"
-    response.text = "{}"
-    return response
-
-
-def _make_mock_context() -> Mock:
-    ctx = Mock(spec=PluginContext)
-    ctx.run_id = "test-run-001"
-    ctx.state_id = "state-001"
-    ctx.landscape = Mock()
-    ctx.landscape.record_call = Mock()
-    return ctx
+def _create_http_response(response_data: dict[str, Any], *, url: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json=response_data,
+        request=httpx.Request("POST", url),
+    )
 
 
 class TestAzurePromptShieldBatchContract(BatchTransformContractTestBase):
@@ -60,12 +50,13 @@ class TestAzurePromptShieldBatchContract(BatchTransformContractTestBase):
     @pytest.fixture(autouse=True)
     def mock_httpx_for_batch(self):
         """Mock httpx.Client for all batch contract tests."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_response = _create_mock_http_response(_make_clean_response())
-            mock_client_instance = Mock()
-            mock_client_instance.post.return_value = mock_response
-            mock_client_instance.__enter__ = Mock(return_value=mock_client_instance)
-            mock_client_instance.__exit__ = Mock(return_value=False)
+        with patch("httpx.Client", autospec=True) as mock_client_class:
+            mock_client_instance = MagicMock(spec_set=_HTTPX_CLIENT_CLASS)
+
+            def _mocked_post(url: str, **_: object) -> httpx.Response:
+                return _create_http_response(_make_clean_response(), url=url)
+
+            mock_client_instance.post.side_effect = _mocked_post
             mock_client_class.return_value = mock_client_instance
             yield mock_client_class
 

@@ -1405,7 +1405,7 @@ class TestProviderCacheTokenAudit:
                 cache_read_input_tokens=1100,
             ),
         )
-        usage = _token_usage_from_response(response)  # type: ignore[arg-type]
+        usage = _token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None

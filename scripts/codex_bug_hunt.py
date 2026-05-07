@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from codex_audit_common import (  # type: ignore[import-not-found]
@@ -27,6 +27,7 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     is_cache_path,
     iter_report_files,
     load_context,
+    make_codex_rate_limiter,
     print_summary,
     priority_from_report,
     resolve_path,
@@ -37,7 +38,6 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     write_run_metadata,
     write_summary_file,
 )
-from pyrate_limiter import Duration, Limiter, Rate
 
 
 def _is_python_file(path: Path) -> bool:
@@ -271,7 +271,7 @@ def _resolve_structured_output_schema(
     if no_structured_output:
         return None
     if structured_output_schema:
-        return resolve_path(repo_root, structured_output_schema)
+        return cast(Path, resolve_path(repo_root, structured_output_schema))
     # The explicit flag is retained for backward-compatible CLI habits; structured
     # output is now the default for this scanner.
     _ = structured_output
@@ -620,9 +620,7 @@ async def _run_batches(
     total_gated = 0
     usage_totals = dict.fromkeys(USAGE_STAT_KEYS, 0)
 
-    # Use pyrate-limiter for rate limiting. max_delay/retry_until_max_delay turns
-    # quota pressure into backpressure instead of immediate task failure.
-    rate_limiter = Limiter(Rate(rate_limit, Duration.MINUTE), max_delay=Duration.MINUTE, retry_until_max_delay=True) if rate_limit else None
+    rate_limiter = make_codex_rate_limiter(rate_limit)
 
     # Progress bar
     pbar = AsyncTqdm(total=len(files), desc="Analyzing files", unit="file")
@@ -651,25 +649,28 @@ async def _run_batches(
                 structured_output=structured_output_schema is not None,
             )
 
-            result = await run_codex_with_retry_and_logging(
-                file_path=file_path,
-                output_path=output_path,
-                model=model,
-                prompt=prompt,
-                repo_root=repo_root,
-                log_path=log_path,
-                log_lock=log_lock,
-                file_display=str(file_path.relative_to(repo_root).as_posix()),
-                output_display=str(output_path.relative_to(repo_root).as_posix()),
-                rate_limiter=rate_limiter,
-                evidence_gate_summary_prefix="",
-                output_schema=structured_output_schema,
-                structured_markdown_field="markdown_report",
-                profile=profile,
-                reasoning_effort=reasoning_effort,
-                service_tier=service_tier,
-                ephemeral=ephemeral,
-                timeout_s=timeout_s,
+            result = cast(
+                dict[str, int],
+                await run_codex_with_retry_and_logging(
+                    file_path=file_path,
+                    output_path=output_path,
+                    model=model,
+                    prompt=prompt,
+                    repo_root=repo_root,
+                    log_path=log_path,
+                    log_lock=log_lock,
+                    file_display=str(file_path.relative_to(repo_root).as_posix()),
+                    output_display=str(output_path.relative_to(repo_root).as_posix()),
+                    rate_limiter=rate_limiter,
+                    evidence_gate_summary_prefix="",
+                    output_schema=structured_output_schema,
+                    structured_markdown_field="markdown_report",
+                    profile=profile,
+                    reasoning_effort=reasoning_effort,
+                    service_tier=service_tier,
+                    ephemeral=ephemeral,
+                    timeout_s=timeout_s,
+                ),
             )
 
             # Deduplicate after successful run

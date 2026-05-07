@@ -28,6 +28,7 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     generate_summary,
     get_git_commit,
     load_context,
+    make_codex_rate_limiter,
     print_summary,
     resolve_path,
     run_codex_with_retry_and_logging,
@@ -36,7 +37,6 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     write_run_metadata,
     write_summary_file,
 )
-from pyrate_limiter import Duration, Limiter, Rate
 
 
 def _parse_dict_pattern_entry(entry: str) -> tuple[str, str, str]:
@@ -205,8 +205,7 @@ async def _run_batches(
     failed_entries: list[tuple[str, Exception]] = []
     total_gated = 0
 
-    # Use pyrate-limiter for rate limiting
-    rate_limiter = Limiter(Rate(rate_limit, Duration.MINUTE)) if rate_limit else None
+    rate_limiter = make_codex_rate_limiter(rate_limit)
     pbar = AsyncTqdm(total=len(exemptions), desc="Validating exemptions", unit="exemption")
 
     for batch in chunked([e[0] for e in exemptions], batch_size):

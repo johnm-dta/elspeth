@@ -12,43 +12,52 @@ and queries dict format (T10 Phase B consolidation).
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
+from openai.types.completion_usage import CompletionUsage
 
-from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 
 from .test_batch_transform_protocol import BatchTransformContractTestBase
 
 
-def _make_mock_response(content: str = '{"score": 85, "rationale": "test"}') -> Mock:
-    mock_response = Mock()
-    mock_response.choices = [Mock(message=Mock(content=content))]
-    mock_response.model = "gpt-4o"
-    mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-    mock_response.model_dump = Mock(return_value={})
-    return mock_response
+def _make_chat_completion(content: str = '{"score": 85, "rationale": "test"}') -> ChatCompletion:
+    return ChatCompletion(
+        id="chatcmpl-test",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content=content),
+            )
+        ],
+        created=0,
+        model="gpt-4o",
+        object="chat.completion",
+        usage=CompletionUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
 
 
-def _make_mock_context() -> Mock:
-    ctx = Mock(spec=PluginContext)
-    ctx.run_id = "test-run-001"
-    ctx.state_id = "state-001"
-    ctx.landscape = Mock()
-    ctx.landscape.record_call = Mock()
-    ctx.landscape.allocate_call_index = Mock(return_value=0)
-    return ctx
+class _FakeCompletions:
+    def create(self, **_: Any) -> ChatCompletion:
+        return _make_chat_completion()
 
 
-@pytest.fixture(autouse=True)
-def mock_azure_openai():
-    with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.return_value = _make_mock_response()
-        mock_azure_class.return_value = mock_client
-        yield mock_client
+class _FakeChat:
+    def __init__(self) -> None:
+        self.completions = _FakeCompletions()
+
+
+class _FakeAzureOpenAI:
+    def __init__(self) -> None:
+        self.chat = _FakeChat()
+
+    def close(self) -> None:
+        pass
 
 
 class TestMultiQueryLLMSpecific:
@@ -130,6 +139,13 @@ class TestMultiQueryLLMSpecific:
 
 class TestMultiQueryBatchContract(BatchTransformContractTestBase):
     """Verify multi-query LLM transform honors BatchTransformMixin contract."""
+
+    @pytest.fixture(autouse=True)
+    def mock_azure_openai(self):
+        with patch("openai.AzureOpenAI", autospec=True) as mock_azure_class:
+            mock_client = _FakeAzureOpenAI()
+            mock_azure_class.return_value = mock_client
+            yield mock_client
 
     @pytest.fixture
     def batch_transform(self) -> BatchTransformMixin:

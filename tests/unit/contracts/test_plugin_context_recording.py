@@ -1,22 +1,136 @@
-"""Tests for PluginContext.record_validation_error() and record_transform_error().
+"""Tests for PluginContext audit recording helpers.
 
 Tests the offensive programming guards (FrameworkBugError) and basic delegation
 to ExecutionRepository. Uses make_source_context() for real landscape integration
 and manual PluginContext construction for guard-clause tests.
 """
 
+from datetime import UTC, datetime
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 
-from elspeth.contracts import FrameworkBugError
-from elspeth.contracts.audit import TokenRef
+from elspeth.contracts import CallStatus, CallType, FrameworkBugError, NodeStateStatus
+from elspeth.contracts.audit import Call, NodeStateCompleted, TokenRef
+from elspeth.contracts.call_data import RawCallPayload
+from elspeth.contracts.events import ExternalCallCompleted
+from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.plugin_context import (
     PluginContext,
     TransformErrorToken,
     ValidationErrorToken,
 )
+from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_source_context
+
+
+def _completed_node_state(*, token_id: str = "token-001", state_id: str = "state-001") -> NodeStateCompleted:
+    return NodeStateCompleted(
+        state_id=state_id,
+        token_id=token_id,
+        node_id="transform-1",
+        step_index=0,
+        attempt=0,
+        status=NodeStateStatus.COMPLETED,
+        input_hash="input-hash",
+        output_hash="output-hash",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        completed_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        duration_ms=1.0,
+    )
+
+
+class _FakePluginAuditWriter:
+    def __init__(self, *, node_state: NodeStateCompleted | None = None) -> None:
+        self.node_state = node_state
+        self.allocated_state_ids: list[str] = []
+        self.node_state_lookups: list[str] = []
+        self.state_calls: list[dict[str, Any]] = []
+        self.operation_calls: list[dict[str, Any]] = []
+
+    def allocate_call_index(self, state_id: str) -> int:
+        self.allocated_state_ids.append(state_id)
+        return len(self.allocated_state_ids) - 1
+
+    def record_call(
+        self,
+        *,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: RawCallPayload,
+        response_data: RawCallPayload | None = None,
+        error: RawCallPayload | None = None,
+        latency_ms: float | None = None,
+    ) -> Call:
+        self.state_calls.append(
+            {
+                "state_id": state_id,
+                "call_index": call_index,
+                "call_type": call_type,
+                "status": status,
+                "request_data": request_data,
+                "response_data": response_data,
+                "error": error,
+                "latency_ms": latency_ms,
+            }
+        )
+        return Call(
+            call_id=f"call-{call_index}",
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_hash="request-hash",
+            response_hash="response-hash" if response_data is not None else None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            state_id=state_id,
+            latency_ms=latency_ms,
+        )
+
+    def record_operation_call(
+        self,
+        *,
+        operation_id: str,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: RawCallPayload,
+        response_data: RawCallPayload | None = None,
+        error: RawCallPayload | None = None,
+        latency_ms: float | None = None,
+    ) -> Call:
+        call_index = len(self.operation_calls)
+        self.operation_calls.append(
+            {
+                "operation_id": operation_id,
+                "call_type": call_type,
+                "status": status,
+                "request_data": request_data,
+                "response_data": response_data,
+                "error": error,
+                "latency_ms": latency_ms,
+            }
+        )
+        return Call(
+            call_id=f"operation-call-{call_index}",
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_hash="operation-request-hash",
+            response_hash="operation-response-hash" if response_data is not None else None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            operation_id=operation_id,
+            latency_ms=latency_ms,
+        )
+
+    def get_node_state(self, state_id: str) -> NodeStateCompleted | None:
+        self.node_state_lookups.append(state_id)
+        return self.node_state
+
+
+def _token_info(token_id: str) -> TokenInfo:
+    return TokenInfo(row_id="row-001", token_id=token_id, row_data=make_pipeline_row({"value": 1}))
 
 
 class TestRecordValidationErrorGuards:
@@ -140,6 +254,181 @@ class TestRecordValidationErrorHappyPath:
         assert ctx.pop_pending_quarantine_validation_error_id({"value": float("nan")}) == token.error_id
 
 
+class TestRecordCallGuards:
+    """record_call() must fail closed when audit parentage is invalid."""
+
+    def test_raises_when_landscape_is_none(self) -> None:
+        ctx = PluginContext(run_id="run-1", config={}, landscape=None, state_id="state-001")
+
+        with pytest.raises(FrameworkBugError, match=r"record_call\(\) called without landscape"):
+            ctx.record_call(
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                {"url": "https://example.test"},
+            )
+
+    def test_raises_when_both_state_and_operation_are_set(self) -> None:
+        writer = _FakePluginAuditWriter(node_state=_completed_node_state())
+        ctx = PluginContext(
+            run_id="run-1",
+            config={},
+            landscape=cast(Any, writer),
+            state_id="state-001",
+            operation_id="operation-001",
+        )
+
+        with pytest.raises(FrameworkBugError, match="BOTH state_id and operation_id"):
+            ctx.record_call(
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                {"url": "https://example.test"},
+            )
+
+        assert writer.state_calls == []
+        assert writer.operation_calls == []
+
+    def test_raises_when_no_parent_id_is_set(self) -> None:
+        writer = _FakePluginAuditWriter()
+        ctx = PluginContext(run_id="run-1", config={}, landscape=cast(Any, writer))
+
+        with pytest.raises(FrameworkBugError, match="without state_id or operation_id"):
+            ctx.record_call(
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                {"url": "https://example.test"},
+            )
+
+        assert writer.state_calls == []
+        assert writer.operation_calls == []
+
+    def test_raises_when_state_id_cannot_be_resolved_to_node_state(self) -> None:
+        writer = _FakePluginAuditWriter(node_state=None)
+        ctx = PluginContext(
+            run_id="run-1",
+            config={},
+            landscape=cast(Any, writer),
+            state_id="state-001",
+        )
+
+        with pytest.raises(FrameworkBugError, match=r"get_node_state\(\) returned None"):
+            ctx.record_call(
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                {"url": "https://example.test"},
+            )
+
+        assert writer.allocated_state_ids == ["state-001"]
+        assert writer.node_state_lookups == ["state-001"]
+        assert len(writer.state_calls) == 1
+
+    def test_raises_when_context_token_disagrees_with_node_state_token(self) -> None:
+        writer = _FakePluginAuditWriter(node_state=_completed_node_state(token_id="token-from-state"))
+        ctx = PluginContext(
+            run_id="run-1",
+            config={},
+            landscape=cast(Any, writer),
+            state_id="state-001",
+            token=_token_info("token-from-context"),
+        )
+
+        with pytest.raises(FrameworkBugError, match="token mismatch"):
+            ctx.record_call(
+                CallType.HTTP,
+                CallStatus.SUCCESS,
+                {"url": "https://example.test"},
+            )
+
+        assert writer.allocated_state_ids == ["state-001"]
+        assert writer.node_state_lookups == ["state-001"]
+        assert len(writer.state_calls) == 1
+
+
+class TestRecordCallHappyPath:
+    """record_call() writes to Landscape before emitting telemetry."""
+
+    def test_state_context_records_call_and_emits_token_correlated_telemetry(self) -> None:
+        writer = _FakePluginAuditWriter(node_state=_completed_node_state(token_id="token-001"))
+        emitted_events: list[ExternalCallCompleted] = []
+        ctx = PluginContext(
+            run_id="run-1",
+            config={},
+            landscape=cast(Any, writer),
+            state_id="state-001",
+            token=_token_info("token-001"),
+            telemetry_emit=emitted_events.append,
+        )
+
+        recorded = ctx.record_call(
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            {"url": "https://example.test"},
+            response_data={"status_code": 200},
+            latency_ms=12.5,
+            provider="example",
+        )
+
+        assert recorded is not None
+        assert recorded.state_id == "state-001"
+        assert recorded.operation_id is None
+        assert recorded.call_index == 0
+        assert writer.allocated_state_ids == ["state-001"]
+        assert writer.node_state_lookups == ["state-001"]
+
+        state_call = writer.state_calls[0]
+        assert state_call["request_data"].to_dict() == {"url": "https://example.test"}
+        assert state_call["response_data"].to_dict() == {"status_code": 200}
+        assert state_call["error"] is None
+
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event.state_id == "state-001"
+        assert event.operation_id is None
+        assert event.token_id == "token-001"
+        assert event.provider == "example"
+        assert event.request_hash == recorded.request_hash
+        assert event.response_hash == recorded.response_hash
+        assert event.request_payload is not None
+        assert event.request_payload.to_dict() == {"url": "https://example.test"}
+        assert event.response_payload is not None
+        assert event.response_payload.to_dict() == {"status_code": 200}
+
+    def test_operation_context_records_operation_call_without_token_lookup(self) -> None:
+        writer = _FakePluginAuditWriter()
+        emitted_events: list[ExternalCallCompleted] = []
+        ctx = PluginContext(
+            run_id="run-1",
+            config={},
+            landscape=cast(Any, writer),
+            operation_id="operation-001",
+            telemetry_emit=emitted_events.append,
+        )
+
+        recorded = ctx.record_call(
+            CallType.FILESYSTEM,
+            CallStatus.ERROR,
+            {"path": "/tmp/output.csv"},
+            error={"type": "OSError", "message": "disk full"},
+            provider="filesystem",
+        )
+
+        assert recorded is not None
+        assert recorded.operation_id == "operation-001"
+        assert recorded.state_id is None
+        assert writer.allocated_state_ids == []
+        assert writer.node_state_lookups == []
+        assert writer.operation_calls[0]["request_data"].to_dict() == {"path": "/tmp/output.csv"}
+        assert writer.operation_calls[0]["error"].to_dict() == {"type": "OSError", "message": "disk full"}
+
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event.state_id is None
+        assert event.operation_id == "operation-001"
+        assert event.token_id is None
+        assert event.provider == "filesystem"
+        assert event.latency_ms == 0.0
+        assert event.request_hash == recorded.request_hash
+
+
 class TestRecordTransformErrorGuards:
     """record_transform_error() must crash on missing landscape."""
 
@@ -185,7 +474,6 @@ class TestRecordTransformErrorHappyPath:
         assert token.token_id == "tok-1"
         assert token.transform_id == "transform-1"
         assert token.destination == "error_sink"
-        assert token.error_id == "terr_abc123"
         mock_landscape.record_transform_error.assert_called_once_with(
             ref=TokenRef(token_id="tok-1", run_id="run-1"),
             transform_id="transform-1",

@@ -354,9 +354,12 @@ def _apply_anthropic_cache_markers(
 
     Behavior:
     - The first message with ``role == "system"`` receives a top-level
-      ``cache_control: {"type": "ephemeral"}`` field. LiteLLM's Anthropic
-      transform recognizes this and propagates it onto the corresponding
-      ``AnthropicSystemMessageContent`` block on the wire.
+      ``cache_control: {"type": "ephemeral"}`` field. ``build_messages()``
+      keeps this first system message to the stable skill/deployment prompt;
+      the dynamic current-state JSON is emitted as a later system message.
+      LiteLLM's Anthropic transform recognizes this marker and propagates it
+      onto the corresponding ``AnthropicSystemMessageContent`` block on the
+      wire.
     - The LAST tool in ``tools`` receives the same marker at the tool
       level. Anthropic caches all tools up to and including the marker,
       so marking the trailing tool covers the full tools array.
@@ -1195,8 +1198,11 @@ class ComposerServiceImpl:
             )
 
             # Execute each tool call, tracking whether this turn has
-            # any mutation calls for budget classification.
+            # budgeted discovery or mutation work. Advisor-only turns are
+            # intentionally neither: they spend the advisor-specific budget,
+            # not the generic discovery/composition turn budgets.
             turn_has_mutation = False
+            turn_has_discovery = False
             all_cache_hits = True
 
             for tool_call in assistant_message.tool_calls:
@@ -1204,8 +1210,10 @@ class ComposerServiceImpl:
                 try:
                     decoded_arguments = json.loads(tool_call.function.arguments)
                 except (json.JSONDecodeError, TypeError) as exc:
-                    # Track mutation intent even when args are unparseable
-                    if not is_discovery_tool(tool_name):
+                    # Track budget class even when args are unparseable.
+                    if is_discovery_tool(tool_name):
+                        turn_has_discovery = True
+                    else:
                         turn_has_mutation = True
                     # ARG_ERROR pre-dispatch site (1/3): JSON-decode failure.
                     # Open the audit envelope with the raw (pre-parse) string
@@ -1241,7 +1249,9 @@ class ComposerServiceImpl:
                     continue
 
                 if not isinstance(decoded_arguments, dict):
-                    if not is_discovery_tool(tool_name):
+                    if is_discovery_tool(tool_name):
+                        turn_has_discovery = True
+                    else:
                         turn_has_mutation = True
                     # ARG_ERROR pre-dispatch site (2/3): non-dict arguments.
                     # The LLM produced valid JSON but not a JSON object. The
@@ -1298,7 +1308,9 @@ class ComposerServiceImpl:
                     actor=actor,
                 )
                 if canonicalization_failed is not None:
-                    if not is_discovery_tool(tool_name):
+                    if is_discovery_tool(tool_name):
+                        turn_has_discovery = True
+                    else:
                         turn_has_mutation = True
                     error_payload = {
                         "error": f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
@@ -1384,7 +1396,9 @@ class ComposerServiceImpl:
                 required_paths = _TOOL_REQUIRED_PATHS[tool_name] if tool_name in _TOOL_REQUIRED_PATHS else ()
                 missing = _find_missing_required_paths(arguments, required_paths)
                 if missing:
-                    if not is_discovery_tool(tool_name):
+                    if is_discovery_tool(tool_name):
+                        turn_has_discovery = True
+                    else:
                         turn_has_mutation = True
                     # ARG_ERROR pre-dispatch site (3/3): schema-required
                     # paths missing. ``missing`` is a list of dotted/indexed
@@ -1427,6 +1441,11 @@ class ComposerServiceImpl:
                 # LLM call is recorded separately via _call_advisor_with_audit
                 # firing a ComposerLLMCall record.
                 if tool_name == "request_advisor_hint":
+                    # Successful advisor guidance is governed solely by the
+                    # advisor budget so the composer can read it. Advisor
+                    # policy/error feedback with no usable guidance is still
+                    # a non-mutating correction turn, so it consumes discovery
+                    # budget before the loop asks the primary model again.
                     if not self._settings.composer_advisor_enabled:
                         # Defense-in-depth: the tool was filtered out of
                         # _get_litellm_tools() but the LLM somehow named it
@@ -1450,6 +1469,7 @@ class ComposerServiceImpl:
                                 "content": json.dumps(error_payload),
                             }
                         )
+                        turn_has_discovery = True
                         continue
 
                     budget = self._settings.composer_advisor_max_calls_per_compose
@@ -1484,6 +1504,7 @@ class ComposerServiceImpl:
                                 "content": json.dumps(budget_payload),
                             }
                         )
+                        turn_has_discovery = True
                         continue
 
                     # F3: validate argument types and total prompt size at the
@@ -1513,6 +1534,7 @@ class ComposerServiceImpl:
                                 "content": json.dumps(advisor_arg_error),
                             }
                         )
+                        turn_has_discovery = True
                         continue
 
                     remaining = deadline - asyncio.get_event_loop().time()
@@ -1616,6 +1638,7 @@ class ComposerServiceImpl:
                                 "content": json.dumps(advisor_error_payload),
                             }
                         )
+                        turn_has_discovery = True
                         continue
                     except Exception as advisor_exc:
                         # Tier 3 boundary: outbound LLM call failed. Convert
@@ -1654,6 +1677,7 @@ class ComposerServiceImpl:
                                 "content": json.dumps(advisor_error_payload),
                             }
                         )
+                        turn_has_discovery = True
                         continue
 
                     success_payload = {
@@ -1829,7 +1853,9 @@ class ComposerServiceImpl:
                 except ToolArgumentError as exc:
                     # The audit record was already written by the helper.
                     # Build the LLM-facing tool message and continue.
-                    if not is_discovery_tool(tool_name):
+                    if is_discovery_tool(tool_name):
+                        turn_has_discovery = True
+                    else:
                         turn_has_mutation = True
                     # Trust-boundary redaction: the echoed message reaches the
                     # LLM API and (via audit) the Landscape. ToolArgumentError
@@ -2004,6 +2030,8 @@ class ComposerServiceImpl:
 
                 if not is_discovery_tool(tool_name):
                     turn_has_mutation = True
+                else:
+                    turn_has_discovery = True
 
             # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
             # same (tool_name, arguments_hash), the model has stopped reading
@@ -2087,7 +2115,7 @@ class ComposerServiceImpl:
                         tool_invocations=recorder.invocations,
                         llm_calls=recorder.llm_calls,
                     )
-            else:
+            elif turn_has_discovery:
                 discovery_turns_used += 1
                 if discovery_turns_used >= self._max_discovery_turns:
                     raise ComposerConvergenceError.capture(
@@ -2098,6 +2126,12 @@ class ComposerServiceImpl:
                         tool_invocations=recorder.invocations,
                         llm_calls=recorder.llm_calls,
                     )
+            else:
+                # The only non-cache tool currently handled outside the
+                # discovery/mutation registries is request_advisor_hint. It
+                # has its own per-compose budget above, so give the primary
+                # model the returned guidance instead of charging discovery.
+                continue
 
     def _persist_crashed_session(self, session_id: str) -> None:
         """Best-effort timestamp bump to mark that a compose session crashed.
@@ -2541,11 +2575,13 @@ class ComposerServiceImpl:
         """Call the composer LLM once and record an audit sidecar.
 
         For Anthropic-family providers, ``cache_control`` markers are
-        applied to the system message and the trailing tool before the
-        call. The transformed payload is what flows to LiteLLM and what
-        the audit ``messages_hash`` / ``tools_spec_hash`` record — the
-        hash is over the bytes actually sent, so the audit row is
-        truthful about the wire payload (elspeth-4e79436719 §Phase 3).
+        applied to the stable first system message and the trailing tool
+        before the call. Dynamic composer state lives in the later context
+        system message, outside the stable prompt-cache breakpoint. The
+        transformed payload is what flows to LiteLLM and what the audit
+        ``messages_hash`` / ``tools_spec_hash`` record — the hash is over
+        the bytes actually sent, so the audit row is truthful about the
+        wire payload (elspeth-4e79436719 §Phase 3).
         """
         from litellm.exceptions import APIError as LiteLLMAPIError
         from litellm.exceptions import AuthenticationError as LiteLLMAuthError

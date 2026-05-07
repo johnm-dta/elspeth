@@ -32,6 +32,8 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 - **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `update_blob`, `delete_blob`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 
+When an LLM transform needs a model identifier, do not assume a familiar model is available in this deployment. Use `list_models` first: the no-argument form gives provider counts, and a provider-filtered call gives the concrete model IDs that validation accepts.
+
 If any tool you intend to call still shows a placeholder signature in a deferred MCP client (e.g. `patch_source_options = () => any`) — **STOP** and reload its schema before invoking it. In the web composer path this should not happen because the function schemas are already supplied in the `tools` request payload.
 
 **Final gate before reporting completion:** call `preview_pipeline` and confirm it succeeds. Do **not** call `generate_yaml` — it is a service-side function, not an LLM tool. The composer renders YAML on demand once the pipeline is in a valid, contract-proven state.
@@ -758,7 +760,7 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 
 - If the user's request is ambiguous, propose the simplest pipeline that satisfies it and ask if they want more complexity
 - When the user uploads a file, use `set_source_from_blob` to wire it as the source
-- When configuring LLM transforms, check available secrets with `list_secret_refs` before choosing a model; for OpenRouter, also call `list_models(provider="openrouter")` to enumerate valid model identifiers (the no-arg form returns provider counts, not slugs, and cannot be used to verify a specific model). The `/validate` endpoint runs a `value_source_compliance` check that rejects hallucinated model identifiers — for OpenRouter the value must appear in `list_models(provider="openrouter")`, and for Azure the `model` field should be omitted (it inherits from `deployment_name`). Do not retry by inventing alternative `provider/model-name` strings.
+- When configuring LLM transforms, check available secrets with `list_secret_refs` before choosing a model. For OpenRouter, call `list_models(provider="openrouter/")` to enumerate valid model identifiers and choose one from that response; do not assume that any particular OpenRouter model exists. The no-argument `list_models` form returns provider counts, not slugs, and cannot verify a specific model. The `/validate` endpoint runs a `value_source_compliance` check that rejects hallucinated model identifiers — for OpenRouter the value must appear in `list_models(provider="openrouter/")`, and for Azure the `model` field should be omitted (it inherits from `deployment_name`). Do not retry by inventing alternative `provider/model-name` strings.
 - After building, explain the structure — what each step does and why
 
 ---
@@ -1247,7 +1249,7 @@ There are **two ways a secret value can appear in YAML**, and only one of them i
 | Provider | Config value | Typical secret env var | Model ID format | Notes |
 |----------|-------------|----------------------|-----------------|-------|
 | Azure OpenAI | `provider: "azure"` | Credential-based (DefaultAzureCredential) | Uses `deployment_name` instead of model — leave `model` empty | Requires `endpoint` URL. `/validate` rejects literal model values that diverge from `deployment_name`. |
-| OpenRouter | `provider: "openrouter"` | `OPENROUTER_API_KEY` | Raw OpenRouter slug from `list_models(provider="openrouter")` (e.g., `anthropic/claude-3.5-sonnet`, `openai/gpt-4o`) — **without** any `openrouter/` routing prefix (the tool already strips it) | `/validate` rejects models not present in `list_models(provider="openrouter")`; never invent identifiers. |
+| OpenRouter | `provider: "openrouter"` | `OPENROUTER_API_KEY` | Raw OpenRouter slug from `list_models(provider="openrouter/")`; choose from the returned list rather than assuming a common model is available. Returned values are **without** any `openrouter/` routing prefix because the tool strips it. | `/validate` rejects models not present in `list_models(provider="openrouter/")`; never invent identifiers. |
 
 ### Other Secrets
 

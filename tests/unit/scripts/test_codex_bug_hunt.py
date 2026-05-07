@@ -354,6 +354,32 @@ async def test_run_codex_once_times_out_and_cleans_up_subprocess(
 
 
 @pytest.mark.asyncio
+async def test_codex_rate_limiter_backpressures_instead_of_failing_at_quota() -> None:
+    now = 0.0
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def sleep(delay_s: float) -> None:
+        nonlocal now
+        sleeps.append(delay_s)
+        now += delay_s
+
+    limiter = codex_audit_common.AsyncRequestRateLimiter(
+        max_calls=1,
+        period_s=0.25,
+        clock=clock,
+        sleep=sleep,
+    )
+
+    await limiter.acquire()
+    await limiter.acquire()
+
+    assert sleeps == [0.25]
+
+
+@pytest.mark.asyncio
 async def test_run_codex_with_retry_awaits_rate_limiter_and_returns_usage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

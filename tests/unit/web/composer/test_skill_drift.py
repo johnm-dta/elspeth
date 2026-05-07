@@ -184,6 +184,23 @@ class TestStateValidatorPluginDrift:
         )
 
 
+class TestLLMModelGuidance:
+    """Pin skill guidance that prevents model-identifier hallucination."""
+
+    def test_web_skill_tells_composer_to_list_models_before_choosing_llm_model(self) -> None:
+        """The composer skill must direct LLM configs through live model discovery.
+
+        The runtime value-source check rejects OpenRouter model identifiers that
+        are not present in the LiteLLM catalog. The skill therefore needs to
+        tell the composer agent to call ``list_models`` and choose from that
+        response instead of assuming a familiar model string is available.
+        """
+        assert 'list_models(provider="openrouter/")' in _WEB_SKILL_CONTENT
+        assert "do not assume" in _WEB_SKILL_CONTENT
+        assert "choose one from that response" in _WEB_SKILL_CONTENT
+        assert "never invent identifiers" in _WEB_SKILL_CONTENT
+
+
 class TestEngineValidatorPluginDrift:
     """Verify static plugin sets in engine-side validators match the runtime registry.
 

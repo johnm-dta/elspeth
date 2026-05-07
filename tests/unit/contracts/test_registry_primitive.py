@@ -21,6 +21,44 @@ def test_write_unfrozen_raises_with_caller_error_after_freeze() -> None:
         registry.items.append("unreachable")
 
 
+def test_write_unfrozen_raises_default_runtime_error_after_freeze() -> None:
+    registry: FrozenRegistry[str, dict[str, str]] = FrozenRegistry(
+        name="test-registry",
+        auxiliary={},
+    )
+
+    registry.freeze()
+
+    with pytest.raises(RuntimeError, match="test-registry registry is frozen"), registry.write_unfrozen():
+        registry.items.append("unreachable")
+
+
+def test_write_unfrozen_allows_reentrant_mutations_before_freeze() -> None:
+    registry: FrozenRegistry[str, dict[str, str]] = FrozenRegistry(
+        name="test-registry",
+        auxiliary={},
+    )
+
+    with registry.write_unfrozen():
+        registry.items.append("outer")
+        with registry.write_unfrozen():
+            registry.items.append("inner")
+
+    assert registry.items == ["outer", "inner"]
+
+
+def test_freeze_is_idempotent() -> None:
+    registry: FrozenRegistry[str, dict[str, str]] = FrozenRegistry(
+        name="test-registry",
+        auxiliary={},
+    )
+
+    registry.freeze()
+    registry.freeze()
+
+    assert registry.is_frozen()
+
+
 def test_freeze_waits_for_in_flight_mutation_lock() -> None:
     registry: FrozenRegistry[str, dict[str, str]] = FrozenRegistry(
         name="test-registry",

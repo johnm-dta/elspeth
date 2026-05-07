@@ -177,6 +177,26 @@ class TestBatchPairedPreference:
         assert result.row["wins"] == 1
         assert result.row["win_rate"] == 1.0
 
+    def test_overflowed_paired_delta_returns_transform_error(self, ctx: PluginContext) -> None:
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": -1e308}),
+            _make_row({"case_id": "p1", "variant": "B", "score": 1e308}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "float_overflow"
+        assert result.reason["operation"] == "paired_delta"
+        assert result.reason["group_value"] == "B"
+
     def test_non_numeric_scores_raise_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
 

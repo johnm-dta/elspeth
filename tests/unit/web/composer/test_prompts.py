@@ -2,8 +2,8 @@
 
 Verifies:
 - build_messages returns a NEW list on every call (cross-turn contamination guard)
-- Message ordering: system → chat history → user message
-- System message injects pipeline state and plugin catalog
+- Message ordering: stable system → dynamic context → chat history → user message
+- Dynamic context message injects pipeline state and plugin catalog
 - Empty chat history handled correctly
 - Context string includes validation summary
 - build_context_string redacts blob storage paths
@@ -112,8 +112,8 @@ class TestBuildMessages:
         roles = [m["role"] for m in list2]
         assert "assistant" not in roles
 
-    def test_message_ordering_system_history_user(self) -> None:
-        """Messages must be: system, then history, then user."""
+    def test_message_ordering_system_context_history_user(self) -> None:
+        """Messages must be: stable system, dynamic context, history, then user."""
         state = _empty_state()
         catalog = _stub_catalog()
         history = [
@@ -124,36 +124,54 @@ class TestBuildMessages:
         messages = build_messages(history, state, "new question", catalog)
 
         assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
-        assert messages[1]["content"] == "previous question"
-        assert messages[2]["role"] == "assistant"
-        assert messages[2]["content"] == "previous answer"
+        assert messages[1]["role"] == "system"
+        assert messages[1]["content"].startswith("Current pipeline state and available plugins:")
+        assert messages[2]["role"] == "user"
+        assert messages[2]["content"] == "previous question"
+        assert messages[3]["role"] == "assistant"
+        assert messages[3]["content"] == "previous answer"
         assert messages[-1]["role"] == "user"
         assert messages[-1]["content"] == "new question"
 
-    def test_empty_history_produces_system_and_user_only(self) -> None:
+    def test_empty_history_produces_system_context_and_user_only(self) -> None:
         state = _empty_state()
         catalog = _stub_catalog()
 
         messages = build_messages([], state, "my question", catalog)
 
-        assert len(messages) == 2
+        assert len(messages) == 3
         assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
-        assert messages[1]["content"] == "my question"
+        assert messages[1]["role"] == "system"
+        assert messages[2]["role"] == "user"
+        assert messages[2]["content"] == "my question"
 
-    def test_system_message_contains_prompt_and_context(self) -> None:
+    def test_system_prompt_and_dynamic_context_are_split_for_prompt_cache(self) -> None:
         state = _empty_state()
         catalog = _stub_catalog()
 
         messages = build_messages([], state, "test", catalog)
-        system_content = messages[0]["content"]
 
-        # Must contain the static system prompt
-        assert SYSTEM_PROMPT in system_content
-        # Must contain injected context with plugin names
-        assert "csv" in system_content
-        assert "uppercase" in system_content
+        stable_system_content = messages[0]["content"]
+        dynamic_context_content = messages[1]["content"]
+
+        assert SYSTEM_PROMPT in stable_system_content
+        assert "Current pipeline state" not in stable_system_content
+        assert dynamic_context_content.startswith("Current pipeline state and available plugins:")
+        assert "csv" in dynamic_context_content
+        assert "uppercase" in dynamic_context_content
+
+    def test_first_system_message_is_stable_when_state_changes(self) -> None:
+        catalog = _stub_catalog()
+
+        empty_messages = build_messages([], _empty_state(), "test", catalog)
+        sourced_messages = build_messages([], _blob_source_state(), "test", catalog)
+
+        assert empty_messages[0]["role"] == "system"
+        assert sourced_messages[0]["role"] == "system"
+        assert empty_messages[0]["content"] == sourced_messages[0]["content"]
+        assert empty_messages[1]["role"] == "system"
+        assert sourced_messages[1]["role"] == "system"
+        assert empty_messages[1]["content"] != sourced_messages[1]["content"]
 
 
 class TestBuildContextString:
@@ -305,8 +323,9 @@ class TestBuildMessagesWithDataDir:
         messages = build_messages([], state, "test", catalog, data_dir=None)
         system_content = messages[0]["content"]
 
-        # System message is SYSTEM_PROMPT + context string.
-        assert system_content.startswith(SYSTEM_PROMPT)
+        # Stable system message is only the prompt prefix; dynamic context is separate.
+        assert system_content == SYSTEM_PROMPT
+        assert messages[1]["content"].startswith("Current pipeline state and available plugins:")
 
     def test_data_dir_with_deployment_skill_injects_it(self, tmp_path: Path) -> None:
         """When data_dir has a deployment skill, it appears in the system message."""

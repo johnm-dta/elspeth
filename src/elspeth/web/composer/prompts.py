@@ -161,9 +161,15 @@ def build_messages(
     contamination.
 
     Message sequence:
-    1. System message (static prompt + injected context)
-    2. Chat history (previous messages in this session)
-    3. Current user message
+    1. Stable system message (core skill + optional deployment skill)
+    2. Dynamic context system message (current state + plugin summary)
+    3. Chat history (previous messages in this session)
+    4. Current user message
+
+    The stable prompt and dynamic context are separate system messages
+    deliberately. Anthropic prompt-cache markers attach to the first
+    system message, so keeping the mutating state JSON in the second
+    message lets follow-up turns reuse the expensive stable skill prefix.
 
     Args:
         chat_history: Chat history as plain dicts (role/content keys).
@@ -185,20 +191,25 @@ def build_messages(
     """
     messages: list[dict[str, Any]] = []
 
-    # 1. System prompt with injected context (single system message)
+    # 1. Stable system prompt only.
     # F1: route through build_system_prompt unconditionally so the
     # advisor-strip transformation applies consistently — the previous
     # ``data_dir is None → SYSTEM_PROMPT`` fast path bypassed it. The
     # @lru_cache on build_system_prompt makes repeat calls free.
     prompt = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
-    context_str = build_context_string(state, catalog)
-    messages.append({"role": "system", "content": prompt + "\n\n" + context_str})
+    messages.append({"role": "system", "content": prompt})
 
-    # 2. Chat history
+    # 2. Dynamic state/plugin context. Keep this outside the first
+    # system message so provider prompt-cache markers cover only the
+    # stable skill/deployment prefix.
+    context_str = build_context_string(state, catalog)
+    messages.append({"role": "system", "content": context_str})
+
+    # 3. Chat history
     if chat_history:
         messages.extend(chat_history)
 
-    # 3. Current user message
+    # 4. Current user message
     messages.append({"role": "user", "content": user_message})
 
     return messages

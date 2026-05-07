@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
@@ -79,12 +80,17 @@ class _FakeUsage:
 class _FakeLLMResponse:
     choices: list[_FakeChoice]
     model: str = "anthropic/claude-sonnet-4-6"
-    usage: _FakeUsage = None  # type: ignore[assignment]
+    usage: _FakeUsage | None = None
     id: str | None = None
 
     def __post_init__(self) -> None:
         if self.usage is None:
             self.usage = _FakeUsage()
+
+
+def _result_canonical(invocation: ComposerToolInvocation) -> str:
+    assert invocation.result_canonical is not None
+    return invocation.result_canonical
 
 
 def _empty_state() -> CompositionState:
@@ -346,9 +352,10 @@ async def test_advisor_call_records_outer_invocation_and_inner_llm_call() -> Non
     # arguments_canonical contains the LLM's stuck-message
     assert "stuck on llm config" in inv.arguments_canonical
     # result_canonical contains the advisor's guidance + metadata
-    assert "Try setting" in inv.result_canonical
-    assert "anthropic/claude-sonnet-4-6" in inv.result_canonical
-    assert "budget_remaining" in inv.result_canonical
+    result_canonical = _result_canonical(inv)
+    assert "Try setting" in result_canonical
+    assert "anthropic/claude-sonnet-4-6" in result_canonical
+    assert "budget_remaining" in result_canonical
 
     # Inner ComposerLLMCall record is in result.llm_calls
     advisor_llm_calls = [call for call in result.llm_calls if call.model_requested == "anthropic/claude-sonnet-4-6"]
@@ -357,6 +364,49 @@ async def test_advisor_call_records_outer_invocation_and_inner_llm_call() -> Non
     assert llm_call.status.name == "SUCCESS"
     assert llm_call.prompt_tokens == 120
     assert llm_call.completion_tokens == 45
+
+
+@pytest.mark.asyncio
+async def test_advisor_only_turn_does_not_consume_discovery_budget() -> None:
+    """Advisor-only turns have their own budget and must not spend discovery turns.
+
+    With composer_max_discovery_turns=1, the old classifier charged the
+    successful advisor call as discovery and raised before the composer LLM
+    could read the guidance on the next turn.
+    """
+    catalog = _mock_catalog()
+    settings = WebSettings(
+        data_dir=Path("/data"),
+        composer_max_composition_turns=15,
+        composer_max_discovery_turns=1,
+        composer_timeout_seconds=85.0,
+        composer_rate_limit_per_minute=10,
+        composer_advisor_enabled=True,
+        composer_advisor_max_calls_per_compose=3,
+        composer_advisor_timeout_seconds=60.0,
+    )
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_make_advisor_response(),
+        ) as mock_acompletion,
+    ):
+        mock_llm.side_effect = [
+            _make_advisor_tool_call("call_advisor_1"),
+            _make_text_only_response("I read the guidance and can continue."),
+        ]
+        result = await service.compose("help me", [], state)
+
+    assert result.message == "I read the guidance and can continue."
+    assert mock_llm.call_count == 2
+    assert mock_acompletion.call_count == 1
+    invocations = [inv for inv in result.tool_invocations if inv.tool_name == "request_advisor_hint"]
+    assert len(invocations) == 1
 
 
 @pytest.mark.asyncio
@@ -474,13 +524,60 @@ async def test_budget_exhaustion_returns_structured_error() -> None:
     assert len(invs) == 4
 
     # The 4th invocation's result_canonical must encode BUDGET_EXHAUSTED.
-    assert "BUDGET_EXHAUSTED" in invs[3].result_canonical
-    assert "budget_remaining" in invs[3].result_canonical
+    exhausted_result = _result_canonical(invs[3])
+    assert "BUDGET_EXHAUSTED" in exhausted_result
+    assert "budget_remaining" in exhausted_result
 
     # The 1st-3rd invocations must encode SUCCESS status in result_payload.
     for inv in invs[:3]:
-        assert "SUCCESS" in inv.result_canonical
-        assert "Try setting" in inv.result_canonical
+        result_canonical = _result_canonical(inv)
+        assert "SUCCESS" in result_canonical
+        assert "Try setting" in result_canonical
+
+
+@pytest.mark.asyncio
+async def test_exhausted_advisor_turn_charges_discovery_budget() -> None:
+    """BUDGET_EXHAUSTED advisor turns must still be bounded by loop budget.
+
+    Successful advisor guidance is budgeted separately so the primary model
+    can read it. A policy refusal is different: no guidance was produced, and
+    repeated calls must converge via the generic discovery-turn guard rather
+    than spinning until the wall-clock compose timeout.
+    """
+    catalog = _mock_catalog()
+    settings = WebSettings(
+        data_dir=Path("/data"),
+        composer_max_composition_turns=15,
+        composer_max_discovery_turns=1,
+        composer_timeout_seconds=85.0,
+        composer_rate_limit_per_minute=10,
+        composer_advisor_enabled=True,
+        composer_advisor_max_calls_per_compose=0,
+        composer_advisor_timeout_seconds=60.0,
+    )
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+        ) as mock_acompletion,
+        pytest.raises(ComposerConvergenceError) as exc_info,
+    ):
+        mock_llm.side_effect = [
+            _make_advisor_tool_call("call_budget_exhausted"),
+            _make_text_only_response("would incorrectly continue"),
+        ]
+        await service.compose("help me", [], state)
+
+    assert exc_info.value.budget_exhausted == "discovery"
+    assert mock_llm.call_count == 1
+    assert mock_acompletion.call_count == 0
+    invocations = [inv for inv in exc_info.value.tool_invocations if inv.tool_name == "request_advisor_hint"]
+    assert len(invocations) == 1
+    assert "BUDGET_EXHAUSTED" in _result_canonical(invocations[0])
 
 
 # --- 6. Disabled-but-LLM-tries (defense-in-depth) ---
@@ -536,8 +633,9 @@ async def test_advisor_call_failure_records_inner_status_and_outer_error() -> No
         "outer dispatch envelope must close as SUCCESS even when the inner LLM call fails — "
         "the failure mode is captured in result_payload, not status"
     )
-    assert "ADVISOR_ERROR" in invs[0].result_canonical
-    assert "APIError" in invs[0].result_canonical, (
+    result_canonical = _result_canonical(invs[0])
+    assert "ADVISOR_ERROR" in result_canonical
+    assert "APIError" in result_canonical, (
         "result must carry the underlying error class so the composer LLM can distinguish "
         "transient API failures from auth/budget/disabled cases"
     )
@@ -690,10 +788,12 @@ async def test_advisor_call_is_bounded_by_remaining_compose_deadline() -> None:
 
     assert exc_info.value.budget_exhausted == "timeout"
     assert mock_llm.call_count == 1
-    advisor_timeout = mock_advisor.await_args.kwargs["timeout"]
+    advisor_await = mock_advisor.await_args
+    assert advisor_await is not None
+    advisor_timeout = advisor_await.kwargs["timeout"]
     assert 0 < advisor_timeout <= 5.0
     assert len(exc_info.value.tool_invocations) == 1
-    assert "COMPOSE_TIMEOUT" in exc_info.value.tool_invocations[0].result_canonical
+    assert "COMPOSE_TIMEOUT" in _result_canonical(exc_info.value.tool_invocations[0])
 
 
 @pytest.mark.asyncio
@@ -727,7 +827,7 @@ async def test_disabled_advisor_returns_disabled_error_no_llm_call() -> None:
 
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 1
-    assert "disabled" in invs[0].result_canonical
+    assert "disabled" in _result_canonical(invs[0])
 
 
 @pytest.mark.asyncio
@@ -778,7 +878,7 @@ async def test_missing_advisor_trigger_rejects_without_outbound_call() -> None:
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 1
     assert invs[0].status.name == "ARG_ERROR"
-    assert "trigger" in invs[0].result_canonical
+    assert "trigger" in _result_canonical(invs[0])
 
 
 # --- Post-review fixes (P2 findings) ---
@@ -849,7 +949,7 @@ async def test_f4_advisor_empty_content_classified_as_malformed() -> None:
 
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 1
-    assert "ADVISOR_ERROR" in invs[0].result_canonical, "empty advisor content was treated as success — should be ADVISOR_ERROR"
+    assert "ADVISOR_ERROR" in _result_canonical(invs[0]), "empty advisor content was treated as success — should be ADVISOR_ERROR"
 
     advisor_calls = [c for c in result.llm_calls if c.model_requested == "anthropic/claude-sonnet-4-6"]
     assert len(advisor_calls) == 1
@@ -889,8 +989,8 @@ async def test_f2_failed_advisor_call_consumes_budget() -> None:
 
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 2
-    assert "ADVISOR_ERROR" in invs[0].result_canonical
-    assert "BUDGET_EXHAUSTED" in invs[1].result_canonical, (
+    assert "ADVISOR_ERROR" in _result_canonical(invs[0])
+    assert "BUDGET_EXHAUSTED" in _result_canonical(invs[1]), (
         "second advisor call after a failed one was not budget-blocked — the failed first call did not consume budget (F2)"
     )
     assert mock_acompletion.call_count == 1, (
@@ -949,7 +1049,7 @@ async def test_f3a_advisor_rejects_non_list_recent_errors() -> None:
     assert mock_acompletion.call_count == 0, "advisor sent malformed-typed argument to provider — should reject locally"
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 1
-    assert "ARG_ERROR" in invs[0].result_canonical
+    assert "ARG_ERROR" in _result_canonical(invs[0])
     assert invs[0].status.name == "ARG_ERROR", (
         "advisor argument rejection must use the audit ARG_ERROR status, not SUCCESS with ARG_ERROR buried inside result_canonical"
     )
@@ -1016,7 +1116,7 @@ async def test_f3b_advisor_rejects_oversized_prompt() -> None:
     assert mock_acompletion.call_count == 0, "oversized prompt was sent to provider — local cap not enforced"
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 1
-    assert "ARG_ERROR" in invs[0].result_canonical
+    assert "ARG_ERROR" in _result_canonical(invs[0])
     assert invs[0].status.name == "ARG_ERROR", (
         "advisor oversized prompt rejection must use the audit ARG_ERROR status, not SUCCESS with ARG_ERROR buried inside result_canonical"
     )
@@ -1082,7 +1182,7 @@ async def test_f3c_advisor_prompt_size_counts_formatting_overhead() -> None:
     assert mock_acompletion.call_count == 0, "advisor sent a formatted prompt whose bullet/newline overhead exceeded the local cap"
     invs = [i for i in result.tool_invocations if i.tool_name == "request_advisor_hint"]
     assert len(invs) == 1
-    assert "ARG_ERROR" in invs[0].result_canonical
+    assert "ARG_ERROR" in _result_canonical(invs[0])
     assert invs[0].status.name == "ARG_ERROR"
 
 

@@ -8,9 +8,10 @@ we add concurrency in a later task.
 
 from __future__ import annotations
 
+import socket
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import httpx
 import pytest
@@ -26,20 +27,38 @@ if TYPE_CHECKING:
     from elspeth.contracts import TransformProtocol
 
 
-def _create_mock_http_response() -> Mock:
-    """Create a mock HTTP response for testing."""
-    response = Mock()
-    response.status_code = 200
-    response.content = b"<html><body>Test content</body></html>"
-    response.text = "<html><body>Test content</body></html>"
-    response.headers = {"content-type": "text/html"}
+_HTTPX_CLIENT_CLASS = httpx.Client
+_TEST_IP = "93.184.216.34"
+
+
+def _mock_getaddrinfo(ip: str = _TEST_IP) -> Any:
+    """Create a deterministic DNS resolver for SSRF validation."""
+
+    def _getaddrinfo(
+        host: str,
+        port: Any,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[Any, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    return _getaddrinfo
+
+
+def _create_http_response() -> httpx.Response:
+    """Create a real HTTP response for testing the audited-client boundary."""
     # WebScrapeTransform records the IP-pinned destination from the final
     # SSRF-safe request. Contract fixtures must therefore emulate the
     # real AuditedHTTPClient behavior rather than leaving request.url.host
     # as an untyped Mock.
-    response.request = httpx.Request("GET", "https://93.184.216.34/contract-test")
-    response.raise_for_status = Mock()
-    return response
+    return httpx.Response(
+        200,
+        content=b"<html><body>Test content</body></html>",
+        headers={"content-type": "text/html"},
+        request=httpx.Request("GET", "https://93.184.216.34/contract-test"),
+    )
 
 
 class TestWebScrapeContract(TransformContractPropertyTestBase):
@@ -48,12 +67,15 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
     @pytest.fixture(autouse=True)
     def mock_httpx(self):
         """Mock httpx.Client for all contract tests."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_response = _create_mock_http_response()
-            mock_client_instance = Mock()
+        with (
+            patch("socket.getaddrinfo", side_effect=_mock_getaddrinfo()),
+            patch("httpx.Client", autospec=True) as mock_client_class,
+        ):
+            mock_response = _create_http_response()
+            mock_client_instance = MagicMock(spec_set=_HTTPX_CLIENT_CLASS)
             mock_client_instance.get.return_value = mock_response
-            mock_client_instance.__enter__ = Mock(return_value=mock_client_instance)
-            mock_client_instance.__exit__ = Mock(return_value=False)
+            mock_client_instance.__enter__.return_value = mock_client_instance
+            mock_client_instance.__exit__.return_value = False
             mock_client_class.return_value = mock_client_instance
             yield mock_client_class
 

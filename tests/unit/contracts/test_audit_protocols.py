@@ -6,11 +6,29 @@ from unittest.mock import MagicMock, sentinel
 
 import pytest
 
-from elspeth.contracts import CallStatus, CallType
+from elspeth.contracts import CallStatus, CallType, RoutingMode, RoutingSpec, SchemaContract, create_contract_from_config
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.audit_protocols import CallRecorder, PluginAuditWriter
+from elspeth.contracts.call_data import RawCallPayload
+from elspeth.contracts.errors import MissingFieldViolation, SinkDiversionReason, TransformErrorReason
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.factory import _PluginAuditWriterAdapter
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+
+
+def _public_method_names(cls: type[object]) -> set[str]:
+    return {name for name, value in vars(cls).items() if not name.startswith("_") and callable(value)}
+
+
+def _sample_payload(name: str) -> RawCallPayload:
+    return RawCallPayload({"payload": name})
+
+
+def _sample_contract() -> SchemaContract:
+    schema_config = SchemaConfig.from_dict({"mode": "fixed", "fields": ["id: int"]})
+    return create_contract_from_config(schema_config)
 
 
 @pytest.fixture()
@@ -35,6 +53,22 @@ class TestAdapterConstruction:
 
     def test_adapter_constructs_successfully(self, writer: _PluginAuditWriterAdapter) -> None:
         assert isinstance(writer, _PluginAuditWriterAdapter)
+
+    def test_adapter_satisfies_plugin_audit_writer_protocol(self, writer: _PluginAuditWriterAdapter) -> None:
+        assert isinstance(writer, PluginAuditWriter)
+
+    def test_adapter_surface_matches_protocol_methods(self) -> None:
+        protocol_methods = _public_method_names(PluginAuditWriter)
+        adapter_methods = _public_method_names(_PluginAuditWriterAdapter)
+
+        assert len(protocol_methods) <= 20
+        assert adapter_methods == protocol_methods
+
+    def test_call_recorder_remains_narrow_subset(self) -> None:
+        call_recorder_methods = _public_method_names(CallRecorder)
+
+        assert call_recorder_methods == {"allocate_call_index", "record_call"}
+        assert call_recorder_methods < _public_method_names(PluginAuditWriter)
 
 
 class TestCallRecordingRoutesToExecution:
@@ -63,13 +97,34 @@ class TestCallRecordingRoutesToExecution:
         execution, _data_flow, _run_lifecycle = repos
         execution.record_call.return_value = sentinel.call
 
-        payload = MagicMock()  # CallPayload is a Protocol; use a mock
-        result = writer.record_call("state-1", 0, CallType.HTTP, CallStatus.SUCCESS, payload)
+        request = _sample_payload("request")
+        response = _sample_payload("response")
+        result = writer.record_call(
+            "state-1",
+            7,
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            request,
+            response,
+            None,
+            12.5,
+            request_ref="blob-request",
+            response_ref="blob-response",
+        )
 
         assert result is sentinel.call
-        execution.record_call.assert_called_once()
-        # Verify the first positional arg routed correctly
-        assert execution.record_call.call_args[0][0] == "state-1"
+        execution.record_call.assert_called_once_with(
+            "state-1",
+            7,
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            request,
+            response,
+            None,
+            12.5,
+            request_ref="blob-request",
+            response_ref="blob-response",
+        )
 
 
 class TestErrorRecordingRoutesToDataFlow:
@@ -82,13 +137,28 @@ class TestErrorRecordingRoutesToDataFlow:
     ) -> None:
         _execution, data_flow, _run_lifecycle = repos
         data_flow.record_validation_error.return_value = "err-1"
+        violation = MissingFieldViolation(normalized_name="field", original_name="Field")
 
-        result = writer.record_validation_error("run-1", "node-1", {"field": "value"}, "bad data", "strict", "sink-1")
+        result = writer.record_validation_error(
+            "run-1",
+            "node-1",
+            {"field": "value"},
+            "bad data",
+            "strict",
+            "sink-1",
+            contract_violation=violation,
+        )
 
         assert result == "err-1"
-        data_flow.record_validation_error.assert_called_once()
-        # Verify run_id routed to data_flow
-        assert data_flow.record_validation_error.call_args[0][0] == "run-1"
+        data_flow.record_validation_error.assert_called_once_with(
+            "run-1",
+            "node-1",
+            {"field": "value"},
+            "bad data",
+            "strict",
+            "sink-1",
+            contract_violation=violation,
+        )
 
 
 class TestNodeStateRoutesToExecution:
@@ -119,12 +189,32 @@ class TestOperationCallRoutesToExecution:
         execution, _data_flow, _run_lifecycle = repos
         execution.record_operation_call.return_value = sentinel.call
 
-        payload = MagicMock()
-        result = writer.record_operation_call("op-1", CallType.HTTP, CallStatus.SUCCESS, payload)
+        request = _sample_payload("operation-request")
+        error = _sample_payload("operation-error")
+        result = writer.record_operation_call(
+            "op-1",
+            CallType.HTTP,
+            CallStatus.ERROR,
+            request,
+            None,
+            error,
+            3.25,
+            request_ref="op-request-ref",
+            response_ref=None,
+        )
 
         assert result is sentinel.call
-        execution.record_operation_call.assert_called_once()
-        assert execution.record_operation_call.call_args[0][0] == "op-1"
+        execution.record_operation_call.assert_called_once_with(
+            "op-1",
+            CallType.HTTP,
+            CallStatus.ERROR,
+            request,
+            None,
+            error,
+            3.25,
+            request_ref="op-request-ref",
+            response_ref=None,
+        )
 
 
 class TestRoutingEventRoutesToExecution:
@@ -135,16 +225,32 @@ class TestRoutingEventRoutesToExecution:
         writer: _PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
-        from elspeth.contracts import RoutingMode
-
         execution, _data_flow, _run_lifecycle = repos
         execution.record_routing_event.return_value = sentinel.event
+        reason: SinkDiversionReason = {"diversion_reason": "rejected by sink"}
 
-        result = writer.record_routing_event("state-1", "edge-1", RoutingMode.MOVE)
+        result = writer.record_routing_event(
+            "state-1",
+            "edge-1",
+            RoutingMode.MOVE,
+            reason,
+            event_id="event-1",
+            routing_group_id="group-1",
+            ordinal=2,
+            reason_ref="reason-blob",
+        )
 
         assert result is sentinel.event
-        execution.record_routing_event.assert_called_once()
-        assert execution.record_routing_event.call_args[0][0] == "state-1"
+        execution.record_routing_event.assert_called_once_with(
+            "state-1",
+            "edge-1",
+            RoutingMode.MOVE,
+            reason,
+            event_id="event-1",
+            routing_group_id="group-1",
+            ordinal=2,
+            reason_ref="reason-blob",
+        )
 
     def test_record_routing_events_routes_to_execution(
         self,
@@ -153,11 +259,13 @@ class TestRoutingEventRoutesToExecution:
     ) -> None:
         execution, _data_flow, _run_lifecycle = repos
         execution.record_routing_events.return_value = [sentinel.event]
+        routes = [RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)]
+        reason: SinkDiversionReason = {"diversion_reason": "bulk route"}
 
-        result = writer.record_routing_events("state-1", [])
+        result = writer.record_routing_events("state-1", routes, reason)
 
         assert result == [sentinel.event]
-        execution.record_routing_events.assert_called_once()
+        execution.record_routing_events.assert_called_once_with("state-1", routes, reason)
 
 
 class TestTransformErrorRoutesToDataFlow:
@@ -168,9 +276,6 @@ class TestTransformErrorRoutesToDataFlow:
         writer: _PluginAuditWriterAdapter,
         repos: tuple[MagicMock, MagicMock, MagicMock],
     ) -> None:
-        from elspeth.contracts.audit import TokenRef
-        from elspeth.contracts.errors import TransformErrorReason
-
         _execution, data_flow, _run_lifecycle = repos
         data_flow.record_transform_error.return_value = "err-1"
 
@@ -179,7 +284,7 @@ class TestTransformErrorRoutesToDataFlow:
         result = writer.record_transform_error(ref, "xform-1", {"field": "val"}, reason, "sink-1")
 
         assert result == "err-1"
-        data_flow.record_transform_error.assert_called_once()
+        data_flow.record_transform_error.assert_called_once_with(ref, "xform-1", {"field": "val"}, reason, "sink-1")
 
 
 class TestContractMethodsRouteToDataFlow:
@@ -192,10 +297,10 @@ class TestContractMethodsRouteToDataFlow:
     ) -> None:
         _execution, data_flow, _run_lifecycle = repos
 
-        mock_contract = MagicMock()
-        writer.update_node_output_contract("run-1", "node-1", mock_contract)
+        contract = _sample_contract()
+        writer.update_node_output_contract("run-1", "node-1", contract)
 
-        data_flow.update_node_output_contract.assert_called_once_with("run-1", "node-1", mock_contract)
+        data_flow.update_node_output_contract.assert_called_once_with("run-1", "node-1", contract)
 
     def test_get_node_contracts_routes_to_data_flow(
         self,
@@ -205,10 +310,10 @@ class TestContractMethodsRouteToDataFlow:
         _execution, data_flow, _run_lifecycle = repos
         data_flow.get_node_contracts.return_value = (sentinel.input, sentinel.output)
 
-        result = writer.get_node_contracts("run-1", "node-1")
+        result = writer.get_node_contracts("run-1", "node-1", allow_missing=True)
 
         assert result == (sentinel.input, sentinel.output)
-        data_flow.get_node_contracts.assert_called_once()
+        data_flow.get_node_contracts.assert_called_once_with("run-1", "node-1", allow_missing=True)
 
 
 class TestReadinessCheckRoutesToRunLifecycle:

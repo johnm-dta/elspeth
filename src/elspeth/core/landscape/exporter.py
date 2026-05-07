@@ -47,6 +47,8 @@ from elspeth.contracts.export_records import (
     TokenExportRecord,
     TokenOutcomeExportRecord,
     TokenParentExportRecord,
+    TransformErrorExportRecord,
+    ValidationErrorExportRecord,
 )
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
@@ -66,6 +68,8 @@ class LandscapeExporter:
     - node: Registered plugins
     - edge: Graph edges
     - operation: Source/sink I/O operations
+    - validation_error: Source validation failures
+    - transform_error: Transform processing failures
     - row: Source rows
     - token: Row instances
     - token_parent: Token lineage for forks/joins
@@ -333,6 +337,44 @@ class LandscapeExporter:
                     "created_at": call.created_at.isoformat() if call.created_at else None,
                 }
                 yield op_call_record
+
+        # Source validation and transform error audit evidence.
+        # Repository getters provide deterministic created_at ordering.
+        for validation_error in self._factory.data_flow.get_validation_errors_for_run(run_id):
+            validation_error_record: ValidationErrorExportRecord = {
+                "record_type": "validation_error",
+                "run_id": run_id,
+                "error_id": validation_error.error_id,
+                "node_id": validation_error.node_id,
+                "row_id": validation_error.row_id,
+                "row_hash": validation_error.row_hash,
+                "row_data_json": validation_error.row_data_json,
+                "error": validation_error.error,
+                "schema_mode": validation_error.schema_mode,
+                "destination": validation_error.destination,
+                "created_at": validation_error.created_at.isoformat(),
+                "violation_type": validation_error.violation_type,
+                "original_field_name": validation_error.original_field_name,
+                "normalized_field_name": validation_error.normalized_field_name,
+                "expected_type": validation_error.expected_type,
+                "actual_type": validation_error.actual_type,
+            }
+            yield validation_error_record
+
+        for transform_error in self._factory.data_flow.get_transform_errors_for_run(run_id):
+            transform_error_record: TransformErrorExportRecord = {
+                "record_type": "transform_error",
+                "run_id": run_id,
+                "error_id": transform_error.error_id,
+                "token_id": transform_error.token_id,
+                "transform_id": transform_error.transform_id,
+                "row_hash": transform_error.row_hash,
+                "row_data_json": transform_error.row_data_json,
+                "error_details_json": transform_error.error_details_json,
+                "destination": transform_error.destination,
+                "created_at": transform_error.created_at.isoformat(),
+            }
+            yield transform_error_record
 
         # === Bug 76r fix: Pre-load all row-related data with batch queries ===
         # This replaces the N+1 pattern where nested loops issued per-entity queries.

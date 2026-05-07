@@ -4,7 +4,7 @@ allow_hits:
   reason: Tier 3 boundary — plugin_type from URL path parameter, lookup in constant dict
   safety: Returns None on miss, handled by 404 response
   expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=5ce2ec68a4826f8e
+- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=a2a02a4cfa344c13
   owner: architecture
   reason: Pydantic before-validator at Tier 3 config boundary — isinstance(v, str) distinguishes raw YAML string input (which
     may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str→Path coercion
@@ -908,14 +908,14 @@ allow_hits:
     via the general PLUGIN_CRASH path, so the audit row still lands recording "the dispatch produced an unrecordable
     result" — rather than the alternative of silently writing zero into the audit trail.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=5389293e031dd9a4
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=ca5229f03c2bdb01
   owner: bugfix
   reason: Tier 3 boundary - LiteLLM tool-call arguments can decode to JSON arrays, nulls, or scalars; the composer must reject
     non-object arguments before cache lookup or tool dispatch
   safety: Emits a tool error back to the LLM, does not call execute_tool, marks mutation intent for budget accounting, and
     preserves current state
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=f572757d8b774cc7
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=63809db383e84bed
   owner: composer-advisor
   reason: Tier 3 boundary — outbound LiteLLM call to advisor (frontier) model. The inner method
     _call_advisor_with_audit catches and re-raises specific known LiteLLM exception classes

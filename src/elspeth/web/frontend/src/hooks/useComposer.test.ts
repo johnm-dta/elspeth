@@ -1,14 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
+import {
+  COMPOSE_BACKEND_TIMEOUT_MS,
+  COMPOSE_CLIENT_GRACE_MS,
+  COMPOSE_SERVER_TRANSPORT_HEADROOM_MS,
+  COMPOSE_TIMEOUT_MS,
+  COMPOSE_TRANSPORT_IDLE_CEILING_MS,
+} from "@/config/composer";
 
 describe("COMPOSE_TIMEOUT_MS", () => {
-  it("exceeds the deployed backend composer budget so server errors win the race", () => {
-    // Backend ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS = 300.0 in
-    // deploy/elspeth-web.env. The client must outlast it (with grace)
-    // or the AbortController kills the fetch before the structured 422
-    // can be emitted.
-    expect(COMPOSE_TIMEOUT_MS).toBeGreaterThan(300_000);
-    expect(COMPOSE_TIMEOUT_MS).toBe(330_000);
+  it("outlasts the backend deadline while staying below the transport idle ceiling", () => {
+    // Backend ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS = 270.0 in the staging
+    // deployment. The client must outlast it with grace, but still abort before
+    // the roughly 300s browser/proxy idle ceiling turns the request into an
+    // opaque transport abort.
+    const minimumClientGraceMs = 20_000;
+
+    expect(COMPOSE_BACKEND_TIMEOUT_MS).toBeLessThanOrEqual(
+      COMPOSE_TRANSPORT_IDLE_CEILING_MS - COMPOSE_SERVER_TRANSPORT_HEADROOM_MS,
+    );
+    expect(COMPOSE_CLIENT_GRACE_MS).toBeGreaterThanOrEqual(minimumClientGraceMs);
+    expect(COMPOSE_CLIENT_GRACE_MS).toBeLessThan(COMPOSE_SERVER_TRANSPORT_HEADROOM_MS);
+    expect(COMPOSE_TIMEOUT_MS).toBe(COMPOSE_BACKEND_TIMEOUT_MS + COMPOSE_CLIENT_GRACE_MS);
+    expect(COMPOSE_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      COMPOSE_BACKEND_TIMEOUT_MS + minimumClientGraceMs,
+    );
+    expect(COMPOSE_TIMEOUT_MS).toBeLessThan(COMPOSE_TRANSPORT_IDLE_CEILING_MS);
   });
 });

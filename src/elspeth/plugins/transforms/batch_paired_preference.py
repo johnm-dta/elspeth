@@ -113,7 +113,7 @@ class BatchPairedPreference(BaseTransform):
 
     name = "batch_paired_preference"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cdcf28d6c99848d9"
+    source_file_hash: str | None = "sha256:a7da02055c68dba8"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 
@@ -233,6 +233,12 @@ class BatchPairedPreference(BaseTransform):
             return 0.0
         return statistics.stdev(values) / math.sqrt(len(values))
 
+    @staticmethod
+    def _require_finite(value: float, *, operation: str) -> float:
+        if not math.isfinite(value):
+            raise OverflowError(operation)
+        return value
+
     def _comparison_for(
         self,
         *,
@@ -264,10 +270,20 @@ class BatchPairedPreference(BaseTransform):
                 incomplete_pairs.append(pair_id)
                 continue
 
+            try:
+                delta = self._require_finite(float(candidate.score - baseline.score), operation="paired_delta")
+            except OverflowError as exc:
+                overflow_reason: TransformErrorReason = {
+                    "reason": "float_overflow",
+                    "operation": str(exc) or "paired_delta",
+                    "group_value": variant,
+                    "value": str(baseline_variant),
+                }
+                return {}, TransformResult.error(overflow_reason, retryable=False)
+
             baseline_scores.append(baseline.score)
             variant_scores.append(candidate.score)
-            delta = candidate.score - baseline.score
-            deltas.append(float(delta))
+            deltas.append(delta)
             if delta > 0:
                 wins += 1
             elif delta < 0:
@@ -277,17 +293,31 @@ class BatchPairedPreference(BaseTransform):
 
         compared_count = len(deltas)
         if compared_count == 0:
-            reason: TransformErrorReason = {
+            no_complete_pairs_reason: TransformErrorReason = {
                 "reason": "validation_failed",
                 "cause": "no_complete_pairs",
                 "group_value": variant,
                 "batch_size": batch_size,
                 "count": len(pairs),
             }
-            return {}, TransformResult.error(reason, retryable=False)
+            return {}, TransformResult.error(no_complete_pairs_reason, retryable=False)
 
-        mean_delta = sum(deltas) / compared_count
-        standard_error = self._standard_error(deltas)
+        try:
+            mean_delta = self._require_finite(sum(deltas) / compared_count, operation="mean_paired_delta")
+            standard_error = self._require_finite(self._standard_error(deltas), operation="standard_error_delta")
+            baseline_mean = self._require_finite(self._mean(baseline_scores), operation="baseline_mean")
+            variant_mean = self._require_finite(self._mean(variant_scores), operation="variant_mean")
+            confidence_95_low = self._require_finite(mean_delta - 1.96 * standard_error, operation="confidence_95_low")
+            confidence_95_high = self._require_finite(mean_delta + 1.96 * standard_error, operation="confidence_95_high")
+        except OverflowError as exc:
+            aggregate_overflow_reason: TransformErrorReason = {
+                "reason": "float_overflow",
+                "operation": str(exc) or "paired_preference",
+                "group_value": variant,
+                "value": str(baseline_variant),
+            }
+            return {}, TransformResult.error(aggregate_overflow_reason, retryable=False)
+
         preference_denominator = wins + losses
         preference_rate = 0.0 if preference_denominator == 0 else wins / preference_denominator
 
@@ -303,8 +333,8 @@ class BatchPairedPreference(BaseTransform):
             "incomplete_pair_count": len(incomplete_pairs),
             "missing_score_count": missing_score_count,
             "non_finite_score_count": non_finite_score_count,
-            "baseline_mean": self._mean(baseline_scores),
-            "variant_mean": self._mean(variant_scores),
+            "baseline_mean": baseline_mean,
+            "variant_mean": variant_mean,
             "mean_paired_delta": mean_delta,
             "wins": wins,
             "losses": losses,
@@ -314,8 +344,8 @@ class BatchPairedPreference(BaseTransform):
             "tie_rate": ties / compared_count,
             "preference_rate": preference_rate,
             "standard_error_delta": standard_error,
-            "confidence_95_low": mean_delta - 1.96 * standard_error,
-            "confidence_95_high": mean_delta + 1.96 * standard_error,
+            "confidence_95_low": confidence_95_low,
+            "confidence_95_high": confidence_95_high,
         }
         if incomplete_pairs:
             result["incomplete_pairs"] = incomplete_pairs

@@ -1550,6 +1550,7 @@ class CapacityError(Exception):
 # Lives in contracts/ so the engine can reference it without crossing the
 # L2→L3 layer boundary; the telemetry package re-exports it for its
 # internal subsystem consumers.
+# TIER-2: telemetry exporter configuration/initialization failure, not audit-integrity corruption.
 class TelemetryExporterError(Exception):
     """Raised when an exporter encounters a configuration or initialization error.
 

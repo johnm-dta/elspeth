@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
+from elspeth.contracts import PluginSchema, SinkContext, SourceContext
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.plugin_roles import (
     require_declared_input_fields_plugin,
     require_declared_output_fields_plugin,
@@ -39,14 +40,14 @@ def _contract(fields: tuple[str, ...]) -> SchemaContract:
 
 class _DeclaredSourceBase(BaseSource):
     name = "declared-source-base"
-    output_schema = object
+    output_schema = PluginSchema
     declared_guaranteed_fields = frozenset({"customer_id"})
 
     def __init__(self) -> None:
         self.config = {}
         self.node_id = None
 
-    def load(self, ctx: PluginContext):
+    def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)))
 
     def close(self) -> None:
@@ -59,14 +60,14 @@ class _InheritedDeclaredSource(_DeclaredSourceBase):
 
 class _DeclaredSinkBase(BaseSink):
     name = "declared-sink-base"
-    input_schema = object
+    input_schema = PluginSchema
     declared_required_fields = frozenset({"customer_id"})
 
     def __init__(self) -> None:
         self.config = {}
         self.node_id = None
 
-    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> SinkWriteResult:
+    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         raise NotImplementedError
 
     def flush(self) -> None:
@@ -78,6 +79,51 @@ class _DeclaredSinkBase(BaseSink):
 
 class _InheritedDeclaredSink(_DeclaredSinkBase):
     pass
+
+
+class _DeclaredOutputPlugin:
+    name: Any = "declared-output"
+    node_id: Any = "node-1"
+    declared_output_fields: Any = frozenset({"customer_id"})
+
+
+class _BadDeclaredOutputTuple(_DeclaredOutputPlugin):
+    declared_output_fields = ("customer_id",)
+
+
+class _BadDeclaredOutputItem(_DeclaredOutputPlugin):
+    declared_output_fields = frozenset({1})
+
+
+class _BadDeclaredOutputName(_DeclaredOutputPlugin):
+    name = ""
+
+
+class _BadDeclaredOutputNodeID(_DeclaredOutputPlugin):
+    node_id = object()
+
+
+class _DeclaredInputPlugin:
+    name: Any = "declared-input"
+    node_id: Any = "node-1"
+    declared_input_fields: Any = frozenset({"customer_id"})
+    is_batch_aware: Any = False
+
+
+class _BadDeclaredInputTuple(_DeclaredInputPlugin):
+    declared_input_fields = ("customer_id",)
+
+
+class _BadDeclaredInputItem(_DeclaredInputPlugin):
+    declared_input_fields = frozenset({1})
+
+
+class _BadDeclaredInputBatchFlag(_DeclaredInputPlugin):
+    is_batch_aware = "false"
+
+
+class _BadDeclaredInputName(_DeclaredInputPlugin):
+    name = ""
 
 
 def test_source_declared_guaranteed_fields_uses_inherited_source_declaration() -> None:
@@ -134,26 +180,59 @@ def test_sink_helper_does_not_cross_match_source_role(
     assert sink_declared_required_fields(plugin) == expected
 
 
-def test_require_declared_output_fields_plugin_returns_typed_plugin() -> None:
-    class _DeclaredOutputPlugin:
-        name = "declared-output"
-        node_id = "node-1"
-        declared_output_fields = frozenset({"customer_id"})
+@pytest.mark.parametrize(
+    ("plugin", "match"),
+    [
+        (
+            _BadDeclaredOutputTuple(),
+            "declared_output_fields must be frozenset",
+        ),
+        (
+            _BadDeclaredOutputItem(),
+            "declared_output_fields must contain only str items",
+        ),
+        (
+            _BadDeclaredOutputName(),
+            "name must be a non-empty str",
+        ),
+        (
+            _BadDeclaredOutputNodeID(),
+            "node_id must be str",
+        ),
+    ],
+)
+def test_require_declared_output_fields_plugin_rejects_invalid_contract_surface(
+    plugin: object,
+    match: str,
+) -> None:
+    with pytest.raises(TypeError, match=match):
+        require_declared_output_fields_plugin(plugin)
 
-    plugin = _DeclaredOutputPlugin()
-    typed = require_declared_output_fields_plugin(plugin)
 
-    assert typed is plugin
-    assert typed.name == "declared-output"
-    assert typed.declared_output_fields == frozenset({"customer_id"})
-
-
-def test_require_declared_input_fields_plugin_rejects_non_frozenset() -> None:
-    class _BadDeclaredInputPlugin:
-        name = "declared-input"
-        node_id = "node-1"
-        declared_input_fields = ("customer_id",)
-        is_batch_aware = False
-
-    with pytest.raises(TypeError, match="declared_input_fields"):
-        require_declared_input_fields_plugin(_BadDeclaredInputPlugin())
+@pytest.mark.parametrize(
+    ("plugin", "match"),
+    [
+        (
+            _BadDeclaredInputTuple(),
+            "declared_input_fields must be frozenset",
+        ),
+        (
+            _BadDeclaredInputItem(),
+            "declared_input_fields must contain only str items",
+        ),
+        (
+            _BadDeclaredInputBatchFlag(),
+            "is_batch_aware must be bool",
+        ),
+        (
+            _BadDeclaredInputName(),
+            "name must be a non-empty str",
+        ),
+    ],
+)
+def test_require_declared_input_fields_plugin_rejects_invalid_contract_surface(
+    plugin: object,
+    match: str,
+) -> None:
+    with pytest.raises(TypeError, match=match):
+        require_declared_input_fields_plugin(plugin)

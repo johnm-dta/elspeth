@@ -81,6 +81,38 @@ class OperationExportRecord(TypedDict):
     output_data_hash: str | None
 
 
+class ValidationErrorExportRecord(TypedDict):
+    record_type: Literal["validation_error"]
+    run_id: str
+    error_id: str
+    node_id: str | None
+    row_id: str | None
+    row_hash: str
+    row_data_json: str | None
+    error: str
+    schema_mode: str
+    destination: str
+    created_at: str
+    violation_type: str | None
+    original_field_name: str | None
+    normalized_field_name: str | None
+    expected_type: str | None
+    actual_type: str | None
+
+
+class TransformErrorExportRecord(TypedDict):
+    record_type: Literal["transform_error"]
+    run_id: str
+    error_id: str
+    token_id: str
+    transform_id: str
+    row_hash: str
+    row_data_json: str | None
+    error_details_json: str | None
+    destination: str
+    created_at: str
+
+
 class CallExportRecord(TypedDict):
     """External call record — parented by either a node_state or an operation.
 
@@ -237,6 +269,8 @@ ExportRecord = (
     | NodeExportRecord
     | EdgeExportRecord
     | OperationExportRecord
+    | ValidationErrorExportRecord
+    | TransformErrorExportRecord
     | CallExportRecord
     | RowExportRecord
     | TokenExportRecord

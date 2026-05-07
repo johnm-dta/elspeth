@@ -93,6 +93,27 @@ class TestWebSettingsValidation:
                 composer_rate_limit_per_minute=10,
             )
 
+    def test_composer_timeout_must_leave_transport_headroom(self) -> None:
+        with pytest.raises(ValidationError, match="transport idle ceiling"):
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=300.0,
+                composer_rate_limit_per_minute=10,
+            )
+
+    def test_composer_timeout_allows_explicit_larger_transport_ceiling(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=300.0,
+            composer_transport_idle_ceiling_seconds=360.0,
+            composer_transport_headroom_seconds=30.0,
+            composer_rate_limit_per_minute=10,
+        )
+
+        assert settings.composer_timeout_seconds == 300.0
+
     def test_composer_rate_limit_zero_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(

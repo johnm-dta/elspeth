@@ -36,6 +36,18 @@ from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.routing import RoutingAction
 
 
+def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
+    """Reject non-PipelineRow output before it can masquerade as valid data."""
+    from elspeth.contracts.schema_contract import PipelineRow
+
+    if not isinstance(value, PipelineRow):
+        raise PluginContractViolation(
+            f"{location} must be a PipelineRow, got {type(value).__name__}. "
+            "Build transform output with PipelineRow(data, contract) before returning it."
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ExceptionResult:
     """Wrapper for exceptions that should propagate through async pattern.
@@ -155,6 +167,11 @@ class TransformResult:
                 "Use TransformResult.success(row, ...) for single-row or "
                 "TransformResult.success_multi(rows, ...) for multi-row output."
             )
+        if self.status == "success" and self.row is not None:
+            _require_pipeline_row(self.row, location="TransformResult.row")
+        if self.status == "success" and self.rows is not None:
+            for i, row in enumerate(self.rows):
+                _require_pipeline_row(row, location=f"TransformResult.rows[{i}]")
         if self.status == "error":
             if self.reason is None:
                 raise ValueError(
@@ -217,6 +234,7 @@ class TransformResult:
                 success_reason={"action": "processed", "fields_modified": ["amount"]}
             )
         """
+        row = _require_pipeline_row(row, location="TransformResult.success(row)")
         return cls(
             status="success",
             row=row,
@@ -256,28 +274,31 @@ class TransformResult:
                 success_reason={"action": "split", "fields_added": ["row_index"]}
             )
         """
-        if not rows:
+        output_rows = tuple(rows)
+        if not output_rows:
             raise ValueError("success_multi requires at least one row")
+        for i, row in enumerate(output_rows):
+            _require_pipeline_row(row, location=f"TransformResult.success_multi(rows[{i}])")
         # All rows must share the same contract identity. Mixed contracts
         # would silently mislabel child tokens, corrupting downstream
         # contract-based validation. Transforms are system-owned code,
         # so mixed contracts = plugin bug.
-        first_contract = rows[0].contract
-        for i in range(1, len(rows)):
-            if rows[i].contract is not first_contract:
+        first_contract = output_rows[0].contract
+        for i in range(1, len(output_rows)):
+            if output_rows[i].contract is not first_contract:
                 raise PluginContractViolation(
                     f"success_multi() received rows with inconsistent contracts: "
                     f"row 0 has {first_contract.mode if first_contract else None} contract "
                     f"with {len(first_contract.fields) if first_contract else 0} fields, "
-                    f"but row {i} has {rows[i].contract.mode if rows[i].contract else None} contract "
-                    f"with {len(rows[i].contract.fields) if rows[i].contract else 0} fields. "
+                    f"but row {i} has {output_rows[i].contract.mode if output_rows[i].contract else None} contract "
+                    f"with {len(output_rows[i].contract.fields) if output_rows[i].contract else 0} fields. "
                     f"All rows in a multi-row result must share the same contract instance."
                 )
         return cls(
             status="success",
             row=None,
             reason=None,
-            rows=tuple(rows),
+            rows=output_rows,
             success_reason=success_reason,
             context_after=context_after,
         )

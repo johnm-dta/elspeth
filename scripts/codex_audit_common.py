@@ -13,18 +13,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 import subprocess
 import sys
 import time
-from collections import Counter
-from collections.abc import Mapping
+from collections import Counter, deque
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from pyrate_limiter import Limiter
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 try:
@@ -66,6 +66,7 @@ RETRY_MAX_WAIT_S = 60
 RETRY_MULTIPLIER = 2
 STDERR_TRUNCATE_CHARS = 500
 USAGE_STAT_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens")
+CODEX_RATE_LIMIT_PERIOD_S = 60.0
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -247,8 +248,64 @@ def structured_output_path_for_report(output_path: Path) -> Path:
     return output_path.with_suffix(output_path.suffix + ".structured.json")
 
 
-async def _await_rate_limiter(rate_limiter: Limiter) -> None:
-    """Acquire a rate-limit slot, preferring the async waiting API."""
+class AsyncRequestRateLimiter:
+    """Async sliding-window rate limiter for Codex subprocess starts."""
+
+    def __init__(
+        self,
+        *,
+        max_calls: int,
+        period_s: float = CODEX_RATE_LIMIT_PERIOD_S,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if max_calls < 1:
+            raise ValueError("max_calls must be >= 1")
+        if period_s <= 0:
+            raise ValueError("period_s must be > 0")
+
+        self._max_calls = max_calls
+        self._period_s = period_s
+        self._clock = clock
+        self._sleep = sleep
+        self._timestamps: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        """Wait until a request slot is available, then reserve it."""
+        while True:
+            async with self._lock:
+                now = self._clock()
+                self._discard_expired(now)
+                if len(self._timestamps) < self._max_calls:
+                    self._timestamps.append(now)
+                    return
+
+                wait_s = self._period_s - (now - self._timestamps[0])
+
+            await self._sleep(max(wait_s, 0.0))
+
+    def _discard_expired(self, now: float) -> None:
+        while self._timestamps and now - self._timestamps[0] >= self._period_s:
+            self._timestamps.popleft()
+
+
+def make_codex_rate_limiter(rate_limit: int | None) -> AsyncRequestRateLimiter | None:
+    """Build the async Codex subprocess rate limiter from a per-minute limit."""
+    if rate_limit is None:
+        return None
+    return AsyncRequestRateLimiter(max_calls=rate_limit)
+
+
+async def _await_rate_limiter(rate_limiter: Any) -> None:
+    """Acquire a rate-limit slot, preferring the shared async wrapper API."""
+    acquire = getattr(rate_limiter, "acquire", None)
+    if acquire is not None:
+        acquired = acquire()
+        if inspect.isawaitable(acquired):
+            await acquired
+        return
+
     acquire_async = getattr(rate_limiter, "try_acquire_async", None)
     if acquire_async is not None:
         await acquire_async("codex_api")
@@ -635,7 +692,7 @@ async def run_codex_with_retry_and_logging(
     log_lock: asyncio.Lock,
     file_display: str,
     output_display: str,
-    rate_limiter: Limiter | None,
+    rate_limiter: Any | None,
     evidence_gate_summary_prefix: str = "",
     output_schema: Path | None = None,
     structured_markdown_field: str | None = None,

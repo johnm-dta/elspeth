@@ -23,8 +23,9 @@ npx playwright test smoke.spec.ts
 ```
 
 Playwright owns the lifecycle of both servers via `webServer:` in
-`playwright.config.ts`. Re-running the suite locally reuses an existing
-backend/frontend if one is already up (`reuseExistingServer: !CI`).
+`playwright.config.ts`. The backend is always started by Playwright so the
+E2E-only auth policy and `.e2e-data` store are applied. Local runs may still
+reuse an existing Vite frontend dev server.
 
 ## Layout
 

@@ -9,7 +9,8 @@ The transform helpers in ``service.py``:
 - ``_apply_anthropic_cache_markers`` — applies
   ``cache_control: {"type": "ephemeral"}`` to the first system message
   and the trailing tool, returning new lists without mutating the
-  inputs.
+  inputs. Composer message construction keeps dynamic state in a later
+  system message so the first marker covers only the stable prompt prefix.
 
 These tests target the helpers directly so a future change to either
 detection or marker placement fails this file with a focused error,
@@ -92,13 +93,14 @@ class TestApplyAnthropicCacheMarkers:
     def test_only_first_system_message_marked(self) -> None:
         """If two system messages exist, only the first gets the marker.
 
-        Multiple system messages are uncommon but not invalid; markers
-        cache up to the marker, so caching the first lets the rest
-        cache through.
+        Composer uses this shape intentionally: the stable skill prompt
+        is the first system message, and dynamic current-state JSON is a
+        later system message that must not become part of the stable
+        prompt-cache breakpoint.
         """
         messages = [
             {"role": "system", "content": "Skill prompt."},
-            {"role": "system", "content": "Deployment overlay."},
+            {"role": "system", "content": "Current pipeline state and available plugins:\n{}"},
         ]
         new_messages, _ = _apply_anthropic_cache_markers(messages, None)
         assert "cache_control" in new_messages[0]
@@ -292,9 +294,7 @@ class TestCacheMarkersWiredAtCallSite:
         settings = _make_settings(composer_model="anthropic/claude-sonnet-4.5")
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
         # Bypass availability check (no real Anthropic API key needed).
-        service._availability = ComposerAvailability(  # type: ignore[attr-defined]
-            available=True, model=service._model, provider="test"
-        )
+        service._availability = ComposerAvailability(available=True, model=service._model, provider="test")
         state = _empty_state()
         captured: dict[str, Any] = {}
 
@@ -311,10 +311,16 @@ class TestCacheMarkersWiredAtCallSite:
         ):
             await service.compose("Build a CSV pipeline.", [], state)
 
-        # The system message MUST carry cache_control after the transform.
+        # The stable system prompt MUST carry cache_control after the transform.
         sent_messages = captured["messages"]
-        system_msg = next(m for m in sent_messages if m.get("role") == "system")
-        assert system_msg["cache_control"] == {"type": "ephemeral"}
+        system_messages = [m for m in sent_messages if m.get("role") == "system"]
+        assert len(system_messages) >= 2
+        stable_system_msg = system_messages[0]
+        dynamic_context_msg = system_messages[1]
+        assert stable_system_msg["cache_control"] == {"type": "ephemeral"}
+        assert "Current pipeline state" not in stable_system_msg["content"]
+        assert dynamic_context_msg["content"].startswith("Current pipeline state and available plugins:")
+        assert "cache_control" not in dynamic_context_msg
 
         # The trailing tool MUST carry cache_control after the transform.
         sent_tools = captured["tools"]
@@ -356,9 +362,7 @@ class TestCacheMarkersWiredAtCallSite:
         # Default _make_settings model is gpt-5.5 (OpenAI-shape).
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
-        service._availability = ComposerAvailability(  # type: ignore[attr-defined]
-            available=True, model=service._model, provider="test"
-        )
+        service._availability = ComposerAvailability(available=True, model=service._model, provider="test")
         state = _empty_state()
         captured: dict[str, Any] = {}
 
@@ -376,8 +380,10 @@ class TestCacheMarkersWiredAtCallSite:
             await service.compose("Build a CSV pipeline.", [], state)
 
         sent_messages = captured["messages"]
-        system_msg = next(m for m in sent_messages if m.get("role") == "system")
-        assert "cache_control" not in system_msg
+        system_messages = [m for m in sent_messages if m.get("role") == "system"]
+        assert len(system_messages) >= 2
+        for system_msg in system_messages:
+            assert "cache_control" not in system_msg
 
         sent_tools = captured["tools"]
         for tool in sent_tools:

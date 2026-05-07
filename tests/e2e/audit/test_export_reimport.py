@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from elspeth.contracts import RunStatus
+from elspeth.contracts.audit import TokenRef
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
 from elspeth.core.payload_store import FilesystemPayloadStore
@@ -141,6 +142,24 @@ class TestExportReimport:
         direct_nodes = factory.data_flow.get_nodes(run_id)
         direct_edges = factory.data_flow.get_edges(run_id)
         direct_tokens = factory.query.get_all_tokens_for_run(run_id)
+        transform_node = next(node for node in direct_nodes if node.node_type.value == "transform")
+        factory.data_flow.record_validation_error(
+            run_id=run_id,
+            node_id=direct_nodes[0].node_id,
+            row_data={"id": "bad_source_row"},
+            error="missing required field",
+            schema_mode="fixed",
+            destination="quarantine",
+        )
+        factory.data_flow.record_transform_error(
+            ref=TokenRef(token_id=direct_tokens[0].token_id, run_id=run_id),
+            transform_id=transform_node.node_id,
+            row_data={"id": "bad_transform_row"},
+            error_details={"reason": "test_error", "message": "boom"},
+            destination="discard",
+        )
+        direct_validation_errors = factory.data_flow.get_validation_errors_for_run(run_id)
+        direct_transform_errors = factory.data_flow.get_transform_errors_for_run(run_id)
 
         # Get counts from export
         exporter = LandscapeExporter(db)
@@ -163,6 +182,16 @@ class TestExportReimport:
 
         assert len(grouped.get("token", [])) == len(direct_tokens), (
             f"Export token count ({len(grouped.get('token', []))}) != direct query count ({len(direct_tokens)})"
+        )
+
+        assert len(grouped.get("validation_error", [])) == len(direct_validation_errors), (
+            f"Export validation_error count ({len(grouped.get('validation_error', []))}) "
+            f"!= direct query count ({len(direct_validation_errors)})"
+        )
+
+        assert len(grouped.get("transform_error", [])) == len(direct_transform_errors), (
+            f"Export transform_error count ({len(grouped.get('transform_error', []))}) "
+            f"!= direct query count ({len(direct_transform_errors)})"
         )
 
         # Verify run_id consistency across all exported records

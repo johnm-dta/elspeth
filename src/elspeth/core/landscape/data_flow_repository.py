@@ -315,15 +315,34 @@ class DataFlowRepository:
 
             artifact_row = self._ops.execute_fetchone(
                 select(artifacts_table.c.artifact_id)
+                .select_from(
+                    artifacts_table.join(
+                        node_states_table,
+                        and_(
+                            artifacts_table.c.produced_by_state_id == node_states_table.c.state_id,
+                            artifacts_table.c.run_id == node_states_table.c.run_id,
+                        ),
+                    ).join(
+                        nodes_table,
+                        and_(
+                            node_states_table.c.node_id == nodes_table.c.node_id,
+                            node_states_table.c.run_id == nodes_table.c.run_id,
+                        ),
+                    )
+                )
                 .where(artifacts_table.c.artifact_id == artifact_id)
                 .where(artifacts_table.c.run_id == ref.run_id)
-                .where(artifacts_table.c.sink_node_id == completed_sink_state.node_id)
+                .where(artifacts_table.c.sink_node_id == sink_node_id)
+                .where(node_states_table.c.node_id == sink_node_id)
+                .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
+                .where(nodes_table.c.node_type == NodeType.SINK.value)
             )
             if artifact_row is None:
                 raise AuditIntegrityError(
                     f"ADR-019 I1c violation for token {ref.token_id}: "
                     f"failsink node {completed_sink_state.node_id!r} has no "
-                    f"artifact_id={artifact_id!r} witness for this run."
+                    f"artifact_id={artifact_id!r} witness produced by a "
+                    "COMPLETED sink node_state at this sink."
                 )
 
         if pair == (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):

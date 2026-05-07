@@ -6,6 +6,7 @@ import type { Run, RunAccounting, RunDiagnostics, RunEvent, ValidationResult } f
 // Mock the API client
 vi.mock("@/api/client", () => ({
   validatePipeline: vi.fn(),
+  executePipeline: vi.fn(),
   cancelRun: vi.fn(),
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
@@ -225,6 +226,77 @@ describe("executionStore failed run events", () => {
       status: "failed",
       error: "Pipeline execution failed (FrameworkBugError)",
     });
+  });
+});
+
+describe("executionStore fanout guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+  });
+
+  const guard = {
+    ack_token: "ack-line-explode",
+    risk_level: "high" as const,
+    summary: "LLM transform 'classify_line' may make an unknown number of OpenRouter calls.",
+    risks: [
+      {
+        node_id: "classify_line",
+        provider: "openrouter",
+        model: "openai/gpt-4o-mini",
+        credential_ref: "secret_ref:OPENROUTER_API_KEY",
+        estimated_provider_calls: null,
+        provider_calls_per_row: 1,
+        upstream_fanout: ["transform:explode_lines:line_explode"],
+        risk_level: "high" as const,
+        message: "LLM transform 'classify_line' may make one OpenRouter call per expanded row.",
+      },
+    ],
+  };
+
+  it("holds a 428 fanout guard for explicit user confirmation", async () => {
+    const { executePipeline } = await import("@/api/client");
+    (executePipeline as ReturnType<typeof vi.fn>).mockRejectedValue({
+      status: 428,
+      detail: guard.summary,
+      error_type: "execution_fanout_ack_required",
+      fanout_guard: guard,
+    });
+
+    const runId = await useExecutionStore.getState().execute("session-1");
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBeNull();
+    expect(executePipeline).toHaveBeenCalledWith("session-1");
+    expect(state.pendingFanoutGuard).toEqual(guard);
+    expect(state.pendingFanoutSessionId).toBe("session-1");
+    expect(state.isExecuting).toBe(false);
+    expect(state.error).toBeNull();
+  });
+
+  it("retries execution with the accepted fanout guard token", async () => {
+    const { executePipeline } = await import("@/api/client");
+    (executePipeline as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce({
+        status: 428,
+        detail: guard.summary,
+        error_type: "execution_fanout_ack_required",
+        fanout_guard: guard,
+      })
+      .mockResolvedValueOnce({ run_id: "run-1" });
+
+    await useExecutionStore.getState().execute("session-1");
+    const runId = await useExecutionStore.getState().confirmFanoutExecution();
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBe("run-1");
+    expect(executePipeline).toHaveBeenLastCalledWith("session-1", {
+      accepted: true,
+      token: "ack-line-explode",
+    });
+    expect(state.pendingFanoutGuard).toBeNull();
+    expect(state.pendingFanoutSessionId).toBeNull();
+    expect(state.activeRunId).toBe("run-1");
   });
 });
 

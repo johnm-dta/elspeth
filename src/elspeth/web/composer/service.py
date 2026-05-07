@@ -704,6 +704,15 @@ def _state_is_structurally_empty(state: CompositionState) -> bool:
     return state.source is None and not state.nodes and not state.outputs
 
 
+def _tool_result_mutated_composition_state(
+    *,
+    version_before: int,
+    result: ToolResult,
+) -> bool:
+    """Return True when a successful tool advanced the CompositionState version."""
+    return result.success and result.updated_state.version > version_before
+
+
 # Suffix appended to the model's prose when finalize-time runtime preflight
 # fails on a structurally-empty state. Single source of truth so tests can
 # pin the contract without duplicating the prose. Stable, system-attributed
@@ -805,12 +814,20 @@ def _blocking_result_from_tool_invocations(tool_invocations: tuple[ComposerToolI
             payload = json.loads(invocation.result_canonical)
             if type(payload) is dict and "success" in payload and payload["success"] is False:
                 return f"{invocation.tool_name} returned success=false{_tool_failure_detail(payload)}"
+            if (
+                type(payload) is dict
+                and "success" in payload
+                and payload["success"] is True
+                and invocation.version_after == invocation.version_before
+                and not is_discovery_tool(invocation.tool_name)
+            ):
+                return f"{invocation.tool_name} succeeded without mutating CompositionState (version stayed {invocation.version_before})."
     return "the model ended the turn without calling any build/edit tool."
 
 
 def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     """Build the synthetic final-gate result for empty-state no-mutation replies."""
-    detail = f"No composer mutation tool returned success=true; state_exists=false. Blocking result: {blocker}"
+    detail = f"No composition-state mutation completed successfully; state_exists=false. Blocking result: {blocker}"
     suggestion = (
         "Call set_pipeline with source.blob_id or source.inline_blob, call "
         "set_source_from_blob/set_source plus set_output, or ask for the specific "
@@ -833,7 +850,7 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
 def _compose_no_mutation_empty_state_message(blocker: str) -> str:
     """Build a concrete blocker message for no-mutation empty-state finalization."""
     return (
-        "[ELSPETH-SYSTEM] No composer mutation tool returned success=true, "
+        "[ELSPETH-SYSTEM] No composition-state mutation completed successfully, "
         "so the pipeline state is still empty (state_exists=false). "
         f"Blocking result: {blocker}\n\n"
         "Next action: call set_pipeline with source.blob_id or source.inline_blob, "
@@ -2240,6 +2257,7 @@ class ComposerServiceImpl:
                 # non-serializable result types). Update loop-local state
                 # from outcome.result and continue with the LLM-message
                 # append.
+                version_before_tool = state.version
                 result = outcome.result
                 state = result.updated_state
                 last_validation = result.validation
@@ -2260,8 +2278,12 @@ class ComposerServiceImpl:
                 # were broken up by 1 get_pipeline_state and 1 get_plugin_schema,
                 # both successful, both irrelevant to whether the model has
                 # progressed on the anchored mutation).
+                #
+                # Mutation means a CompositionState version advance here.
+                # Blob-store side effects such as create_blob/update_blob are
+                # useful work, but they do not make an empty pipeline exist.
                 if result.success:
-                    if not is_discovery_tool(tool_name):
+                    if _tool_result_mutated_composition_state(version_before=version_before_tool, result=result):
                         mutation_success_seen = True
                         anti_anchor.record_success()
                 else:

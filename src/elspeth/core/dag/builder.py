@@ -359,13 +359,15 @@ def build_execution_graph(
 
         config_gate_schema_inputs.append((gid, gate_config.name, gate_config.input))
 
-        # Gate routes to sinks; connection-name routes are deferred.
+        # Gate routes to fork/sinks immediately. Connection-name routes are
+        # deferred until the consumer registry exists. A literal "discard"
+        # route is also deferred unless a real sink by that name exists, so a
+        # real connection named "discard" can win before the virtual-drop
+        # sentinel fallback is applied.
         for route_label, target in gate_config.routes.items():
             if target == "fork":
                 # Fork is a special routing mode - handled by fork_to branches
                 graph.add_route_resolution_entry(gid, route_label, RouteDestination.fork())
-            elif target == "discard":
-                graph.add_route_resolution_entry(gid, route_label, RouteDestination.discard())
             elif SinkName(target) in sink_ids:
                 target_sink_id = sink_ids[SinkName(target)]
                 graph.add_edge(gid, target_sink_id, label=route_label, mode=RoutingMode.MOVE)
@@ -582,18 +584,6 @@ def build_execution_graph(
                     f"coalesce '{coalesce_config.name}'",
                 )
 
-    for gate_id, route_label, target in gate_route_connections:
-        gate_connection_key = (gate_id, target)
-        gate_connection_route_labels[gate_connection_key].append(route_label)
-
-        # Multiple routes from the same gate may converge to the same target
-        # (e.g., {"true": "next_gate", "false": "next_gate"}). Only register
-        # the producer once — the connection is the same regardless of which
-        # route label was taken.
-        if target in producers and producers[target][0] == gate_id:
-            continue
-        register_producer(target, gate_id, route_label, f"gate route '{route_label}' from '{gate_id}'")
-
     # Register fork branches as produced connections (only for branches with transforms).
     # Identity branches use direct COPY edges and don't need connection registration.
     for branch_name in transformed_branches:
@@ -646,6 +636,23 @@ def build_execution_graph(
             coalesce_ids[coal_name],
             f"coalesce '{coal_name}' branch '{branch_name}'",
         )
+
+    for gate_id, route_label, target in gate_route_connections:
+        if target == "discard" and target not in consumers:
+            # No real sink or consumer claimed this target. It remains the
+            # virtual drop sentinel and must not create a dangling producer.
+            continue
+
+        gate_connection_key = (gate_id, target)
+        gate_connection_route_labels[gate_connection_key].append(route_label)
+
+        # Multiple routes from the same gate may converge to the same target
+        # (e.g., {"true": "next_gate", "false": "next_gate"}). Only register
+        # the producer once — the connection is the same regardless of which
+        # route label was taken.
+        if target in producers and producers[target][0] == gate_id:
+            continue
+        register_producer(target, gate_id, route_label, f"gate route '{route_label}' from '{gate_id}'")
 
     # ===== VALIDATE CONNECTION NAMESPACES =====
     cls._validate_connection_namespaces(
@@ -711,7 +718,11 @@ def build_execution_graph(
 
     # ===== RESOLVE DEFERRED GATE ROUTES =====
     for gate_id, route_label, target in gate_route_connections:
-        if target not in consumers:
+        if target in consumers:
+            graph.add_route_resolution_entry(gate_id, route_label, RouteDestination.processing_node(consumers[target]))
+        elif target == "discard":
+            graph.add_route_resolution_entry(gate_id, route_label, RouteDestination.discard())
+        else:
             suggestions = _suggest_similar(target, sorted(consumers.keys()))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
             raise GraphValidationError(
@@ -719,7 +730,6 @@ def build_execution_graph(
                 component_id=str(gate_id),
                 component_type="gate",
             )
-        graph.add_route_resolution_entry(gate_id, route_label, RouteDestination.processing_node(consumers[target]))
 
     # Ensure all declared gate route labels are resolvable before runtime.
     graph._validate_route_resolution_map_complete()

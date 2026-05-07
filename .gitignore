@@ -249,3 +249,5 @@ deploy/
 # the pre-commit large-file threshold).
 docs/assets/*.pdf
 .claude/scheduled_tasks.lock
+*.db-shm
+*.db-wal

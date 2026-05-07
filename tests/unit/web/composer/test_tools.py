@@ -756,6 +756,28 @@ class TestUpsertNode:
 
 
 class TestUpsertEdge:
+    def _catalog_with_llm_and_json(self) -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="llm",
+                description="LLM transform",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+        catalog.list_sinks.return_value = [
+            *catalog.list_sinks.return_value,
+            PluginSummary(
+                name="json",
+                description="JSON file sink",
+                plugin_type="sink",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
     def test_adds_edge(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -854,6 +876,61 @@ class TestUpsertEdge:
         assert r3.success is True
         node = next(n for n in r3.updated_state.nodes if n.id == "t1")
         assert node.on_error == "err_out"
+
+    def test_upsert_edge_adds_llm_failure_sink_on_error_without_rebuilding_pipeline(self) -> None:
+        """An existing LLM node can be routed to a failure sink via upsert_edge."""
+        state = _empty_state()
+        catalog = self._catalog_with_llm_and_json()
+        with_node = execute_tool(
+            "upsert_node",
+            {
+                "id": "judge_layers",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "judged_layers",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert with_node.success is True
+        with_failure_sink = execute_tool(
+            "set_output",
+            {
+                "sink_name": "llm_failures",
+                "plugin": "json",
+                "options": {
+                    "path": "/data/outputs/magic_comp_rules_layers_failures.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            with_node.updated_state,
+            catalog,
+            data_dir="/data",
+        )
+        assert with_failure_sink.success is True
+
+        result = execute_tool(
+            "upsert_edge",
+            {
+                "id": "e_judge_layers_error",
+                "from_node": "judge_layers",
+                "to_node": "llm_failures",
+                "edge_type": "on_error",
+                "label": "LLM failures",
+            },
+            with_failure_sink.updated_state,
+            catalog,
+        )
+
+        assert result.success is True
+        assert result.updated_state.nodes[0].on_error == "llm_failures"
+        assert result.updated_state.nodes[0].options == with_failure_sink.updated_state.nodes[0].options
+        assert result.updated_state.edges[-1].edge_type == "on_error"
 
     @pytest.mark.parametrize(
         ("edge_type", "expected_routes"),
@@ -1600,6 +1677,30 @@ class TestToolDefinitions:
 
         assert "omit when output count depends on group_by" in expected_schema["description"]
 
+    def test_upsert_edge_schema_includes_llm_failure_sink_routing_example(self) -> None:
+        """The tool surface must show how to patch LLM failure routing."""
+        upsert_edge = next(defn for defn in get_tool_definitions() if defn["name"] == "upsert_edge")
+        examples = upsert_edge["parameters"]["examples"]
+
+        assert {
+            "id": "e_judge_layers_error",
+            "from_node": "judge_layers",
+            "to_node": "llm_failures",
+            "edge_type": "on_error",
+            "label": "LLM failures",
+        } in examples
+
+    def test_get_pipeline_state_component_schema_documents_full_state_aliases(self) -> None:
+        """Tool schema must expose full-state spellings instead of relying only on omission."""
+        get_pipeline_state = next(defn for defn in get_tool_definitions() if defn["name"] == "get_pipeline_state")
+        component_schema = get_pipeline_state["parameters"]["properties"]["component"]
+
+        assert "Accepted full-state aliases" in component_schema["description"]
+        assert "full" in component_schema["description"]
+        assert "all" in component_schema["description"]
+        assert "pipeline" in component_schema["description"]
+        assert "empty string" in component_schema["description"]
+
     def _assert_no_enum_on_validation_failure(self, schema: object, tool_name: str) -> None:
         """Recursively walk a JSON schema and assert no on_validation_failure has enum."""
         if isinstance(schema, dict):
@@ -2228,6 +2329,34 @@ class TestGetPipelineState:
         assert "metadata" in data
         assert "version" in data
 
+    def test_full_state_alias_full_returns_all_components(self) -> None:
+        """component='full' is accepted as an explicit full-state alias."""
+        state = self._build_populated_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool("get_pipeline_state", {"component": "full"}, state, catalog)
+        assert result.success is True
+        data = result.to_dict()["data"]
+        assert data["inspection"]["resolved_component"] == "full"
+        assert "full" in data["inspection"]["accepted_full_state_aliases"]
+        assert data["source"] is not None
+        assert data["nodes"][0]["id"] == "t1"
+        assert data["outputs"][0]["sink_name"] == "out"
+        assert data["edges"][0]["id"] == "e1"
+
+    def test_full_state_alias_empty_string_returns_all_components(self) -> None:
+        """component='' is accepted as an explicit full-state alias."""
+        state = self._build_populated_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool("get_pipeline_state", {"component": ""}, state, catalog)
+        assert result.success is True
+        data = result.to_dict()["data"]
+        assert data["inspection"]["requested_component"] == ""
+        assert data["inspection"]["resolved_component"] == "full"
+        assert data["nodes"][0]["id"] == "t1"
+        assert data["outputs"][0]["sink_name"] == "out"
+
     def test_full_state_options_are_plain_dicts(self) -> None:
         """to_dict() deep_thaw converts frozen containers to plain dicts for JSON serialization."""
         state = self._build_populated_state()
@@ -2281,6 +2410,34 @@ class TestGetPipelineState:
         assert data["node"]["id"] == "t1"
         assert data["node"]["plugin"] == "uppercase"
         assert isinstance(data["node"]["options"], dict)
+
+    def test_full_state_alias_does_not_shadow_real_node_id(self) -> None:
+        """A real node id named 'full' remains addressable as a component."""
+        state = _empty_state().with_node(
+            NodeSpec(
+                id="full",
+                node_type="transform",
+                plugin="uppercase",
+                input="source",
+                on_success="out",
+                on_error=None,
+                options={"schema": {"mode": "observed"}},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool("get_pipeline_state", {"component": "full"}, state, catalog)
+        assert result.success is True
+        data = result.to_dict()["data"]
+        assert "node" in data
+        assert data["node"]["id"] == "full"
+        assert "nodes" not in data
 
     def test_component_output_by_name(self) -> None:
         """component=<output_name> returns that output's details."""
@@ -4671,6 +4828,41 @@ class TestPatchNodeOptions:
             field="t1:api_key",
         )
 
+    def test_patch_node_options_rejects_on_error_with_routing_tool_guidance(self) -> None:
+        """on_error is a node routing field, not a plugin option patch."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_node = execute_tool(
+            "upsert_node",
+            {
+                "id": "t1",
+                "node_type": "transform",
+                "plugin": "uppercase",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {},
+            },
+            state,
+            catalog,
+        )
+        assert with_node.success is True
+
+        result = execute_tool(
+            "patch_node_options",
+            {"node_id": "t1", "patch": {"on_error": "llm_failures"}},
+            with_node.updated_state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is with_node.updated_state
+        assert result.updated_state.nodes[0].on_error == "discard"
+        assert "on_error is a node-level routing field" in result.data["error"]
+        assert "upsert_edge" in result.data["error"]
+        assert "edge_type='on_error'" in result.data["error"]
+        assert "Extra inputs are not permitted" not in result.data["error"]
+
     def test_patch_node_options_unknown_node_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -4997,8 +5189,50 @@ class TestSetPipelineSchemaShape:
         assert "blob_id" in source["properties"], "source.blob_id must bind an already uploaded blob"
         assert "blob_id" not in source["required"]
 
+    def test_options_are_optional_at_schema_boundary(self) -> None:
+        """Missing options must reach the handler so it can emit repair guidance."""
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        defns = {d["name"]: d for d in get_tool_definitions()}
+        params = defns["set_pipeline"]["parameters"]
+        source = params["properties"]["source"]
+        output_item = params["properties"]["outputs"]["items"]
+
+        assert "options" not in source["required"]
+        assert "options" not in output_item["required"]
+
+    def test_output_schema_examples_show_valid_file_sink_options(self) -> None:
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        defns = {d["name"]: d for d in get_tool_definitions()}
+        output_item = defns["set_pipeline"]["parameters"]["properties"]["outputs"]["items"]
+
+        assert {
+            "sink_name": "results",
+            "plugin": "json",
+            "options": {
+                "path": "outputs/results.json",
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+            "on_write_failure": "discard",
+        } in output_item["examples"]
+
 
 class TestSetPipeline:
+    def _catalog_with_json_sink(self) -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_sinks.return_value = [
+            *catalog.list_sinks.return_value,
+            PluginSummary(
+                name="json",
+                description="JSON file sink",
+                plugin_type="sink",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
     def test_set_pipeline_creates_valid_state(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -5007,6 +5241,63 @@ class TestSetPipeline:
         assert result.validation is not None
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
+
+    def test_set_pipeline_missing_json_output_options_returns_exact_repair_hint(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_json_sink()
+        args = _valid_pipeline_args()
+        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        del args["outputs"][0]["options"]
+        args["outputs"][0]["plugin"] = "json"
+
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+
+        assert result.success is False
+        assert result.updated_state is state
+        error = result.data["error"]
+        assert "Output 'main' is missing options" in error
+        assert '"sink_name": "main"' in error
+        assert '"plugin": "json"' in error
+        assert '"path": "outputs/main.json"' in error
+        assert '"schema": {"mode": "observed"}' in error
+        assert '"collision_policy": "auto_increment"' in error
+        assert '"on_write_failure": "discard"' in error
+
+    def test_set_pipeline_accepts_two_json_sinks_with_explicit_file_options(self, tmp_path: Path) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_json_sink()
+        args = _valid_pipeline_args()
+        args["source"]["options"]["path"] = str(tmp_path / "blobs" / "input.csv")
+        args["nodes"][0]["on_error"] = "failures"
+        args["outputs"] = [
+            {
+                "sink_name": "main",
+                "plugin": "json",
+                "options": {
+                    "path": str(tmp_path / "outputs" / "main.json"),
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            {
+                "sink_name": "failures",
+                "plugin": "json",
+                "options": {
+                    "path": str(tmp_path / "outputs" / "failures.json"),
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+        ]
+
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir=str(tmp_path))
+
+        assert result.success is True
+        assert result.validation.is_valid is True
+        assert [output.plugin for output in result.updated_state.outputs] == ["json", "json"]
+        assert [output.name for output in result.updated_state.outputs] == ["main", "failures"]
 
     def test_set_pipeline_rejects_literal_credential_value_without_mutating_state(self) -> None:
         state = _empty_state()

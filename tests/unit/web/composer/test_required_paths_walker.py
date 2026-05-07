@@ -189,14 +189,31 @@ class TestSetPipelineCompiledIndex:
         unconditional_paths = {p.path for p in compiled if not p.optional_ancestor}
         assert ("source",) in unconditional_paths
         assert ("source", "plugin") in unconditional_paths
-        assert ("source", "options") in unconditional_paths
         assert ("source", "on_success") in unconditional_paths
+        assert ("source", "options") not in unconditional_paths
+
+    def test_set_pipeline_options_omissions_reach_handler_feedback(
+        self,
+        compiled: tuple[_CompiledRequiredPath, ...],
+    ) -> None:
+        arguments = {
+            "source": {"plugin": "csv", "on_success": "source_out"},
+            "nodes": [],
+            "edges": [],
+            "outputs": [{"sink_name": "main", "plugin": "json"}],
+        }
+
+        missing = _find_missing_required_paths(arguments, compiled)
+
+        assert "source.options" not in missing
+        assert "outputs[0].options" not in missing
 
     def test_array_item_required_fields_are_unconditional(self, compiled: tuple[_CompiledRequiredPath, ...]) -> None:
         unconditional_paths = {p.path for p in compiled if not p.optional_ancestor}
         assert ("nodes", "[]", "id") in unconditional_paths
         assert ("edges", "[]", "edge_type") in unconditional_paths
         assert ("outputs", "[]", "sink_name") in unconditional_paths
+        assert ("outputs", "[]", "options") not in unconditional_paths
 
 
 class TestOptionalAncestorPresentRefusesArraySegment:

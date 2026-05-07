@@ -217,6 +217,132 @@ class TestAmbiguousContinueFallthrough:
         discard_edges = [edge for edge in graph.get_edges() if edge.label == "false" and edge.to_node == NodeID("discard")]
         assert discard_edges == []
 
+    def test_gate_discard_route_prefers_real_sink_named_discard(self, plugin_manager: Any) -> None:
+        """A real sink named 'discard' must not be shadowed by the virtual drop sentinel."""
+        from elspeth.cli_helpers import instantiate_plugins_from_config
+        from elspeth.contracts import RouteDestination
+        from elspeth.contracts.types import GateName, SinkName
+        from elspeth.core.config import (
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+            SourceSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            source=SourceSettings(
+                plugin="csv",
+                on_success="source_out",
+                options={
+                    "path": "test.csv",
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            ),
+            gates=[
+                GateSettings(
+                    name="router",
+                    input="source_out",
+                    condition="True",
+                    routes={"true": "discard", "false": "output"},
+                ),
+            ],
+            sinks={
+                "discard": SinkSettings(
+                    plugin="json",
+                    on_write_failure="discard",
+                    options={"path": "discard.json", "schema": {"mode": "observed"}},
+                ),
+                "output": SinkSettings(
+                    plugin="json",
+                    on_write_failure="discard",
+                    options={"path": "output.json", "schema": {"mode": "observed"}},
+                ),
+            },
+        )
+
+        plugins = instantiate_plugins_from_config(settings)
+        graph = ExecutionGraph.from_plugin_instances(
+            source=plugins.source,
+            source_settings=plugins.source_settings,
+            transforms=plugins.transforms,
+            sinks=plugins.sinks,
+            aggregations=plugins.aggregations,
+            gates=list(settings.gates),
+        )
+
+        gate_id = graph.get_config_gate_id_map()[GateName("router")]
+        assert graph.get_route_resolution_map()[(gate_id, "true")] == RouteDestination.sink(SinkName("discard"))
+        assert graph.get_route_label(str(gate_id), SinkName("discard")) == "true"
+
+    def test_gate_discard_route_prefers_real_connection_named_discard(self, plugin_manager: Any) -> None:
+        """A real connection named 'discard' must route to its consumer before virtual drop fallback."""
+        from elspeth.cli_helpers import instantiate_plugins_from_config
+        from elspeth.contracts import RouteDestination
+        from elspeth.contracts.types import GateName
+        from elspeth.core.config import (
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+            SourceSettings,
+            TransformSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            source=SourceSettings(
+                plugin="csv",
+                on_success="source_out",
+                options={
+                    "path": "test.csv",
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            ),
+            gates=[
+                GateSettings(
+                    name="router",
+                    input="source_out",
+                    condition="True",
+                    routes={"true": "discard", "false": "output"},
+                ),
+            ],
+            transforms=[
+                TransformSettings(
+                    name="after_discard_route",
+                    plugin="passthrough",
+                    input="discard",
+                    on_success="output",
+                    on_error="discard",
+                    options={"schema": {"mode": "observed"}},
+                ),
+            ],
+            sinks={
+                "output": SinkSettings(
+                    plugin="json",
+                    on_write_failure="discard",
+                    options={"path": "output.json", "schema": {"mode": "observed"}},
+                ),
+            },
+        )
+
+        plugins = instantiate_plugins_from_config(settings)
+        graph = ExecutionGraph.from_plugin_instances(
+            source=plugins.source,
+            source_settings=plugins.source_settings,
+            transforms=plugins.transforms,
+            sinks=plugins.sinks,
+            aggregations=plugins.aggregations,
+            gates=list(settings.gates),
+        )
+
+        gate_id = graph.get_config_gate_id_map()[GateName("router")]
+        true_edges = [edge for edge in graph.get_edges() if edge.from_node == gate_id and edge.label == "true"]
+        assert len(true_edges) == 1
+        consumer_id = true_edges[0].to_node
+        assert graph.get_route_resolution_map()[(gate_id, "true")] == RouteDestination.processing_node(consumer_id)
+
 
 class TestCoalesceOnSuccessRejectsConnection:
     """Coalesce on_success must point to a sink, not a connection name.

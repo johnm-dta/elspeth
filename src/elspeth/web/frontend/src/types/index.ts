@@ -616,6 +616,32 @@ export interface RunDiagnosticsEvaluation {
   working_view: RunDiagnosticsWorkingView;
 }
 
+// ── Execution Fanout Guard ─────────────────────────────────────────────────
+
+export interface ExecutionFanoutRisk {
+  node_id: string;
+  provider: string;
+  model: string | null;
+  credential_ref: string | null;
+  estimated_provider_calls: number | null;
+  provider_calls_per_row: number;
+  upstream_fanout: string[];
+  risk_level: "medium" | "high";
+  message: string;
+}
+
+export interface ExecutionFanoutGuard {
+  ack_token: string;
+  risk_level: "medium" | "high";
+  summary: string;
+  risks: ExecutionFanoutRisk[];
+}
+
+export interface ExecutionFanoutAck {
+  token: string;
+  accepted: true;
+}
+
 // ── API Error Envelope ──────────────────────────────────────────────────────
 
 /**
@@ -634,6 +660,7 @@ export interface ApiError {
   status: number;
   detail: string;
   error_type?: string;
+  fanout_guard?: ExecutionFanoutGuard;
   provider_detail?: string;
   provider_status_code?: number;
   validation_errors?: ValidationError[];

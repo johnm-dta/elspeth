@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hmac
 import io
+import json
 import os
 import re
 import tempfile
@@ -60,6 +61,10 @@ _AUTHORING_VALIDATION_COUNTER = metrics.get_meter(__name__).create_counter(
     description="Total authoring (Stage 1) validation outcomes from preview_pipeline",
 )
 
+_FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
+_FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
+_NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
+
 
 class _SemanticEdgeContractPayload(TypedDict):
     """Wire shape for a serialized SemanticEdgeContract.
@@ -78,6 +83,33 @@ class _SemanticEdgeContractPayload(TypedDict):
     consumer_field: str
     outcome: str
     requirement_code: str
+
+
+class _FullPipelineStateMetadataPayload(TypedDict):
+    """Metadata payload nested in full get_pipeline_state responses."""
+
+    name: str | None
+    description: str | None
+
+
+class _FullPipelineStateInspectionPayload(TypedDict):
+    """Inspection payload documenting how a full-state alias resolved."""
+
+    requested_component: Any
+    resolved_component: str
+    accepted_full_state_aliases: list[str]
+
+
+class _FullPipelineStatePayload(TypedDict):
+    """Full-state payload returned by get_pipeline_state."""
+
+    source: dict[str, Any] | None
+    nodes: list[dict[str, Any]]
+    outputs: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    metadata: _FullPipelineStateMetadataPayload
+    version: int
+    inspection: _FullPipelineStateInspectionPayload
 
 
 class _RepairToolCall(TypedDict):
@@ -709,7 +741,11 @@ def get_tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "upsert_edge",
-            "description": "Add or update a connection between nodes.",
+            "description": (
+                "Add or update a connection between nodes. When the edge targets a sink, "
+                "this also updates the source/node routing field used by runtime "
+                "(on_success, on_error, gate routes, or fork destinations)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -723,6 +759,15 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "label": {"type": ["string", "null"], "description": "Display label."},
                 },
                 "required": ["id", "from_node", "to_node", "edge_type"],
+                "examples": [
+                    {
+                        "id": "e_judge_layers_error",
+                        "from_node": "judge_layers",
+                        "to_node": "llm_failures",
+                        "edge_type": "on_error",
+                        "label": "LLM failures",
+                    }
+                ],
             },
         },
         {
@@ -830,7 +875,9 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             "name": "patch_node_options",
             "description": "Apply a shallow merge-patch to a node's options. "
             "Keys in the patch overwrite existing keys. "
-            "Keys set to null are deleted. Missing keys are unchanged.",
+            "Keys set to null are deleted. Missing keys are unchanged. "
+            "Do not use this for node routing fields such as on_success/on_error/input/routes; "
+            "use upsert_edge or upsert_node for routing edits.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -840,7 +887,11 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     },
                     "patch": {
                         "type": "object",
-                        "description": "Merge-patch to apply to node options.",
+                        "description": (
+                            "Merge-patch to apply to plugin options only. "
+                            "Node-level routing fields such as on_success, on_error, input, routes, "
+                            "and fork_to are siblings of options; edit them with upsert_edge or upsert_node."
+                        ),
                     },
                 },
                 "required": ["node_id", "patch"],
@@ -878,7 +929,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "source": {
                         "type": "object",
                         "description": (
-                            "Source configuration: {plugin, options, on_success, on_validation_failure?, blob_id?, inline_blob?}. "
+                            "Source configuration: {plugin, on_success, options?, on_validation_failure?, blob_id?, inline_blob?}. "
                             "Use blob_id to bind an already uploaded session blob, or inline_blob to "
                             "materialize user-provided literal data while atomically setting the full pipeline."
                         ),
@@ -891,7 +942,14 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                     "The tool resolves path/blob_ref authoritatively exactly like set_source_from_blob."
                                 ),
                             },
-                            "options": {"type": "object"},
+                            "options": {
+                                "type": "object",
+                                "description": (
+                                    "Plugin-specific source config. Required by most file/data sources even though "
+                                    "the schema leaves it optional so the handler can return plugin-specific repair "
+                                    "feedback instead of a generic missing-argument error."
+                                ),
+                            },
                             "on_success": {
                                 "type": "string",
                                 "description": (
@@ -931,7 +989,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                 "required": ["filename", "mime_type", "content"],
                             },
                         },
-                        "required": ["plugin", "options", "on_success"],
+                        "required": ["plugin", "on_success"],
                     },
                     "nodes": {
                         "type": "array",
@@ -1013,10 +1071,28 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                     "examples": ["lines_out", "scored_results", "errors_quarantine"],
                                 },
                                 "plugin": {"type": "string"},
-                                "options": {"type": "object"},
+                                "options": {
+                                    "type": "object",
+                                    "description": (
+                                        "Plugin-specific sink config. For csv/json file sinks in runnable web "
+                                        "pipelines, include path, schema, and explicit collision_policy."
+                                    ),
+                                },
                                 "on_write_failure": {"type": "string"},
                             },
-                            "required": ["sink_name", "plugin", "options"],
+                            "required": ["sink_name", "plugin"],
+                            "examples": [
+                                {
+                                    "sink_name": "results",
+                                    "plugin": "json",
+                                    "options": {
+                                        "path": "outputs/results.json",
+                                        "schema": {"mode": "observed"},
+                                        "collision_policy": "auto_increment",
+                                    },
+                                    "on_write_failure": "discard",
+                                }
+                            ],
                         },
                         "description": (
                             "Array of output specs: [{sink_name, plugin, options, on_write_failure?}]. "
@@ -1203,7 +1279,11 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "component": {
                         "type": "string",
-                        "description": "Optional: return only one component — 'source', a node ID, or an output name. Omit for full state.",
+                        "description": (
+                            "Optional: return only one component — 'source', a node ID, or an output name. "
+                            "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
+                            "or pass the empty string."
+                        ),
                     },
                 },
                 "required": [],
@@ -2004,8 +2084,51 @@ def _prevalidate_plugin_options(
 
 _WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref"})
 _FILE_SINKS_REQUIRING_COLLISION_POLICY = frozenset({"csv", "json"})
+_FILE_SINK_REPAIR_EXTENSIONS: Final[dict[str, str]] = {"csv": "csv", "json": "json"}
 _WRITE_COLLISION_POLICIES = frozenset({"fail_if_exists", "auto_increment"})
 _APPEND_COLLISION_POLICIES = frozenset({"append_or_create"})
+
+
+def _missing_output_options_repair_error(
+    *,
+    sink_name: str,
+    plugin_name: str,
+    on_write_failure: str,
+    validation_error: str | None,
+) -> str:
+    """Return an exact output-object repair hint for omitted sink options."""
+    if plugin_name in _FILE_SINK_REPAIR_EXTENSIONS:
+        path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
+        extension = _FILE_SINK_REPAIR_EXTENSIONS[plugin_name]
+        repair_output = {
+            "sink_name": sink_name,
+            "plugin": plugin_name,
+            "options": {
+                "path": f"outputs/{path_fragment}.{extension}",
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+            "on_write_failure": on_write_failure,
+        }
+        detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+        return (
+            f"Output '{sink_name}' is missing options. For {plugin_name} file sinks, include "
+            f"an options object with path, schema, and collision_policy. Use this output object "
+            f"shape and adjust the path/schema if needed: {json.dumps(repair_output)}.{detail}"
+        )
+
+    repair_output = {
+        "sink_name": sink_name,
+        "plugin": plugin_name,
+        "options": {},
+        "on_write_failure": on_write_failure,
+    }
+    detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+    return (
+        f"Output '{sink_name}' is missing options. Include the sink plugin's options object. "
+        f"If this sink accepts empty configuration, use: {json.dumps(repair_output)}; otherwise "
+        f"call get_plugin_schema for sink '{plugin_name}' and fill the required options.{detail}"
+    )
 
 
 def _manual_source_blob_ref_error(*, tool_name: str, inline_blob_supported: bool = False) -> str:
@@ -3667,7 +3790,26 @@ def _execute_set_pipeline(
         if plugin_error is not None:
             return _failure_result(state, f"Output '{out_name}': {plugin_error}")
         # S2: Validate sink path allowlist (mirrors source path check)
+        options_missing = "options" not in out_args
         out_options = out_args.get("options", {})
+        if options_missing:
+            out_prevalidation = _prevalidate_sink(out_plugin, out_options)
+            out_collision_error = validate_composer_file_sink_collision_policy(
+                out_plugin,
+                out_options,
+                require_explicit=data_dir is not None,
+            )
+            validation_error = out_prevalidation if out_prevalidation is not None else out_collision_error
+            if validation_error is not None:
+                return _failure_result(
+                    state,
+                    _missing_output_options_repair_error(
+                        sink_name=out_name,
+                        plugin_name=out_plugin,
+                        on_write_failure=out_args.get("on_write_failure", "discard"),
+                        validation_error=validation_error,
+                    ),
+                )
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id=out_name,
@@ -3889,6 +4031,39 @@ def _handle_patch_source_options(
     return _execute_patch_source_options(arguments, state, data_dir)
 
 
+def _node_routing_option_patch_error(patch: Mapping[str, Any]) -> str | None:
+    """Return guidance when plugin-option patches contain node routing fields."""
+    if not (_NODE_ROUTING_OPTION_PATCH_KEYS & patch.keys()):
+        return None
+    for key in ("on_error", "on_success", "input", "routes", "fork_to"):
+        if key not in patch:
+            continue
+        if key == "on_error":
+            return (
+                "on_error is a node-level routing field, not a plugin option. "
+                "Use upsert_edge with edge_type='on_error' when routing failures to an existing sink, "
+                "or use upsert_node with on_error as a sibling of options for other routing edits."
+            )
+        if key == "on_success":
+            return (
+                "on_success is a node-level routing field, not a plugin option. "
+                "Use upsert_edge with edge_type='on_success' when routing success rows to an existing sink, "
+                "or use upsert_node with on_success as a sibling of options for other routing edits."
+            )
+        if key == "input":
+            return (
+                "input is a node-level connection field, not a plugin option. "
+                "Use upsert_node with input as a sibling of options to change the connection this node consumes."
+            )
+        if key in {"routes", "fork_to"}:
+            return (
+                f"{key} is a gate-level routing field, not a plugin option. "
+                "Use upsert_edge with edge_type='route_true', edge_type='route_false', or edge_type='fork' "
+                f"for sink routing, or use upsert_node with {key} as a sibling of options."
+            )
+    return None
+
+
 def _execute_patch_node_options(
     args: dict[str, Any],
     state: CompositionState,
@@ -3900,6 +4075,9 @@ def _execute_patch_node_options(
     current = next((n for n in state.nodes if n.id == node_id), None)
     if current is None:
         return _failure_result(state, f"Node '{node_id}' not found.")
+    routing_patch_error = _node_routing_option_patch_error(patch)
+    if routing_patch_error is not None:
+        return _failure_result(state, routing_patch_error)
     new_options = _apply_merge_patch(current.options, patch)
     credential_error = _credential_wiring_contract_failure(
         state,
@@ -4380,6 +4558,28 @@ def _serialize_edge(edge: EdgeSpec) -> dict[str, Any]:
     }
 
 
+def _is_full_state_component_alias(component: Any) -> bool:
+    """Return whether a component argument explicitly requests full state."""
+    return isinstance(component, str) and component.strip().lower() in _FULL_STATE_COMPONENT_ALIAS_SET
+
+
+def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
+    """Serialize the full state and expose accepted full-state spellings."""
+    return {
+        "source": _serialize_source(state.source) if state.source is not None else None,
+        "nodes": [_serialize_node(n) for n in state.nodes],
+        "outputs": [_serialize_output(o) for o in state.outputs],
+        "edges": [_serialize_edge(e) for e in state.edges],
+        "metadata": {"name": state.metadata.name, "description": state.metadata.description},
+        "version": state.version,
+        "inspection": {
+            "requested_component": requested_component,
+            "resolved_component": "full",
+            "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
+        },
+    }
+
+
 def _execute_get_pipeline_state(
     args: dict[str, Any],
     state: CompositionState,
@@ -4405,18 +4605,16 @@ def _execute_get_pipeline_state(
             output = next((o for o in state.outputs if o.name == component), None)
             if output is not None:
                 data = {"output": _serialize_output(output)}
+            elif _is_full_state_component_alias(component):
+                data = _serialize_full_pipeline_state(state, requested_component=component)
             else:
-                return _failure_result(state, f"Component '{component}' not found. Specify 'source', a node ID, or an output name.")
+                return _failure_result(
+                    state,
+                    f"Component '{component}' not found. Specify 'source', a node ID, an output name, "
+                    "or a full-state alias ('full', 'all', 'pipeline', or empty string).",
+                )
     else:
-        # Full state
-        data = {
-            "source": _serialize_source(state.source) if state.source is not None else None,
-            "nodes": [_serialize_node(n) for n in state.nodes],
-            "outputs": [_serialize_output(o) for o in state.outputs],
-            "edges": [_serialize_edge(e) for e in state.edges],
-            "metadata": {"name": state.metadata.name, "description": state.metadata.description},
-            "version": state.version,
-        }
+        data = _serialize_full_pipeline_state(state, requested_component=None)
 
     data = redact_source_storage_path(data)
     return _discovery_result(state, data)

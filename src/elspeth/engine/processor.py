@@ -625,7 +625,7 @@ class RowProcessor:
         """
         if outcome.sink_name is not None:
             return (outcome.sink_name,)
-        elif outcome.discarded:
+        elif outcome.discarded is True:
             return ("discard",)
         elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
             # For forks, return the branch names of child tokens

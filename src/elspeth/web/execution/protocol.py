@@ -78,7 +78,14 @@ class ExecutionService(Protocol):
         """
         ...
 
-    async def execute(self, session_id: UUID, state_id: UUID | None = None, *, user_id: str | None = None) -> UUID:
+    async def execute(
+        self,
+        session_id: UUID,
+        state_id: UUID | None = None,
+        *,
+        user_id: str | None = None,
+        fanout_ack_token: str | None = None,
+    ) -> UUID:
         """Start a background pipeline run.
 
         Returns the run_id immediately. Raises RunAlreadyActiveError if
@@ -88,6 +95,8 @@ class ExecutionService(Protocol):
             session_id: Session to execute.
             state_id: Specific state to execute (latest if None).
             user_id: Authenticated user's ID for scoped secret resolution.
+            fanout_ack_token: Optional launch acknowledgement for high-fanout
+                LLM/provider-call risk.
 
         Note: async because it calls SessionService (async) for active-run
         check and run creation. The actual pipeline runs in a background

@@ -21,7 +21,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
@@ -35,6 +35,7 @@ from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
     load_run_outputs_for_settings,
@@ -47,6 +48,7 @@ from elspeth.web.execution.schemas import (
     RUN_STATUS_TERMINAL_VALUES,
     CancelledData,
     CompletedData,
+    ExecuteRequest,
     FailedData,
     RunDiagnosticsEvaluationResponse,
     RunDiagnosticsResponse,
@@ -426,6 +428,7 @@ def create_execution_router() -> APIRouter:
         session_id: UUID,
         request: Request,
         state_id: UUID | None = None,
+        execute_request: ExecuteRequest | None = Body(default=None),  # noqa: B008
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
     ) -> dict[str, str]:
@@ -436,8 +439,14 @@ def create_execution_router() -> APIRouter:
         {"detail": str(exc), "error_type": "run_already_active"}.
         """
         await _verify_session_ownership(session_id, user, request)
+        fanout_ack_token = execute_request.fanout_ack_token if execute_request is not None else None
         try:
-            run_id = await service.execute(session_id, state_id, user_id=user.user_id)
+            run_id = await service.execute(
+                session_id,
+                state_id,
+                user_id=user.user_id,
+                fanout_ack_token=fanout_ack_token,
+            )
         except StateAccessError:
             # IDOR contract: the "state does not exist" and
             # "state belongs to another session" branches in the
@@ -495,6 +504,15 @@ def create_execution_router() -> APIRouter:
                         "operator must investigate the captured "
                         "composition state."
                     ),
+                },
+            ) from exc
+        except ExecutionFanoutGuardRequired as exc:
+            raise HTTPException(
+                status_code=428,
+                detail={
+                    "error_type": FANOUT_GUARD_ERROR_TYPE,
+                    "detail": str(exc),
+                    "fanout_guard": exc.guard.to_dict(),
                 },
             ) from exc
         except SemanticContractViolationError as exc:

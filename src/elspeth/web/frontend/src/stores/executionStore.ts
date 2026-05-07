@@ -25,6 +25,8 @@ import type {
   RunStatus,
   ValidationResult,
   ApiError,
+  ExecutionFanoutAck,
+  ExecutionFanoutGuard,
 } from "@/types/index";
 import * as api from "@/api/client";
 import { connectToRun, type WebSocketConnection } from "@/api/websocket";
@@ -46,13 +48,17 @@ interface ExecutionState {
   diagnosticsExplanationByRunId: Record<string, string>;
   diagnosticsWorkingViewByRunId: Record<string, RunDiagnosticsWorkingView>;
   validationResult: ValidationResult | null;
+  pendingFanoutGuard: ExecutionFanoutGuard | null;
+  pendingFanoutSessionId: string | null;
   isValidating: boolean;
   isExecuting: boolean;
   wsDisconnected: boolean;
   error: string | null;
 
   validate: (sessionId: string) => Promise<void>;
-  execute: (sessionId: string) => Promise<string | null>;
+  execute: (sessionId: string, fanoutAck?: ExecutionFanoutAck) => Promise<string | null>;
+  confirmFanoutExecution: () => Promise<string | null>;
+  dismissFanoutGuard: () => void;
   cancel: (runId: string) => Promise<void>;
   loadRuns: (sessionId: string) => Promise<void>;
   loadRunDiagnostics: (runId: string) => Promise<void>;
@@ -237,6 +243,8 @@ const initialExecutionState = {
   diagnosticsExplanationByRunId: {} as Record<string, string>,
   diagnosticsWorkingViewByRunId: {} as Record<string, RunDiagnosticsWorkingView>,
   validationResult: null as ValidationResult | null,
+  pendingFanoutGuard: null as ExecutionFanoutGuard | null,
+  pendingFanoutSessionId: null as string | null,
   isValidating: false,
   isExecuting: false,
   wsDisconnected: false,
@@ -264,13 +272,18 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     }
   },
 
-  async execute(sessionId: string) {
+  async execute(sessionId: string, fanoutAck?: ExecutionFanoutAck) {
     set({ isExecuting: true, error: null });
     try {
-      const { run_id } = await api.executePipeline(sessionId);
+      const { run_id } =
+        fanoutAck === undefined
+          ? await api.executePipeline(sessionId)
+          : await api.executePipeline(sessionId, fanoutAck);
       set({
         activeRunId: run_id,
         isExecuting: false,
+        pendingFanoutGuard: null,
+        pendingFanoutSessionId: null,
         progress: {
           source_rows_processed: 0,
           tokens_succeeded: 0,
@@ -293,6 +306,19 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       return run_id;
     } catch (err) {
       const apiErr = err as ApiError;
+      if (
+        apiErr.status === 428 &&
+        apiErr.error_type === "execution_fanout_ack_required" &&
+        apiErr.fanout_guard
+      ) {
+        set({
+          isExecuting: false,
+          pendingFanoutGuard: apiErr.fanout_guard,
+          pendingFanoutSessionId: sessionId,
+          error: null,
+        });
+        return null;
+      }
       const message =
         apiErr.status === 409
           ? "A run is already in progress for this pipeline."
@@ -304,6 +330,26 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       });
       return null;
     }
+  },
+
+  async confirmFanoutExecution() {
+    const pendingGuard = get().pendingFanoutGuard;
+    const pendingSessionId = get().pendingFanoutSessionId;
+    if (!pendingGuard || !pendingSessionId) {
+      return null;
+    }
+    return get().execute(pendingSessionId, {
+      accepted: true,
+      token: pendingGuard.ack_token,
+    });
+  },
+
+  dismissFanoutGuard() {
+    set({
+      isExecuting: false,
+      pendingFanoutGuard: null,
+      pendingFanoutSessionId: null,
+    });
   },
 
   connectWebSocket(runId: string) {

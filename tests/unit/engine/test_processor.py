@@ -460,6 +460,41 @@ class TestGetGateDestinations:
         outcome.result.action.destinations = ("high",)
         assert processor._get_gate_destinations(outcome) == ("high",)
 
+    def test_missing_discarded_attr_does_not_mask_fork_to_paths(self) -> None:
+        """GateOutcome-like test doubles without discarded still report fork paths."""
+        _, factory = _make_factory()
+        processor = _make_processor(factory)
+        child_a = Mock()
+        child_a.branch_name = "path_a"
+        child_b = Mock()
+        child_b.branch_name = "path_b"
+        outcome = Mock()
+        outcome.sink_name = None
+        outcome.result.action.kind = RoutingKind.FORK_TO_PATHS
+        outcome.child_tokens = [child_a, child_b]
+        assert processor._get_gate_destinations(outcome) == ("path_a", "path_b")
+
+    def test_missing_discarded_attr_does_not_mask_continue_routing(self) -> None:
+        """GateOutcome-like test doubles without discarded still report continue."""
+        _, factory = _make_factory()
+        processor = _make_processor(factory)
+        outcome = Mock()
+        outcome.sink_name = None
+        outcome.result.action.kind = RoutingKind.CONTINUE
+        outcome.next_node_id = None
+        assert processor._get_gate_destinations(outcome) == ("continue",)
+
+    def test_missing_discarded_attr_does_not_mask_processing_route_label(self) -> None:
+        """GateOutcome-like test doubles without discarded still report route labels."""
+        _, factory = _make_factory()
+        processor = _make_processor(factory)
+        outcome = Mock()
+        outcome.sink_name = None
+        outcome.next_node_id = NodeID("transform-2")
+        outcome.result.action.kind = RoutingKind.ROUTE
+        outcome.result.action.destinations = ("high",)
+        assert processor._get_gate_destinations(outcome) == ("high",)
+
 
 # =============================================================================
 # process_row: Linear pipeline (no transforms)

@@ -174,7 +174,7 @@ async def test_text_only_success_records_llm_call_metadata() -> None:
     with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response) as mock_acomp:
         result = await service.compose("Build a CSV pipeline", [], state)
 
-    assert "No composer mutation tool returned success=true" in result.message
+    assert "No composition-state mutation completed successfully" in result.message
     assert result.raw_assistant_content == "Done."
     assert len(result.llm_calls) == 1
     call = result.llm_calls[0]

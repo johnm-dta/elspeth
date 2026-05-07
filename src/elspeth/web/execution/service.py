@@ -45,6 +45,11 @@ from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.fanout_guard import (
+    ExecutionFanoutGuardRequired,
+    annotate_pipeline_yaml_with_fanout_guard,
+    evaluate_execution_fanout_guard,
+)
 from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError, YamlGenerator
@@ -300,7 +305,14 @@ class ExecutionServiceImpl:
             event.set()
         await run_sync_in_worker(self._executor.shutdown, True)
 
-    async def execute(self, session_id: UUID, state_id: UUID | None = None, *, user_id: str | None = None) -> UUID:
+    async def execute(
+        self,
+        session_id: UUID,
+        state_id: UUID | None = None,
+        *,
+        user_id: str | None = None,
+        fanout_ack_token: str | None = None,
+    ) -> UUID:
         """Start a background pipeline run.
 
         B6 enforcement: raises RunAlreadyActiveError if a pending or running
@@ -312,6 +324,8 @@ class ExecutionServiceImpl:
             session_id: Session to execute.
             state_id: Specific state to execute (latest if None).
             user_id: Authenticated user's ID for scoped secret resolution.
+            fanout_ack_token: Optional launch acknowledgement for high-fanout
+                LLM/provider-call risk.
 
         Note: async because SessionService methods are async. The pipeline
         itself runs in a background thread — only setup is async.
@@ -322,9 +336,16 @@ class ExecutionServiceImpl:
         session_key = str(session_id)
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
-            return await self._execute_locked(session_id, state_id, user_id=user_id)
+            return await self._execute_locked(session_id, state_id, user_id=user_id, fanout_ack_token=fanout_ack_token)
 
-    async def _execute_locked(self, session_id: UUID, state_id: UUID | None = None, *, user_id: str | None = None) -> UUID:
+    async def _execute_locked(
+        self,
+        session_id: UUID,
+        state_id: UUID | None = None,
+        *,
+        user_id: str | None = None,
+        fanout_ack_token: str | None = None,
+    ) -> UUID:
         """Inner execute — runs under the per-session asyncio.Lock."""
         # B6: One active run per session (AC #17: via SessionService)
         active = await self._session_service.get_active_run(session_id)
@@ -461,6 +482,15 @@ class ExecutionServiceImpl:
                         blob_id=str(parsed_blob_id),
                         session_id=str(session_id),
                     )
+
+        fanout_guard = evaluate_execution_fanout_guard(
+            composition_state,
+            data_dir=self._settings.data_dir,
+        )
+        if fanout_guard is not None:
+            if fanout_ack_token != fanout_guard.ack_token:
+                raise ExecutionFanoutGuardRequired(fanout_guard)
+            pipeline_yaml = annotate_pipeline_yaml_with_fanout_guard(pipeline_yaml, fanout_guard)
 
         # B9 fix: create_run() generates its own UUID internally and returns
         # a RunRecord. Read the run_id back from the returned record so our

@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 from hypothesis import given
 from hypothesis import strategies as st
 
+from elspeth.plugins.sources.field_normalization import normalize_field_name
 from tests.fixtures.factories import make_operation_context
 from tests.strategies.settings import SLOW_SETTINGS
 
@@ -159,7 +160,7 @@ class TestAzureBlobSourceJSONProperties:
             st.from_regex(r"[a-z][a-z0-9_]{0,9}", fullmatch=True),
             min_size=1,
             max_size=5,
-            unique=True,
+            unique_by=normalize_field_name,
         ),
         data=st.data(),
     )

@@ -239,6 +239,63 @@ class TestExecuteEndpoint:
             assert "detail" in body
 
     @pytest.mark.asyncio
+    async def test_execute_forwards_fanout_ack_token_to_service(self) -> None:
+        expected_run_id = uuid4()
+        svc = MagicMock()
+        svc.execute = AsyncMock(return_value=expected_run_id)
+        app = _create_test_app(execution_service=svc)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/api/sessions/{uuid4()}/execute",
+                json={"fanout_ack_token": "ack-test-token"},
+            )
+
+        assert resp.status_code == 202
+        assert svc.execute.await_args.kwargs["fanout_ack_token"] == "ack-test-token"
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_428_with_structured_fanout_guard(self) -> None:
+        from elspeth.web.execution.fanout_guard import (
+            ExecutionFanoutGuard,
+            ExecutionFanoutGuardRequired,
+            ExecutionFanoutRisk,
+        )
+
+        guard = ExecutionFanoutGuard(
+            ack_token="ack-line-explode",
+            risk_level="high",
+            summary="LLM transform 'classify_line' may make an unknown number of OpenRouter calls.",
+            risks=(
+                ExecutionFanoutRisk(
+                    node_id="classify_line",
+                    provider="openrouter",
+                    model="openai/gpt-4o-mini",
+                    credential_ref="secret_ref:OPENROUTER_API_KEY",
+                    estimated_provider_calls=None,
+                    provider_calls_per_row=1,
+                    upstream_fanout=["transform:explode_lines:line_explode"],
+                    risk_level="high",
+                    message="LLM transform 'classify_line' may make one OpenRouter call per expanded row.",
+                ),
+            ),
+        )
+        svc = MagicMock()
+        svc.execute = AsyncMock(side_effect=ExecutionFanoutGuardRequired(guard))
+        app = _create_test_app(execution_service=svc)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+
+        assert resp.status_code == 428
+        detail = resp.json()["detail"]
+        assert detail["error_type"] == "execution_fanout_ack_required"
+        assert detail["fanout_guard"]["ack_token"] == "ack-line-explode"
+        assert detail["fanout_guard"]["risks"][0]["provider"] == "openrouter"
+        assert detail["fanout_guard"]["risks"][0]["model"] == "openai/gpt-4o-mini"
+        assert detail["fanout_guard"]["risks"][0]["estimated_provider_calls"] is None
+
+    @pytest.mark.asyncio
     async def test_execute_returns_422_with_structured_semantic_payload(self) -> None:
         """Semantic contract violations surface as 422 with structured payload.
 

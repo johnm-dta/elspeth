@@ -419,12 +419,12 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=36b59cd796f02fae
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=557570ade7c5fe66
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=5fa6be1b7ac0e0a6
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=9b5174a43d7f3b2e
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
     rollback expected; programmer bugs still propagate
@@ -432,7 +432,7 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=48107e62f943464c
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=460c23d550fc07ed
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
     primary DB exception
@@ -673,66 +673,66 @@ allow_hits:
     still propagate
   safety: Recovery failure appended to errors list as RecoveryFailed[<type>]; not a silent swallow
   expires: null
-- key: web/execution/routes.py:R5:_run_integrity_http:fp=7b4850a6e749a2e7
+- key: web/execution/routes.py:R5:_run_integrity_http:fp=67a6b8831e6acca4
   owner: web-execution
   reason: Internal response-shaping helper dispatches the closed union of Pydantic ValidationError versus _RunStatusIntegrityError
     to decide which diagnostic fields are safe for the 500 response body.
   safety: Both branches return explicit HTTP 500 run_integrity_error detail; no exception is discarded and no successful
     RunEvent/RunStatusResponse is fabricated.
   expires: null
-- key: web/execution/routes.py:R1:create_execution_router:websocket_run_progress:fp=2b9a76ccae420053
+- key: web/execution/routes.py:R1:create_execution_router:websocket_run_progress:fp=e501c6e54b2b35eb
   owner: web-execution
   reason: False positive — asyncio.Queue.get() is an async queue method, not dict.get()
   safety: No dict access involved
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=88b779144e305163
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=6b050cd0df553805
   owner: web-execution
   reason: Heartbeat timeout is an expected idle path, not an error swallow
   safety: Sends heartbeat to keep connection alive
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=e0373967be7fa900
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=303895ef72980ebd
   owner: web-execution
   reason: Idle-timeout status recheck — run may be deleted between heartbeat polls
   safety: Only not-found errors close with 4004; infrastructure errors propagate to the outer handler
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=eabcdb854580ec9a
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=c17f54149917c7d3
   owner: web-execution
   reason: WebSocketDisconnect is the expected disconnect control-flow path
   safety: Falls through to unsubscribe cleanup
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=ef433ded85525225
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=235553a5eb6737f1
   owner: web-execution
   reason: Narrowed outer handler to (ConnectionError, OSError) — programming errors now propagate
   safety: Logged with slog.error; clean 1011 close sent to client
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=16ca60a6aa9e04ce
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=d589af255bdb9fb2
   owner: web-execution
   reason: Narrowed close catch to (WebSocketDisconnect, ConnectionError, OSError)
   safety: Logged; already in error path
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=56ad5fcdb646a475
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=2019603f4bf9e426
   owner: web-execution
   reason: WebSocket auth — narrowed from except (AuthenticationError, Exception) to except AuthenticationError only
   safety: Only auth failures close with 4001; infrastructure errors propagate to outer handler
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=d64dd514658f1d99
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=6990434f0bf5c2c2
   owner: web-execution
   reason: Run-ownership IDOR gate — narrowed from except Exception to except ValueError
   safety: Only not-found errors return 4004; infrastructure errors propagate to outer handler
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=535fa7debfce589f
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=99fe0bece4d31532
   owner: web-execution
   reason: TOCTOU guard — run may be deleted between verify_run_ownership and get_status
   safety: Only not-found errors close with 4004; returns immediately
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=62d8094f7be07371
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=5ebdf9fac1300e8e
   owner: web-execution
   reason: Initial terminal-status seed may fail accounting response validation after auth/ownership succeeds; the WebSocket
     must report an explicit internal-error close instead of sending a malformed terminal event.
   safety: Closes with 1011 and returns immediately; programming and infrastructure errors outside the validation/integrity
     union still propagate to the outer handler.
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=31d328289112e6cf
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=2fc7bbf4a13c0aa3
   owner: web-execution
   reason: Idle-timeout terminal-status recheck may fail accounting response validation; the WebSocket must close with an
     explicit internal-error signal rather than fabricating heartbeat or terminal payloads.
@@ -1339,110 +1339,110 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised at the caller site with full chain preservation;
     no silent swallowing
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=8faec2ca40b30e62
+- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=3c9b05232e0eee8f
   owner: web-execution
   reason: Tier 1 field_validator — isinstance whitelists datetime|str for timestamp, rejects int (Unix epoch)
   safety: Raises ValueError on non-datetime/non-str; tightens Field(strict=False) coercion scope
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=9814992d2fb9ecc9
+- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=dcc657a0ad575656
   owner: web-execution
   reason: Pydantic before-validator — isinstance(values, dict) gates JSON round-trip path; non-dict values handled by Pydantic
   safety: Structural dispatch for deserialization, not error suppression
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=e57584a8a91f95f7
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=722acae92f14936c
   owner: web-execution
   reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON round-trip
   safety: Missing keys fall through to Pydantic field validation downstream
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=6a3e090cae66298f
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=0cea4977dfaad477
   owner: web-execution
   reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON round-trip
   safety: Missing keys fall through to Pydantic field validation downstream
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=0166f790c8633cf1
+- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=fc80b640eaad1fe2
   owner: web-execution
   reason: Pydantic before-validator — isinstance(values, dict) gates JSON round-trip path; non-dict values handled by Pydantic
   safety: Structural dispatch for deserialization, not error suppression
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=7f0c9d0fed753991
+- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=24d8a0d80e61796b
   owner: web-execution
   reason: Offensive programming — isinstance enforces event_type/data type correspondence at construction time
   safety: Raises ValueError on mismatch; belt-and-suspenders with before-validator
   expires: null
-- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=1378dc4c3a5c6dec
+- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=dbd46fa41d6b0905
   owner: web-execution
   reason: Security boundary — isinstance dispatches SecretResolutionError to safe message (no secret name leakage)
   safety: Type dispatch for sanitization, not error suppression
   expires: null
-- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=dab71b7562298e03
+- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=7051b993b5f0f0c4
   owner: web-execution
   reason: Security boundary — isinstance dispatches SecretResolutionError to safe message (no secret name leakage)
   safety: Type dispatch for sanitization, not error suppression
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=3d1b811818881b9c
+- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=809af55c79e96a02
   owner: web-execution
   reason: Session may never have called execute(), so no lock exists in _session_locks. Cleanup is called on every session
     delete regardless. Matches ProgressBroadcaster.cleanup_run() pattern.
   safety: Missing key means session was never executed against; no cleanup needed
   expires: null
-- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=b613a406b653f910
+- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=129610d0eec4d682
   owner: web-execution
   reason: Session lock map creates per-session lock lazily on first execution
   safety: Mutation is thread-safe; setdefault is atomic for dict
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=1977701c7d283367
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=6aeb4c789842ea1a
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=27f70f481a3ecfb7
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=e6f0a4c698ce0e82
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=a28d22979f5e6b13
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=73d2c875061fb2d8
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=0d60c08d7bed26c1
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=17f4aff089ffcfce
   owner: web-execution
   reason: Idempotent shutdown-event cleanup on failure path
   safety: Pop is idempotent; except BaseException handler cleans up before re-raise
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=058af5b75fe4237f
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=6f43afcddc17c1b9
   owner: web-execution
   reason: Best-effort run status cleanup on setup failure — must not mask original exception. Narrowed from `except Exception`
     to `(SQLAlchemyError, OSError)` per canonical pattern b8ba2214/127417cb so programmer bugs in update_run_status propagate.
     Logs exc_class only (no str(exc)) to avoid SQLAlchemy `__cause__` chains exposing DB URLs/credentials.
   safety: Logged with slog.error; original exception always re-raised
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=e6d1228250c9732a
+- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=db0d3c96b9faa518
   owner: web-execution
   reason: Check for live shutdown event before fallback handling
   safety: Returns None if absent; no silent default
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=7dfa0192a8e45421
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=d1c69a4201dbbefd
   owner: web-execution
   reason: Tier 3 — config from YAML deserialization may be non-dict
   safety: Raises TypeError if not dict; no silent default
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=414dd0e55d9d7f7c
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=8e1bb9a98b5bb9c3
   owner: web-execution
   reason: Scope-to-audit-source mapping — .get() on explicit mapping dict with crash-on-unknown guard
   safety: Unknown scope raises ValueError immediately; no silent default
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=20034e1d6bd2268c
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=6c96d53f6e440038
   owner: web-execution
   reason: Progress broadcasting via call_soon_threadsafe raises RuntimeError when event loop is closed during shutdown
   safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical exc_class; pipeline continues
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=1e07e827564a725c
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=42aefce129b6a034
   owner: web-execution
   reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation
   safety: Classified as cancelled; separated from BaseException failure path
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=281782245b3a334e
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=db15dffcade1ae7e
   owner: web-execution
   reason: Signal-exception classification (KeyboardInterrupt/SystemExit) inside the BaseException recovery block — programmer
     signals must propagate; only normal exceptions are classified to the failed path and routed through the post-completion
@@ -1450,7 +1450,7 @@ allow_hits:
   safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal exceptions become operator-visible
     structured failures
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=90f983879e097028
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=5f662279a12ae80d
   owner: web-execution
   reason: 'elspeth-879f6de6bd post-completion run-state probe — catches (SQLAlchemyError, OSError) only, so transient audit-system
     degradation (DB hiccup, filesystem race) on the get_run() read does not mask the original post-completion exception. ValueError
@@ -1463,7 +1463,7 @@ allow_hits:
   safety: Falls through to best-effort failed-status update on absorbed exceptions; ValueError surfaces Tier-1 audit corruption
     as required; programmer bugs (TypeError/AttributeError/RuntimeError) propagate
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=51a9e6ed72ae3180
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=d992557b7ed191aa
   owner: web-execution
   reason: Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status update inside the BaseException recovery
     handler. Fingerprint shifted from 7edaa7aa890d4d12 by the I-4 audit-primacy fix that removed the post-terminal-exception
@@ -1471,19 +1471,19 @@ allow_hits:
   safety: Catches (SQLAlchemyError, OSError) from update_run_status so transient DB or filesystem failures do not mask the
     original pipeline exception; programmer bugs (TypeError, AttributeError, RuntimeError) propagate
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=9ac0615ce8b046f3
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=83b92bd18747808f
   owner: web-execution
   reason: Final shutdown-event cleanup is intentionally idempotent
   safety: Pop is idempotent
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=108a2e3a254c1c32
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=b4126e419715d0e1
   owner: web-execution
   reason: Blob finalization before terminal broadcast — failure must not mask run outcome
   safety: _FINALIZE_SUPPRESSED covers blob-domain exceptions (OSError, SQLAlchemyError, BlobNotFoundError, BlobQuotaExceededError,
     BlobStateError); RuntimeError deliberately excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=338283b69ad215aa
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=6b593acaf9c4c455
   owner: web-execution
   reason: Last-resort safety net — isinstance check excludes KeyboardInterrupt/SystemExit from diagnostic logging
   safety: Only suppresses signal exceptions; all other exceptions logged as last-resort diagnostic
@@ -1923,7 +1923,7 @@ allow_hits:
     Malformed shapes become structured argument errors returned to the LLM, not crashes or silent tool
     execution.
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=4c4a5ddee6541192
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=60ddf123415ae14d
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1932,7 +1932,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=39b201e2e8119189
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=7b4a2dd2adfe5c01
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1941,7 +1941,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=361345a71191a206
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=50f9947df69b3ce2
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1950,7 +1950,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=812f37066a15a1ba
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=2f6894f2d1273534
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1959,7 +1959,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=8cacebf74dd9e4e6
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=adbbe3441b336017
   owner: composer-advisor
   reason: >-
     Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted
@@ -1968,7 +1968,7 @@ allow_hits:
     Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as
     bounded tool results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=75c2823d4e327941
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=8d88ebd4d30ba958
   owner: composer-advisor
   reason: >-
     Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted
@@ -1977,7 +1977,7 @@ allow_hits:
     Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as
     bounded tool results.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=fd05536e76186e8c
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2a180b1f10822c6d
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -1985,7 +1985,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2f7640d58642388f
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=17fd860da93d6177
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -1993,7 +1993,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=38e8f89b189e1279
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=38cb0ff12213bbb0
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2001,7 +2001,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=5ba281263796a625
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=7f849414256a5713
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2009,7 +2009,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=47c3951f5cba7d3d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=bbc9dca579f3a3a4
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2017,7 +2017,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=f9561823ab7e6232
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=0a5b6aa60a45c562
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2025,13 +2025,130 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=f53f971f7e97e808
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=c41115c4b4a308ae
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
     budget or constructing prompts.
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=acb7b346b49d78de
+  owner: web-execution
+  reason: >-
+    Launch guard inspects user-authored LLM plugin options at the execution boundary; queries may be a
+    mapping for named multi-query prompts.
+  safety: >-
+    Only the query count is used for spend estimation; malformed options still go through plugin/runtime
+    validation before any provider call.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=3bc6520349f25f93
+  owner: web-execution
+  reason: >-
+    Launch guard inspects user-authored LLM plugin options at the execution boundary; queries may be a
+    sequence for multi-query prompts.
+  safety: >-
+    Strings and byte sequences are excluded from the sequence count; malformed options still go through
+    plugin/runtime validation before any provider call.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=c5cb478f091b67dd
+  owner: web-execution
+  reason: >-
+    Launch guard distinguishes scalar string-like values from query sequences when estimating LLM provider
+    calls from user-authored plugin options.
+  safety: >-
+    Scalar string-like values fall back to one provider call per row; plugin/runtime validation remains the
+    authority for option correctness.
+  expires: null
+- key: web/execution/fanout_guard.py:R6:_estimate_source_rows:fp=7dd44a74e9adfaca
+  owner: web-execution
+  reason: >-
+    Fanout estimation reads user-provided source files before execution; filesystem, encoding, CSV, or JSON
+    parse failures mean cardinality is unknown.
+  safety: >-
+    The guard never fabricates a row count from unreadable data; execution still validates/opens the source
+    on the normal path before any downstream provider calls.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_source_path:fp=43c70a65df834ad8
+  owner: web-execution
+  reason: >-
+    Source path/file options are user-authored plugin options and may be absent or non-string before plugin
+    validation runs.
+  safety: >-
+    Non-string values are treated as unavailable for local row estimation only; normal execution validation
+    remains responsible for rejecting invalid source options.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_remote_source_limit:fp=7d9dc7a2eeb65d98
+  owner: web-execution
+  reason: >-
+    Remote source limit/top/max_rows options are user-authored plugin options and only integer row caps can
+    safely inform spend estimation.
+  safety: >-
+    Non-integer values do not reduce the guard's estimate; plugin/runtime validation remains responsible for
+    option correctness.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_count_csv_source_rows:fp=68a64944bd3152b8
+  owner: web-execution
+  reason: >-
+    CSV skip_rows is a user-authored option inspected before execution so the launch guard can estimate
+    source cardinality.
+  safety: >-
+    Only integer skip_rows affects the estimator; invalid values are still rejected by plugin/runtime
+    validation on the normal execution path.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=f49836a7537b01a5
+  owner: web-execution
+  reason: >-
+    JSON source files are external/user data; data_key counting must first verify the decoded payload is an
+    object before indexing it.
+  safety: >-
+    Non-object payloads return unknown cardinality for the estimator instead of fabricating a count; execution
+    source validation still handles malformed data.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=b7cd8b2011b9fdf9
+  owner: web-execution
+  reason: >-
+    JSON source files are external/user data; only top-level arrays have a directly countable row
+    cardinality for this launch guard.
+  safety: >-
+    Non-array payloads return unknown cardinality for the estimator instead of fabricating a count; execution
+    source validation still handles malformed data.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_string_option:fp=9fa90e44796e9f63
+  owner: web-execution
+  reason: >-
+    Fanout estimation reads optional user-authored plugin string options such as provider, model, encoding,
+    delimiter, format, and data_key.
+  safety: >-
+    Only nonblank strings are surfaced into the guard payload; absent or malformed values remain unknown and
+    normal plugin/runtime validation remains authoritative.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=5cb9875f0f626a65
+  owner: web-execution
+  reason: >-
+    LLM credential configuration can be either an inline string or a secret-ref mapping in user-authored
+    plugin options.
+  safety: >-
+    The guard emits only credential category/ref metadata and never the secret value; actual secret
+    resolution remains on the execution path.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=0a8d0c29849f2252
+  owner: web-execution
+  reason: >-
+    Secret-ref mappings are user-authored plugin options and the nested secret_ref value must be a visible
+    nonblank string before being identified in the guard payload.
+  safety: >-
+    The guard emits only the secret_ref name marker and never resolves or logs the secret value; invalid
+    shapes remain unknown for the guard.
+  expires: null
+- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=cedbffb408e67884
+  owner: web-execution
+  reason: >-
+    Inline LLM API keys are user-authored plugin options and must be identified without exposing their
+    contents in the launch guard.
+  safety: >-
+    Nonblank inline strings are reported only as the category inline_api_key; the actual credential value is
+    never included in the guard payload.
   expires: null
 per_file_rules:
 - pattern: web/composer/tools.py

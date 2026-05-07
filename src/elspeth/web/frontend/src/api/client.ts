@@ -15,6 +15,8 @@ import type {
   CompositionState,
   CompositionStateVersion,
   ComposerProgressSnapshot,
+  ExecutionFanoutAck,
+  ExecutionFanoutGuard,
   CancelRunResponse,
   PluginSchemaInfo,
   PluginSummary,
@@ -83,6 +85,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
     let errorType: string | undefined;
     let providerDetail: string | undefined;
     let providerStatusCode: number | undefined;
+    let fanoutGuard: ExecutionFanoutGuard | undefined;
     let validationErrors: ApiError["validation_errors"];
     try {
       const body = await response.json();
@@ -121,6 +124,9 @@ async function parseResponse<T>(response: Response): Promise<T> {
         ? rawProviderStatusCode
         : undefined;
 
+      fanoutGuard =
+        body.fanout_guard ?? nestedDetail?.fanout_guard;
+
       validationErrors =
         body.validation_errors ?? nestedDetail?.validation_errors;
     } catch {
@@ -131,6 +137,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
       status: response.status,
       detail,
       error_type: errorType,
+      fanout_guard: fanoutGuard,
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
@@ -446,11 +453,18 @@ export async function validatePipeline(
  * The run executes asynchronously; progress streams via WebSocket.
  * Throws 409 if a run is already in progress for this session.
  */
-export async function executePipeline(sessionId: string): Promise<{ run_id: string }> {
-  const response = await fetch(`/api/sessions/${sessionId}/execute`, {
+export async function executePipeline(
+  sessionId: string,
+  fanoutAck?: ExecutionFanoutAck,
+): Promise<{ run_id: string }> {
+  const init: RequestInit = {
     method: "POST",
     headers: authHeaders("application/json"),
-  });
+  };
+  if (fanoutAck) {
+    init.body = JSON.stringify({ fanout_ack_token: fanoutAck.token });
+  }
+  const response = await fetch(`/api/sessions/${sessionId}/execute`, init);
   return parseResponse<{ run_id: string }>(response);
 }
 

@@ -80,6 +80,12 @@ class ValidationResult(_StrictResponse):
     semantic_contracts: list[SemanticEdgeContractResponse] = []
 
 
+class ExecuteRequest(_StrictResponse):
+    """Optional execution-launch acknowledgement payload."""
+
+    fanout_ack_token: str | None = Field(default=None, min_length=1)
+
+
 # ── Typed event payload models ──────────────────────────────────────────
 #
 # Each event_type has a dedicated payload model so that the server-side

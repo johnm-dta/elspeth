@@ -4,6 +4,7 @@ import * as api from "./api/client";
 import { AuthGuard } from "./components/common/AuthGuard";
 import { Layout } from "./components/common/Layout";
 import { CommandPalette } from "./components/common/CommandPalette";
+import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
 import { SessionSidebar } from "./components/sessions/SessionSidebar";
 import { ChatPanel } from "./components/chat/ChatPanel";
@@ -45,10 +46,20 @@ function App() {
   const createSession = useSessionStore((s) => s.createSession);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const compositionState = useSessionStore((s) => s.compositionState);
+  const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
 
   const openSecrets = useCallback(() => setShowSecrets(true), []);
   const closeSecrets = useCallback(() => setShowSecrets(false), []);
   const closePalette = useCallback(() => setShowPalette(false), []);
+  const confirmFanoutExecution = useCallback(async () => {
+    const runId = await useExecutionStore.getState().confirmFanoutExecution();
+    if (runId) {
+      window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" }));
+    }
+  }, []);
+  const dismissFanoutGuard = useCallback(() => {
+    useExecutionStore.getState().dismissFanoutGuard();
+  }, []);
 
   // Check backend health
   const checkHealth = useCallback(async () => {
@@ -217,6 +228,17 @@ function App() {
         <CommandPalette isOpen={showPalette} onClose={closePalette} />
         {showShortcuts && (
           <ShortcutsHelp onClose={() => setShowShortcuts(false)} />
+        )}
+        {pendingFanoutGuard && (
+          <ConfirmDialog
+            title="Review LLM provider calls"
+            message={pendingFanoutGuard.summary}
+            confirmLabel="Execute"
+            cancelLabel="Cancel"
+            variant="danger"
+            onConfirm={confirmFanoutExecution}
+            onCancel={dismissFanoutGuard}
+          />
         )}
       </div>
     </AuthGuard>

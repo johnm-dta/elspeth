@@ -45,6 +45,7 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
+    CompositionStateRecord,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
     SessionRunStatus,
@@ -134,6 +135,50 @@ def _run_accounting_for_status(status: RunStatus) -> RunAccounting:
         tokens=RunAccountingTokens(emitted=10, terminal=10, succeeded=10, failed=0, structural=0, pending=0),
         routing=RunAccountingRouting(routed_success=0, routed_failure=0, quarantined=0, discarded=0),
         integrity=RunAccountingIntegrity(closure="closed", missing_terminal_outcomes=0, duplicate_terminal_outcomes=0),
+    )
+
+
+def _composition_state_record(
+    *,
+    session_id: UUID,
+    source_path: Path,
+    output_path: Path,
+    nodes: list[dict[str, Any]],
+) -> CompositionStateRecord:
+    return CompositionStateRecord(
+        id=uuid4(),
+        session_id=session_id,
+        version=1,
+        source={
+            "plugin": "text",
+            "on_success": "source_rows",
+            "on_validation_failure": "discard",
+            "options": {
+                "path": str(source_path),
+                "column": "body",
+                "schema": {"mode": "observed"},
+            },
+        },
+        nodes=nodes,
+        edges=[],
+        outputs=[
+            {
+                "name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": str(output_path),
+                    "format": "jsonl",
+                    "mode": "write",
+                    "schema": {"mode": "observed"},
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+        metadata_={"name": "Test", "description": ""},
+        is_valid=True,
+        validation_errors=None,
+        created_at=datetime.now(UTC),
+        derived_from_state_id=None,
     )
 
 
@@ -251,6 +296,194 @@ class TestExecutionFlow:
         status = await service.get_status(run_id)
         assert status.status == "running"
         assert status.accounting is None
+
+
+class TestExecutionFanoutGuard:
+    @pytest.mark.asyncio
+    async def test_line_explode_to_llm_requires_ack_before_run_creation(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """A deaggregation transform upstream of LLM must stop at launch."""
+        from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired
+
+        data_dir = tmp_path
+        blob_dir = data_dir / "blobs"
+        output_dir = data_dir / "outputs"
+        blob_dir.mkdir()
+        output_dir.mkdir()
+        source_path = blob_dir / "input.txt"
+        source_path.write_text("alpha\nbeta\n", encoding="utf-8")
+        session_id = uuid4()
+        mock_settings.data_dir = data_dir
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=output_dir / "out.jsonl",
+            nodes=[
+                {
+                    "id": "explode_lines",
+                    "node_type": "transform",
+                    "plugin": "line_explode",
+                    "input": "source_rows",
+                    "on_success": "line_rows",
+                    "on_error": "errors",
+                    "options": {"source_field": "body", "schema": {"mode": "observed"}},
+                },
+                {
+                    "id": "classify_line",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "line_rows",
+                    "on_success": "out",
+                    "on_error": "errors",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4o-mini",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    },
+                },
+            ],
+        )
+
+        with (
+            patch.object(service, "_run_pipeline"),
+            patch("elspeth.web.execution.service.validate_semantic_contracts", return_value=((), ())),
+            pytest.raises(ExecutionFanoutGuardRequired) as raised,
+        ):
+            await service.execute(session_id=session_id)
+
+        guard = raised.value.guard
+        assert guard.ack_token
+        assert guard.risks[0].node_id == "classify_line"
+        assert guard.risks[0].provider == "openrouter"
+        assert guard.risks[0].model == "openai/gpt-4o-mini"
+        assert guard.risks[0].credential_ref == "secret_ref:OPENROUTER_API_KEY"
+        assert guard.risks[0].estimated_provider_calls is None
+        assert mock_session_service.create_run.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_acknowledged_line_explode_to_llm_records_guard_in_run_yaml(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Accepted fanout warnings are persisted with the run launch record."""
+        from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired
+
+        data_dir = tmp_path
+        blob_dir = data_dir / "blobs"
+        output_dir = data_dir / "outputs"
+        blob_dir.mkdir()
+        output_dir.mkdir()
+        source_path = blob_dir / "input.txt"
+        source_path.write_text("alpha\nbeta\n", encoding="utf-8")
+        session_id = uuid4()
+        mock_settings.data_dir = data_dir
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=output_dir / "out.jsonl",
+            nodes=[
+                {
+                    "id": "explode_lines",
+                    "node_type": "transform",
+                    "plugin": "line_explode",
+                    "input": "source_rows",
+                    "on_success": "line_rows",
+                    "on_error": "errors",
+                    "options": {"source_field": "body", "schema": {"mode": "observed"}},
+                },
+                {
+                    "id": "classify_line",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "line_rows",
+                    "on_success": "out",
+                    "on_error": "errors",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4o-mini",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    },
+                },
+            ],
+        )
+
+        with (
+            patch.object(service, "_run_pipeline"),
+            patch("elspeth.web.execution.service.validate_semantic_contracts", return_value=((), ())),
+            pytest.raises(ExecutionFanoutGuardRequired) as raised,
+        ):
+            await service.execute(session_id=session_id)
+
+        run_id = uuid4()
+        mock_session_service.create_run.return_value = MagicMock(id=run_id)
+        await service.execute(
+            session_id=session_id,
+            fanout_ack_token=raised.value.guard.ack_token,
+        )
+
+        create_call = mock_session_service.create_run.await_args_list[-1]
+        persisted_yaml = create_call.kwargs["pipeline_yaml"]
+        assert "elspeth_execution_fanout_guard" in persisted_yaml
+        assert '"accepted":true' in persisted_yaml
+        assert raised.value.guard.ack_token in persisted_yaml
+        assert '"node_id":"classify_line"' in persisted_yaml
+
+    @pytest.mark.asyncio
+    async def test_direct_small_text_source_to_llm_executes_without_ack(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """A direct low-cardinality source->LLM path remains a one-click run."""
+        data_dir = tmp_path
+        blob_dir = data_dir / "blobs"
+        output_dir = data_dir / "outputs"
+        blob_dir.mkdir()
+        output_dir.mkdir()
+        source_path = blob_dir / "input.txt"
+        source_path.write_text("alpha\nbeta\n", encoding="utf-8")
+        session_id = uuid4()
+        mock_settings.data_dir = data_dir
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=source_path,
+            output_path=output_dir / "out.jsonl",
+            nodes=[
+                {
+                    "id": "classify_row",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "source_rows",
+                    "on_success": "out",
+                    "on_error": "errors",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4o-mini",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    },
+                },
+            ],
+        )
+
+        with (
+            patch.object(service, "_run_pipeline"),
+            patch("elspeth.web.execution.service.validate_semantic_contracts", return_value=((), ())),
+        ):
+            run_id = await service.execute(session_id=session_id)
+
+        assert isinstance(run_id, UUID)
+        persisted_yaml = mock_session_service.create_run.await_args.kwargs["pipeline_yaml"]
+        assert "elspeth_execution_fanout_guard" not in persisted_yaml
 
 
 class TestWebRuntimeInfrastructure:

@@ -26,7 +26,7 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 **Step 0 (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
 
 - **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`
-- **State / preview:** `get_pipeline_state`, `preview_pipeline`, `diff_pipeline`
+- **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
 - **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
 - **Diagnostics:** `explain_validation_error`, `request_advisor_hint`
 - **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `update_blob`, `delete_blob`

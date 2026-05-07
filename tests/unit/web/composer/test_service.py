@@ -184,7 +184,7 @@ def _assert_no_mutation_empty_state_blocker(
     assert result.runtime_preflight.is_valid is False
     assert [check.name for check in result.runtime_preflight.checks] == ["state_exists"]
     assert result.raw_assistant_content is not None
-    assert "No composer mutation tool returned success=true" in result.message
+    assert "No composition-state mutation completed successfully" in result.message
     assert "state_exists=false" in result.message
     assert f"Blocking result: {tool_name}" in result.message
     assert expected_detail in result.message
@@ -300,7 +300,7 @@ class TestComposerTextOnlyResponse:
         assert result.runtime_preflight is not None
         assert result.runtime_preflight.is_valid is False
         assert [check.name for check in result.runtime_preflight.checks] == ["state_exists"]
-        assert "No composer mutation tool returned success=true" in result.message
+        assert "No composition-state mutation completed successfully" in result.message
         assert "state_exists=false" in result.message
         assert "the model ended the turn without calling any build/edit tool" in result.message
         assert "set_pipeline" in result.message
@@ -338,10 +338,47 @@ class TestComposerTextOnlyResponse:
         assert result.raw_assistant_content == final_prose
         assert result.runtime_preflight is not None
         assert result.runtime_preflight.is_valid is False
-        assert "No composer mutation tool returned success=true" in result.message
+        assert "No composition-state mutation completed successfully" in result.message
         assert "Blocking result: set_pipeline failed before mutation" in result.message
         assert "MissingRequiredPaths" in result.message
         assert "source.plugin" in result.message
+
+    @pytest.mark.asyncio
+    async def test_blob_only_success_then_empty_state_reply_returns_no_state_mutation_blocker(self, tmp_path: Path) -> None:
+        """A blob-side success is not a successful CompositionState mutation."""
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        settings = _make_settings(data_dir=tmp_path)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        state = _empty_state()
+        create_blob_turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_create_blob",
+                    "name": "create_blob",
+                    "arguments": {
+                        "filename": "seed.txt",
+                        "mime_type": "text/plain",
+                        "content": "hello",
+                    },
+                }
+            ],
+        )
+        final_prose = "I created the input blob, so the pipeline is ready."
+        text_response = _make_llm_response(content=final_prose)
+
+        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [create_blob_turn, text_response]
+            result = await service.compose("Build a runnable pipeline from this text.", [], state, session_id=session_id)
+
+        assert result.state.version == state.version
+        assert result.raw_assistant_content == final_prose
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert "No composition-state mutation completed successfully" in result.message
+        assert "state_exists=false" in result.message
+        assert "create_blob succeeded without mutating CompositionState" in result.message
+        assert mock_llm.call_count == 2
 
 
 class TestComposerSingleToolCall:

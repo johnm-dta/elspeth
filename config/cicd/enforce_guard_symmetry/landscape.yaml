@@ -1,0 +1,26 @@
+# Guard symmetry allowlist for Landscape loaders.
+#
+# DESIGN: Single entry with max_hits capped at the exact current finding count.
+# Any new unguarded loader will push the count above the cap and fail CI.
+#
+# NOTE: Per-file rules match by (file pattern + rule ID), not by finding
+# content. All findings are in model_loaders.py with rule GS1, so per-loader
+# granularity isn't possible with this allowlist model. The max_hits cap
+# provides the same safety: adding a new unguarded loader exceeds the cap.
+#
+# Loaders with complex state validation (NodeStateLoader,
+# TokenOutcomeLoader, NodeLoader, RunLoader, CallLoader,
+# OperationLoader) correctly use explicit AuditIntegrityError
+# and are NOT counted in this allowlist.
+
+per_file_rules:
+  - pattern: "core/landscape/model_loaders.py"
+    rules: [GS1]
+    reason: >-
+      9 loaders where __post_init__ validation fires during load(),
+      providing read-side coverage without explicit AuditIntegrityError.
+      Int-only: RowLoader, TokenLoader, TokenParentLoader, ArtifactLoader,
+      BatchMemberLoader. Enum+int: EdgeLoader, BatchLoader, RoutingEventLoader.
+      Plugin: ValidationErrorLoader (pairs with validation.py, not audit.py).
+    expires: null
+    max_hits: 9

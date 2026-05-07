@@ -23,6 +23,7 @@ import pytest
 from elspeth.contracts import TransformResult
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
+from elspeth.plugins.transforms.llm.provider import LLMProvider
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -318,7 +319,7 @@ class TestLoadScenarios:
         transform.connect_output(collector, max_pending=10)
 
         # Mock the provider to raise RateLimitError on some queries
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         query_call_count = [0]
 
         def mock_execute_query(
@@ -447,7 +448,7 @@ class TestRowAtomicity:
         transform.connect_output(collector, max_pending=50)
 
         # Mock provider to simulate rate limit errors
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
 
         def mock_execute_query(
@@ -548,7 +549,7 @@ class TestRowAtomicity:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=20)
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
 
         def mock_execute_query(
@@ -647,7 +648,7 @@ class TestRowAtomicity:
         collector = CollectorOutputPort()
         transform.connect_output(collector, max_pending=30)
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         llm_call_count = [0]
 
         def mock_execute_query(

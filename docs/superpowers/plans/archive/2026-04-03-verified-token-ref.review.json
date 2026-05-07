@@ -1,0 +1,126 @@
+{
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "summary": "Plan is sound. Option B (API-boundary) is the right call. 6 warnings: no independent verify_token_ref() tests, coalesce_tokens needs a tracking artifact, acceptance criterion references nonexistent scanner, and Option A follow-up should be filed. No blocking issues.",
+  "plan_file": "docs/superpowers/plans/2026-04-03-verified-token-ref.md",
+  "reviewed_at": "2026-04-03T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "W1",
+      "source": "systems",
+      "also_flagged_by": ["quality"],
+      "issue": "Acceptance criterion 6 references guard symmetry enforcer that does not yet exist",
+      "priority_score": 6,
+      "priority_breakdown": "Severity=2 x Likelihood=3 x Reversibility=1",
+      "recommendation": "Either add Filigree depends_on (TokenRef depends on scanner plan) or remove criterion 6 and replace with 'CI enforcers pass (tier model, freeze guards)'. The scanner can validate retroactively."
+    },
+    {
+      "id": "W2",
+      "source": "quality",
+      "issue": "No independent tests for verify_token_ref() factory function",
+      "priority_score": 6,
+      "priority_breakdown": "Severity=2 x Likelihood=2 x Reversibility=1 (easy to add later)",
+      "recommendation": "Add at least 3 tests: valid ref passes, mismatched ref raises AuditIntegrityError, nonexistent token raises. These are trivial but important for regression."
+    },
+    {
+      "id": "W3",
+      "source": "systems",
+      "also_flagged_by": ["architecture", "quality"],
+      "issue": "coalesce_tokens exclusion creates permanent asymmetry with no tracking artifact",
+      "priority_score": 6,
+      "priority_breakdown": "Severity=2 x Likelihood=2 x Reversibility=1",
+      "recommendation": "Create a Filigree follow-up issue for coalesce_tokens TokenRef support before closing the parent issue. Document the multi-token challenge explicitly."
+    },
+    {
+      "id": "W4",
+      "source": "systems",
+      "issue": "Option B does not eliminate dual-parameter bugs inside dataclass construction",
+      "priority_score": 4,
+      "priority_breakdown": "Severity=2 x Likelihood=1 x Reversibility=2",
+      "recommendation": "Acknowledged by the plan (Option A is documented as future work). File Option A as a concrete Filigree issue before closing this plan, so the gap is tracked."
+    },
+    {
+      "id": "W5",
+      "source": "architecture",
+      "issue": "Task 2 creates purposeless intermediate state (internal accepts TokenRef, public API unchanged)",
+      "priority_score": 3,
+      "priority_breakdown": "Severity=1 x Likelihood=3 x Reversibility=1",
+      "recommendation": "Minor concern. The intermediate commit is fine for reviewability and bisectability. No action needed."
+    },
+    {
+      "id": "W6",
+      "source": "quality",
+      "issue": "mypy should run after each method signature change, not just at end",
+      "priority_score": 3,
+      "priority_breakdown": "Severity=1 x Likelihood=2 x Reversibility=1",
+      "recommendation": "Add mypy check to Task 3 Step 4 (after each method update) to catch type errors incrementally."
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "SHOULD_FIX",
+      "source": "systems",
+      "suggestion": "Fix acceptance criterion 6 to reference only existing CI enforcers, or add scanner as explicit dependency"
+    },
+    {
+      "type": "SHOULD_FIX",
+      "source": "quality",
+      "suggestion": "Add verify_token_ref() unit tests in Task 2 or Task 3"
+    },
+    {
+      "type": "SHOULD_FIX",
+      "source": "systems",
+      "suggestion": "Create follow-up issues for coalesce_tokens and Option A before closing"
+    },
+    {
+      "type": "CONSIDER",
+      "source": "quality",
+      "suggestion": "Run mypy after each method signature change in Task 3"
+    },
+    {
+      "type": "CONSIDER",
+      "source": "reality",
+      "suggestion": "Check execution_repository.py for token_id/run_id usage that may need updating"
+    }
+  ],
+  "conflicts_resolved": [
+    {
+      "issue": "Severity of pre-commit mode for cross-file scanning (Systems B1 on scanner plan)",
+      "systems_view": "TokenRef acceptance criteria unverifiable until scanner ships (blocking)",
+      "resolution": "Downgraded to warning (W1). The criterion can be removed or made conditional. The TokenRef plan is independently valuable without the scanner."
+    },
+    {
+      "issue": "Task 2 intermediate state",
+      "architecture_view": "Purposeless intermediate -- could fold into Task 3",
+      "quality_view": "Not flagged",
+      "resolution": "Classified as minor warning. Separate commits for internal-then-public changes aid bisectability and code review. Standard refactoring practice."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "PASS",
+      "blocking": 0,
+      "warnings": 1,
+      "notes": "All symbols confirmed. Operation confirmed to lack token_id as plan states. execution_repository.py flagged as potential scope gap."
+    },
+    "architecture": {
+      "status": "PASS",
+      "blocking": 0,
+      "warnings": 2,
+      "notes": "Option B endorsed. Layer placement correct (L0 contracts). Task 2 intermediate noted but acceptable."
+    },
+    "quality": {
+      "status": "WARNINGS",
+      "blocking": 0,
+      "warnings": 3,
+      "notes": "Missing verify_token_ref tests, coalesce_tokens gap, mypy timing."
+    },
+    "systems": {
+      "status": "WARNINGS",
+      "blocking": 0,
+      "warnings": 3,
+      "notes": "Acceptance criteria dependency, Option B residual risk, coalesce_tokens asymmetry."
+    }
+  }
+}

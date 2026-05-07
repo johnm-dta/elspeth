@@ -1,0 +1,50 @@
+# Deployment-Specific Pipeline Composer Knowledge
+
+This file is loaded after the core pipeline composer skill and appended
+to the LLM agent's system prompt. Use it to inject knowledge specific
+to your deployment — providers, models, secrets, patterns, vocabulary.
+
+Delete sections you don't need. The core skill covers all system-level
+knowledge; this file is for your organisation's specifics.
+
+## Available Providers and Models
+
+<!-- List the LLM providers and models configured in this deployment. -->
+
+| Provider | Secret Name | Available Models | Default |
+|----------|-------------|------------------|---------|
+| openrouter | `OPENROUTER_API_KEY` | `anthropic/claude-3.5-sonnet`, `openai/gpt-4o` | `anthropic/claude-3.5-sonnet` |
+
+## Secret Naming Conventions
+
+<!-- How are secrets named in this deployment? -->
+
+All secrets follow the pattern `SERVICE_API_KEY` (e.g., `OPENROUTER_API_KEY`,
+`AZURE_STORAGE_KEY`). Check `list_secret_refs` to see what's configured.
+
+## Common Patterns for This Organisation
+
+<!-- Add organisation-specific pipeline patterns here. -->
+<!-- Follow the format from the core skill's Common Pipeline Patterns section. -->
+
+## Domain Vocabulary
+
+<!-- If your users use domain-specific terms, map them here. -->
+
+| User says | Means |
+|-----------|-------|
+| "case file" | JSON input with case metadata |
+| "evidence report" | JSON sink output |
+
+## Default Preferences
+
+<!-- Organisation-wide defaults the agent should apply. -->
+
+- Default output format: JSON with indent 2
+- Default LLM temperature: 0.0
+- Default error handling: route to quarantine sink
+- Do not set an organisation-wide default `collision_policy`. For every generated
+  CSV/JSON sink, choose it deliberately from the user's intent:
+  - `fail_if_exists` when the requested filename is a deliberate contract
+  - `auto_increment` for exploratory/repeated runs
+  - `append_or_create` only when using `mode: append`

@@ -5,14 +5,14 @@ The landscape recording system is the audit backbone of ELSPETH. These tests
 verify invariants that must hold for the audit trail to be trustworthy:
 
 1. Run lifecycle: begin→get round-trip preserves all fields
-2. Token outcome contracts: each RowOutcome requires specific fields
+2. Token outcome contracts: each ADR-019 terminal pair requires specific fields
 3. Schema contract round-trip: store→retrieve preserves contract content
 4. Config hash determinism: same config → same hash
 5. Row recording referential integrity: rows link to valid runs
 6. Run completion timestamp ordering: completed_at >= started_at
 
 Testing approach:
-- Uses LandscapeDB.in_memory() for isolated, fast property tests
+- Uses LandscapeDB.in_memory() via RecorderFactory for isolated, fast property tests
 - Hypothesis generates varied configs, field names, and outcome types
 - Tests verify database-level invariants (not just API-level behavior)
 """
@@ -28,13 +28,15 @@ from sqlalchemy import text
 
 from elspeth.contracts import (
     NodeType,
-    RowOutcome,
     RunStatus,
 )
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
-from tests.fixtures.landscape import make_landscape_db, make_recorder, make_recorder_with_run
+from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
+from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run
 
 # =============================================================================
 # Strategies
@@ -88,10 +90,10 @@ class TestRunLifecycleProperties:
     def test_begin_get_round_trip(self, config: dict[str, Any], version: str) -> None:
         """Property: get_run returns the same data that begin_run stored."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(config=config, canonical_version=version)
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(config=config, canonical_version=version)
 
-            retrieved = recorder.get_run(run.run_id)
+            retrieved = factory.run_lifecycle.get_run(run.run_id)
             assert retrieved is not None
             assert retrieved.run_id == run.run_id
             assert retrieved.config_hash == run.config_hash
@@ -103,10 +105,10 @@ class TestRunLifecycleProperties:
     def test_run_id_uniqueness(self, config: dict[str, Any]) -> None:
         """Property: Auto-generated run IDs are unique across multiple begin_run calls."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
+            factory = make_factory(db)
             ids = set()
             for _ in range(5):
-                run = recorder.begin_run(config=config, canonical_version="1.0")
+                run = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
                 assert run.run_id not in ids, f"Duplicate run_id: {run.run_id}"
                 ids.add(run.run_id)
 
@@ -115,9 +117,9 @@ class TestRunLifecycleProperties:
     def test_config_hash_determinism(self, config: dict[str, Any]) -> None:
         """Property: Same config always produces the same config_hash."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run1 = recorder.begin_run(config=config, canonical_version="1.0")
-            run2 = recorder.begin_run(config=config, canonical_version="1.0")
+            factory = make_factory(db)
+            run1 = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
+            run2 = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
             assert run1.config_hash == run2.config_hash
 
     @given(config=simple_configs)
@@ -125,10 +127,10 @@ class TestRunLifecycleProperties:
     def test_complete_run_sets_status(self, config: dict[str, Any]) -> None:
         """Property: complete_run transitions status to the specified value."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(config=config, canonical_version="1.0")
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
 
-            completed = recorder.complete_run(run.run_id, RunStatus.COMPLETED)
+            completed = factory.run_lifecycle.complete_run(run.run_id, RunStatus.COMPLETED)
             assert completed.status == RunStatus.COMPLETED
 
     @given(config=simple_configs)
@@ -136,10 +138,10 @@ class TestRunLifecycleProperties:
     def test_complete_run_sets_completed_at(self, config: dict[str, Any]) -> None:
         """Property: complete_run sets completed_at timestamp."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(config=config, canonical_version="1.0")
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
 
-            completed = recorder.complete_run(run.run_id, RunStatus.COMPLETED)
+            completed = factory.run_lifecycle.complete_run(run.run_id, RunStatus.COMPLETED)
             assert completed.completed_at is not None
 
     @given(config=simple_configs)
@@ -147,10 +149,10 @@ class TestRunLifecycleProperties:
     def test_completed_at_after_started_at(self, config: dict[str, Any]) -> None:
         """Property: completed_at >= started_at (temporal ordering)."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(config=config, canonical_version="1.0")
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
 
-            completed = recorder.complete_run(run.run_id, RunStatus.COMPLETED)
+            completed = factory.run_lifecycle.complete_run(run.run_id, RunStatus.COMPLETED)
             assert completed.completed_at is not None
             assert completed.completed_at >= completed.started_at
 
@@ -159,26 +161,26 @@ class TestRunLifecycleProperties:
     def test_initial_status_is_running(self, config: dict[str, Any]) -> None:
         """Property: Newly created runs have RUNNING status."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(config=config, canonical_version="1.0")
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
             assert run.status == RunStatus.RUNNING
 
     def test_get_nonexistent_run_returns_none(self) -> None:
         """Property: get_run for nonexistent ID returns None, not crash."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            assert recorder.get_run("nonexistent-id") is None
+            factory = make_factory(db)
+            assert factory.run_lifecycle.get_run("nonexistent-id") is None
 
     @given(config=simple_configs)
     @settings(max_examples=30, deadline=None)
     def test_list_runs_includes_created(self, config: dict[str, Any]) -> None:
         """Property: list_runs includes all created runs."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run1 = recorder.begin_run(config=config, canonical_version="1.0")
-            run2 = recorder.begin_run(config=config, canonical_version="1.0")
+            factory = make_factory(db)
+            run1 = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
+            run2 = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
 
-            runs = recorder.list_runs()
+            runs = factory.run_lifecycle.list_runs()
             run_ids = {r.run_id for r in runs}
             assert run1.run_id in run_ids
             assert run2.run_id in run_ids
@@ -188,15 +190,15 @@ class TestRunLifecycleProperties:
     def test_list_runs_filters_by_status(self, config: dict[str, Any]) -> None:
         """Property: list_runs(status=X) returns only runs with that status."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            recorder.begin_run(config=config, canonical_version="1.0")
-            run2 = recorder.begin_run(config=config, canonical_version="1.0")
-            recorder.complete_run(run2.run_id, RunStatus.COMPLETED)
+            factory = make_factory(db)
+            factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
+            run2 = factory.run_lifecycle.begin_run(config=config, canonical_version="1.0")
+            factory.run_lifecycle.complete_run(run2.run_id, RunStatus.COMPLETED)
 
-            running = recorder.list_runs(status=RunStatus.RUNNING)
+            running = factory.run_lifecycle.list_runs(status=RunStatus.RUNNING)
             assert all(r.status == RunStatus.RUNNING for r in running)
 
-            completed = recorder.list_runs(status=RunStatus.COMPLETED)
+            completed = factory.run_lifecycle.list_runs(status=RunStatus.COMPLETED)
             assert all(r.status == RunStatus.COMPLETED for r in completed)
 
 
@@ -206,91 +208,144 @@ class TestRunLifecycleProperties:
 
 
 class TestTokenOutcomeContractProperties:
-    """Each RowOutcome requires specific fields — missing ones must raise ValueError."""
+    """Each terminal pair requires specific fields — missing ones must raise ValueError."""
 
-    def _setup(self) -> tuple[LandscapeDB, LandscapeRecorder, str, str]:
+    def _setup(self) -> tuple[LandscapeDB, RecorderFactory, str, str]:
         """Create a run with a source row and token for testing outcomes."""
         setup = make_recorder_with_run(canonical_version="1.0", source_plugin_name="test_source")
-        db, recorder, run_id, source_node_id = setup.db, setup.recorder, setup.run_id, setup.source_node_id
-        row = recorder.create_row(
+        db, factory, run_id, source_node_id = setup.db, setup.factory, setup.run_id, setup.source_node_id
+        row = factory.data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=0,
             data={"value": 1},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        return db, recorder, run_id, token.token_id
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        return db, factory, run_id, token.token_id
 
     def test_completed_requires_sink_name(self) -> None:
-        """Property: COMPLETED without sink_name raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="COMPLETED outcome requires sink_name"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.COMPLETED)
+        """Property: (SUCCESS, DEFAULT_FLOW) without sink_name raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(SUCCESS, DEFAULT_FLOW\) outcome requires sink_name"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+            )
         db.close()
 
     @given(sink=sink_names)
     @settings(max_examples=30, deadline=None)
     def test_completed_with_sink_name_succeeds(self, sink: str) -> None:
-        """Property: COMPLETED with valid sink_name succeeds."""
-        db, recorder, run_id, token_id = self._setup()
-        outcome_id = recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.COMPLETED, sink_name=sink)
+        """Property: (SUCCESS, DEFAULT_FLOW) with valid sink_name succeeds."""
+        db, factory, run_id, token_id = self._setup()
+        outcome_id = factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name=sink,
+        )
         assert outcome_id is not None
         db.close()
 
     def test_routed_requires_sink_name(self) -> None:
-        """Property: ROUTED without sink_name raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="ROUTED outcome requires sink_name"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.ROUTED)
+        """Property: (SUCCESS, GATE_ROUTED) without sink_name raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(SUCCESS, GATE_ROUTED\) outcome requires sink_name"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
+            )
         db.close()
 
     def test_forked_requires_fork_group_id(self) -> None:
-        """Property: FORKED without fork_group_id raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="FORKED outcome requires fork_group_id"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.FORKED)
+        """Property: (TRANSIENT, FORK_PARENT) without fork_group_id raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(TRANSIENT, FORK_PARENT\) outcome requires fork_group_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
+            )
         db.close()
 
     def test_failed_requires_error_hash(self) -> None:
-        """Property: FAILED without error_hash raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="FAILED outcome requires error_hash"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.FAILED)
+        """Property: (FAILURE, UNROUTED) without error_hash raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(FAILURE, UNROUTED\) outcome requires error_hash"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
         db.close()
 
     def test_quarantined_requires_error_hash(self) -> None:
-        """Property: QUARANTINED without error_hash raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="QUARANTINED outcome requires error_hash"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.QUARANTINED)
+        """Property: (FAILURE, QUARANTINED_AT_SOURCE) without error_hash raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(FAILURE, QUARANTINED_AT_SOURCE\) outcome requires error_hash"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
+            )
         db.close()
 
     def test_consumed_in_batch_requires_batch_id(self) -> None:
-        """Property: CONSUMED_IN_BATCH without batch_id raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="CONSUMED_IN_BATCH outcome requires batch_id"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.CONSUMED_IN_BATCH)
+        """Property: (TRANSIENT, BATCH_CONSUMED) without batch_id raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(TRANSIENT, BATCH_CONSUMED\) outcome requires batch_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.BATCH_CONSUMED,
+            )
         db.close()
 
     def test_coalesced_requires_join_group_id(self) -> None:
-        """Property: COALESCED without join_group_id raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="COALESCED outcome requires join_group_id"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.COALESCED)
+        """Property: (SUCCESS, COALESCED) without join_group_id raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(SUCCESS, COALESCED\) outcome requires join_group_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="default",
+            )
         db.close()
 
     def test_expanded_requires_expand_group_id(self) -> None:
-        """Property: EXPANDED without expand_group_id raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="EXPANDED outcome requires expand_group_id"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.EXPANDED)
+        """Property: (TRANSIENT, EXPAND_PARENT) without expand_group_id raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(TRANSIENT, EXPAND_PARENT\) outcome requires expand_group_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.EXPAND_PARENT,
+            )
         db.close()
 
     def test_buffered_requires_batch_id(self) -> None:
-        """Property: BUFFERED without batch_id raises ValueError."""
-        db, recorder, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="BUFFERED outcome requires batch_id"):
-            recorder.record_token_outcome(run_id=run_id, token_id=token_id, outcome=RowOutcome.BUFFERED)
+        """Property: (NULL, BUFFERED) without batch_id raises ValueError."""
+        db, factory, run_id, token_id = self._setup()
+        with pytest.raises(ValueError, match=r"\(NULL, BUFFERED\) outcome requires batch_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+            )
+        db.close()
+
+    def test_dropped_by_filter_requires_no_auxiliary_fields(self) -> None:
+        """Property: DROPPED_BY_FILTER is terminal with no extra required fields."""
+        db, factory, run_id, token_id = self._setup()
+        outcome_id = factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.FILTER_DROPPED,
+        )
+        assert outcome_id is not None
         db.close()
 
 
@@ -319,14 +374,14 @@ class TestSchemaContractRoundTripProperties:
         contract = SchemaContract(mode="FIXED", fields=(field,), locked=True)
 
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            recorder.update_run_contract(run.run_id, contract)
-            restored = recorder.get_run_contract(run.run_id)
+            factory.run_lifecycle.update_run_contract(run.run_id, contract)
+            restored = factory.run_lifecycle.get_run_contract(run.run_id)
 
             assert restored is not None
             assert restored.mode == "FIXED"
@@ -363,14 +418,14 @@ class TestSchemaContractRoundTripProperties:
         contract = SchemaContract(mode="FIXED", fields=tuple(fields_list), locked=True)
 
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            recorder.update_run_contract(run.run_id, contract)
-            restored = recorder.get_run_contract(run.run_id)
+            factory.run_lifecycle.update_run_contract(run.run_id, contract)
+            restored = factory.run_lifecycle.get_run_contract(run.run_id)
 
             assert restored is not None
             assert len(restored.fields) == n_fields
@@ -381,12 +436,12 @@ class TestSchemaContractRoundTripProperties:
     def test_no_contract_returns_none(self) -> None:
         """Property: get_run_contract returns None when no contract stored."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            assert recorder.get_run_contract(run.run_id) is None
+            assert factory.run_lifecycle.get_run_contract(run.run_id) is None
 
 
 # =============================================================================
@@ -402,12 +457,12 @@ class TestReferentialIntegrityProperties:
     def test_all_tokens_have_valid_rows(self, n_rows: int) -> None:
         """Property: Every token's row_id exists in the rows table."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -417,13 +472,13 @@ class TestReferentialIntegrityProperties:
             )
 
             for i in range(n_rows):
-                row = recorder.create_row(
+                row = factory.data_flow.create_row(
                     run_id=run.run_id,
                     source_node_id=source.node_id,
                     row_index=i,
                     data={"i": i},
                 )
-                recorder.create_token(row_id=row.row_id)
+                factory.data_flow.create_token(row_id=row.row_id)
 
             # Verify no orphan tokens
             with db.connection() as conn:
@@ -441,12 +496,12 @@ class TestReferentialIntegrityProperties:
     def test_all_rows_have_valid_runs(self, n_rows: int) -> None:
         """Property: Every row's run_id exists in the runs table."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -456,7 +511,7 @@ class TestReferentialIntegrityProperties:
             )
 
             for i in range(n_rows):
-                recorder.create_row(
+                factory.data_flow.create_row(
                     run_id=run.run_id,
                     source_node_id=source.node_id,
                     row_index=i,
@@ -479,12 +534,12 @@ class TestReferentialIntegrityProperties:
     def test_fork_children_share_row_id(self, branch_count: int) -> None:
         """Property: All fork children reference the same row_id as parent."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -493,20 +548,19 @@ class TestReferentialIntegrityProperties:
                 schema_config=_make_schema_config(),
             )
 
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
             )
-            parent = recorder.create_token(row_id=row.row_id)
+            parent = factory.data_flow.create_token(row_id=row.row_id)
 
             branches = [f"b_{i}" for i in range(branch_count)]
-            children, _fork_group_id = recorder.fork_token(
-                parent_token_id=parent.token_id,
+            children, _fork_group_id = factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 branches=branches,
-                run_id=run.run_id,
             )
 
             assert len(children) == branch_count
@@ -516,12 +570,12 @@ class TestReferentialIntegrityProperties:
     def test_fork_with_empty_branches_raises(self) -> None:
         """Property: fork_token rejects empty branch list."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -529,20 +583,19 @@ class TestReferentialIntegrityProperties:
                 config={},
                 schema_config=_make_schema_config(),
             )
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
             )
-            parent = recorder.create_token(row_id=row.row_id)
+            parent = factory.data_flow.create_token(row_id=row.row_id)
 
             with pytest.raises(ValueError, match="at least one branch"):
-                recorder.fork_token(
-                    parent_token_id=parent.token_id,
+                factory.data_flow.fork_token(
+                    parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
                     row_id=row.row_id,
                     branches=[],
-                    run_id=run.run_id,
                 )
 
     @given(count=st.integers(min_value=1, max_value=5))
@@ -550,12 +603,12 @@ class TestReferentialIntegrityProperties:
     def test_expand_creates_correct_children(self, count: int) -> None:
         """Property: expand_token creates exactly N children."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -563,19 +616,18 @@ class TestReferentialIntegrityProperties:
                 config={},
                 schema_config=_make_schema_config(),
             )
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
             )
-            parent = recorder.create_token(row_id=row.row_id)
+            parent = factory.data_flow.create_token(row_id=row.row_id)
 
-            children, expand_group_id = recorder.expand_token(
-                parent_token_id=parent.token_id,
+            children, expand_group_id = factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 count=count,
-                run_id=run.run_id,
             )
 
             assert len(children) == count
@@ -605,30 +657,30 @@ class TestFieldResolutionProperties:
         mapping = dict(zip(originals, finals, strict=False))
 
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            recorder.record_source_field_resolution(
+            factory.run_lifecycle.record_source_field_resolution(
                 run_id=run.run_id,
                 resolution_mapping=mapping,
                 normalization_version="v1",
             )
 
-            retrieved = recorder.get_source_field_resolution(run.run_id)
+            retrieved = factory.run_lifecycle.get_source_field_resolution(run.run_id)
             assert retrieved == mapping
 
     def test_no_resolution_returns_none(self) -> None:
         """Property: get_source_field_resolution returns None when not recorded."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            assert recorder.get_source_field_resolution(run.run_id) is None
+            assert factory.run_lifecycle.get_source_field_resolution(run.run_id) is None
 
 
 # =============================================================================
@@ -644,12 +696,12 @@ class TestRowHashProperties:
     def test_same_data_same_hash(self, data: dict[str, Any]) -> None:
         """Property: Identical data produces identical source_data_hash."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -658,13 +710,13 @@ class TestRowHashProperties:
                 schema_config=_make_schema_config(),
             )
 
-            row1 = recorder.create_row(
+            row1 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=0,
                 data=data,
             )
-            row2 = recorder.create_row(
+            row2 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=1,
@@ -681,12 +733,12 @@ class TestRowHashProperties:
     def test_different_data_different_hash(self, data1: dict[str, Any], data2: dict[str, Any]) -> None:
         """Property: Different data produces different source_data_hash."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
-            run = recorder.begin_run(
+            factory = make_factory(db)
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
-            source = recorder.register_node(
+            source = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="src",
                 node_type=NodeType.SOURCE,
@@ -695,13 +747,13 @@ class TestRowHashProperties:
                 schema_config=_make_schema_config(),
             )
 
-            row1 = recorder.create_row(
+            row1 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=0,
                 data=data1,
             )
-            row2 = recorder.create_row(
+            row2 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=1,

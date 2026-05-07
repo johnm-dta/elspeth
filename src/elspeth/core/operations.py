@@ -10,7 +10,6 @@ This module provides the track_operation context manager which handles:
 - Exception capture with proper status
 - Guaranteed completion (even on DB failure)
 - Context cleanup (clears operation_id after completion)
-- BatchPendingError handling (marks as 'pending', not 'failed')
 """
 
 from __future__ import annotations
@@ -21,14 +20,26 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
-from elspeth.contracts import BatchPendingError
+import elspeth.contracts.errors as contract_errors
 
 if TYPE_CHECKING:
     from elspeth.contracts import Operation
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.core.landscape.execution_repository import ExecutionRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _render_exception(exc: BaseException) -> str:
+    """Render an exception to a non-empty audit message."""
+    # Preserve KeyError's quoted rendering, but otherwise prefer
+    # BaseException.__str__ so a broken custom __str__ override cannot
+    # derail audit completion.
+    if type(exc) is KeyError:
+        message = str(exc)
+    else:
+        message = BaseException.__str__(exc)
+    return message if message else type(exc).__name__
 
 
 class OperationHandle:
@@ -60,7 +71,7 @@ class OperationHandle:
 
 @contextmanager
 def track_operation(
-    recorder: LandscapeRecorder,
+    recorder: ExecutionRepository,
     run_id: str,
     node_id: str,
     operation_type: Literal["source_load", "sink_write"],
@@ -106,7 +117,7 @@ def track_operation(
             # No output_data for sources (row count tracked elsewhere)
 
     Args:
-        recorder: LandscapeRecorder for audit recording
+        recorder: ExecutionRepository for audit recording
         run_id: Run ID this operation belongs to
         node_id: Source or sink node performing the operation
         operation_type: Type of operation ('source_load' or 'sink_write')
@@ -130,21 +141,15 @@ def track_operation(
     ctx.operation_id = operation.operation_id
 
     start_time = time.perf_counter()
-    status: Literal["completed", "failed", "pending"] = "completed"
+    status: Literal["completed", "failed"] = "completed"
     error_msg: str | None = None
     original_exception: BaseException | None = None
 
     try:
         yield handle
-    except BatchPendingError:
-        # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-        # A batch transform needs to wait for async results.
-        # Mark as "pending" to distinguish from actual failures.
-        status = "pending"
-        raise
     except Exception as e:
         status = "failed"
-        error_msg = str(e)
+        error_msg = _render_exception(e)
         original_exception = e
         raise
     except BaseException as e:
@@ -153,7 +158,7 @@ def track_operation(
         # Without this, interrupted operations would be recorded as "completed".
         # Must come AFTER except Exception (more specific handlers first).
         status = "failed"
-        error_msg = str(e)
+        error_msg = _render_exception(e)
         original_exception = e
         raise
     finally:
@@ -167,9 +172,6 @@ def track_operation(
                 duration_ms=duration_ms,
             )
         except Exception as db_error:
-            from elspeth.contracts import FrameworkBugError
-            from elspeth.contracts.errors import AuditIntegrityError
-
             # Audit integrity: if we can't record the operation, the run must fail.
             # A successful operation with missing audit record violates Tier-1 trust.
             logger.critical(
@@ -182,11 +184,11 @@ def track_operation(
                     "original_error": error_msg,
                 },
             )
-            # FrameworkBugError and AuditIntegrityError indicate Tier 1 violations
-            # (corruption, bugs in our code). These must ALWAYS propagate regardless
-            # of whether there was an original exception — audit corruption is
-            # categorically worse than any operation-level error.
-            if isinstance(db_error, (FrameworkBugError, AuditIntegrityError)):
+            # Tier 1 errors (corruption, framework bugs, invariant violations)
+            # must ALWAYS propagate regardless of whether there was an original
+            # exception — audit corruption is categorically worse than any
+            # operation-level error.
+            if isinstance(db_error, contract_errors.TIER_1_ERRORS):
                 raise db_error from original_exception
             # If there was an original exception, let it propagate (DB error is logged).
             # If the operation succeeded but audit failed, we MUST raise the DB error.

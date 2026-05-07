@@ -22,9 +22,9 @@ from elspeth.contracts import (
     PluginSchema,
     ResumeCheck,
     ResumePoint,
-    RowOutcome,
     RunStatus,
     SchemaContract,
+    TerminalPath,
 )
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
@@ -33,7 +33,7 @@ from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidat
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
 from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
     rows_table,
     runs_table,
@@ -47,6 +47,8 @@ if TYPE_CHECKING:
 # SQLite's SQLITE_MAX_VARIABLE_NUMBER defaults to 999. We chunk IN clauses
 # at 500 to leave headroom for other query parameters in the same statement.
 _METADATA_CHUNK_SIZE = 500
+_DELEGATION_PATHS = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
+_RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
 
 __all__ = [
     "RecoveryManager",
@@ -109,14 +111,19 @@ class RecoveryManager:
         if run is None:
             return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
 
-        if run.status == RunStatus.COMPLETED:
+        try:
+            run_status = RunStatus(run.status)
+        except ValueError as exc:
+            raise CheckpointCorruptionError(f"Run {run_id} has invalid status {run.status!r}; audit trail is corrupt") from exc
+
+        if run_status == RunStatus.COMPLETED:
             return ResumeCheck(can_resume=False, reason="Run already completed successfully")
 
-        if run.status == RunStatus.RUNNING:
+        if run_status == RunStatus.RUNNING:
             return ResumeCheck(can_resume=False, reason="Run is still in progress")
 
-        # Any other status (FAILED, INTERRUPTED) is eligible for resume
-        # if a valid checkpoint exists.
+        if run_status not in _RESUMABLE_RUN_STATUSES:
+            return ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")
 
         try:
             checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
@@ -224,8 +231,10 @@ class RecoveryManager:
             Empty list if run cannot be resumed or all rows were processed.
 
         Raises:
-            ValueError: If row data cannot be retrieved (payload purged or missing),
-                or if schema validation fails (indicates data corruption or schema mismatch)
+            AuditIntegrityError: If row not found in database, payload is corrupt,
+                or decoded payload is not a dict (Tier 1 violations).
+            ValueError: If payload has been purged or schema validation fails
+                (operational errors that prevent resume but aren't data corruption)
         """
         row_ids = self.get_unprocessed_rows(run_id)
         if not row_ids:
@@ -255,14 +264,32 @@ class RecoveryManager:
             row_index, source_data_ref = row_metadata[row_id]
 
             if source_data_ref is None:
-                raise AuditIntegrityError(f"Row {row_id} has no source_data_ref — cannot resume without payload (Tier 1 violation)")
+                raise ValueError(
+                    f"Row {row_id} has no source_data_ref — row was recorded without "
+                    f"payload storage, so recovery cannot reconstruct its data. "
+                    f"Re-run the pipeline from scratch instead of resuming."
+                )
 
             # Retrieve from payload store
             try:
                 payload_bytes = payload_store.retrieve(source_data_ref)
-                degraded_data = json.loads(payload_bytes.decode("utf-8"))
             except PayloadNotFoundError as exc:
                 raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
+
+            try:
+                degraded_data = json.loads(payload_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise AuditIntegrityError(
+                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                    f"cannot decode persisted row data (Tier 1 violation). "
+                    f"Error: {exc}"
+                ) from exc
+
+            if not isinstance(degraded_data, dict):
+                raise AuditIntegrityError(
+                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                    f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
+                )
 
             # TYPE FIDELITY RESTORATION:
             # Re-validate through source schema to restore types.
@@ -292,7 +319,7 @@ class RecoveryManager:
         """Get row IDs that were not processed before the run failed.
 
         Uses token outcomes to determine which rows need processing:
-        - Rows with terminal outcomes (COMPLETED, ROUTED, QUARANTINED, FAILED) are done
+        - Rows with non-delegation terminal outcomes are done
         - Rows whose tokens lack terminal outcomes need reprocessing
         - Rows already buffered in checkpoint aggregation state are excluded
           (they will be restored from checkpoint, not reprocessed)
@@ -326,16 +353,13 @@ class RecoveryManager:
             # "Leaf" tokens = tokens that are NOT delegation markers.
             #
             # Delegation markers (excluded from completion check):
-            # - FORKED: Fork parent, children carry completion status
-            # - EXPANDED: Deaggregation parent, expanded children carry status
+            # - FORK_PARENT: Fork parent, children carry completion status
+            # - EXPAND_PARENT: Deaggregation parent, expanded children carry status
             #
             # Terminal outcomes (indicate row processing is done):
-            # - COMPLETED: Reached output sink successfully
-            # - ROUTED: Sent to named sink by gate
-            # - QUARANTINED: Failed validation, stored for investigation
-            # - FAILED: Processing failed, not recoverable
-            # - CONSUMED_IN_BATCH: Absorbed into aggregation (batch recovery handles batch)
-            # - COALESCED: Merged in join (merged token carries forward)
+            # - completed=1 marks rows with an outcome decision.
+            # - FORK_PARENT/EXPAND_PARENT paths are excluded because those
+            #   parent outcomes delegate completion to child tokens.
             #
             # A row is "incomplete" (needs reprocessing) if ANY of:
             # 1. No tokens at all (never started processing)
@@ -347,38 +371,20 @@ class RecoveryManager:
             # Failed: If child A completed but child B crashed, row marked done.
             # Fix: "ALL non-delegation tokens must have terminal outcomes"
 
-            # Subquery: Tokens that are delegation markers (FORKED or EXPANDED)
+            # Subquery: Tokens that are delegation markers (FORK_PARENT or EXPAND_PARENT)
             # These delegate completion to their children, so exclude from completion check
             delegation_tokens = (
                 select(token_outcomes_table.c.token_id)
                 .where(token_outcomes_table.c.run_id == run_id)
-                .where(
-                    token_outcomes_table.c.outcome.in_(
-                        [
-                            RowOutcome.FORKED,
-                            RowOutcome.EXPANDED,
-                        ]
-                    )
-                )
+                .where(token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
             ).scalar_subquery()
-
-            # Terminal outcomes that indicate row processing is complete
-            # (excludes FORKED and EXPANDED which are delegation markers)
-            terminal_outcome_values = [
-                RowOutcome.COMPLETED,
-                RowOutcome.ROUTED,
-                RowOutcome.QUARANTINED,
-                RowOutcome.FAILED,
-                RowOutcome.CONSUMED_IN_BATCH,
-                RowOutcome.COALESCED,
-            ]
 
             # Subquery: Tokens with terminal outcomes
             terminal_tokens = (
                 select(token_outcomes_table.c.token_id)
                 .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
-                .where(token_outcomes_table.c.outcome.in_(terminal_outcome_values))
+                .where(token_outcomes_table.c.completed == 1)
+                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
             ).scalar_subquery()
 
             # Subquery: Rows that have at least one terminal outcome
@@ -392,8 +398,8 @@ class RecoveryManager:
                     )
                 )
                 .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
-                .where(token_outcomes_table.c.outcome.in_(terminal_outcome_values))
+                .where(token_outcomes_table.c.completed == 1)
+                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
             ).scalar_subquery()
 
             # Main query: Find incomplete rows
@@ -511,10 +517,10 @@ class RecoveryManager:
                 Per CLAUDE.md Tier-1 trust model: "Bad data in the audit trail = crash immediately"
                 Missing contract is treated as corruption - NO backward compatibility.
         """
-        recorder = LandscapeRecorder(self._db)
+        factory = RecorderFactory(self._db)
 
         try:
-            contract = recorder.get_run_contract(run_id)
+            contract = factory.run_lifecycle.get_run_contract(run_id)
         except AuditIntegrityError as e:
             # get_run_contract raises AuditIntegrityError for hash verification failures
             # and run-not-found. Convert to CheckpointCorruptionError for checkpoint-specific context.

@@ -224,6 +224,7 @@ class TestWebScrapeTelemetryWiring:
             port=443,
             path="/page",
             scheme="https",
+            bare_hostname="example.com",
         )
         mock_response = httpx.Response(
             200,

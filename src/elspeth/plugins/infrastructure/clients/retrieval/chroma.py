@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import re
 import time
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import chromadb
 from pydantic import BaseModel, field_validator, model_validator
@@ -32,7 +32,7 @@ from elspeth.plugins.infrastructure.clients.retrieval.connection import ChromaCo
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 
 if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.core.landscape.execution_repository import ExecutionRepository
 
 
 class ChromaSearchProviderConfig(BaseModel):
@@ -61,13 +61,6 @@ class ChromaSearchProviderConfig(BaseModel):
                 f"collection must contain only alphanumeric characters, hyphens, and underscores "
                 f"(and start/end with alphanumeric), got {v!r}."
             )
-        return v
-
-    @field_validator("persist_directory")
-    @classmethod
-    def validate_persist_directory(cls, v: str | None) -> str | None:
-        if v is not None and ".." in v.split("/"):
-            raise ValueError(f"persist_directory must not contain '..' path components, got {v!r}")
         return v
 
     @model_validator(mode="after")
@@ -119,13 +112,15 @@ class ChromaSearchProvider:
         self,
         config: ChromaSearchProviderConfig,
         *,
-        recorder: LandscapeRecorder | None = None,
-        run_id: str | None = None,
+        execution: ExecutionRepository,
+        run_id: str,
     ) -> None:
         self._config = config
         self._distance_function = config.distance_function
-        self._recorder = recorder
+        self._execution = execution
         self._run_id = run_id
+        self.last_skipped_count: int = 0
+        self.last_skipped_reasons: list[dict[str, Any]] = []
 
         if config.mode == "ephemeral":
             self._client = chromadb.Client()
@@ -142,31 +137,41 @@ class ChromaSearchProvider:
                 ssl=config.ssl,
             )
 
+        # Retrieval providers must NOT create collections — that's a sink/indexing
+        # concern. Using get_collection() ensures a typo in the collection name
+        # fails fast at startup instead of silently creating an empty collection.
         try:
-            self._collection = self._client.get_or_create_collection(
+            self._collection = self._client.get_collection(
                 name=config.collection,
-                metadata={"hnsw:space": config.distance_function},
             )
-            # Chroma collection metadata is Tier 3 (external/persisted data) — use .get()
-            # to safely detect mismatch rather than crashing on missing key.
-            collection_metadata = self._collection.metadata or {}
-            actual_space = collection_metadata.get("hnsw:space")
-            if actual_space is not None and actual_space != config.distance_function:
-                raise RetrievalError(
-                    f"Chroma collection {config.collection!r} exists with "
-                    f"distance_function={actual_space!r}, but config specifies "
-                    f"{config.distance_function!r}. Score normalization would use "
-                    f"the wrong formula. Either change the config to match the "
-                    f"existing collection, or use a different collection name.",
-                    retryable=False,
-                )
-        except RetrievalError:
-            raise
-        except Exception as exc:
+        except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
             raise RetrievalError(
-                f"Failed to access Chroma collection {config.collection!r}: {exc}",
+                f"Chroma collection {config.collection!r} does not exist or is "
+                f"unreachable. Retrieval requires a pre-populated collection — "
+                f"check the collection name and ensure the corpus has been indexed. "
+                f"Error: {exc}",
                 retryable=False,
             ) from exc
+
+        # Validate distance function matches what the collection was created with.
+        collection_metadata = self._collection.metadata or {}
+        if "hnsw:space" not in collection_metadata:
+            raise RetrievalError(
+                f"Chroma collection {config.collection!r} has no 'hnsw:space' "
+                f"in metadata. Score normalization cannot proceed without a "
+                f"known distance function.",
+                retryable=False,
+            )
+        actual_space = collection_metadata["hnsw:space"]
+        if actual_space != config.distance_function:
+            raise RetrievalError(
+                f"Chroma collection {config.collection!r} exists with "
+                f"distance_function={actual_space!r}, but config specifies "
+                f"{config.distance_function!r}. Score normalization would use "
+                f"the wrong formula. Either change the config to match the "
+                f"existing collection, or use a different collection name.",
+                retryable=False,
+            )
 
     def search(
         self,
@@ -183,18 +188,79 @@ class ChromaSearchProvider:
         effective_top_k = min(top_k, collection_count)
 
         start_time = time.monotonic()
+        request_payload = RawCallPayload({"query": query, "top_k": effective_top_k, "collection": self._config.collection})
         try:
             results = self._collection.query(
                 query_texts=[query],
                 n_results=effective_top_k,
                 include=["documents", "distances", "metadatas"],
             )
-        except Exception as exc:
+        except (
+            chromadb.errors.InvalidDimensionException,
+            chromadb.errors.InvalidArgumentError,
+            chromadb.errors.NotFoundError,
+            chromadb.errors.AuthorizationError,
+        ) as exc:
+            self._record_error(state_id, start_time, request_payload, exc, retryable=False)
+            raise RetrievalError(
+                f"Chroma query failed (permanent): {exc}",
+                retryable=False,
+            ) from exc
+        except chromadb.errors.ChromaError as exc:
+            self._record_error(state_id, start_time, request_payload, exc, retryable=True)
             raise RetrievalError(f"Chroma query failed: {exc}", retryable=True) from exc
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            # OS-level failures that bypass the ChromaDB SDK's own error wrapping
+            self._record_error(state_id, start_time, request_payload, exc, retryable=True)
+            raise RetrievalError(f"Chroma connection failed: {exc}", retryable=True) from exc
         elapsed_ms = (time.monotonic() - start_time) * 1000
 
-        # Tier 3 boundary: ChromaDB SDK response structure is external data.
-        # Wrap access to guard against malformed/unexpected SDK responses.
+        # Post-query processing: parse response, validate distances, build chunks.
+        # The external call already happened — any failure here must still produce
+        # an audit record. Without this try/except, response parsing errors,
+        # distance validation crashes, and normalization failures would leave
+        # no trace in the Landscape (fix: elspeth-9454d584d2).
+        try:
+            chunks, skipped = self._parse_and_build_chunks(results, min_score)
+        except RetrievalError as exc:
+            self._record_error(state_id, start_time, request_payload, exc, retryable=exc.retryable)
+            raise
+
+        chunks.sort(key=lambda c: c.score, reverse=True)
+        self.last_skipped_count = skipped
+
+        call_index = self._execution.allocate_call_index(state_id)
+        self._execution.record_call(
+            state_id=state_id,
+            call_index=call_index,
+            call_type=CallType.VECTOR,
+            status=CallStatus.SUCCESS,
+            request_data=request_payload,
+            response_data=RawCallPayload(
+                {"result_count": len(chunks), "skipped_count": skipped, "top_score": chunks[0].score if chunks else None}
+            ),
+            latency_ms=round(elapsed_ms),
+        )
+
+        return chunks
+
+    def _parse_and_build_chunks(
+        self,
+        results: Any,
+        min_score: float,
+    ) -> tuple[list[RetrievalChunk], int]:
+        """Parse ChromaDB query results and build RetrievalChunk list.
+
+        Tier 3 boundary: the SDK response structure is external data.
+        All access is guarded against malformed/unexpected responses.
+
+        Returns:
+            Tuple of (chunks, skipped_count)
+
+        Raises:
+            RetrievalError: On malformed response structure, corrupt distances,
+                or non-finite distance values.
+        """
         try:
             raw_documents = results["documents"]
             raw_distances = results["distances"]
@@ -218,7 +284,7 @@ class ChromaSearchProvider:
         skipped = 0
         for doc, distance, metadata, doc_id in zip(documents, distances, metadatas, ids, strict=True):
             if not isinstance(doc, str):  # Tier 3: SDK may return non-str from corrupt index
-                skipped += 1  # type: ignore[unreachable]
+                skipped += 1
                 continue
 
             # ChromaDB is our infrastructure, not an external API — corrupt
@@ -247,23 +313,7 @@ class ChromaSearchProvider:
                 )
             )
 
-        chunks.sort(key=lambda c: c.score, reverse=True)
-
-        if self._recorder is not None:
-            call_index = self._recorder.allocate_call_index(state_id)
-            self._recorder.record_call(
-                state_id=state_id,
-                call_index=call_index,
-                call_type=CallType.VECTOR,
-                status=CallStatus.SUCCESS,
-                request_data=RawCallPayload({"query": query, "top_k": effective_top_k, "collection": self._config.collection}),
-                response_data=RawCallPayload(
-                    {"result_count": len(chunks), "skipped_count": skipped, "top_score": chunks[0].score if chunks else None}
-                ),
-                latency_ms=round(elapsed_ms),
-            )
-
-        return chunks
+        return chunks, skipped
 
     def _normalize_distance(self, distance: float) -> float:
         if not math.isfinite(distance):
@@ -278,31 +328,67 @@ class ChromaSearchProvider:
         else:  # ip
             return max(0.0, min(1.0, 1.0 - distance))
 
+    def _record_error(
+        self,
+        state_id: str,
+        start_time: float,
+        request_data: RawCallPayload,
+        exc: Exception,
+        *,
+        retryable: bool,
+    ) -> None:
+        """Record a failed search call in the audit trail.
+
+        Called from except blocks before re-raising. Uses best-effort
+        recording — if the audit recording itself fails, the original search
+        error takes priority (we don't mask it with an AuditIntegrityError
+        here because the caller is about to raise a RetrievalError).
+        """
+        elapsed_ms = (time.monotonic() - start_time) * 1000
+        call_index = self._execution.allocate_call_index(state_id)
+        self._execution.record_call(
+            state_id=state_id,
+            call_index=call_index,
+            call_type=CallType.VECTOR,
+            status=CallStatus.ERROR,
+            request_data=request_data,
+            error=RawCallPayload(
+                {
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "retryable": retryable,
+                }
+            ),
+            latency_ms=round(elapsed_ms),
+        )
+
     def check_readiness(self) -> CollectionReadinessResult:
-        """Check that the ChromaDB collection exists and has documents.
+        """Check that the ChromaDB collection is reachable and has documents.
 
         Called during on_start() AFTER provider construction. self._collection
-        is always set by __init__ (which calls get_or_create_collection).
-        If __init__ fails, the provider doesn't exist and this method is
-        never called.
+        is always set by __init__ (which calls get_collection — fails fast
+        if collection doesn't exist). If __init__ fails, the provider doesn't
+        exist and this method is never called.
         """
         collection_name = self._config.collection
 
         try:
             count = self._collection.count()
+            if count > 0:
+                message = f"Collection '{collection_name}' has {count} documents"
+            else:
+                message = f"Collection '{collection_name}' is empty"
             return CollectionReadinessResult(
                 collection=collection_name,
                 reachable=True,
                 count=count,
-                message=(
-                    f"Collection '{collection_name}' has {count} documents" if count > 0 else f"Collection '{collection_name}' is empty"
-                ),
+                message=message,
             )
         except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
             return CollectionReadinessResult(
                 collection=collection_name,
                 reachable=False,
-                count=0,
+                count=None,
                 message=f"Collection '{collection_name}' unreachable: {type(exc).__name__}: {exc}",
             )
 

@@ -16,7 +16,7 @@ from tests.fixtures.base_classes import (
     as_source,
     as_transform,
 )
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, FailingSink, ListSource, PassTransform
 
@@ -210,8 +210,8 @@ class TestOrchestratorCheckpointing:
         with pytest.raises(RuntimeError, match="Bad sink failure"):
             orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        recorder = make_recorder(landscape_db)
-        runs = recorder.list_runs()
+        factory = make_factory(landscape_db)
+        runs = factory.run_lifecycle.list_runs()
         assert len(runs) >= 1
         run_id = sorted(runs, key=lambda r: r.started_at, reverse=True)[0].run_id
 

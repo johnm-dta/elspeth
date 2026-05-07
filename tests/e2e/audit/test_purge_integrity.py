@@ -13,8 +13,8 @@ from typing import Any
 
 from elspeth.contracts import RunStatus
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.core.landscape.row_data import RowDataState
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.retention.purge import PurgeManager
@@ -78,8 +78,8 @@ class TestPurgeIntegrity:
         source_data = [{"id": f"row_{i}", "value": i * 10} for i in range(5)]
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, source_data)
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 5
 
         # Capture hashes before purge
@@ -91,7 +91,7 @@ class TestPurgeIntegrity:
         _purge_all(db, payload_store)
 
         # Re-query rows and verify hashes are preserved
-        rows_after = recorder.get_rows(run_id)
+        rows_after = factory.query.get_rows(run_id)
         for row in rows_after:
             assert row.source_data_hash == hashes_before[row.row_id], f"Hash for {row.row_id} changed after purge"
 
@@ -102,13 +102,13 @@ class TestPurgeIntegrity:
         source_data = [{"id": f"row_{i}", "value": i} for i in range(3)]
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, source_data)
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 3
 
         # Verify data is available before purge
         for row in rows:
-            result = recorder.get_row_data(row.row_id)
+            result = factory.query.get_row_data(row.row_id)
             assert result.state == RowDataState.AVAILABLE
 
         # Purge all payloads
@@ -116,7 +116,7 @@ class TestPurgeIntegrity:
 
         # Verify data is now marked as purged
         for row in rows:
-            result = recorder.get_row_data(row.row_id)
+            result = factory.query.get_row_data(row.row_id)
             assert result.state == RowDataState.PURGED, f"Row {row.row_id}: expected PURGED, got {result.state}"
 
         db.close()
@@ -128,13 +128,13 @@ class TestPurgeIntegrity:
         source_data = [{"id": "trace_me", "value": 42}]
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, source_data)
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 1
         row = rows[0]
 
         # Verify explain works before purge with payload
-        lineage_before = explain(recorder, run_id=run_id, row_id=row.row_id)
+        lineage_before = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
         assert lineage_before is not None
         assert lineage_before.source_row.payload_available is True
 
@@ -142,7 +142,7 @@ class TestPurgeIntegrity:
         _purge_all(db, payload_store)
 
         # Verify explain still works after purge
-        lineage_after = explain(recorder, run_id=run_id, row_id=row.row_id)
+        lineage_after = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
         assert lineage_after is not None, "explain() must work after purge"
         assert lineage_after.source_row is not None
         assert lineage_after.source_row.payload_available is False
@@ -162,8 +162,8 @@ class TestPurgeIntegrity:
         source_data = [{"id": f"row_{i}", "value": i * 100} for i in range(5)]
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, source_data)
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 5
 
         # Purge only the first 2 rows' payload refs
@@ -178,12 +178,12 @@ class TestPurgeIntegrity:
 
         # Verify first 2 rows are purged
         for row in rows[:2]:
-            result = recorder.get_row_data(row.row_id)
+            result = factory.query.get_row_data(row.row_id)
             assert result.state == RowDataState.PURGED, f"Row {row.row_id} should be PURGED"
 
         # Verify last 3 rows still have payload available
         for row in rows[2:]:
-            result = recorder.get_row_data(row.row_id)
+            result = factory.query.get_row_data(row.row_id)
             assert result.state == RowDataState.AVAILABLE, f"Row {row.row_id} should still be AVAILABLE, got {result.state}"
 
         db.close()

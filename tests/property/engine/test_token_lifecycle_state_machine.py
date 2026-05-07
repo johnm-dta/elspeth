@@ -40,11 +40,13 @@ from elspeth.contracts import (
     Determinism,
     NodeStateStatus,
     NodeType,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
 )
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape import LandscapeDB
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.strategies.ids import multiple_branches
 from tests.strategies.json import row_data
 
@@ -167,18 +169,18 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__()
 
-        # Database and recorder
+        # Database and factory
         self.db = make_landscape_db()
-        self.recorder = make_recorder(self.db)
+        self.factory = make_factory(self.db)
 
         # Begin a run
-        self.run = self.recorder.begin_run(
+        self.run = self.factory.run_lifecycle.begin_run(
             config={"source": {"plugin": "test"}, "sinks": {"default": {"plugin": "test"}}},
             canonical_version="1.0",
         )
 
         # Register nodes
-        self.source_node = self.recorder.register_node(
+        self.source_node = self.factory.data_flow.register_node(
             run_id=self.run.run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -187,7 +189,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             schema_config=create_dynamic_schema(),
         )
 
-        self.transform_node = self.recorder.register_node(
+        self.transform_node = self.factory.data_flow.register_node(
             run_id=self.run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -197,7 +199,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             schema_config=create_dynamic_schema(),
         )
 
-        self.sink_node = self.recorder.register_node(
+        self.sink_node = self.factory.data_flow.register_node(
             run_id=self.run.run_id,
             plugin_name="test_sink",
             node_type=NodeType.SINK,
@@ -225,7 +227,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
     def create_token(self, data: dict[str, Any]) -> str:
         """Create a new token from a source row."""
         # Create row in database
-        row = self.recorder.create_row(
+        row = self.factory.data_flow.create_row(
             run_id=self.run.run_id,
             source_node_id=self.source_node.node_id,
             row_index=self.row_index,
@@ -234,7 +236,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         self.row_index += 1
 
         # Create token
-        token = self.recorder.create_token(row_id=row.row_id)
+        token = self.factory.data_flow.create_token(row_id=row.row_id)
 
         # Update model
         self.model_tokens[token.token_id] = ModelToken(
@@ -265,7 +267,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
 
         # Begin and complete node state
         self.step_counter += 1
-        state = self.recorder.begin_node_state(
+        state = self.factory.execution.begin_node_state(
             token_id=token_id,
             node_id=self.transform_node.node_id,
             run_id=self.run.run_id,
@@ -273,7 +275,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             input_data=data,
         )
 
-        self.recorder.complete_node_state(
+        self.factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data=data,
@@ -303,11 +305,10 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         self.step_counter += 1
 
         # Fork in database (this also records FORKED outcome for parent)
-        children, fork_group_id = self.recorder.fork_token(
-            parent_token_id=token_id,
+        children, fork_group_id = self.factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token_id, run_id=self.run.run_id),
             row_id=model.row_id,
             branches=branches,
-            run_id=self.run.run_id,
             step_in_pipeline=self.step_counter,
         )
 
@@ -376,18 +377,19 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         self.step_counter += 1
 
         # Coalesce in database
-        merged = self.recorder.coalesce_tokens(
-            parent_token_ids=sibling_ids,
+        merged = self.factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=sid, run_id=self.run.run_id) for sid in sibling_ids],
             row_id=model.row_id,
             step_in_pipeline=self.step_counter,
         )
 
         # Record COALESCED outcome for each sibling (requires join_group_id per contract)
         for sib_id in sibling_ids:
-            self.recorder.record_token_outcome(
-                run_id=self.run.run_id,
-                token_id=sib_id,
-                outcome=RowOutcome.COALESCED,
+            self.factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=sib_id, run_id=self.run.run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="default",
                 join_group_id=merged.join_group_id,
             )
             self.model_tokens[sib_id].state = TokenState.COALESCED
@@ -416,10 +418,10 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             return
 
         # Record outcome in database
-        self.recorder.record_token_outcome(
-            run_id=self.run.run_id,
-            token_id=token_id,
-            outcome=RowOutcome.COMPLETED,
+        self.factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=self.run.run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="default",
         )
 
@@ -436,10 +438,10 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             return
 
         # Record outcome in database
-        self.recorder.record_token_outcome(
-            run_id=self.run.run_id,
-            token_id=token_id,
-            outcome=RowOutcome.QUARANTINED,
+        self.factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=self.run.run_id),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
             error_hash="test_error_hash",
         )
 
@@ -514,31 +516,33 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             for token_id, model in self.model_tokens.items():
                 if model.state in {TokenState.COMPLETED, TokenState.QUARANTINED}:
                     result = conn.execute(
-                        text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                        text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                         {"token_id": token_id},
                     ).fetchone()
 
                     assert result is not None, f"Token {token_id} in state {model.state} has no outcome"
 
                 elif model.state == TokenState.FORKED:
-                    # FORKED tokens have outcome recorded by recorder.fork_token()
+                    # FORKED tokens have outcome recorded by factory.data_flow.fork_token()
                     result = conn.execute(
-                        text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                        text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                         {"token_id": token_id},
                     ).fetchone()
 
                     assert result is not None, f"Forked parent {token_id} has no FORKED outcome"
-                    assert result[0] == RowOutcome.FORKED, f"Wrong outcome for forked token: {result[0]}"
+                    assert result[0] == TerminalOutcome.TRANSIENT.value
+                    assert result[1] == TerminalPath.FORK_PARENT.value, f"Wrong path for forked token: {result[1]}"
 
                 elif model.state == TokenState.COALESCED:
                     # COALESCED tokens have outcome recorded by coalesce rule
                     result = conn.execute(
-                        text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                        text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                         {"token_id": token_id},
                     ).fetchone()
 
                     assert result is not None, f"Coalesced token {token_id} has no COALESCED outcome"
-                    assert result[0] == RowOutcome.COALESCED, f"Wrong outcome for coalesced token: {result[0]}"
+                    assert result[0] == TerminalOutcome.SUCCESS.value
+                    assert result[1] == TerminalPath.COALESCED.value, f"Wrong path for coalesced token: {result[1]}"
 
     @invariant()
     def coalesce_merged_tokens_have_parent_links(self) -> None:
@@ -587,14 +591,14 @@ class TestTokenLifecycleInvariants:
     def test_token_id_uniqueness(self, token_count: int) -> None:
         """Property: Token IDs are unique across multiple creations."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
+            factory = make_factory(db)
 
-            run = recorder.begin_run(
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            source_node = recorder.register_node(
+            source_node = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_source",
                 node_type=NodeType.SOURCE,
@@ -603,7 +607,7 @@ class TestTokenLifecycleInvariants:
                 schema_config=create_dynamic_schema(),
             )
 
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source_node.node_id,
                 row_index=0,
@@ -613,7 +617,7 @@ class TestTokenLifecycleInvariants:
             # Create multiple tokens for same row
             token_ids = set()
             for _ in range(token_count):
-                token = recorder.create_token(row_id=row.row_id)
+                token = factory.data_flow.create_token(row_id=row.row_id)
                 assert token.token_id not in token_ids, f"Duplicate token ID: {token.token_id}"
                 token_ids.add(token.token_id)
 
@@ -622,14 +626,14 @@ class TestTokenLifecycleInvariants:
     def test_fork_atomic_parent_outcome(self, branch_count: int) -> None:
         """Property: Fork atomically records FORKED outcome for parent."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
+            factory = make_factory(db)
 
-            run = recorder.begin_run(
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            source_node = recorder.register_node(
+            source_node = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_source",
                 node_type=NodeType.SOURCE,
@@ -638,36 +642,36 @@ class TestTokenLifecycleInvariants:
                 schema_config=create_dynamic_schema(),
             )
 
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
             )
 
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
 
             # Generate branch names based on count
             branches = [f"branch_{i}" for i in range(branch_count)]
 
             # Fork should record parent outcome atomically
-            children, _fork_group_id = recorder.fork_token(
-                parent_token_id=token.token_id,
+            children, _fork_group_id = factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 branches=branches,
-                run_id=run.run_id,
                 step_in_pipeline=1,
             )
 
             # Verify parent has FORKED outcome
             with db.connection() as conn:
                 result = conn.execute(
-                    text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                    text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                     {"token_id": token.token_id},
                 ).fetchone()
 
                 assert result is not None, "Parent token missing outcome after fork"
-                assert result[0] == RowOutcome.FORKED, f"Wrong outcome: {result[0]}"
+                assert result[0] == TerminalOutcome.TRANSIENT.value
+                assert result[1] == TerminalPath.FORK_PARENT.value, f"Wrong path: {result[1]}"
 
             # Verify children exist with parent links
             assert len(children) == branch_count
@@ -680,14 +684,14 @@ class TestTokenLifecycleInvariants:
     def test_terminal_state_is_final(self, data: dict[str, Any]) -> None:
         """Property: Once a token reaches terminal state, no new outcomes can be recorded."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
+            factory = make_factory(db)
 
-            run = recorder.begin_run(
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            source_node = recorder.register_node(
+            source_node = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_source",
                 node_type=NodeType.SOURCE,
@@ -696,31 +700,35 @@ class TestTokenLifecycleInvariants:
                 schema_config=create_dynamic_schema(),
             )
 
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data=data,
             )
 
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
 
             # Record COMPLETED outcome
-            recorder.record_token_outcome(
-                run_id=run.run_id,
-                token_id=token.token_id,
-                outcome=RowOutcome.COMPLETED,
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 
-            # Second terminal outcome should violate unique constraint
-            with pytest.raises(IntegrityError):
-                recorder.record_token_outcome(
-                    run_id=run.run_id,
-                    token_id=token.token_id,
-                    outcome=RowOutcome.QUARANTINED,
+            # Second terminal outcome should violate the unique constraint and
+            # surface through the recorder wrapper.
+            from elspeth.core.landscape.errors import LandscapeRecordError
+
+            with pytest.raises(LandscapeRecordError) as exc_info:
+                factory.data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.QUARANTINED_AT_SOURCE,
                     error_hash="test_error_hash",
                 )
+            assert isinstance(exc_info.value.__cause__, IntegrityError)
 
             # Count outcomes - should be exactly 1
             with db.connection() as conn:
@@ -736,14 +744,14 @@ class TestTokenLifecycleInvariants:
     def test_row_data_preserved_through_lifecycle(self, data: dict[str, Any]) -> None:
         """Property: row_id remains constant through token lifecycle."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
+            factory = make_factory(db)
 
-            run = recorder.begin_run(
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            source_node = recorder.register_node(
+            source_node = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_source",
                 node_type=NodeType.SOURCE,
@@ -752,22 +760,21 @@ class TestTokenLifecycleInvariants:
                 schema_config=create_dynamic_schema(),
             )
 
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data=data,
             )
 
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
             original_row_id = row.row_id
 
             # Fork token
-            children, _ = recorder.fork_token(
-                parent_token_id=token.token_id,
+            children, _ = factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 branches=["a", "b"],
-                run_id=run.run_id,
                 step_in_pipeline=1,
             )
 
@@ -786,14 +793,14 @@ class TestTokenLifecycleInvariants:
     def test_coalesce_creates_merged_token(self, parent_count: int) -> None:
         """Property: Coalesce creates a new token linking to parent tokens."""
         with make_landscape_db() as db:
-            recorder = make_recorder(db)
+            factory = make_factory(db)
 
-            run = recorder.begin_run(
+            run = factory.run_lifecycle.begin_run(
                 config={"source": {"plugin": "test"}},
                 canonical_version="1.0",
             )
 
-            source_node = recorder.register_node(
+            source_node = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_source",
                 node_type=NodeType.SOURCE,
@@ -802,7 +809,7 @@ class TestTokenLifecycleInvariants:
                 schema_config=create_dynamic_schema(),
             )
 
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source_node.node_id,
                 row_index=0,
@@ -811,18 +818,17 @@ class TestTokenLifecycleInvariants:
 
             # Create parent token and fork with variable number of branches
             branches = [chr(ord("a") + i) for i in range(parent_count)]
-            parent = recorder.create_token(row_id=row.row_id)
-            children, _ = recorder.fork_token(
-                parent_token_id=parent.token_id,
+            parent = factory.data_flow.create_token(row_id=row.row_id)
+            children, _ = factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 branches=branches,
-                run_id=run.run_id,
                 step_in_pipeline=1,
             )
 
             # Coalesce the children
-            merged = recorder.coalesce_tokens(
-                parent_token_ids=[c.token_id for c in children],
+            merged = factory.data_flow.coalesce_tokens(
+                parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
                 row_id=row.row_id,
                 step_in_pipeline=2,
             )

@@ -16,17 +16,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from elspeth.contracts import TokenCompleted, TokenUsage
-from elspeth.contracts.enums import RowOutcome, RunStatus
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
     RunFinished,
     RunStarted,
 )
 from elspeth.telemetry.errors import TelemetryExporterError
-from elspeth.telemetry.exporters.otlp import (
-    OTLPExporter,
-    _derive_trace_id,
-    _generate_span_id,
-)
+from elspeth.telemetry.exporters.otlp import OTLPExporter
+from elspeth.telemetry.serialization import derive_trace_id, generate_span_id
 
 # Path to patch OTLPSpanExporter - must be at the source location
 OTLP_EXPORTER_PATCH = "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter"
@@ -38,19 +35,19 @@ class TestTraceIdDerivation:
     def test_same_run_id_produces_same_trace_id(self) -> None:
         """Consistent run_id produces consistent trace_id."""
         run_id = "run-12345"
-        trace_id_1 = _derive_trace_id(run_id)
-        trace_id_2 = _derive_trace_id(run_id)
+        trace_id_1 = derive_trace_id(run_id)
+        trace_id_2 = derive_trace_id(run_id)
         assert trace_id_1 == trace_id_2
 
     def test_different_run_ids_produce_different_trace_ids(self) -> None:
         """Different run_ids produce different trace_ids."""
-        trace_id_1 = _derive_trace_id("run-12345")
-        trace_id_2 = _derive_trace_id("run-67890")
+        trace_id_1 = derive_trace_id("run-12345")
+        trace_id_2 = derive_trace_id("run-67890")
         assert trace_id_1 != trace_id_2
 
     def test_trace_id_is_128_bit_integer(self) -> None:
         """Trace ID is a positive 128-bit integer."""
-        trace_id = _derive_trace_id("run-12345")
+        trace_id = derive_trace_id("run-12345")
         assert isinstance(trace_id, int)
         assert trace_id > 0
         assert trace_id < 2**128
@@ -61,20 +58,20 @@ class TestSpanIdGeneration:
 
     def test_span_id_is_64_bit_integer(self) -> None:
         """Span ID is a positive 64-bit integer."""
-        span_id = _generate_span_id()
+        span_id = generate_span_id()
         assert isinstance(span_id, int)
         assert span_id > 0
         assert span_id < 2**64
 
     def test_span_ids_are_unique(self) -> None:
         """Consecutive span IDs do not collide."""
-        ids = {_generate_span_id() for _ in range(1000)}
+        ids = {generate_span_id() for _ in range(1000)}
         assert len(ids) == 1000
 
     def test_span_id_is_nonzero(self) -> None:
         """Span ID is never zero (OTel requirement)."""
         for _ in range(100):
-            assert _generate_span_id() != 0
+            assert generate_span_id() != 0
 
 
 class TestOTLPExporterConfiguration:
@@ -345,7 +342,7 @@ class TestOTLPExporterSpanConversion:
         exporter.export(event)
 
         exported_spans = mock_sdk.export.call_args[0][0]
-        expected_trace_id = _derive_trace_id("run-123")
+        expected_trace_id = derive_trace_id("run-123")
         assert exported_spans[0].context.trace_id == expected_trace_id
 
     def test_span_attributes_contain_event_fields(self) -> None:
@@ -435,7 +432,8 @@ class TestOTLPExporterSpanConversion:
             run_id="run-123",
             row_id="row-1",
             token_id="token-1",
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             sink_name=None,
         )
         exporter.export(event)
@@ -521,7 +519,7 @@ class TestOTLPExporterLifecycle:
     def test_export_failure_does_not_raise(self) -> None:
         """Export failures are logged but don't raise exceptions."""
         exporter, mock_sdk = self._create_configured_exporter()
-        mock_sdk.export.side_effect = Exception("Network error")
+        mock_sdk.export.side_effect = ConnectionError("Network error")
 
         event = RunStarted(
             timestamp=datetime.now(UTC),
@@ -539,7 +537,7 @@ class TestOTLPExporterLifecycle:
     def test_flush_failure_does_not_raise(self) -> None:
         """flush() failures are logged but don't raise exceptions."""
         exporter, mock_sdk = self._create_configured_exporter()
-        mock_sdk.export.side_effect = Exception("Network error")
+        mock_sdk.export.side_effect = ConnectionError("Network error")
 
         event = RunStarted(
             timestamp=datetime.now(UTC),
@@ -555,10 +553,26 @@ class TestOTLPExporterLifecycle:
     def test_close_failure_does_not_raise(self) -> None:
         """close() shutdown failures are logged but don't raise."""
         exporter, mock_sdk = self._create_configured_exporter()
-        mock_sdk.shutdown.side_effect = Exception("Shutdown error")
+        mock_sdk.shutdown.side_effect = ConnectionError("Shutdown error")
 
         # Should not raise
         exporter.close()
+
+    def test_programming_error_in_export_crashes(self) -> None:
+        """Programming errors (non-transport) must crash — not be swallowed."""
+        exporter, mock_sdk = self._create_configured_exporter()
+        mock_sdk.export.side_effect = ValueError("Bad payload construction")
+
+        event = RunStarted(
+            timestamp=datetime.now(UTC),
+            run_id="run-123",
+            config_hash="abc",
+            source_plugin="csv",
+        )
+        exporter._buffer.append(event)
+
+        with pytest.raises(ValueError, match="Bad payload construction"):
+            exporter._flush_batch()
 
 
 class TestOTLPExporterRegistration:
@@ -580,13 +594,13 @@ class TestOTLPExporterRegistration:
 
 
 class TestSyntheticSpanSDKCompatibility:
-    """Tests that verify _SyntheticReadableSpan works with actual SDK encoder.
+    """Tests that verify SyntheticReadableSpan works with actual SDK encoder.
 
     These tests catch SDK compatibility issues that mocked tests would miss.
     """
 
     def test_synthetic_span_encodes_with_sdk(self) -> None:
-        """Verify _SyntheticReadableSpan works with actual OTLP encoder.
+        """Verify SyntheticReadableSpan works with actual OTLP encoder.
 
         This test catches SDK compatibility issues that mocked tests would miss.
         The SDK encoder accesses properties like dropped_attributes, dropped_events,
@@ -595,7 +609,7 @@ class TestSyntheticSpanSDKCompatibility:
         from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
         from opentelemetry.trace import SpanContext, SpanKind, TraceFlags
 
-        from elspeth.telemetry.exporters.otlp import _SyntheticReadableSpan
+        from elspeth.telemetry.serialization import SyntheticReadableSpan
 
         # Create a span context
         span_context = SpanContext(
@@ -606,7 +620,7 @@ class TestSyntheticSpanSDKCompatibility:
         )
 
         # Create a synthetic span
-        span = _SyntheticReadableSpan(
+        span = SyntheticReadableSpan(
             name="TestEvent",
             context=span_context,
             attributes={"test_key": "test_value", "count": 42},
@@ -623,10 +637,10 @@ class TestSyntheticSpanSDKCompatibility:
         assert hasattr(result, "resource_spans")
 
     def test_synthetic_span_has_required_dropped_properties(self) -> None:
-        """Verify _SyntheticReadableSpan exposes dropped_* properties."""
+        """Verify SyntheticReadableSpan exposes dropped_* properties."""
         from opentelemetry.trace import SpanContext, SpanKind, TraceFlags
 
-        from elspeth.telemetry.exporters.otlp import _SyntheticReadableSpan
+        from elspeth.telemetry.serialization import SyntheticReadableSpan
 
         span_context = SpanContext(
             trace_id=0x12345678901234567890123456789012,
@@ -635,7 +649,7 @@ class TestSyntheticSpanSDKCompatibility:
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
         )
 
-        span = _SyntheticReadableSpan(
+        span = SyntheticReadableSpan(
             name="TestEvent",
             context=span_context,
             attributes={},

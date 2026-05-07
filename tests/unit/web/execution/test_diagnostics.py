@@ -1,0 +1,200 @@
+"""Tests for web run diagnostics snapshots.
+
+Diagnostics are intentionally a bounded projection over Landscape audit
+records. They are for operator visibility and LLM explanation prompts, not a
+new audit surface or a payload/context export path.
+"""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy import text
+
+from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.schema import SchemaConfig
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.web.execution.diagnostics import load_run_diagnostics_from_db
+
+_OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+def _register_node(
+    factory: RecorderFactory,
+    run_id: str,
+    node_id: str,
+    node_type: NodeType,
+    plugin_name: str,
+) -> None:
+    factory.data_flow.register_node(
+        run_id=run_id,
+        node_id=node_id,
+        plugin_name=plugin_name,
+        node_type=node_type,
+        plugin_version="1.0",
+        config={},
+        schema_config=_OBSERVED_SCHEMA,
+    )
+
+
+def _seed_diagnostics_run(db: LandscapeDB, tmp_path, *, web_run_id: str = "web-run-1") -> None:
+    factory = RecorderFactory(db)
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=web_run_id)
+    _register_node(factory, web_run_id, "source", NodeType.SOURCE, "text")
+    _register_node(factory, web_run_id, "extract", NodeType.TRANSFORM, "llm_extract")
+    _register_node(factory, web_run_id, "json_out", NodeType.SINK, "json")
+
+    first_row = factory.data_flow.create_row(web_run_id, "source", 0, {"html": "<h1>A</h1>"}, row_id="row-0")
+    second_row = factory.data_flow.create_row(web_run_id, "source", 1, {"html": "<h1>B</h1>"}, row_id="row-1")
+    first_token = factory.data_flow.create_token(first_row.row_id, token_id="token-0")
+    second_token = factory.data_flow.create_token(second_row.row_id, token_id="token-1")
+
+    first_state = factory.execution.begin_node_state(
+        first_token.token_id,
+        "extract",
+        web_run_id,
+        1,
+        {"html": "<h1>A</h1>"},
+        state_id="state-token-0",
+    )
+    factory.execution.complete_node_state(
+        first_state.state_id,
+        NodeStateStatus.COMPLETED,
+        output_data={"title": "A"},
+        duration_ms=125.0,
+    )
+    factory.execution.begin_node_state(
+        second_token.token_id,
+        "extract",
+        web_run_id,
+        1,
+        {"html": "<h1>B</h1>"},
+        state_id="state-token-1",
+    )
+    factory.data_flow.record_token_outcome(
+        TokenRef(token_id=first_token.token_id, run_id=web_run_id),
+        TerminalOutcome.SUCCESS,
+        TerminalPath.DEFAULT_FLOW,
+        sink_name="json_out",
+    )
+    source_operation = factory.execution.begin_operation(web_run_id, "source", "source_load")
+    factory.execution.complete_operation(source_operation.operation_id, "completed", duration_ms=15.0)
+    factory.execution.register_artifact(
+        web_run_id,
+        first_state.state_id,
+        "json_out",
+        "json",
+        str(tmp_path / "out.json"),
+        "a" * 64,
+        42,
+        artifact_id="artifact-1",
+    )
+
+
+def test_diagnostics_returns_bounded_tokens_states_operations_and_artifacts(tmp_path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+    db = LandscapeDB.from_url(db_url)
+    try:
+        web_run_id = "web-run-1"
+        _seed_diagnostics_run(db, tmp_path, web_run_id=web_run_id)
+
+        diagnostics = load_run_diagnostics_from_db(
+            db,
+            run_id=web_run_id,
+            landscape_run_id=web_run_id,
+            run_status="running",
+            limit=1,
+        )
+
+        assert diagnostics.run_id == web_run_id
+        assert diagnostics.landscape_run_id == web_run_id
+        assert diagnostics.run_status == "running"
+        assert diagnostics.summary.token_count == 2
+        assert diagnostics.summary.preview_limit == 1
+        assert diagnostics.summary.preview_truncated is True
+        assert diagnostics.summary.state_counts["completed"] == 1
+        assert diagnostics.summary.state_counts["open"] == 1
+        assert [token.token_id for token in diagnostics.tokens] == ["token-0"]
+        assert diagnostics.tokens[0].row_index == 0
+        assert diagnostics.tokens[0].terminal_outcome == "success"
+        assert diagnostics.tokens[0].states[0].node_id == "extract"
+        assert diagnostics.tokens[0].states[0].status == "completed"
+        assert diagnostics.operations[0].operation_type == "source_load"
+        assert diagnostics.operations[0].status == "completed"
+        assert diagnostics.artifacts[0].path_or_uri.endswith("out.json")
+        assert "context_after" not in diagnostics.model_dump_json()
+    finally:
+        db.close()
+
+
+def test_diagnostics_rejects_corrupt_landscape_types(tmp_path) -> None:
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
+    try:
+        web_run_id = "web-run-1"
+        _seed_diagnostics_run(db, tmp_path, web_run_id=web_run_id)
+
+        with db.connection() as conn:
+            conn.execute(text("UPDATE node_states SET step_index = 1.5 WHERE state_id = 'state-token-0'"))
+
+        with pytest.raises(ValidationError, match="step_index"):
+            load_run_diagnostics_from_db(
+                db,
+                run_id=web_run_id,
+                landscape_run_id=web_run_id,
+                run_status="running",
+                limit=1,
+            )
+    finally:
+        db.close()
+
+
+def test_diagnostics_summary_counts_share_main_read_snapshot(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
+    try:
+        web_run_id = "web-run-1"
+        _seed_diagnostics_run(db, tmp_path, web_run_id=web_run_id)
+        original_read_only_connection = db.read_only_connection
+        read_count = 0
+
+        def counting_read_only_connection():
+            nonlocal read_count
+            read_count += 1
+            return original_read_only_connection()
+
+        monkeypatch.setattr(db, "read_only_connection", counting_read_only_connection)
+
+        diagnostics = load_run_diagnostics_from_db(
+            db,
+            run_id=web_run_id,
+            landscape_run_id=web_run_id,
+            run_status="running",
+            limit=1,
+        )
+
+        assert diagnostics.summary.state_counts["completed"] == 1
+        assert diagnostics.summary.operation_counts["source_load"] == 1
+        assert read_count == 1
+    finally:
+        db.close()
+
+
+def test_diagnostics_empty_when_landscape_run_has_not_started(tmp_path) -> None:
+    db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
+    try:
+        diagnostics = load_run_diagnostics_from_db(
+            db,
+            run_id="web-run-before-begin-run",
+            landscape_run_id="web-run-before-begin-run",
+            run_status="pending",
+            limit=50,
+        )
+
+        assert diagnostics.summary.token_count == 0
+        assert diagnostics.summary.preview_truncated is False
+        assert diagnostics.tokens == []
+        assert diagnostics.operations == []
+        assert diagnostics.artifacts == []
+    finally:
+        db.close()

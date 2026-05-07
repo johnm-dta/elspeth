@@ -3,7 +3,7 @@
 Functions: get_run_summary, get_dag_structure, get_performance_report,
 get_error_analysis, get_llm_usage_report, describe_schema, get_outcome_analysis.
 
-All functions accept (db, recorder) as their first two parameters.
+All functions accept (db, factory) as their first two parameters.
 """
 
 from __future__ import annotations
@@ -12,8 +12,9 @@ import json
 from typing import Any
 
 from elspeth.contracts.enums import CallStatus, NodeType, RoutingMode
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.types import (
     DAGStructureReport,
     ErrorAnalysisReport,
@@ -26,12 +27,12 @@ from elspeth.mcp.types import (
 )
 
 
-def get_run_summary(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> RunSummaryReport | ErrorResult:
+def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunSummaryReport | ErrorResult:
     """Get summary statistics for a run.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: The run ID to analyze
 
     Returns:
@@ -50,7 +51,7 @@ def get_run_summary(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -
         validation_errors_table,
     )
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
@@ -116,14 +117,32 @@ def get_run_summary(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -
             or 0
         )
 
-        # Get outcome distribution
+        # Get outcome distribution. ADR-019 makes outcome path-aware:
+        # outcome is TerminalOutcome.value or NULL, path is always populated.
         outcome_query = (
-            select(token_outcomes_table.c.outcome, func.count().label("count"))
+            select(
+                token_outcomes_table.c.outcome,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
+                func.count().label("count"),
+            )
             .where(token_outcomes_table.c.run_id == run_id)
-            .group_by(token_outcomes_table.c.outcome)
+            .group_by(
+                token_outcomes_table.c.outcome,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
+            )
         )
         outcome_rows = conn.execute(outcome_query).fetchall()
-        outcome_distribution = {row.outcome: row.count for row in outcome_rows}
+        outcome_distribution = [
+            {
+                "outcome": row.outcome,
+                "path": row.path,
+                "completed": bool(row.completed),
+                "count": row.count,
+            }
+            for row in outcome_rows
+        ]
 
         # Calculate average processing duration per node state
         avg_duration = conn.execute(select(func.avg(node_states_table.c.duration_ms)).where(node_states_table.c.run_id == run_id)).scalar()
@@ -158,21 +177,21 @@ def get_run_summary(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -
     }
 
 
-def get_dag_structure(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> DAGStructureReport | ErrorResult:
+def get_dag_structure(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> DAGStructureReport | ErrorResult:
     """Get the DAG structure for a run as a structured object.
 
     Returns nodes, edges, and a mermaid diagram for visualization.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to analyze
 
     Returns:
         DAG structure with nodes, edges, and mermaid diagram
     """
-    nodes = recorder.get_nodes(run_id)
-    edges = recorder.get_edges(run_id)
+    nodes = factory.data_flow.get_nodes(run_id)
+    edges = factory.data_flow.get_edges(run_id)
 
     if not nodes:
         return {"error": f"Run '{run_id}' not found or has no nodes"}
@@ -238,14 +257,14 @@ def get_dag_structure(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str)
     }
 
 
-def get_performance_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> PerformanceReport | ErrorResult:
+def get_performance_report(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> PerformanceReport | ErrorResult:
     """Get performance analysis for a run.
 
     Identifies slow nodes, outliers, and processing bottlenecks.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to analyze
 
     Returns:
@@ -255,7 +274,7 @@ def get_performance_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id:
 
     from elspeth.core.landscape.schema import node_states_table, nodes_table
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
@@ -332,12 +351,12 @@ def get_performance_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id:
     }
 
 
-def get_error_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> ErrorAnalysisReport | ErrorResult:
+def get_error_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> ErrorAnalysisReport | ErrorResult:
     """Analyze errors for a run, grouping by type and identifying patterns.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to analyze
 
     Returns:
@@ -351,7 +370,7 @@ def get_error_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str
         validation_errors_table,
     )
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
@@ -406,6 +425,17 @@ def get_error_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str
         for row in val_rows
     ]
 
+    # Corruption guard: transform_errors always reference a transform node.
+    # A None plugin_name bucket means the outerjoin found no matching node row.
+    for row in trans_rows:
+        if row.plugin_name is None:
+            msg = (
+                f"Tier-1 corruption: {row.count} transform_errors row(s) reference "
+                f"transform_id(s) with no matching node in nodes table "
+                f"for run_id={run_id!r}"
+            )
+            raise AuditIntegrityError(msg)
+
     transform_summary = [{"transform_plugin": row.plugin_name, "count": row.count} for row in trans_rows]
 
     return {
@@ -423,14 +453,14 @@ def get_error_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str
     }
 
 
-def get_llm_usage_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> LLMUsageReport | ErrorResult:
+def get_llm_usage_report(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> LLMUsageReport | ErrorResult:
     """Get LLM usage statistics for a run.
 
     Analyzes external calls that were LLM API calls.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to analyze
 
     Returns:
@@ -445,7 +475,7 @@ def get_llm_usage_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
         operations_table,
     )
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
@@ -516,14 +546,14 @@ def get_llm_usage_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
         ).group_by(combined_types.c.call_type)
         call_type_rows = conn.execute(call_types_query).fetchall()
 
-    if not llm_rows and not call_type_rows:
+    call_type_summary = {row.call_type: row.count for row in call_type_rows}
+
+    if not llm_rows:
         return {
             "run_id": run_id,
-            "message": "No external calls found in this run",
-            "call_types": {},
+            "message": "No LLM calls found in this run",
+            "call_types": call_type_summary,  # type: ignore[typeddict-item]  # SA Row attr types
         }
-
-    call_type_summary = {row.call_type: row.count for row in call_type_rows}
 
     llm_by_plugin: dict[str, dict[str, Any]] = {}
     for row in llm_rows:
@@ -565,12 +595,12 @@ def get_llm_usage_report(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
     }
 
 
-def describe_schema(db: LandscapeDB, recorder: LandscapeRecorder) -> SchemaDescription:
+def describe_schema(db: LandscapeDB, factory: RecorderFactory) -> SchemaDescription:
     """Describe the database schema for ad-hoc query exploration.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
 
     Returns:
         Schema description with tables and columns
@@ -618,14 +648,14 @@ def describe_schema(db: LandscapeDB, recorder: LandscapeRecorder) -> SchemaDescr
     }
 
 
-def get_outcome_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> OutcomeAnalysisReport | ErrorResult:
+def get_outcome_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> OutcomeAnalysisReport | ErrorResult:
     """Analyze token outcomes for a run.
 
     Shows terminal state distribution, fork/join patterns, and sink routing.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to analyze
 
     Returns:
@@ -635,7 +665,7 @@ def get_outcome_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
 
     from elspeth.core.landscape.schema import token_outcomes_table
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
@@ -644,11 +674,16 @@ def get_outcome_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
         outcome_dist = (
             select(
                 token_outcomes_table.c.outcome,
-                token_outcomes_table.c.is_terminal,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
                 func.count(token_outcomes_table.c.outcome_id).label("count"),
             )
             .where(token_outcomes_table.c.run_id == run_id)
-            .group_by(token_outcomes_table.c.outcome, token_outcomes_table.c.is_terminal)
+            .group_by(
+                token_outcomes_table.c.outcome,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
+            )
         )
         outcome_rows = conn.execute(outcome_dist).fetchall()
 
@@ -685,7 +720,8 @@ def get_outcome_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
     outcomes = [
         {
             "outcome": row.outcome,
-            "is_terminal": bool(row.is_terminal),
+            "path": row.path,
+            "completed": bool(row.completed),
             "count": row.count,
         }
         for row in outcome_rows
@@ -693,8 +729,8 @@ def get_outcome_analysis(db: LandscapeDB, recorder: LandscapeRecorder, run_id: s
 
     sinks = {row.sink_name: row.count for row in sink_rows}
 
-    terminal_count = sum(o["count"] for o in outcomes if o["is_terminal"])
-    non_terminal_count = sum(o["count"] for o in outcomes if not o["is_terminal"])
+    terminal_count = sum(o["count"] for o in outcomes if o["completed"])
+    non_terminal_count = sum(o["count"] for o in outcomes if not o["completed"])
 
     return {
         "run_id": run_id,

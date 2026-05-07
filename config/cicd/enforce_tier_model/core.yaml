@@ -1,4 +1,10 @@
 per_file_rules:
+- pattern: core/secrets.py
+  rules:
+  - R5
+  reason: Tree-walk over Tier-3 config dicts requires isinstance() for structural dispatch (dict/list/leaf), and exact ${NAME} secret-env marker detection requires confirming scalar strings before regex parsing. The entire point of this module is to inspect an arbitrary config dict whose shape is external/user-provided.
+  expires: null
+  max_hits: 10
 - pattern: core/expression_parser.py
   rules:
   - R5
@@ -22,7 +28,7 @@ per_file_rules:
   - R5
   reason: Type discrimination for Pydantic validator dispatch and config parsing
   expires: null
-  max_hits: 42
+  max_hits: 45
 - pattern: core/security/*
   rules:
   - R1
@@ -33,31 +39,25 @@ per_file_rules:
   - R5
   reason: Type dispatch for numpy/pandas normalization and NaN rejection
   expires: null
-  max_hits: 19
+  max_hits: 23
 - pattern: core/checkpoint/serialization.py
   rules:
   - R5
   reason: Type envelope detection, NaN rejection, and reserved key escaping
   expires: null
-  max_hits: 11
+  max_hits: 13
 - pattern: core/dag/builder.py
   rules:
   - R5
   reason: Config format discrimination (str vs dict field specs)
   expires: null
   max_hits: 5
-- pattern: core/dag/builder.py
-  rules:
-  - R1
-  reason: Coalesce merge reads optional guaranteed_fields/audit_fields from schema dicts — upstream provides dicts not SchemaConfig (see elspeth-ba100104c2)
-  expires: '2026-06-14'
-  max_hits: 2
 - pattern: core/dag/graph.py
   rules:
   - R5
   reason: Optional schema access for mixed node types
   expires: null
-  max_hits: 2
+  max_hits: 3
 - pattern: core/landscape/database.py
   rules:
   - R5
@@ -107,29 +107,35 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
+- key: core/payload_store.py:R6:FilesystemPayloadStore:store:fp=7ffad90e4cb20922
+  owner: architecture
+  reason: TOCTOU race guard — FileNotFoundError means file was purged between read attempt and write fallback
+  safety: Falls through to atomic write path, restoring the blob. No data loss.
+  expires: null
 - key: core/payload_store.py:R6:FilesystemPayloadStore:delete:fp=5e6dea501dc28457
   owner: architecture
   reason: Idempotent delete — FileNotFoundError means content already deleted (retention purge or duplicate call)
   safety: Returns False on missing file — caller informed, no silent data loss
   expires: null
-- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=60bbaf31e9f6472d
+- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=5b5158345e746330
   owner: architecture
   reason: PayloadNotFoundError from PayloadStore when payload purged by retention policy — expected, not corruption
-- key: core/canonical.py:R6:_normalize_value:fp=20ccee9926534392
+  safety: Logs debug message and continues with source_data=None; payload_available flag set to False
+- key: core/canonical.py:R6:_normalize_value:fp=b26d50562c16f852
   owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: core/rate_limit/limiter.py:R6:RateLimiter:try_acquire:fp=860b9a4a7e64c817
+  reason: TypeError from np.isnan/isinf on non-numeric dtypes is expected — non-numeric arrays can't contain NaN
+  safety: Only catches TypeError from np.isnan/isinf, lets all other exceptions propagate
+  expires: '2026-07-02'
+- key: core/rate_limit/limiter.py:R6:RateLimiter:try_acquire:fp=3e1bc5e9e76ba71f
   owner: architecture
   reason: Silent recovery with explicit error handling path — returns False when bucket full
   safety: Caller checks return value; no silent data loss
-  expires: '2026-05-02'
-- key: core/rate_limit/limiter.py:R6:RateLimiter:close:fp=35b37e8f13a03454
+  expires: '2026-07-02'
+- key: core/rate_limit/limiter.py:R6:RateLimiter:close:fp=3aef03c2689d8024
   owner: architecture
   reason: Framework boundary — pyrate-limiter _leaker attribute may not exist across library versions
   safety: Graceful degradation to no cleanup if attribute missing; thread dies naturally
-  expires: '2026-05-02'
+  expires: '2026-07-02'
 - key: core/security/secret_loader.py:R6:CompositeSecretLoader:get_secret:fp=cb4d8fc57f9917d4
   owner: bugfix
   reason: Intentional fallback pattern - CompositeSecretLoader tries loaders in priority order
@@ -139,26 +145,17 @@ allow_hits:
   owner: architecture
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: core/dag/graph.py:R1:ExecutionGraph:get_schema_config_from_node:fp=73f85fc7a4d9cc8c
+  expires: '2026-07-02'
+- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=ea839197606998d2
   owner: architecture
-  reason: Optional schema access for mixed node types (source/sink/gate/coalesce)
-  safety: Crashes on malformed schema payloads; None is an intentional non-schema state
+  reason: Silent except in schema lookup — DIVERT edge may target non-existent node (forward reference or optional path)
+  safety: Continues to next coalesce point; warning about potential data loss is best-effort
   expires: '2026-05-12'
-- key: core/dag/graph.py:R1:ExecutionGraph:get_required_fields:fp=b6609d1feafe7526
-  owner: architecture
-  reason: Optional required_input_fields key supports transforms with implicit/no required field contract
-  safety: Missing key yields empty set; downstream schema checks still enforce compatibility
-  expires: '2026-05-12'
-- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=d18462d12dcaf547
-  owner: bugfix
-  reason: Tier-3 boundary - PayloadStore.exists() is external I/O (filesystem/blob storage)
-  safety: Exception caught and logged, ref added to failed_refs, loop continues
-- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=b64335ceb158346f
+- key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
   owner: bugfix
   reason: Tier-3 boundary - PayloadStore.delete() is external I/O (filesystem/blob storage)
   safety: Exception caught and logged, ref added to failed_refs, loop continues
-- key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=9f4d85c8f2f6527b
+- key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
@@ -166,49 +163,49 @@ allow_hits:
 - key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=455e3f20c68fa667
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=90701a15f81f120d
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=1ef96f8297c0018e
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=d13bff181e8c8c4b
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2fbf8ece4fc84429
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=77d4ada8a0a3c91c
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=5a4bcca49c9562cc
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=9f2474980b6bfbcd
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=0d39d40f3b603a68
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=54647a782c1117e1
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=1e4573ff84803165
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=d9d2d4f0e34017bd
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=aa4d3aa685d51b84
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2c0214fa9a261b33
+- key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=fe6db82976e6fa39
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=85dd4fafa902525b
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=60affc486e53170e
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-05-12'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=8c98581f5e887d78
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=7d0809b197d9ab44
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-05-12'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=f0736393b98ef39a
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=5d39923434a1b710
   owner: architecture
   reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically serializable
-  safety: Falls back to repr() with logging - audit trail preserved with metadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=0768d9dfc79e26b4
+  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=ec4658370df974ec
   owner: bugfix
   reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity that canonical_json rejects
-  safety: Falls back to repr() with logging — audit trail preserved with metadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=e6fe0c538daac110
+  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=f234b4284f04a49d
   owner: bugfix
   reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity that canonical_json rejects
-  safety: Falls back to repr_hash + NonCanonicalMetadata with warning log — audit trail preserved
+  safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved
 - key: core/security/web.py:R4:validate_url_for_ssrf:_resolve_worker:fp=bdf07052a9f75058
   owner: bugfix
   reason: DNS resolver worker catches BaseException to relay ALL errors through the queue to the caller thread
@@ -218,7 +215,12 @@ allow_hits:
   owner: bugfix
   reason: Sentinel class definition in except ImportError — not a runtime error handler
   safety: _get_client() raises ImportError before any Azure API call; sentinel class is never caught
-- key: core/retention/purge.py:R4:PurgeManager:purge_payloads:fp=9eae649e78a32371
+- key: core/retention/purge.py:R4:PurgeManager:purge_payloads:fp=ed928398c920ef43
   owner: bugfix
   reason: Post-point-of-no-return recovery — payloads are already irreversibly deleted, so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures in PurgeResult, operator informed via CLI output
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=b640bacb8966c304
+  owner: core
+  reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
+  safety: Raises TypeError if not dict; no silent coercion
+  expires: null

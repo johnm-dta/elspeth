@@ -2,28 +2,42 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
+import fnmatch
 import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
+import yaml
 from codex_audit_common import (  # type: ignore[import-not-found]
+    USAGE_STAT_KEYS,
     AsyncTqdm,
     chunked,
     ensure_log_file,
     extract_section,
     generate_summary,
+    get_codex_version,
+    get_git_commit,
     is_cache_path,
+    iter_report_files,
     load_context,
+    make_codex_rate_limiter,
     print_summary,
     priority_from_report,
     resolve_path,
     run_codex_with_retry_and_logging,
+    sha256_text,
+    utc_now,
+    write_findings_index,
+    write_run_metadata,
+    write_summary_file,
 )
-from pyrate_limiter import Duration, Limiter, Rate
 
 
 def _is_python_file(path: Path) -> bool:
@@ -31,10 +45,260 @@ def _is_python_file(path: Path) -> bool:
     return path.suffix == ".py" and not path.name.startswith("test_")
 
 
-def _build_prompt(file_path: Path, template: str, context: str, extra_message: str | None = None) -> str:
+def _load_tier_allowlist(repo_root: Path) -> list[dict[str, Any]]:
+    """Load tier model per-file rules from all module allowlist YAML files."""
+    allowlist_dir = repo_root / "config" / "cicd" / "enforce_tier_model"
+    if not allowlist_dir.exists():
+        return []
+
+    if allowlist_dir.is_dir():
+        yaml_files = sorted(path for path in allowlist_dir.glob("*.yaml") if path.name != "_defaults.yaml")
+    else:
+        yaml_files = [allowlist_dir]
+
+    rules: list[dict[str, Any]] = []
+    for path in yaml_files:
+        data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for entry in data.get("per_file_rules", []):
+            if isinstance(entry, dict):
+                rules.append(entry)
+    return rules
+
+
+def _allowlist_entries_for_file(file_path: Path, allowlist_root: Path, allowlist: list[dict[str, Any]]) -> str | None:
+    """Extract tier-model allowlist entries relevant to a specific target file.
+
+    Returns formatted text for prompt injection, or None if no entries match.
+    """
+    try:
+        relative = file_path.relative_to(allowlist_root).as_posix()
+    except ValueError:
+        relative = file_path.as_posix()
+    matches: list[str] = []
+    for entry in allowlist:
+        pattern = str(entry.get("pattern", "")).replace("\\", "/")
+        if fnmatch.fnmatchcase(relative, pattern):
+            rules = ", ".join(str(rule) for rule in entry.get("rules", []))
+            reason = entry.get("reason", "no reason given")
+            max_hits = entry.get("max_hits")
+            line = f"  - Rules {rules}: {reason}"
+            if max_hits is not None:
+                line += f" (max_hits={max_hits})"
+            matches.append(line)
+    if not matches:
+        return None
+    return (
+        "Tier Model Allowlist Entries for This File:\n"
+        "The following defensive patterns are ALLOWLISTED in this file and should\n"
+        "NOT be reported as bugs unless they exceed their max_hits count:\n" + "\n".join(matches)
+    )
+
+
+def _node_line(source_lines: list[str], lineno: int) -> str:
+    if lineno < 1 or lineno > len(source_lines):
+        return ""
+    return source_lines[lineno - 1].strip()
+
+
+def _build_static_prepass_context(file_path: Path, *, repo_root: Path, root_dir: Path) -> str:
+    """Build deterministic target-file facts for Codex to verify, not assume."""
+    del root_dir
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return "Static Pre-pass Context:\n- Could not decode target as UTF-8."
+
+    source_lines = text.splitlines()
+    imports: list[str] = []
+    risk_lines: list[str] = []
+
+    try:
+        tree = ast.parse(text, filename=str(file_path))
+    except SyntaxError as exc:
+        return f"Static Pre-pass Context:\n- SyntaxError while parsing target: {exc}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            imports.append(f"  - {file_path.relative_to(repo_root)}:{node.lineno}: {_node_line(source_lines, node.lineno)}")
+        elif isinstance(node, ast.ExceptHandler):
+            broad = node.type is None
+            if isinstance(node.type, ast.Name) and node.type.id in {"Exception", "BaseException"}:
+                broad = True
+            if broad:
+                risk_lines.append(
+                    f"  - Broad exception handler at {file_path.relative_to(repo_root)}:{node.lineno}: "
+                    f"{_node_line(source_lines, node.lineno)}"
+                )
+
+    pattern_checks = [
+        ("defensive .get usage", re.compile(r"\.get\(")),
+        ("getattr usage", re.compile(r"\bgetattr\(")),
+        ("hasattr usage", re.compile(r"\bhasattr\(")),
+        ("logger usage", re.compile(r"\blogging\.getLogger\(|\blogger\.")),
+        ("blocking sleep", re.compile(r"\btime\.sleep\(")),
+        ("subprocess call", re.compile(r"\bsubprocess\.(run|Popen|check_call|check_output)\(")),
+    ]
+    rel_path = file_path.relative_to(repo_root)
+    for line_no, line in enumerate(source_lines, start=1):
+        stripped = line.strip()
+        for label, pattern in pattern_checks:
+            if pattern.search(stripped):
+                risk_lines.append(f"  - {label} at {rel_path}:{line_no}: {stripped}")
+
+    sibling_tests = sorted((repo_root / "tests").rglob(f"test_{file_path.stem}.py")) if (repo_root / "tests").exists() else []
+
+    sections = ["Static Pre-pass Context:"]
+    if imports:
+        sections.append("Imports:\n" + "\n".join(imports[:20]))
+    if risk_lines:
+        sections.append("Static risk leads to verify:\n" + "\n".join(risk_lines[:30]))
+    if sibling_tests:
+        test_lines = [f"  - {path.relative_to(repo_root)}" for path in sibling_tests[:10]]
+        sections.append("Potential sibling tests:\n" + "\n".join(test_lines))
+    if len(sections) == 1:
+        sections.append("- No deterministic static leads found by the pre-pass.")
+    return "\n".join(sections)
+
+
+def _safe_relative(path: Path, repo_root: Path) -> str:
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _imported_module_from_node(node: ast.Import | ast.ImportFrom) -> str | None:
+    if isinstance(node, ast.ImportFrom):
+        if node.module:
+            return "." * node.level + node.module if node.level else node.module
+        return "." * node.level if node.level else None
+    if node.names:
+        return node.names[0].name
+    return None
+
+
+def _module_path_for_import(module: str, repo_root: Path) -> Path | None:
+    if not module.startswith("elspeth."):
+        return None
+    relative = Path("src") / Path(*module.split("."))
+    module_path = repo_root / relative.with_suffix(".py")
+    if module_path.exists():
+        return module_path.resolve()
+    package_path = repo_root / relative / "__init__.py"
+    if package_path.exists():
+        return package_path.resolve()
+    return None
+
+
+def _build_subsystem_context(root_dir: Path, *, repo_root: Path) -> str:
+    """Build a deterministic subsystem map once per run for cacheable context."""
+    source_root = root_dir if root_dir.is_dir() else root_dir.parent
+    python_files = sorted(path for path in source_root.rglob("*.py") if path.is_file() and not is_cache_path(path))
+
+    imports: list[str] = []
+    definitions: list[str] = []
+    reverse_imports: list[str] = []
+    markers: list[str] = []
+    tests: list[str] = []
+    import_edges: list[tuple[Path, Path]] = []
+    test_root = repo_root / "tests"
+
+    for path in python_files[:200]:
+        rel_path = _safe_relative(path, repo_root)
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            markers.append(f"  - {rel_path}: parse skipped ({type(exc).__name__})")
+            continue
+
+        source_lines = text.splitlines()
+        for node in tree.body:
+            if isinstance(node, ast.Import | ast.ImportFrom):
+                module = _imported_module_from_node(node)
+                if module and (module.startswith("elspeth") or module.startswith(".")):
+                    imports.append(f"  - {rel_path}:{node.lineno}: {_node_line(source_lines, node.lineno)}")
+                    imported_path = _module_path_for_import(module, repo_root)
+                    if imported_path is not None and _is_under_root(imported_path, source_root):
+                        import_edges.append((imported_path, path.resolve()))
+            elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                if not node.name.startswith("_"):
+                    keyword = "class" if isinstance(node, ast.ClassDef) else "def"
+                    definitions.append(f"  - {rel_path}:{node.lineno}: {keyword} {node.name}")
+                    if isinstance(node, ast.ClassDef):
+                        base_names = [ast.unparse(base) for base in node.bases]
+                        if any(token in base for base in base_names for token in ("Config", "Settings", "Protocol", "Schema", "BaseModel")):
+                            markers.append(f"  - {rel_path}:{node.lineno}: {keyword} {node.name}({', '.join(base_names)})")
+
+        for line_no, line in enumerate(source_lines, start=1):
+            stripped = line.strip()
+            if "@hookimpl" in stripped or "hookimpl(" in stripped or "entry_points" in stripped or "SchemaContract" in stripped:
+                markers.append(f"  - {rel_path}:{line_no}: {stripped}")
+
+        if test_root.exists():
+            for test_path in sorted(test_root.rglob(f"test_{path.stem}.py"))[:5]:
+                tests.append(f"  - {_safe_relative(test_path, repo_root)} covers {rel_path}")
+
+    for imported_path, importer_path in sorted(set(import_edges)):
+        reverse_imports.append(f"  - {_safe_relative(imported_path, repo_root)} <- {_safe_relative(importer_path, repo_root)}")
+
+    sections = [
+        "Subsystem Static Map:",
+        f"- Root: {_safe_relative(source_root, repo_root)}",
+        f"- Python files discovered: {len(python_files)}",
+    ]
+    if definitions:
+        sections.append("Public definitions:\n" + "\n".join(definitions[:80]))
+    if imports:
+        sections.append("Internal imports:\n" + "\n".join(imports[:80]))
+    if reverse_imports:
+        sections.append("Reverse import hints:\n" + "\n".join(reverse_imports[:80]))
+    if markers:
+        sections.append("Plugin/contract markers:\n" + "\n".join(markers[:80]))
+    if tests:
+        sections.append("Adjacent tests:\n" + "\n".join(tests[:80]))
+    return "\n".join(sections)
+
+
+def _resolve_structured_output_schema(
+    repo_root: Path,
+    *,
+    structured_output: bool,
+    structured_output_schema: str | None,
+    no_structured_output: bool,
+) -> Path | None:
+    """Resolve the schema path. Bug hunt defaults to structured output."""
+    if no_structured_output:
+        return None
+    if structured_output_schema:
+        return cast(Path, resolve_path(repo_root, structured_output_schema))
+    # The explicit flag is retained for backward-compatible CLI habits; structured
+    # output is now the default for this scanner.
+    _ = structured_output
+    return repo_root / "scripts" / "schemas" / "codex_bug_hunt_report.schema.json"
+
+
+def _build_prompt(
+    file_path: Path,
+    template: str,
+    context: str,
+    extra_message: str | None = None,
+    target_context: str | None = None,
+    allowlist_context: str | None = None,
+    structured_output: bool = False,
+) -> str:
+    structured_instruction = (
+        "- Return JSON matching the supplied output schema. Put the complete\n"
+        "  Markdown bug report content in the `markdown_report` field and\n"
+        "  machine-readable finding summaries in `findings`. Use an empty\n"
+        "  `findings` array when no concrete bug is found.\n"
+        if structured_output
+        else ""
+    )
+    run_level_context = f"Run-level context:\n{extra_message}\n\n" if extra_message else ""
     return (
         "You are a static analysis agent doing a deep bug audit.\n"
-        f"Target file: {file_path}\n\n"
+        "\n"
         "Instructions:\n"
         "- Use the bug report template below verbatim.\n"
         "- Fill in every section. If unknown, write 'Unknown'.\n"
@@ -49,11 +313,9 @@ def _build_prompt(file_path: Path, template: str, context: str, extra_message: s
         "- If you find multiple distinct bugs, output one full template per bug,\n"
         "  separated by a line with only '---'.\n"
         "- If you find no credible bug, output one template with Summary set to\n"
-        f"  'No concrete bug found in {file_path}', Severity 'trivial', Priority 'P3',\n"
+        "  'No concrete bug found in the target file', Severity 'trivial', Priority 'P3',\n"
         "  and Root Cause Hypothesis 'No bug identified'.\n"
-        "- Evidence should cite file paths and line numbers when possible.\n"
-        + (f"\n⚠️  IMPORTANT CONTEXT:\n{extra_message}\n" if extra_message else "")
-        + "\n"
+        "- Evidence should cite file paths and line numbers when possible.\n" + structured_instruction + "\n"
         "Bug Categories to Check:\n"
         "1. **Audit Trail Violations**:\n"
         "   - Missing payload recording for external API calls\n"
@@ -127,6 +389,8 @@ def _build_prompt(file_path: Path, template: str, context: str, extra_message: s
         "\n"
         "Analysis Depth Checklist:\n"
         "- [ ] Read CLAUDE.md sections relevant to this file's subsystem\n"
+        "- [ ] Consult the Skill references (tier model, engine patterns, config\n"
+        "      contracts, logging/telemetry) included in the repository context below\n"
         "- [ ] Check plugin protocol compliance (hookspec signatures)\n"
         "- [ ] Verify schema contracts match implementation\n"
         "- [ ] Trace data flow for audit trail completeness\n"
@@ -134,11 +398,14 @@ def _build_prompt(file_path: Path, template: str, context: str, extra_message: s
         "- [ ] Validate integration tests exist for edge cases\n"
         "- [ ] Look for untested error conditions\n"
         "- [ ] Check for missing type annotations\n"
-        "\n"
-        "Repository context (read-only):\n"
+        "\n" + run_level_context + "Repository context (read-only):\n"
         f"{context}\n\n"
         "Bug report template:\n"
-        f"{template}\n"
+        f"{template}\n\n"
+        "Target-specific context:\n"
+        f"Target file: {file_path}\n"
+        + (f"\n{target_context}\n" if target_context else "")
+        + (f"\n{allowlist_context}\n" if allowlist_context else "")
     )
 
 
@@ -305,12 +572,10 @@ def _deduplicate_and_merge(
 def _organize_by_priority(output_dir: Path) -> None:
     """Organize outputs into by-priority/ subdirectories."""
     by_priority_dir = output_dir / "by-priority"
+    if by_priority_dir.exists():
+        shutil.rmtree(by_priority_dir)
 
-    for md_file in output_dir.rglob("*.md"):
-        # Skip files already in by-priority
-        if "by-priority" in md_file.parts:
-            continue
-
+    for md_file in iter_report_files(output_dir):
         text = md_file.read_text(encoding="utf-8")
         priority = priority_from_report(text)
 
@@ -338,37 +603,55 @@ async def _run_batches(
     bugs_open_dir: Path | None,
     deduplicate: bool,
     extra_message: str | None = None,
+    tier_allowlist: list[dict[str, Any]] | None = None,
+    allowlist_root: Path | None = None,
+    structured_output_schema: Path | None = None,
+    warm_up_cache: bool = False,
+    profile: str | None = None,
+    reasoning_effort: str | None = None,
+    service_tier: str | None = None,
+    ephemeral: bool = False,
+    timeout_s: float | None = 1800.0,
 ) -> dict[str, int]:
     """Run analysis in batches. Returns statistics."""
     log_lock = asyncio.Lock()
     failed_files: list[tuple[Path, Exception]] = []
     total_merged = 0
     total_gated = 0
+    usage_totals = dict.fromkeys(USAGE_STAT_KEYS, 0)
 
-    # Use pyrate-limiter for rate limiting
-    rate_limiter = Limiter(Rate(rate_limit, Duration.MINUTE)) if rate_limit else None
+    rate_limiter = make_codex_rate_limiter(rate_limit)
 
     # Progress bar
     pbar = AsyncTqdm(total=len(files), desc="Analyzing files", unit="file")
 
-    for batch in chunked(files, batch_size):
-        tasks: list[asyncio.Task[dict[str, int]]] = []
-        batch_files: list[Path] = []
-
-        for file_path in batch:
+    async def run_one_file(file_path: Path) -> dict[str, int] | None:
+        try:
             relative = file_path.relative_to(root_dir)
             output_path = output_dir / relative
             output_path = output_path.with_suffix(output_path.suffix + ".md")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
             if skip_existing and output_path.exists():
-                pbar.update(1)
-                continue
+                return None
 
-            prompt = _build_prompt(file_path, prompt_template, context, extra_message)
-            batch_files.append(file_path)
+            effective_allowlist_root = allowlist_root or root_dir
+            allowlist_ctx = _allowlist_entries_for_file(file_path, effective_allowlist_root, tier_allowlist) if tier_allowlist else None
+            target_context_parts = [_build_static_prepass_context(file_path, repo_root=repo_root, root_dir=root_dir)]
+            target_extra_message = "\n\n".join(part for part in target_context_parts if part)
+            prompt = _build_prompt(
+                file_path,
+                prompt_template,
+                context,
+                extra_message=extra_message,
+                target_context=target_extra_message,
+                allowlist_context=allowlist_ctx,
+                structured_output=structured_output_schema is not None,
+            )
 
-            task = asyncio.create_task(
-                run_codex_with_retry_and_logging(
+            result = cast(
+                dict[str, int],
+                await run_codex_with_retry_and_logging(
                     file_path=file_path,
                     output_path=output_path,
                     model=model,
@@ -380,28 +663,61 @@ async def _run_batches(
                     output_display=str(output_path.relative_to(repo_root).as_posix()),
                     rate_limiter=rate_limiter,
                     evidence_gate_summary_prefix="",
-                )
+                    output_schema=structured_output_schema,
+                    structured_markdown_field="markdown_report",
+                    profile=profile,
+                    reasoning_effort=reasoning_effort,
+                    service_tier=service_tier,
+                    ephemeral=ephemeral,
+                    timeout_s=timeout_s,
+                ),
             )
+
+            # Deduplicate after successful run
+            if deduplicate and bugs_open_dir and bugs_open_dir.exists():
+                merged_count = _deduplicate_and_merge(output_path, bugs_open_dir, repo_root)
+                result["merged"] = merged_count
+
+            return result
+        finally:
+            pbar.update(1)
+
+    async def run_and_capture(file_path: Path) -> tuple[Path, dict[str, int] | Exception | None]:
+        try:
+            return file_path, await run_one_file(file_path)
+        except Exception as exc:
+            return file_path, exc
+
+    def record_result(file_path: Path, result: dict[str, int] | Exception | None) -> None:
+        nonlocal total_gated, total_merged
+        if result is None:
+            return
+        if isinstance(result, Exception):
+            failed_files.append((file_path, result))
+            return
+        total_gated += result.get("gated", 0)
+        total_merged += result.get("merged", 0)
+        for key in USAGE_STAT_KEYS:
+            usage_totals[key] += result.get(key, 0)
+
+    remaining_files = list(files)
+    if warm_up_cache and batch_size > 1 and len(remaining_files) > 1:
+        warm_file = remaining_files.pop(0)
+        file_path, result = await run_and_capture(warm_file)
+        record_result(file_path, result)
+
+    for batch in chunked(remaining_files, batch_size):
+        tasks: list[asyncio.Task[tuple[Path, dict[str, int] | Exception | None]]] = []
+
+        for file_path in batch:
+            task = asyncio.create_task(run_and_capture(file_path))
             tasks.append(task)
 
         # Wait for all tasks in batch to complete
         if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for file_path, result in zip(batch_files, results, strict=False):
-                if isinstance(result, Exception):
-                    failed_files.append((file_path, result))
-                elif isinstance(result, dict):
-                    total_gated += result["gated"]
-
-                    # Deduplicate after successful run
-                    if deduplicate and bugs_open_dir and bugs_open_dir.exists():
-                        relative = file_path.relative_to(root_dir)
-                        output_path = output_dir / relative
-                        output_path = output_path.with_suffix(output_path.suffix + ".md")
-                        merged_count = _deduplicate_and_merge(output_path, bugs_open_dir, repo_root)
-                        total_merged += merged_count
-
-                pbar.update(1)
+            results = await asyncio.gather(*tasks)
+            for file_path, result in results:
+                record_result(file_path, result)
 
     pbar.close()
 
@@ -427,6 +743,8 @@ async def _run_batches(
     summary: dict[str, int] = generate_summary(output_dir, no_defect_marker="No concrete bug found")
     summary["merged"] = total_merged
     summary["gated"] = total_gated
+    for key in USAGE_STAT_KEYS:
+        summary[key] = usage_totals[key]
     return summary
 
 
@@ -636,6 +954,34 @@ Examples:
         help="Override Codex model (passes --model to codex exec).",
     )
     parser.add_argument(
+        "--profile",
+        default=None,
+        help="Codex config profile to use for each codex exec run.",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        choices=["minimal", "low", "medium", "high", "xhigh"],
+        help="Override Codex model_reasoning_effort for each run.",
+    )
+    parser.add_argument(
+        "--service-tier",
+        default=None,
+        choices=["flex", "fast"],
+        help="Override Codex service_tier for each run.",
+    )
+    parser.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="Run codex exec without persisting session rollout files.",
+    )
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=1800.0,
+        help="Per-file codex exec timeout in seconds (default: 1800).",
+    )
+    parser.add_argument(
         "--changed-since",
         default=None,
         help="Only scan files changed since this git ref (e.g. HEAD~1).",
@@ -703,6 +1049,26 @@ Examples:
         default=None,
         help="Additional context message to include in the analysis prompt (e.g., migration notes).",
     )
+    parser.add_argument(
+        "--structured-output",
+        action="store_true",
+        help="Use Codex --output-schema and extract markdown_report back into the normal .md output (default).",
+    )
+    parser.add_argument(
+        "--no-structured-output",
+        action="store_true",
+        help="Disable Codex --output-schema and request raw Markdown output.",
+    )
+    parser.add_argument(
+        "--structured-output-schema",
+        default=None,
+        help="Custom JSON schema for --structured-output (default: scripts/schemas/codex_bug_hunt_report.schema.json).",
+    )
+    parser.add_argument(
+        "--no-cache-warm-up",
+        action="store_true",
+        help="Disable the initial serial run that warms Codex prompt caching before parallel batches.",
+    )
 
     args = parser.parse_args()
 
@@ -711,6 +1077,8 @@ Examples:
         raise ValueError("--batch-size must be >= 1")
     if args.rate_limit is not None and args.rate_limit < 1:
         raise ValueError("--rate-limit must be >= 1")
+    if args.timeout_s <= 0:
+        raise ValueError("--timeout-s must be > 0")
 
     if shutil.which("codex") is None:
         raise RuntimeError("codex CLI not found on PATH")
@@ -721,6 +1089,14 @@ Examples:
     output_dir = resolve_path(repo_root, args.output_dir)
     log_path = resolve_path(repo_root, "docs/bugs/process/CODEX_LOG.md")
     bugs_open_dir = resolve_path(repo_root, args.bugs_dir) if args.deduplicate else None
+    structured_output_schema = _resolve_structured_output_schema(
+        repo_root,
+        structured_output=args.structured_output,
+        structured_output_schema=args.structured_output_schema,
+        no_structured_output=args.no_structured_output,
+    )
+    if structured_output_schema is not None and not structured_output_schema.exists():
+        raise RuntimeError(f"Structured output schema not found: {structured_output_schema}")
 
     # List files to scan
     paths_from = resolve_path(repo_root, args.paths_from) if args.paths_from else None
@@ -747,10 +1123,19 @@ Examples:
             print(f"  ... and {len(files) - 20} more")
         return 0
 
-    # Load template and context
+    git_commit = get_git_commit(repo_root)
+
+    # Load template, context (with skills), and tier model allowlist
     template_text = template_path.read_text(encoding="utf-8")
-    context_text = load_context(repo_root, extra_files=args.context_files)
+    context_text = load_context(repo_root, extra_files=args.context_files, include_skills=True)
+    subsystem_context = _build_subsystem_context(root_dir, repo_root=repo_root)
+    context_text = "\n\n".join(part for part in (context_text, subsystem_context) if part)
+    tier_allowlist = _load_tier_allowlist(repo_root)
     ensure_log_file(log_path, header_title="Codex Bug Hunt Log")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    start_time = utc_now()
+    start_monotonic = time.monotonic()
 
     # Run analysis
     stats = asyncio.run(
@@ -770,11 +1155,76 @@ Examples:
             bugs_open_dir=bugs_open_dir,
             deduplicate=args.deduplicate,
             extra_message=args.extra_message,
+            tier_allowlist=tier_allowlist,
+            allowlist_root=repo_root / "src" / "elspeth",
+            structured_output_schema=structured_output_schema,
+            warm_up_cache=not args.no_cache_warm_up,
+            profile=args.profile,
+            reasoning_effort=args.reasoning_effort,
+            service_tier=args.service_tier,
+            ephemeral=args.ephemeral,
+            timeout_s=args.timeout_s,
         )
+    )
+
+    end_time = utc_now()
+    duration_s = time.monotonic() - start_monotonic
+
+    write_run_metadata(
+        output_dir=output_dir,
+        repo_root=repo_root,
+        start_time=start_time,
+        end_time=end_time,
+        duration_s=duration_s,
+        files_scanned=len(files),
+        model=args.model,
+        batch_size=args.batch_size,
+        rate_limit=args.rate_limit,
+        git_commit=git_commit,
+        title="Codex Bug Hunt Run Metadata",
+        script_name="scripts/codex_bug_hunt.py",
+        extra_parameters={
+            "Codex CLI": get_codex_version(repo_root),
+            "Runner": "codex exec (Pro-backed CLI)",
+            "Output Mode": "structured-json-to-markdown" if structured_output_schema else "markdown",
+            "Prompt Cache Warm-up": "enabled" if not args.no_cache_warm_up else "disabled",
+            "Codex Profile": args.profile or "default",
+            "Reasoning Effort": args.reasoning_effort or "default",
+            "Service Tier": args.service_tier or "default",
+            "Ephemeral Sessions": "enabled" if args.ephemeral else "disabled",
+            "Per-file Timeout Seconds": f"{args.timeout_s:g}",
+            "Structured Output Schema": (str(structured_output_schema.relative_to(repo_root)) if structured_output_schema else "disabled"),
+            "Scan Root": str(root_dir.relative_to(repo_root)) if _is_under_root(root_dir, repo_root) else str(root_dir),
+            "Context SHA256": sha256_text(context_text),
+            "Template SHA256": sha256_text(template_text),
+        },
+    )
+
+    write_summary_file(
+        output_dir=output_dir,
+        stats=stats,
+        total_files=len(files),
+        title="Codex Bug Hunt Summary",
+        defects_label="Bugs Found",
+        clean_label="Clean Files",
+    )
+
+    write_findings_index(
+        output_dir=output_dir,
+        repo_root=repo_root,
+        title="Codex Bug Hunt Findings Index",
+        file_column_label="Source File",
+        no_defect_marker="No concrete bug found",
+        clean_section_title="Clean Files",
     )
 
     # Print summary
     print_summary(stats, icon="🐛", title="Bug Hunt Summary")
+    print(f"Detailed results written to: {output_dir.relative_to(repo_root)}/")
+    print("   - RUN_METADATA.md: Run details and parameters")
+    print("   - SUMMARY.md: Triage dashboard and statistics")
+    print("   - FINDINGS_INDEX.md: Sortable table of all findings")
+    print("   - CODEX_LOG.md: Execution log")
 
     return 0
 

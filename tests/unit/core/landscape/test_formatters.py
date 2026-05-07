@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
 import pytest
 
@@ -35,8 +36,8 @@ class TestSerializeDatetime:
     def test_recursively_handles_dict(self) -> None:
         """Dicts have datetime values converted recursively."""
         dt = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
-        data = {"created_at": dt, "name": "test", "nested": {"time": dt}}
-        result = serialize_datetime(data)
+        data: dict[str, Any] = {"created_at": dt, "name": "test", "nested": {"time": dt}}
+        result: dict[str, Any] = serialize_datetime(data)
 
         assert result["created_at"] == "2026-01-29T12:00:00+00:00"
         assert result["name"] == "test"
@@ -45,8 +46,8 @@ class TestSerializeDatetime:
     def test_recursively_handles_list(self) -> None:
         """Lists have datetime values converted recursively."""
         dt = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
-        data = [dt, "string", {"time": dt}]
-        result = serialize_datetime(data)
+        data: list[Any] = [dt, "string", {"time": dt}]
+        result: list[Any] = serialize_datetime(data)
 
         assert result[0] == "2026-01-29T12:00:00+00:00"
         assert result[1] == "string"
@@ -189,6 +190,59 @@ class TestDataclassToDict:
         result = dataclass_to_dict({"a": 1})
         assert result == {"a": 1}
 
+    def test_lineage_result_source_data_mapping_is_json_serializable(self) -> None:
+        """Frozen source payload mappings become JSON-serializable dicts."""
+        from elspeth.contracts import RowLineage, Token
+        from elspeth.core.landscape.lineage import LineageResult
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        lineage = LineageResult(
+            token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
+            source_row=RowLineage(
+                row_id="row-456",
+                run_id="run-001",
+                source_node_id="src-node",
+                row_index=0,
+                source_data_hash="abc123",
+                created_at=now,
+                source_data={"id": 1, "seen_at": now},
+                payload_available=True,
+            ),
+            node_states=(),
+            routing_events=(),
+            calls=(),
+            parent_tokens=(),
+        )
+
+        result = dataclass_to_dict(lineage)
+
+        source_data = result["source_row"]["source_data"]
+        assert isinstance(source_data, dict)
+        assert source_data == {"id": 1, "seen_at": "2026-01-29T12:00:00+00:00"}
+        json.dumps(result)
+
+    def test_dataclass_to_dict_excludes_classvar_pseudo_fields(self) -> None:
+        """Dataclass ClassVar constants are not serialized as instance data."""
+        from elspeth.contracts import Checkpoint
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        checkpoint = Checkpoint(
+            checkpoint_id="chk-1",
+            run_id="run-001",
+            token_id="tok-123",
+            node_id="node-1",
+            sequence_number=1,
+            created_at=now,
+            upstream_topology_hash="topology-hash",
+            checkpoint_node_config_hash="config-hash",
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+
+        result = dataclass_to_dict(checkpoint)
+
+        assert "CURRENT_FORMAT_VERSION" not in result
+        assert result["format_version"] == Checkpoint.CURRENT_FORMAT_VERSION
+
 
 class TestCSVFormatter:
     """CSVFormatter flattens nested structures for CSV output."""
@@ -280,7 +334,7 @@ class TestCSVFormatter:
         assert flat["nested.also_none"] is None
 
     def test_csv_formatter_handles_empty_dict(self) -> None:
-        """CSV formatter should handle empty nested dicts."""
+        """CSV formatter preserves empty dicts as '{}' — distinct from absence."""
         formatter = CSVFormatter()
 
         record = {
@@ -291,8 +345,25 @@ class TestCSVFormatter:
         flat = formatter.flatten(record)
 
         assert flat["record_type"] == "test"
-        # Empty dict produces no keys for that prefix
-        assert "empty" not in flat
+        # Empty dict is preserved as JSON "{}" — an empty object is a
+        # distinct datum from absence.
+        assert flat["empty"] == "{}"
+
+    def test_csv_formatter_empty_dict_nested(self) -> None:
+        """Empty dict inside a nested path is preserved."""
+        formatter = CSVFormatter()
+
+        record = {
+            "outer": {
+                "config": {},
+                "name": "test",
+            },
+        }
+
+        flat = formatter.flatten(record)
+
+        assert flat["outer.config"] == "{}"
+        assert flat["outer.name"] == "test"
 
     def test_csv_formatter_rejects_nan_in_list(self) -> None:
         """CSV formatter must reject NaN in lists per CLAUDE.md audit integrity.
@@ -486,7 +557,7 @@ class TestLineageTextFormatter:
             token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
             source_row=RowLineage(
                 row_id="row-456",
-                run_id="run-789",
+                run_id="run-001",
                 source_node_id="src-node",
                 row_index=0,
                 source_data_hash="abc123",
@@ -494,10 +565,10 @@ class TestLineageTextFormatter:
                 source_data={"id": 1, "name": "test"},
                 payload_available=True,
             ),
-            node_states=[],
-            routing_events=[],
-            calls=[],
-            parent_tokens=[],
+            node_states=(),
+            routing_events=(),
+            calls=(),
+            parent_tokens=(),
         )
 
         formatter = LineageTextFormatter()
@@ -507,9 +578,9 @@ class TestLineageTextFormatter:
         assert "Row: row-456" in text
         assert "Source Data Hash: abc123" in text
 
-    def test_formats_with_outcome(self) -> None:
-        """Includes outcome when present."""
-        from elspeth.contracts import RowLineage, RowOutcome, Token, TokenOutcome
+    def test_formats_empty_source_data_when_payload_is_available(self) -> None:
+        """Explicitly empty source payloads are shown, not treated as absent."""
+        from elspeth.contracts import RowLineage, Token
         from elspeth.core.landscape.formatters import LineageTextFormatter
         from elspeth.core.landscape.lineage import LineageResult
 
@@ -518,7 +589,38 @@ class TestLineageTextFormatter:
             token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
             source_row=RowLineage(
                 row_id="row-456",
-                run_id="run-789",
+                run_id="run-001",
+                source_node_id="src-node",
+                row_index=0,
+                source_data_hash="abc123",
+                created_at=now,
+                source_data={},
+                payload_available=True,
+            ),
+            node_states=(),
+            routing_events=(),
+            calls=(),
+            parent_tokens=(),
+        )
+
+        formatter = LineageTextFormatter()
+        text = formatter.format(result)
+
+        assert "Payload Available: True" in text
+        assert "Source Data: {}" in text
+
+    def test_formats_with_outcome(self) -> None:
+        """Includes outcome when present."""
+        from elspeth.contracts import RowLineage, TerminalOutcome, TerminalPath, Token, TokenOutcome
+        from elspeth.core.landscape.formatters import LineageTextFormatter
+        from elspeth.core.landscape.lineage import LineageResult
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        result = LineageResult(
+            token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
+            source_row=RowLineage(
+                row_id="row-456",
+                run_id="run-001",
                 source_node_id="src-node",
                 row_index=0,
                 source_data_hash="abc123",
@@ -526,17 +628,18 @@ class TestLineageTextFormatter:
                 source_data={"id": 1},
                 payload_available=True,
             ),
-            node_states=[],
-            routing_events=[],
-            calls=[],
-            parent_tokens=[],
+            node_states=(),
+            routing_events=(),
+            calls=(),
+            parent_tokens=(),
             outcome=TokenOutcome(
                 outcome_id="out-1",
                 token_id="tok-123",
-                run_id="run-789",
-                outcome=RowOutcome.COMPLETED,
+                run_id="run-001",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
                 sink_name="output",
-                is_terminal=True,
                 recorded_at=now,
             ),
         )
@@ -544,7 +647,10 @@ class TestLineageTextFormatter:
         formatter = LineageTextFormatter()
         text = formatter.format(result)
 
-        assert "Outcome: COMPLETED" in text
+        assert "Outcome: SUCCESS" in text
+        assert "Path: DEFAULT_FLOW" in text
+        assert "Completed: True" in text
+        assert "Terminal:" not in text
         assert "Sink: output" in text
 
     def test_formats_missing_latency_as_na(self) -> None:
@@ -558,7 +664,7 @@ class TestLineageTextFormatter:
             token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
             source_row=RowLineage(
                 row_id="row-456",
-                run_id="run-789",
+                run_id="run-001",
                 source_node_id="src-node",
                 row_index=0,
                 source_data_hash="abc123",
@@ -566,9 +672,9 @@ class TestLineageTextFormatter:
                 source_data={"id": 1},
                 payload_available=True,
             ),
-            node_states=[],
-            routing_events=[],
-            calls=[
+            node_states=(),
+            routing_events=(),
+            calls=(
                 Call(
                     call_id="call-1",
                     state_id="state-1",
@@ -578,9 +684,9 @@ class TestLineageTextFormatter:
                     request_hash="req-hash",
                     created_at=now,
                     latency_ms=None,
-                )
-            ],
-            parent_tokens=[],
+                ),
+            ),
+            parent_tokens=(),
         )
 
         formatter = LineageTextFormatter()

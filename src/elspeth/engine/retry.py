@@ -22,7 +22,9 @@ Configuration:
     - RuntimeRetryConfig.no_retry() - single attempt, no retries
 """
 
+import time
 from collections.abc import Callable
+from threading import Event
 from typing import TypeVar
 
 from tenacity import (
@@ -30,6 +32,7 @@ from tenacity import (
     RetryError,
     Retrying,
     retry_if_exception,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
 )
@@ -72,6 +75,7 @@ class RetryManager:
         *,
         is_retryable: Callable[[BaseException], bool],
         on_retry: Callable[[int, BaseException], None] | None = None,
+        shutdown_event: Event | None = None,
     ) -> T:
         """Execute operation with retry logic.
 
@@ -83,6 +87,9 @@ class RetryManager:
                       (matching Landscape audit convention: first attempt = 0).
                       Only called when a retry will actually occur, never on
                       the final attempt.
+            shutdown_event: Optional run-cancellation signal. When set before
+                      an attempt or during retry backoff, retrying stops with
+                      InterruptedError instead of sleeping out the delay.
 
         Returns:
             Result of operation
@@ -94,6 +101,17 @@ class RetryManager:
         attempt = 0
         last_error: BaseException | None = None
 
+        def raise_if_shutdown_requested(when: str) -> None:
+            if shutdown_event is not None and shutdown_event.is_set():
+                raise InterruptedError(f"shutdown requested {when}")
+
+        def interruptible_sleep(seconds: float) -> None:
+            if shutdown_event is None:
+                time.sleep(seconds)
+                return
+            if shutdown_event.wait(timeout=seconds):
+                raise InterruptedError("shutdown requested during retry wait")
+
         # Use tenacity's before_sleep hook to invoke on_retry callback.
         # This ensures callback fires ONLY when a retry is actually scheduled,
         # never on the final attempt when retries are exhausted.
@@ -103,9 +121,11 @@ class RetryManager:
                 if exc is not None:
                     # Convert tenacity's 1-based attempt_number to 0-based for audit convention
                     on_retry(retry_state.attempt_number - 1, exc)
+            raise_if_shutdown_requested("during retry backoff")
 
         try:
             for attempt_state in Retrying(
+                sleep=interruptible_sleep,
                 stop=stop_after_attempt(self._config.max_attempts),
                 wait=wait_exponential_jitter(
                     initial=self._config.base_delay,
@@ -113,13 +133,14 @@ class RetryManager:
                     exp_base=self._config.exponential_base,
                     jitter=self._config.jitter,
                 ),
-                retry=retry_if_exception(is_retryable),
+                retry=retry_if_not_exception_type(InterruptedError) & retry_if_exception(is_retryable),
                 reraise=False,  # We catch RetryError and convert to MaxRetriesExceeded
                 before_sleep=before_sleep_handler if on_retry else None,
             ):
                 with attempt_state:
                     attempt = attempt_state.retry_state.attempt_number
                     try:
+                        raise_if_shutdown_requested("before retry attempt")
                         return operation()
                     except Exception as e:
                         last_error = e

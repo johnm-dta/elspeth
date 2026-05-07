@@ -3,6 +3,7 @@
 import pytest
 
 from elspeth.plugins.sinks.database_sink import DatabaseSink
+from tests.fixtures.base_classes import inject_write_failure
 
 # Strict schema for tests - DatabaseSink requires fixed columns
 STRICT_SCHEMA = {"mode": "fixed", "fields": ["id: int"]}
@@ -66,13 +67,15 @@ class TestDatabaseSinkResumeEndToEnd:
         4. Verify ALL rows present in database
         """
         # Initial run: replace mode writes first batch
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink1.write([{"id": 1}, {"id": 2}], ctx)
         sink1.close()
@@ -83,13 +86,15 @@ class TestDatabaseSinkResumeEndToEnd:
         assert {r["id"] for r in rows} == {1, 2}
 
         # Resume run: configure for resume and write more rows
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",  # Will be changed by configure_for_resume
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",  # Will be changed by configure_for_resume
+                }
+            )
         )
         sink2.configure_for_resume()  # Switch to append mode
         sink2.write([{"id": 3}, {"id": 4}], ctx)
@@ -106,25 +111,29 @@ class TestDatabaseSinkResumeEndToEnd:
         This verifies that configure_for_resume is necessary for resume behavior.
         """
         # Initial run
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink1.write([{"id": 1}, {"id": 2}], ctx)
         sink1.close()
 
         # Second run WITHOUT configure_for_resume - should replace
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         # NO configure_for_resume call
         sink2.write([{"id": 3}], ctx)
@@ -138,25 +147,29 @@ class TestDatabaseSinkResumeEndToEnd:
     def test_resume_multiple_batches(self, db_url: str, ctx) -> None:
         """Resume mode can write multiple batches across multiple sink instances."""
         # Initial run
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink1.write([{"id": 1}], ctx)
         sink1.close()
 
         # Resume run 1
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink2.configure_for_resume()
         sink2.write([{"id": 2}], ctx)
@@ -164,13 +177,15 @@ class TestDatabaseSinkResumeEndToEnd:
         sink2.close()
 
         # Resume run 2
-        sink3 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink3 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink3.configure_for_resume()
         sink3.write([{"id": 4}], ctx)
@@ -184,25 +199,29 @@ class TestDatabaseSinkResumeEndToEnd:
     def test_resume_with_append_mode_default(self, db_url: str, ctx) -> None:
         """Resume mode works when initial sink uses append mode (default)."""
         # Initial run with append mode (default behavior)
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "append",
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "append",
+                }
+            )
         )
         sink1.write([{"id": 1}], ctx)
         sink1.close()
 
         # Resume run - configure_for_resume is idempotent when already append
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "append",
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "append",
+                }
+            )
         )
         sink2.configure_for_resume()  # Should be no-op since already append
         sink2.write([{"id": 2}], ctx)
@@ -216,25 +235,29 @@ class TestDatabaseSinkResumeEndToEnd:
     def test_validate_output_target_then_write_in_resume_mode(self, db_url: str, ctx) -> None:
         """validate_output_target() should not break first write initialization."""
         # Initial run creates the table.
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "append",
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "append",
+                }
+            )
         )
         sink1.write([{"id": 1}], ctx)
         sink1.close()
 
         # Resume sink validates first, then writes.
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink2.configure_for_resume()
         validation = sink2.validate_output_target()

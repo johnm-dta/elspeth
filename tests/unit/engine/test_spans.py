@@ -376,18 +376,22 @@ class TestTokenIdOnChildSpans:
         # 1 row_span + 1 pre_fork + 2 post_fork = 4 spans
         assert len(spans) == 4
 
-        # Find spans by name
+        # Find spans by name — span names are static; plugin identity is in attributes
         row_spans = [s for s in spans if s.name == "row"]
-        pre_fork_spans = [s for s in spans if s.name == "transform:pre_fork_transform"]
-        post_fork_spans = [s for s in spans if s.name == "transform:post_fork_transform"]
+        transform_spans = [s for s in spans if s.name == "transform"]
 
         assert len(row_spans) == 1
-        assert len(pre_fork_spans) == 1
-        assert len(post_fork_spans) == 2
+        assert len(transform_spans) == 3  # 1 pre-fork + 2 post-fork
 
         # Row span has parent token.id
         row_attrs = dict(row_spans[0].attributes or {})
         assert row_attrs.get("token.id") == parent_token_id
+
+        # Identify pre-fork vs post-fork by plugin.name attribute and token.id
+        pre_fork_spans = [s for s in transform_spans if dict(s.attributes or {}).get("plugin.name") == "pre_fork_transform"]
+        post_fork_spans = [s for s in transform_spans if dict(s.attributes or {}).get("plugin.name") == "post_fork_transform"]
+        assert len(pre_fork_spans) == 1
+        assert len(post_fork_spans) == 2
 
         # Pre-fork transform has parent token.id
         pre_fork_attrs = dict(pre_fork_spans[0].attributes or {})

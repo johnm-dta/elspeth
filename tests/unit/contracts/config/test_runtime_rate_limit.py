@@ -5,6 +5,7 @@ Rate-limit-specific tests only. Common tests (frozen, slots, protocol, orphan fi
 are in test_runtime_common.py.
 """
 
+from types import MappingProxyType
 
 # NOTE: Protocol compliance, orphan detection, frozen/slots tests are in test_runtime_common.py
 
@@ -44,7 +45,7 @@ class TestRateLimitFieldNameMapping:
 
         # RateLimitSettings should not have any field mappings
         # because all field names are the same between Settings and Runtime
-        mappings = FIELD_MAPPINGS.get("RateLimitSettings", {})
+        mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get("RateLimitSettings", {})
 
         assert mappings == {}, f"RateLimitSettings should have no field mappings (same names), but found: {mappings}"
 
@@ -163,7 +164,7 @@ class TestRuntimeRateLimitPostInit:
         from elspeth.contracts.config.runtime import RuntimeServiceRateLimit
 
         with pytest.raises(TypeError, match="requests_per_minute must be int"):
-            RuntimeServiceRateLimit(requests_per_minute=True)  # type: ignore[arg-type]  # Intentional: testing bool rejection
+            RuntimeServiceRateLimit(requests_per_minute=True)
 
     def test_config_rejects_bool_default_rpm(self) -> None:
         """default_requests_per_minute=True should raise TypeError — bool is not int."""
@@ -176,7 +177,7 @@ class TestRuntimeRateLimitPostInit:
         with pytest.raises(TypeError, match="default_requests_per_minute must be int"):
             RuntimeRateLimitConfig(
                 enabled=True,
-                default_requests_per_minute=True,  # type: ignore[arg-type]  # Intentional: testing bool rejection
+                default_requests_per_minute=True,
                 persistence_path=None,
                 services=MappingProxyType({}),
             )

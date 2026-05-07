@@ -12,16 +12,17 @@ import time
 import urllib.parse
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal, Self
 
 import structlog
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.core.canonical import canonical_json, stable_hash
@@ -32,7 +33,6 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseClientError,
     validate_additional_domain,
 )
-from elspeth.plugins.infrastructure.clients.fingerprinting import fingerprint_headers
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 
@@ -47,12 +47,28 @@ class LookupConfig(BaseModel):
     target_entity: str  # Dataverse entity to bind to (e.g., "accounts")
     target_field: str  # Navigation property name (e.g., "parentcustomerid")
 
+    @field_validator("target_entity")
+    @classmethod
+    def validate_target_entity_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("target_entity cannot be empty")
+        return v.strip()
+
+    @field_validator("target_field")
+    @classmethod
+    def validate_target_field_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("target_field cannot be empty")
+        return v.strip()
+
 
 class DataverseSinkConfig(DataPluginConfig):
     """Configuration for Dataverse sink plugin.
 
     Extends DataPluginConfig which requires schema configuration.
     """
+
+    _plugin_component_type: ClassVar[str | None] = "sink"
 
     environment_url: str = Field(
         ...,
@@ -134,6 +150,64 @@ class DataverseSinkConfig(DataPluginConfig):
             raise ValueError("alternate_key cannot be empty")
         return v.strip()
 
+    @model_validator(mode="after")
+    def validate_no_outbound_key_collisions(self) -> Self:
+        """Reject configs where multiple source fields map to the same Dataverse key.
+
+        Checks three collision types:
+        1. Duplicate field_mapping values (two pipeline fields → same Dataverse column)
+        2. Duplicate lookup target_field values (two lookups → same navigation property)
+        3. Lookup bind key colliding with a field_mapping target
+        """
+        # 1. field_mapping value uniqueness
+        targets = list(self.field_mapping.values())
+        seen: dict[str, str] = {}
+        for pipeline_field, dv_column in self.field_mapping.items():
+            if dv_column in seen:
+                raise ValueError(
+                    f"field_mapping collision: pipeline fields '{seen[dv_column]}' and "
+                    f"'{pipeline_field}' both map to Dataverse column '{dv_column}'"
+                )
+            seen[dv_column] = pipeline_field
+
+        if self.lookups:
+            # 2. lookup target_field uniqueness
+            lookup_targets: dict[str, str] = {}
+            for pipeline_field, lookup in self.lookups.items():
+                bind_key = f"{lookup.target_field}@odata.bind"
+                if lookup.target_field in lookup_targets:
+                    raise ValueError(
+                        f"lookup collision: fields '{lookup_targets[lookup.target_field]}' and "
+                        f"'{pipeline_field}' both target navigation property '{lookup.target_field}'"
+                    )
+                lookup_targets[lookup.target_field] = pipeline_field
+
+                # 3. bind key vs field_mapping target collision
+                if bind_key in targets:
+                    raise ValueError(
+                        f"lookup/field_mapping collision: lookup for '{pipeline_field}' produces "
+                        f"bind key '{bind_key}' which collides with a field_mapping target"
+                    )
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_alternate_key_in_field_mapping(self) -> Self:
+        """Reject configs where alternate_key is not in field_mapping values.
+
+        The alternate_key must name a Dataverse column that appears as a value
+        in field_mapping (pipeline_field -> dataverse_column). Moved from
+        DataverseSink.__init__ so from_dict() catches it (pre-validation /
+        engine-validation agreement).
+        """
+        if self.alternate_key not in self.field_mapping.values():
+            raise ValueError(
+                f"alternate_key '{self.alternate_key}' not found in field_mapping values. "
+                f"The alternate_key must be a Dataverse column that appears as a value in field_mapping. "
+                f"Available field_mapping values: {sorted(self.field_mapping.values())}"
+            )
+        return self
+
 
 # Rebuild model to resolve forward references
 DataverseSinkConfig.model_rebuild()
@@ -148,13 +222,16 @@ class DataverseSink(BaseSink):
     """
 
     name = "dataverse"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:cf259d9d2a666fb9"
     determinism = Determinism.EXTERNAL_CALL
+    config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
     supports_resume = False  # Dataverse writes are not locally staged
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = DataverseSinkConfig.from_dict(config)
+        cfg = DataverseSinkConfig.from_dict(config, plugin_name=self.name)
 
         # Store config
         self._environment_url = cfg.environment_url
@@ -176,19 +253,18 @@ class DataverseSink(BaseSink):
         )
         self.input_schema = self._schema_class
 
+        # Required-field enforcement (centralized in SinkExecutor)
+        self.declared_required_fields = self._schema_config.get_effective_required_fields()
+
         # Resolve the pipeline field name for the alternate key.
         # field_mapping is pipeline_field → dataverse_column; we need the reverse.
+        # Presence of alternate_key in field_mapping values is guaranteed by
+        # DataverseSinkConfig.validate_alternate_key_in_field_mapping model_validator.
         self._alternate_key_pipeline_field: str | None = None
         for pipeline_field, dataverse_col in self._field_mapping.items():
             if dataverse_col == self._alternate_key:
                 self._alternate_key_pipeline_field = pipeline_field
                 break
-        if self._alternate_key_pipeline_field is None:
-            raise ValueError(
-                f"alternate_key '{self._alternate_key}' not found in field_mapping values. "
-                f"The alternate_key must be a Dataverse column that appears as a value in field_mapping. "
-                f"Available field_mapping values: {sorted(self._field_mapping.values())}"
-            )
 
         # Lazy-constructed client (needs lifecycle context)
         self._client: DataverseClient | None = None
@@ -200,20 +276,7 @@ class DataverseSink(BaseSink):
         self._run_id = ctx.run_id
         self._telemetry_emit = ctx.telemetry_emit
 
-        from azure.identity import ClientSecretCredential, ManagedIdentityCredential
-
-        credential: ClientSecretCredential | ManagedIdentityCredential
-        if self._auth_config.method == "service_principal":
-            assert self._auth_config.tenant_id is not None
-            assert self._auth_config.client_id is not None
-            assert self._auth_config.client_secret is not None
-            credential = ClientSecretCredential(
-                tenant_id=self._auth_config.tenant_id,
-                client_id=self._auth_config.client_id,
-                client_secret=self._auth_config.client_secret,
-            )
-        else:
-            credential = ManagedIdentityCredential()
+        credential = self._auth_config.create_credential()
 
         # Obtain rate limiter (with null guard)
         limiter = ctx.rate_limit_registry.get_limiter("dataverse_sink") if ctx.rate_limit_registry is not None else None
@@ -273,7 +336,7 @@ class DataverseSink(BaseSink):
                     response_payload=resp_payload,
                 )
             )
-        except (FrameworkBugError, AuditIntegrityError):
+        except contract_errors.TIER_1_ERRORS:
             raise
         except Exception as tel_err:
             logger.warning(
@@ -340,11 +403,6 @@ class DataverseSink(BaseSink):
                 )
             )
 
-        # Compute content hash BEFORE writing (proves intent)
-        canonical_payload = canonical_json(rows).encode("utf-8")
-        content_hash = hashlib.sha256(canonical_payload).hexdigest()
-        total_size = len(canonical_payload)
-
         # Client and key field must be set by on_start/__init__
         assert self._client is not None, "on_start() must be called before write()"
         assert self._alternate_key_pipeline_field is not None
@@ -373,6 +431,14 @@ class DataverseSink(BaseSink):
             payload = self._map_row(row)
             prepared.append((url, payload))
 
+        # Compute content hash from the mapped payloads (what we actually send
+        # to Dataverse), not the full pipeline rows. This allows an auditor to
+        # independently verify the hash against the Dataverse-side data.
+        mapped_payloads = [payload for _, payload in prepared]
+        canonical_payload = canonical_json(mapped_payloads).encode("utf-8")
+        content_hash = hashlib.sha256(canonical_payload).hexdigest()
+        total_size = len(canonical_payload)
+
         # All pre-processing succeeded — safe to make HTTP calls
         for url, payload in prepared:
             # Execute upsert with audit recording + telemetry
@@ -385,8 +451,8 @@ class DataverseSink(BaseSink):
                 request_data = {
                     "method": "PATCH",
                     "url": url,
-                    "headers": fingerprint_headers(response.request_headers),
-                    "field_names": sorted(payload.keys()),
+                    "headers": response.request_headers,
+                    "json": payload,
                 }
                 response_data = {"status_code": response.status_code}
                 try:
@@ -418,7 +484,7 @@ class DataverseSink(BaseSink):
                 request_data = {
                     "method": "PATCH",
                     "url": url,
-                    "field_names": sorted(payload.keys()),
+                    "json": payload,
                 }
                 ctx.record_call(
                     call_type=CallType.HTTP,

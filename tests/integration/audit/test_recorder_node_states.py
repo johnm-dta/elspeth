@@ -1,4 +1,4 @@
-"""Tests for LandscapeRecorder node state operations."""
+"""Tests for RecorderFactory node state operations."""
 
 from __future__ import annotations
 
@@ -11,18 +11,18 @@ from elspeth.contracts.schema import SchemaConfig
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
-class TestLandscapeRecorderNodeStates:
+class TestRecorderFactoryNodeStates:
     """Node state recording (what happened at each node)."""
 
     def test_begin_node_state(self) -> None:
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -30,15 +30,15 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=source.node_id,
             run_id=run.run_id,
@@ -59,12 +59,12 @@ class TestLandscapeRecorderNodeStates:
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.canonical import stable_hash
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -72,18 +72,18 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         input_data = {"x": 1, "y": 2}
         output_data = {"x": 1, "y": 2, "z": 3}
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -95,7 +95,7 @@ class TestLandscapeRecorderNodeStates:
         expected_input_hash = stable_hash(input_data)
         assert state.input_hash == expected_input_hash, f"input_hash mismatch: expected {expected_input_hash}, got {state.input_hash}"
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data=output_data,
@@ -112,12 +112,12 @@ class TestLandscapeRecorderNodeStates:
     def test_complete_node_state_success(self) -> None:
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -125,14 +125,14 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -140,7 +140,7 @@ class TestLandscapeRecorderNodeStates:
             input_data={"x": 1},
         )
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"x": 1, "y": 2},
@@ -155,12 +155,12 @@ class TestLandscapeRecorderNodeStates:
     def test_complete_node_state_failed(self) -> None:
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -168,14 +168,14 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -183,7 +183,7 @@ class TestLandscapeRecorderNodeStates:
             input_data={},
         )
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.FAILED,
             error={"reason": "test_error", "message": "Validation failed"},
@@ -210,12 +210,12 @@ class TestLandscapeRecorderNodeStates:
 
         from elspeth.contracts import ExecutionError, NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -223,14 +223,14 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -245,7 +245,7 @@ class TestLandscapeRecorderNodeStates:
             phase="process",
         )
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.FAILED,
             error=error,
@@ -279,12 +279,12 @@ class TestLandscapeRecorderNodeStates:
 
         from elspeth.contracts import ExecutionError, NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="gate",
             node_type=NodeType.GATE,
@@ -292,14 +292,14 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -313,7 +313,7 @@ class TestLandscapeRecorderNodeStates:
             exception_type="RuntimeError",
         )
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.FAILED,
             error=error,
@@ -334,12 +334,12 @@ class TestLandscapeRecorderNodeStates:
         """
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -347,14 +347,14 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -363,7 +363,7 @@ class TestLandscapeRecorderNodeStates:
         )
 
         # Empty output_data={} should succeed, not crash
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={},  # Empty dict is valid output
@@ -380,12 +380,12 @@ class TestLandscapeRecorderNodeStates:
         """
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -393,14 +393,14 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -409,7 +409,7 @@ class TestLandscapeRecorderNodeStates:
         )
 
         # Empty error={} should be serialized, not dropped
-        completed = recorder.complete_node_state(  # type: ignore[call-overload]  # Empty dict tests serialization
+        completed = factory.execution.complete_node_state(  # type: ignore[call-overload]  # Empty dict tests serialization
             state_id=state.state_id,
             status=NodeStateStatus.FAILED,
             error={},
@@ -422,12 +422,12 @@ class TestLandscapeRecorderNodeStates:
     def test_retry_increments_attempt(self) -> None:
         from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -435,16 +435,16 @@ class TestLandscapeRecorderNodeStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         # First attempt fails
-        state1 = recorder.begin_node_state(
+        state1 = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -452,10 +452,10 @@ class TestLandscapeRecorderNodeStates:
             input_data={},
             attempt=0,
         )
-        recorder.complete_node_state(state1.state_id, status=NodeStateStatus.FAILED, error={}, duration_ms=1.0)  # type: ignore[call-overload]  # Empty dict tests serialization
+        factory.execution.complete_node_state(state1.state_id, status=NodeStateStatus.FAILED, error={}, duration_ms=1.0)  # type: ignore[call-overload]  # Empty dict tests serialization
 
         # Second attempt
-        state2 = recorder.begin_node_state(
+        state2 = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -484,14 +484,14 @@ class TestNodeStateIntegrityValidation:
         from sqlalchemy import text
 
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Create valid infrastructure
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -499,23 +499,23 @@ class TestNodeStateIntegrityValidation:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row_record = recorder.create_row(
+        row_record = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"test": "value"},
         )
-        token = recorder.create_token(row_id=row_record.row_id)
+        token = factory.data_flow.create_token(row_id=row_record.row_id)
 
         # Create a completed state normally
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
             step_index=0,
             input_data={"test": "data"},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"result": "ok"},
@@ -523,7 +523,7 @@ class TestNodeStateIntegrityValidation:
         )
 
         # Verify it works normally
-        retrieved = recorder.get_node_states_for_token(token.token_id)
+        retrieved = factory.query.get_node_states_for_token(token.token_id)
         assert len(retrieved) == 1
 
         # Now corrupt the database - set completed_at to NULL
@@ -536,7 +536,7 @@ class TestNodeStateIntegrityValidation:
 
         # Reading corrupted data should crash (Tier 1 rule)
         with pytest.raises(AuditIntegrityError, match=r"NULL completed_at.*audit integrity violation"):
-            recorder.get_node_states_for_token(token.token_id)
+            factory.query.get_node_states_for_token(token.token_id)
 
     def test_failed_state_with_null_completed_at_raises(self) -> None:
         """FAILED state with NULL completed_at raises integrity violation.
@@ -547,14 +547,14 @@ class TestNodeStateIntegrityValidation:
         from sqlalchemy import text
 
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Create valid infrastructure
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -562,23 +562,23 @@ class TestNodeStateIntegrityValidation:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row_record = recorder.create_row(
+        row_record = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"test": "value"},
         )
-        token = recorder.create_token(row_id=row_record.row_id)
+        token = factory.data_flow.create_token(row_id=row_record.row_id)
 
         # Create a failed state normally
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
             step_index=0,
             input_data={"test": "data"},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.FAILED,
             error={"reason": "test_error", "message": "Something went wrong"},
@@ -586,7 +586,7 @@ class TestNodeStateIntegrityValidation:
         )
 
         # Verify it works normally
-        retrieved = recorder.get_node_states_for_token(token.token_id)
+        retrieved = factory.query.get_node_states_for_token(token.token_id)
         assert len(retrieved) == 1
 
         # Now corrupt the database - set completed_at to NULL
@@ -599,7 +599,7 @@ class TestNodeStateIntegrityValidation:
 
         # Reading corrupted data should crash (Tier 1 rule)
         with pytest.raises(AuditIntegrityError, match=r"NULL completed_at.*audit integrity violation"):
-            recorder.get_node_states_for_token(token.token_id)
+            factory.query.get_node_states_for_token(token.token_id)
 
 
 class TestNodeStateOrderingWithRetries:
@@ -619,13 +619,13 @@ class TestNodeStateOrderingWithRetries:
         Fix: ORDER BY (step_index, attempt) for deterministic ordering.
         """
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node1 = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node1 = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform_1",
             node_type=NodeType.TRANSFORM,
@@ -633,7 +633,7 @@ class TestNodeStateOrderingWithRetries:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        node2 = recorder.register_node(
+        node2 = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform_2",
             node_type=NodeType.TRANSFORM,
@@ -641,17 +641,17 @@ class TestNodeStateOrderingWithRetries:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row_record = recorder.create_row(
+        row_record = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node1.node_id,
             row_index=0,
             data={"test": "value"},
         )
-        token = recorder.create_token(row_id=row_record.row_id)
+        token = factory.data_flow.create_token(row_id=row_record.row_id)
 
         # Create states at step 0 with multiple attempts (simulating retries)
         # Insert OUT OF ORDER to test that ordering is enforced by the query
-        state_0_attempt_1 = recorder.begin_node_state(
+        state_0_attempt_1 = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node1.node_id,
             run_id=run.run_id,
@@ -659,14 +659,14 @@ class TestNodeStateOrderingWithRetries:
             attempt=1,  # Second attempt first!
             input_data={"test": "data"},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state_0_attempt_1.state_id,
             status=NodeStateStatus.FAILED,
             error={"reason": "test_error", "message": "First failure"},
             duration_ms=10.0,
         )
 
-        state_0_attempt_0 = recorder.begin_node_state(
+        state_0_attempt_0 = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node1.node_id,
             run_id=run.run_id,
@@ -674,7 +674,7 @@ class TestNodeStateOrderingWithRetries:
             attempt=0,  # First attempt second!
             input_data={"test": "data"},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state_0_attempt_0.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"result": "ok"},
@@ -682,7 +682,7 @@ class TestNodeStateOrderingWithRetries:
         )
 
         # Create a state at step 1 using a different node (different step in pipeline)
-        state_1_attempt_0 = recorder.begin_node_state(
+        state_1_attempt_0 = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node2.node_id,  # Different node for step 1
             run_id=run.run_id,
@@ -690,7 +690,7 @@ class TestNodeStateOrderingWithRetries:
             attempt=0,
             input_data={"test": "data2"},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state_1_attempt_0.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"result": "ok2"},
@@ -698,7 +698,7 @@ class TestNodeStateOrderingWithRetries:
         )
 
         # REGRESSION CHECK: Verify ordering is (step_index, attempt)
-        states = recorder.get_node_states_for_token(token.token_id)
+        states = factory.query.get_node_states_for_token(token.token_id)
         assert len(states) == 3
 
         # Verify order: step 0 attempt 0, step 0 attempt 1, step 1 attempt 0
@@ -728,12 +728,12 @@ class TestContextAfterRoundTrip:
         from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
         from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="coalesce",
             node_type=NodeType.COALESCE,
@@ -741,13 +741,13 @@ class TestContextAfterRoundTrip:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         metadata = CoalesceMetadata.for_merge(
             policy=CoalescePolicy.REQUIRE_ALL,
@@ -762,14 +762,14 @@ class TestContextAfterRoundTrip:
             wait_duration_ms=50.0,
         )
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
             step_index=0,
             input_data={},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"merged": True},
@@ -777,7 +777,7 @@ class TestContextAfterRoundTrip:
             context_after=metadata,
         )
 
-        fetched = recorder.get_node_state(state.state_id)
+        fetched = factory.execution.get_node_state(state.state_id)
         assert fetched is not None
         assert isinstance(fetched, NodeStateCompleted)
         assert fetched.context_after_json is not None
@@ -794,12 +794,12 @@ class TestContextAfterRoundTrip:
             QueryOrderEntry,
         )
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -807,13 +807,13 @@ class TestContextAfterRoundTrip:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         ctx = PoolExecutionContext(
             pool_config=PoolConfigSnapshot(
@@ -835,14 +835,14 @@ class TestContextAfterRoundTrip:
             ),
         )
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
             step_index=0,
             input_data={},
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"result": "ok"},
@@ -850,7 +850,7 @@ class TestContextAfterRoundTrip:
             context_after=ctx,
         )
 
-        fetched = recorder.get_node_state(state.state_id)
+        fetched = factory.execution.get_node_state(state.state_id)
         assert fetched is not None
         assert isinstance(fetched, NodeStateCompleted)
         assert fetched.context_after_json is not None

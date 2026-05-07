@@ -12,13 +12,25 @@ would cause transforms to execute out of order or produce corrupt audit trails.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import networkx as nx
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.contracts.enums import NodeType
+from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.contracts.types import NodeID
-from elspeth.core.dag import ExecutionGraph, GraphValidationError
+from elspeth.core.dag import (
+    ExecutionGraph,
+    GraphValidationError,
+    merge_guaranteed_fields,
+    merge_union_fields,
+)
+from tests.helpers.coalesce import _add_coalesce_with_computed_schema
+
+# Type alias matching FieldDefinition.field_type
+_FieldType = Literal["str", "int", "float", "bool", "any"]
 
 # =============================================================================
 # Strategies for generating valid DAG structures
@@ -599,11 +611,13 @@ class TestGuaranteedFieldsProperties:
         branch_a_only: frozenset[str],
         branch_b_only: frozenset[str],
     ) -> None:
-        """Property: After coalesce, guaranteed = intersection of branch guarantees.
+        """Property: Under best_effort, coalesce guaranteed = intersection of branch guarantees.
 
-        When parallel branches rejoin at a coalesce node, only fields
-        guaranteed by ALL branches remain guaranteed. This is the
-        "lowest common denominator" of field availability.
+        When parallel branches rejoin at a coalesce node under best_effort
+        policy, branches may be lost — only fields guaranteed by ALL branches
+        remain guaranteed (the "lowest common denominator"). Under require_all
+        the result would be the union (every branch always arrives) — see
+        test_dag_coalesce_optionality.py::test_require_all_* for that path.
         """
         # Ensure disjoint branch-specific fields
         branch_a_only = branch_a_only - common_fields - branch_b_only
@@ -611,7 +625,7 @@ class TestGuaranteedFieldsProperties:
 
         branch_a_guarantees = common_fields | branch_a_only
         branch_b_guarantees = common_fields | branch_b_only
-        expected_after_coalesce = common_fields  # Only common fields survive
+        expected_after_coalesce = common_fields  # Only common fields survive intersection
 
         graph = ExecutionGraph()
 
@@ -632,8 +646,14 @@ class TestGuaranteedFieldsProperties:
             config={"schema": {"mode": "observed", "guaranteed_fields": list(branch_b_guarantees)}},
         )
 
-        # Coalesce node (merge point) — union merge uses intersection of guarantees
-        graph.add_node("coalesce", node_type=NodeType.COALESCE, plugin_name="test_coalesce", config={"merge": "union"})
+        # Coalesce node (merge point) — best_effort uses intersection of guarantees
+        _add_coalesce_with_computed_schema(
+            graph,
+            "coalesce",
+            ["branch_a", "branch_b"],
+            policy="best_effort",
+            extra_config={"branches": {"branch_a": {}, "branch_b": {}}},
+        )
 
         # Sink
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="test_sink")
@@ -654,13 +674,107 @@ class TestGuaranteedFieldsProperties:
             f"Branch A: {branch_a_guarantees}, Branch B: {branch_b_guarantees}"
         )
 
+    @given(
+        common_fields=st.frozensets(
+            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            min_size=0,
+            max_size=3,
+        ),
+        branch_a_only=st.frozensets(
+            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            min_size=0,
+            max_size=2,
+        ),
+        branch_b_only=st.frozensets(
+            st.from_regex(r"[a-zA-Z_][a-zA-Z0-9_]{0,7}", fullmatch=True),
+            min_size=0,
+            max_size=2,
+        ),
+    )
+    @settings(max_examples=100)
+    def test_coalesce_require_all_union_property(
+        self,
+        common_fields: frozenset[str],
+        branch_a_only: frozenset[str],
+        branch_b_only: frozenset[str],
+    ) -> None:
+        """Property: Under require_all, coalesce guaranteed = UNION of branch guarantees.
+
+        When parallel branches rejoin under require_all, every branch always
+        arrives (CoalesceExecutor._should_merge enforces this) and _merge_data's
+        dict.update preserves every branch's keys. So a field guaranteed by
+        ANY branch is guaranteed in the merged row — the merged spec is the
+        union of branch guarantees, not the intersection.
+
+        This is the symmetric counterpart to test_coalesce_intersection_property
+        (which exercises best_effort).
+        """
+        # Ensure disjoint branch-specific fields
+        branch_a_only = branch_a_only - common_fields - branch_b_only
+        branch_b_only = branch_b_only - common_fields - branch_a_only
+
+        # The union property is only observable when at least one branch has
+        # exclusive fields. Without this, union == intersection == common_fields,
+        # making the test degenerate. QA review identified this gap.
+        assume(branch_a_only or branch_b_only)
+
+        branch_a_guarantees = common_fields | branch_a_only
+        branch_b_guarantees = common_fields | branch_b_only
+        # Under require_all, every branch always arrives → union of guarantees.
+        expected_after_coalesce = branch_a_guarantees | branch_b_guarantees
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type=NodeType.SOURCE, plugin_name="test_source")
+        graph.add_node(
+            "branch_a",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="test_transform",
+            config={"schema": {"mode": "observed", "guaranteed_fields": list(branch_a_guarantees)}},
+        )
+        graph.add_node(
+            "branch_b",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="test_transform",
+            config={"schema": {"mode": "observed", "guaranteed_fields": list(branch_b_guarantees)}},
+        )
+
+        # Coalesce node — require_all uses union of guarantees (every branch arrives)
+        _add_coalesce_with_computed_schema(
+            graph,
+            "coalesce",
+            ["branch_a", "branch_b"],
+            policy="require_all",
+            extra_config={"branches": {"branch_a": {}, "branch_b": {}}},
+        )
+
+        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="test_sink")
+
+        graph.add_edge("source", "branch_a", label="path_a")
+        graph.add_edge("source", "branch_b", label="path_b")
+        graph.add_edge("branch_a", "coalesce", label="continue")
+        graph.add_edge("branch_b", "coalesce", label="continue")
+        graph.add_edge("coalesce", "sink", label="continue")
+
+        effective = graph.get_effective_guaranteed_fields("coalesce")
+
+        # Both branches' guarantees survive under require_all (union semantics).
+        # However: a branch with guaranteed_fields=None abstains and contributes
+        # nothing. With both branches having explicit (possibly empty) guarantees,
+        # we expect the union of both.
+        assert effective == expected_after_coalesce, (
+            f"Coalesce under require_all should guarantee union: "
+            f"{expected_after_coalesce}, got {effective}. "
+            f"Branch A: {branch_a_guarantees}, Branch B: {branch_b_guarantees}"
+        )
+
     @given(guaranteed=field_sets.filter(lambda s: len(s) > 0))
     @settings(max_examples=50)
     def test_gate_passthrough_inheritance(self, guaranteed: frozenset[str]) -> None:
-        """Property: Gates inherit guarantees from upstream (pass-through).
+        """Property: Gates use schema propagated by builder from upstream.
 
-        Gates don't transform data - they only route. The effective
-        guarantees after a gate should equal the upstream guarantees.
+        Gates don't transform data - they only route. In production, the
+        builder copies the upstream schema to the gate. The effective
+        guarantees after a gate should equal the propagated guarantees.
         """
         graph = ExecutionGraph()
 
@@ -672,8 +786,13 @@ class TestGuaranteedFieldsProperties:
             config={"schema": {"mode": "observed", "guaranteed_fields": list(guaranteed)}},
         )
 
-        # Gate (pass-through)
-        graph.add_node("gate", node_type=NodeType.GATE, plugin_name="test_gate")
+        # Gate (builder would propagate source schema here)
+        graph.add_node(
+            "gate",
+            node_type=NodeType.GATE,
+            plugin_name="test_gate",
+            config={"schema": {"mode": "observed", "guaranteed_fields": list(guaranteed)}},
+        )
 
         # Sink
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="test_sink")
@@ -787,3 +906,346 @@ class TestGuaranteedFieldsProperties:
 
         # Schema contract validation should pass - no requirements to violate
         graph.validate_edge_compatibility()  # Should not raise
+
+
+# =============================================================================
+# Coalesce Topology Property Tests (N-branch, field optionality)
+# =============================================================================
+
+
+# Strategies for field definitions with mixed required/optional
+valid_field_types: st.SearchStrategy[_FieldType] = st.sampled_from(["int", "str", "float", "bool"])
+
+
+@st.composite
+def field_definitions(draw: st.DrawFn) -> FieldDefinition:
+    """Generate a single FieldDefinition with random name, type, and required status."""
+    name = draw(st.from_regex(r"[a-z][a-z0-9_]{0,7}", fullmatch=True))
+    field_type = draw(valid_field_types)
+    required = draw(st.booleans())
+    return FieldDefinition(name=name, field_type=field_type, required=required)
+
+
+@st.composite
+def branch_schemas(
+    draw: st.DrawFn,
+    min_fields: int = 1,
+    max_fields: int = 4,
+) -> SchemaConfig:
+    """Generate a SchemaConfig with random fields and required statuses."""
+    num_fields = draw(st.integers(min_value=min_fields, max_value=max_fields))
+
+    # Generate unique field names with types and required flags
+    field_names = draw(
+        st.lists(
+            st.from_regex(r"[a-z][a-z0-9_]{0,5}", fullmatch=True),
+            min_size=num_fields,
+            max_size=num_fields,
+            unique=True,
+        )
+    )
+    fields = tuple(
+        FieldDefinition(
+            name=name,
+            field_type=draw(valid_field_types),
+            required=draw(st.booleans()),
+        )
+        for name in field_names
+    )
+
+    return SchemaConfig(mode="flexible", fields=fields)
+
+
+@st.composite
+def coalesce_branch_sets(
+    draw: st.DrawFn,
+    min_branches: int = 2,
+    max_branches: int = 5,
+) -> dict[str, SchemaConfig]:
+    """Generate a set of branch schemas for a coalesce node."""
+    num_branches = draw(st.integers(min_value=min_branches, max_value=max_branches))
+
+    branches = {}
+    for i in range(num_branches):
+        branch_name = f"branch_{i}"
+        # Each branch gets its own schema
+        branches[branch_name] = draw(branch_schemas())
+
+    return branches
+
+
+class TestCoalesceNBranchProperties:
+    """Property tests for coalesce behavior with varying branch counts (2-N).
+
+    These tests verify invariants that must hold regardless of the number of
+    branches feeding into a coalesce node. The RC5-UX change set introduced
+    significant coalesce logic — these tests ensure the invariants hold under
+    arbitrary branch counts, not just the 2-branch case covered by unit tests.
+    """
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=5))
+    @settings(max_examples=100)
+    def test_best_effort_guarantees_are_intersection(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under best_effort, merged guarantees = intersection of branch guarantees.
+
+        For N branches, any branch might be lost, so only fields guaranteed by
+        ALL branches survive in the merged output.
+        """
+        # Compute effective guarantees for each branch
+        branch_guarantees = [schema.get_effective_guaranteed_fields() for schema in branches.values()]
+
+        # Intersection: only fields guaranteed by ALL branches survive
+        if branch_guarantees:
+            expected = set.intersection(*[set(g) for g in branch_guarantees])
+        else:
+            expected = set()
+
+        # Use production function
+        result = merge_guaranteed_fields(branches, require_all=False)
+
+        # Result should be intersection (or None if no branch has guarantees)
+        if result is None:
+            # None means no branch had effective guarantees
+            assert all(not schema.has_effective_guarantees for schema in branches.values()), (
+                "Result None but some branch has effective guarantees"
+            )
+        else:
+            assert set(result) == expected, f"best_effort should produce intersection: expected {expected}, got {set(result)}"
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=5))
+    @settings(max_examples=100)
+    def test_require_all_guarantees_are_union(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under require_all, merged guarantees = union of branch guarantees.
+
+        When all branches always arrive, any field guaranteed by ANY branch
+        is guaranteed in the merged output.
+        """
+        branch_guarantees = [schema.get_effective_guaranteed_fields() for schema in branches.values()]
+
+        # Union: fields guaranteed by ANY branch survive
+        if branch_guarantees:
+            expected = set.union(*[set(g) for g in branch_guarantees])
+        else:
+            expected = set()
+
+        result = merge_guaranteed_fields(branches, require_all=True)
+
+        if result is None:
+            assert all(not schema.has_effective_guarantees for schema in branches.values()), (
+                "Result None but some branch has effective guarantees"
+            )
+        else:
+            assert set(result) == expected, f"require_all should produce union: expected {expected}, got {set(result)}"
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=4))
+    @settings(max_examples=100)
+    def test_best_effort_guarantees_subset_of_any_branch(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under best_effort, merged guarantees ⊆ each branch's guarantees.
+
+        The intersection is always a subset of (or equal to) each input set.
+        This is the "monotonicity" property — guarantees can only shrink.
+        """
+        result = merge_guaranteed_fields(branches, require_all=False)
+
+        if result is not None:
+            result_set = set(result)
+            for branch_name, schema in branches.items():
+                if schema.has_effective_guarantees:
+                    branch_set = set(schema.get_effective_guaranteed_fields())
+                    assert result_set <= branch_set, (
+                        f"Merged guarantees {result_set} not subset of branch {branch_name}'s guarantees {branch_set}"
+                    )
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=4))
+    @settings(max_examples=100)
+    def test_require_all_guarantees_superset_of_any_branch(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under require_all, merged guarantees ⊇ each branch's guarantees.
+
+        The union is always a superset of (or equal to) each input set.
+        """
+        result = merge_guaranteed_fields(branches, require_all=True)
+
+        if result is not None:
+            result_set = set(result)
+            for branch_name, schema in branches.items():
+                if schema.has_effective_guarantees:
+                    branch_set = set(schema.get_effective_guaranteed_fields())
+                    assert result_set >= branch_set, (
+                        f"Merged guarantees {result_set} not superset of branch {branch_name}'s guarantees {branch_set}"
+                    )
+
+
+def _has_type_conflicts(branches: dict[str, SchemaConfig]) -> bool:
+    """Check if branches have fields with same name but different types."""
+    field_types: dict[str, str] = {}
+    for schema in branches.values():
+        if schema.fields is None:
+            continue
+        for fd in schema.fields:
+            if fd.name in field_types:
+                if field_types[fd.name] != fd.field_type:
+                    return True
+            else:
+                field_types[fd.name] = fd.field_type
+    return False
+
+
+class TestCoalesceFieldOptionalityProperties:
+    """Property tests for field required/optional semantics in union merge.
+
+    These tests verify the OR/AND semantics for the `required` flag when
+    merging typed fields from multiple branches.
+
+    Note: These tests filter out type conflicts (same field name, different
+    types) since that's a separate invariant tested elsewhere.
+    """
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=4))
+    @settings(max_examples=100)
+    def test_best_effort_shared_field_required_only_if_all_require(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under best_effort, shared field is required only if ALL branches require it.
+
+        AND semantics: a field must be required in every contributing branch
+        to be required in the merged output. "Shared" means present in ALL
+        contributing branches (branches with fields defined).
+        """
+        # Skip examples with type conflicts — those raise GraphValidationError
+        assume(not _has_type_conflicts(branches))
+
+        merged = merge_union_fields(branches, require_all=False)
+
+        if merged.fields is None:
+            return  # Observed mode, no fields to check
+
+        # Identify contributing branches (those with fields defined)
+        contributing_branches = [name for name, schema in branches.items() if schema.fields is not None]
+        num_contributing = len(contributing_branches)
+
+        if num_contributing == 0:
+            return  # No contributing branches
+
+        # Build map of field names to merged required status
+        merged_fields = {fd.name: fd.required for fd in merged.fields}
+
+        # For each merged field, check AND semantics for truly shared fields
+        for field_name, merged_required in merged_fields.items():
+            # Count how many branches have this field and their required statuses
+            branch_statuses = []
+            for branch_name in contributing_branches:
+                schema = branches[branch_name]
+                if schema.fields is not None:
+                    for fd in schema.fields:
+                        if fd.name == field_name:
+                            branch_statuses.append(fd.required)
+                            break
+
+            # Only check AND semantics for fields in ALL contributing branches
+            if len(branch_statuses) == num_contributing:
+                # Truly shared field — AND semantics: required only if ALL require
+                expected = all(branch_statuses)
+                assert merged_required == expected, (
+                    f"Field {field_name}: expected required={expected} (AND of {branch_statuses}), got required={merged_required}"
+                )
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=4))
+    @settings(max_examples=100)
+    def test_require_all_shared_field_required_if_any_requires(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under require_all, shared field is required if ANY branch requires it.
+
+        OR semantics: a field is required in the merged output if at least
+        one branch requires it. "Shared" means present in ALL contributing branches.
+        """
+        assume(not _has_type_conflicts(branches))
+
+        merged = merge_union_fields(branches, require_all=True)
+
+        if merged.fields is None:
+            return
+
+        # Identify contributing branches
+        contributing_branches = [name for name, schema in branches.items() if schema.fields is not None]
+        num_contributing = len(contributing_branches)
+
+        if num_contributing == 0:
+            return
+
+        merged_fields = {fd.name: fd.required for fd in merged.fields}
+
+        for field_name, merged_required in merged_fields.items():
+            branch_statuses = []
+            for branch_name in contributing_branches:
+                schema = branches[branch_name]
+                if schema.fields is not None:
+                    for fd in schema.fields:
+                        if fd.name == field_name:
+                            branch_statuses.append(fd.required)
+                            break
+
+            # Only check OR semantics for fields in ALL contributing branches
+            if len(branch_statuses) == num_contributing:
+                # Truly shared field — OR semantics: required if ANY requires
+                expected = any(branch_statuses)
+                assert merged_required == expected, (
+                    f"Field {field_name}: expected required={expected} (OR of {branch_statuses}), got required={merged_required}"
+                )
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=4))
+    @settings(max_examples=100)
+    def test_best_effort_branch_exclusive_field_always_optional(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Under best_effort, branch-exclusive fields are always optional.
+
+        A field that exists in only one branch cannot be guaranteed in the
+        merged output — the branch that has it might not arrive.
+        """
+        assume(not _has_type_conflicts(branches))
+
+        merged = merge_union_fields(branches, require_all=False)
+
+        if merged.fields is None:
+            return
+
+        # Identify branch-exclusive fields
+        field_to_branches: dict[str, list[str]] = {}
+        for branch_name, schema in branches.items():
+            if schema.fields is not None:
+                for fd in schema.fields:
+                    if fd.name not in field_to_branches:
+                        field_to_branches[fd.name] = []
+                    field_to_branches[fd.name].append(branch_name)
+
+        exclusive_fields = {name for name, branch_list in field_to_branches.items() if len(branch_list) == 1}
+
+        for fd in merged.fields:
+            if fd.name in exclusive_fields:
+                assert fd.required is False, (
+                    f"Branch-exclusive field {fd.name} should be optional under best_effort, but got required={fd.required}"
+                )
+
+    @given(branches=coalesce_branch_sets(min_branches=2, max_branches=4))
+    @settings(max_examples=100)
+    def test_merged_fields_superset_of_all_branch_fields(self, branches: dict[str, SchemaConfig]) -> None:
+        """Property: Merged schema contains all fields from all branches (union merge).
+
+        Under union merge strategy, the merged schema includes every field
+        that appears in any branch (unlike select merge which picks one).
+        """
+        assume(not _has_type_conflicts(branches))
+
+        merged = merge_union_fields(branches, require_all=False)
+
+        # Collect all field names from all branches
+        all_field_names: set[str] = set()
+        for schema in branches.values():
+            if schema.fields is not None:
+                for fd in schema.fields:
+                    all_field_names.add(fd.name)
+
+        if not all_field_names:
+            # All branches are observed mode
+            assert merged.fields is None
+            return
+
+        assert merged.fields is not None, "Expected merged fields when branches have fields"
+        merged_names = {fd.name for fd in merged.fields}
+
+        assert merged_names == all_field_names, f"Merged should contain all branch fields: expected {all_field_names}, got {merged_names}"

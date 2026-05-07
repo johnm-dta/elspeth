@@ -116,10 +116,10 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
     assert result.rows_processed == 2, "Should process 2 rows"
 
     # Get the recorded rows from landscape
-    from elspeth.core.landscape import LandscapeRecorder
+    from elspeth.core.landscape.factory import RecorderFactory
 
-    recorder = LandscapeRecorder(db, payload_store=payload_store)
-    rows = recorder.get_rows(result.run_id)
+    factory = RecorderFactory(db, payload_store=payload_store)
+    rows = factory.query.get_rows(result.run_id)
 
     assert len(rows) == 2, "Should have 2 rows recorded"
 
@@ -132,7 +132,7 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
         )
 
         # Verify payload can be retrieved
-        row_data_result = recorder.get_row_data(row.row_id)
+        row_data_result = factory.query.get_row_data(row.row_id)
         assert row_data_result.state == RowDataState.AVAILABLE, (
             f"Row {row.row_id} payload should be AVAILABLE, got {row_data_result.state}. "
             "PayloadStore should have stored the source row data."

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from elspeth.contracts.errors import PluginContractViolation
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.results import ArtifactDescriptor
 
@@ -56,3 +57,30 @@ class SinkWriteResult:
 
     artifact: ArtifactDescriptor
     diversions: tuple[RowDiversion, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact, ArtifactDescriptor):
+            raise PluginContractViolation(
+                f"SinkWriteResult.artifact must be ArtifactDescriptor, got {type(self.artifact).__name__}: {self.artifact!r}"
+            )
+        if not isinstance(self.diversions, tuple):
+            raise PluginContractViolation(
+                f"SinkWriteResult.diversions must be a tuple, got {type(self.diversions).__name__}. Use tuple(...) to convert from list."
+            )
+        if not self.diversions:
+            return
+        for i, d in enumerate(self.diversions):
+            if not isinstance(d, RowDiversion):
+                raise PluginContractViolation(f"SinkWriteResult.diversions[{i}] must be RowDiversion, got {type(d).__name__}: {d!r}")
+        # Duplicate row_index values would collapse in set operations downstream
+        # (SinkExecutor.write builds diversion_by_index as a dict), silently
+        # dropping a diversion and recording the wrong terminal outcome. Crash
+        # immediately — this is a plugin bug in our code, not user data.
+        seen: set[int] = set()
+        for d in self.diversions:
+            if d.row_index in seen:
+                raise PluginContractViolation(
+                    f"SinkWriteResult has duplicate diversion row_index={d.row_index}. "
+                    f"Each row can be diverted at most once — this is a sink plugin bug."
+                )
+            seen.add(d.row_index)

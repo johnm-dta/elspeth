@@ -7,6 +7,7 @@ Settings are frozen (immutable) after construction.
 
 import ast
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from elspeth.contracts.enums import OutputMode, RunMode
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
 from elspeth.core.dependency_config import CollectionProbeConfig, CommencementGateConfig, DependencyConfig
+from elspeth.core.secrets import is_secret_field
 
 # Reserved edge labels that cannot be used as user-defined routing names.
 # "continue" is used for sequential edges, "fork" is a gate-only routing action,
@@ -232,6 +234,7 @@ class TriggerConfig(BaseModel):
     - count: Fire after N rows accumulated
     - timeout: Fire after N seconds since first accept
     - condition: Fire when expression evaluates to true (batch-level metrics only)
+    - end_of_source: Implicit, represented by omitting trigger or using {}
 
     Note: end_of_source is IMPLICIT - always checked at source exhaustion.
     It is not configured here because it always applies.
@@ -249,6 +252,12 @@ class TriggerConfig(BaseModel):
           count: 1000           # Fire after 1000 rows
           timeout_seconds: 3600         # Or after 1 hour
           condition: "row['batch_count'] >= 100 and row['batch_age_seconds'] < 30"  # Or batch metrics
+
+    Example YAML (end-of-source only):
+        aggregations:
+          - name: final_summary
+            plugin: batch_stats
+            # trigger omitted: flushes remaining batch when the source completes
     """
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -278,6 +287,12 @@ class TriggerConfig(BaseModel):
         """
         if v is None:
             return v
+
+        if v.strip() == "end_of_source":
+            raise ValueError(
+                "end_of_source is not a trigger.condition expression. End-of-source flush is implicit; "
+                "omit trigger or use trigger: {} for end-of-source-only aggregation."
+            )
 
         from elspeth.core.expression_parser import (
             ExpressionParser,
@@ -353,13 +368,6 @@ class TriggerConfig(BaseModel):
             )
         return v
 
-    @model_validator(mode="after")
-    def validate_at_least_one_trigger(self) -> "TriggerConfig":
-        """At least one trigger must be configured."""
-        if self.count is None and self.timeout_seconds is None and self.condition is None:
-            raise ValueError("at least one trigger must be configured (count, timeout_seconds, or condition)")
-        return self
-
     @property
     def has_count(self) -> bool:
         """Whether count trigger is configured."""
@@ -412,7 +420,10 @@ class AggregationSettings(BaseModel):
     on_error: str = Field(
         description="Sink name for rows that fail batch processing, or 'discard'",
     )
-    trigger: TriggerConfig = Field(description="When to flush the batch")
+    trigger: TriggerConfig = Field(
+        default_factory=TriggerConfig,
+        description="Optional early flush triggers. Omit or use {} for end-of-source-only aggregation.",
+    )
     output_mode: OutputMode = Field(
         default=OutputMode.TRANSFORM,
         description="How batch produces output rows",
@@ -491,7 +502,7 @@ class GateSettings(BaseModel):
     condition: str = Field(description="Expression to evaluate (validated by ExpressionParser)")
     routes: dict[str, str] = Field(
         max_length=32,
-        description="Maps route labels to destinations (connection name, sink name, or 'fork')",
+        description="Maps route labels to destinations (connection name, sink name, 'fork', or virtual 'discard')",
     )
     fork_to: list[str] | None = Field(
         default=None,
@@ -563,8 +574,9 @@ class GateSettings(BaseModel):
                 raise ValueError("Route labels must not be empty")
             _validate_connection_or_sink_name(label, field_label="Route label")
 
-            # "fork" is a special routing action consumed by fork_to branch wiring.
-            if destination == "fork":
+            # "fork" is consumed by fork_to branch wiring; "discard" is a
+            # virtual terminal gate destination resolved during DAG build.
+            if destination in {"fork", "discard"}:
                 continue
             if destination == "continue":
                 raise ValueError("Route destination 'continue' has been removed. Use an explicit connection name or sink name.")
@@ -718,6 +730,20 @@ class CoalesceSettings(BaseModel):
         default="union",
         description="How to combine row data from branches",
     )
+    union_collision_policy: Literal["last_wins", "first_wins", "fail"] = Field(
+        default="last_wins",
+        description=(
+            "How to resolve field-level collisions during union merge. "
+            "'last_wins' (default) keeps the value from the last branch in declaration order — current behavior. "
+            "'first_wins' keeps the first branch's value. "
+            "'fail' raises CoalesceCollisionError when any field collides. "
+            "Note: 'fail' treats any field-name overlap as a collision, even if both branches produced the same value — "
+            "collision detection is name-based, not value-based. "
+            "Only meaningful when merge='union'; ignored for nested and select. "
+            "Orthogonal to 'policy' (arrival policy): this field controls field-level conflict resolution within a single merged row, "
+            "while 'policy' controls how branch-level arrival failures are handled. They are independent axes."
+        ),
+    )
     timeout_seconds: float | None = Field(
         default=None,
         gt=0,
@@ -778,6 +804,17 @@ class CoalesceSettings(BaseModel):
             raise ValueError(
                 f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) cannot exceed number of branches ({len(self.branches)})"
             )
+        # Warn when quorum_count == len(branches) — this is runtime-equivalent to
+        # require_all but may confuse users expecting quorum semantics. The warning
+        # helps surface the equivalence at config time rather than runtime.
+        if self.policy == "quorum" and self.quorum_count is not None and self.quorum_count == len(self.branches):
+            warnings.warn(
+                f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) equals branch count — "
+                f"this is equivalent to policy='require_all'. Consider using require_all "
+                f"for clearer intent.",
+                UserWarning,
+                stacklevel=2,
+            )
         if self.policy == "best_effort" and self.timeout_seconds is None:
             raise ValueError(f"Coalesce '{self.name}': best_effort policy requires timeout_seconds")
         return self
@@ -803,6 +840,24 @@ class CoalesceSettings(BaseModel):
             return None
         value = v.strip()
         return _validate_connection_or_sink_name(value, field_label="Coalesce on_success sink name")
+
+    @property
+    def has_all_branch_semantics(self) -> bool:
+        """Whether this coalesce requires all branches to arrive for successful merge.
+
+        Returns True for:
+        - policy='require_all' (explicit all-branch requirement)
+        - policy='quorum' with quorum_count == len(branches) (implicit all-branch)
+
+        This property determines which merge semantics to use:
+        - True → OR/union semantics (any branch's guarantee is in merged row)
+        - False → AND/intersection semantics (only common guarantees survive)
+
+        The quorum=N case is runtime-equivalent to require_all when N == branch_count:
+        _should_merge() waits for all branches, _evaluate_after_loss() fails on any loss.
+        Build-time validation must use the same semantics for equivalent configs.
+        """
+        return self.policy == "require_all" or (self.policy == "quorum" and self.quorum_count == len(self.branches))
 
 
 class SourceSettings(BaseModel):
@@ -928,7 +983,7 @@ class SinkSettings(BaseModel):
         description=(
             "Per-row write failure handling. Required — pipeline author must decide: "
             "'discard' to drop with audit record, or a sink name to divert to failsink "
-            "(must be csv, json, or xml plugin)."
+            "(must be csv or json plugin)."
         ),
     )
 
@@ -976,13 +1031,24 @@ class LandscapeSettings(BaseModel):
 
     model_config = {"frozen": True, "extra": "forbid"}
 
-    enabled: bool = Field(default=True, description="Enable audit trail recording")
+    enabled: bool = Field(default=True, description="Reserved — Landscape recording is always active (audit trail is mandatory)")
+
+    @field_validator("enabled")
+    @classmethod
+    def _reject_disabled(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError(
+                "landscape.enabled=false is not supported — the audit trail is mandatory. "
+                "Disabling Landscape recording would violate the auditability standard."
+            )
+        return v
+
     backend: Literal["sqlite", "sqlcipher", "postgresql"] = Field(
         default="sqlite",
         description="Database backend type (sqlcipher requires the 'security' extra)",
     )
-    # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs like
-    # "postgresql://user:pass@host/db" (pathlib interprets // as UNC path)
+    # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs
+    # (pathlib interprets // as a UNC path).
     url: str = Field(
         default="sqlite:///./state/audit.db",
         description="Full SQLAlchemy database URL",
@@ -1024,23 +1090,36 @@ class LandscapeSettings(BaseModel):
         Catches malformed URLs early (fail-fast) rather than at first DB access.
         Uses SQLAlchemy's own URL parser for accurate validation.
         """
-        from sqlalchemy.engine.url import make_url
-        from sqlalchemy.exc import ArgumentError
+        from elspeth.contracts.database_url import validate_database_url_format
 
-        try:
-            parsed = make_url(v)
-            # Verify we got a valid driver/scheme
-            if not parsed.drivername:
-                raise ValueError("Database URL missing driver (e.g., 'sqlite', 'postgresql')")
-        except ArgumentError as e:
-            raise ValueError(f"Invalid database URL format: {e}") from e
-        return v
+        return validate_database_url_format(v)
 
     @model_validator(mode="after")
-    def validate_sqlcipher_backend(self) -> "LandscapeSettings":
-        """Validate that sqlcipher backend uses a SQLite-compatible URL."""
-        if self.backend == "sqlcipher" and not self.url.startswith("sqlite"):
-            raise ValueError("backend='sqlcipher' requires a SQLite URL (sqlcipher is wire-compatible with SQLite)")
+    def validate_backend_url_consistency(self) -> "LandscapeSettings":
+        """Enforce that backend and URL scheme agree.
+
+        Prevents split-brain configs where backend declares one database
+        type while the URL opens another. SQLCipher uses sqlite:// URLs
+        with a passphrase — the scheme is 'sqlite' for both backends.
+        """
+        from sqlalchemy.engine.url import make_url
+
+        # Valid URL scheme prefixes for each backend
+        backend_to_schemes: dict[str, tuple[str, ...]] = {
+            "sqlite": ("sqlite",),
+            "sqlcipher": ("sqlite",),  # same scheme, different runtime
+            "postgresql": ("postgresql",),
+        }
+        parsed = make_url(self.url)
+        # drivername can be "postgresql+psycopg2" etc. — check the base
+        base_scheme = parsed.drivername.split("+")[0]
+        allowed = backend_to_schemes[self.backend]
+        if base_scheme not in allowed:
+            raise ValueError(
+                f"backend={self.backend!r} requires URL scheme "
+                f"{' or '.join(repr(s) for s in allowed)}, "
+                f"got {parsed.drivername!r} from url={self.url!r}"
+            )
         return self
 
 
@@ -1486,31 +1565,6 @@ def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
     return {k: _expand_value(v) for k, v in config.items()}
 
 
-# Secret field names that should be fingerprinted (exact matches, case-insensitive)
-_SECRET_FIELD_NAMES = frozenset(
-    {
-        "api_key",
-        "api-key",
-        "authorization",
-        "connection_string",
-        "credential",
-        "password",
-        "secret",
-        "token",
-        "x-api-key",
-    }
-)
-
-# Secret field suffixes that should be fingerprinted (case-insensitive)
-_SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential", "_connection_string")
-
-
-def _is_secret_field(field_name: str) -> bool:
-    """Check if a field name represents a secret that should be fingerprinted."""
-    normalized = field_name.lower()
-    return normalized in _SECRET_FIELD_NAMES or normalized.endswith(_SECRET_FIELD_SUFFIXES)
-
-
 def _fingerprint_secrets(
     options: dict[str, Any],
     *,
@@ -1549,7 +1603,7 @@ def _fingerprint_secrets(
             return key, _recurse(value), False
         elif isinstance(value, list):
             return key, [_process_value("", item)[1] for item in value], False
-        elif isinstance(value, str) and _is_secret_field(key):
+        elif isinstance(value, str) and is_secret_field(key):
             # This is a secret field
             if have_key:
                 fp = secret_fingerprint(value)
@@ -1572,7 +1626,7 @@ def _fingerprint_secrets(
         # Without this check, the pre-existing _fingerprint value would silently overwrite
         # the computed HMAC, allowing an attacker to inject a fake fingerprint.
         for key in d:
-            if isinstance(d[key], str) and _is_secret_field(key):
+            if isinstance(d[key], str) and is_secret_field(key):
                 fp_key = f"{key}_fingerprint"
                 if fp_key in d:
                     raise SecretFingerprintError(
@@ -1610,7 +1664,7 @@ def _sanitize_dsn(
                                 and fail_if_no_key=True
 
     Example:
-        >>> _sanitize_dsn("postgresql://user:secret@host/db")
+        >>> _sanitize_dsn("postgresql://user:secret@host/db")  # secret-scan: allow-this-line
         ("postgresql://user@host/db", "abc123...", True)
     """
     from sqlalchemy.engine import URL
@@ -1637,8 +1691,43 @@ def _sanitize_dsn(
             ) from parse_err
         return url, None, False
 
-    if parsed.password is None:
-        # No password in URL
+    # Check for credentials in query parameters (case-insensitive).
+    # Database drivers accept passwords via ?password=, ?pwd=, ?passwd=,
+    # and ODBC embeds them in ?odbc_connect=...PWD=...
+    _SENSITIVE_KEYS = frozenset({"password", "pwd", "passwd", "pass"})
+    scrubbed_query: dict[str, str | tuple[str, ...]] = {}
+    query_had_password = False
+    query_password_value: str | None = None
+
+    for key, value in parsed.query.items():
+        if key.lower() in _SENSITIVE_KEYS:
+            query_had_password = True
+            if query_password_value is None:
+                query_password_value = value if isinstance(value, str) else value[0]
+        elif key.lower() == "odbc_connect" and isinstance(value, str):
+            import re
+            import urllib.parse
+
+            decoded = urllib.parse.unquote(value)
+            if re.search(r"(?i)(PWD|Password)\s*=", decoded):
+                query_had_password = True
+                # Extract the password value for fingerprinting
+                match = re.search(r"(?i)(?:PWD|Password)\s*=\s*([^;]*)", decoded)
+                if match and query_password_value is None:
+                    query_password_value = match.group(1)
+                # Scrub PWD/Password from the connect string
+                scrubbed_connect = re.sub(r"(?i)(?:PWD|Password)\s*=\s*[^;]*;?", "", decoded)
+                scrubbed_query[key] = urllib.parse.quote(scrubbed_connect, safe="")
+            else:
+                scrubbed_query[key] = value
+        else:
+            scrubbed_query[key] = value
+
+    has_password = parsed.password is not None or query_had_password
+    # Use userinfo password for fingerprinting if present, else query-param password
+    fingerprint_source = parsed.password if parsed.password is not None else query_password_value
+
+    if not has_password:
         return url, None, False
 
     # Check if we have a fingerprint key
@@ -1652,10 +1741,10 @@ def _sanitize_dsn(
 
     # Compute fingerprint if we have a key
     password_fingerprint = None
-    if have_key:
+    if have_key and fingerprint_source is not None:
         from elspeth.core.security import secret_fingerprint
 
-        password_fingerprint = secret_fingerprint(parsed.password)
+        password_fingerprint = secret_fingerprint(fingerprint_source)
     elif fail_if_no_key:
         raise SecretFingerprintError(
             "Database URL contains a password but ELSPETH_FINGERPRINT_KEY "
@@ -1674,7 +1763,7 @@ def _sanitize_dsn(
         host=parsed.host,
         port=parsed.port,
         database=parsed.database,
-        query=parsed.query,
+        query=scrubbed_query,
     )
 
     return str(sanitized), password_fingerprint, True
@@ -2062,6 +2151,35 @@ def load_settings(config_path: Path) -> ElspethSettings:
     # Fingerprinting happens in resolve_config() when creating the audit copy.
     raw_config = _expand_config_templates(raw_config, settings_path=config_path)
 
+    return ElspethSettings(**raw_config)
+
+
+def load_settings_from_yaml_string(yaml_content: str) -> ElspethSettings:
+    """Load settings from a YAML string without touching disk.
+
+    This is used by the web execution service to load pipeline configs
+    that may contain resolved secrets. Unlike load_settings(), this
+    skips Dynaconf (no env var merging) and file I/O, ensuring secret
+    values never leave process memory.
+
+    Args:
+        yaml_content: YAML configuration as a string.
+
+    Returns:
+        Validated ElspethSettings instance.
+    """
+    config_dict = yaml.safe_load(yaml_content)
+    if not isinstance(config_dict, dict):
+        raise ValueError(f"Configuration must be a YAML mapping (key: value), not {type(config_dict).__name__}")
+    raw_config = _lowercase_schema_keys(config_dict)
+    known_fields = set(ElspethSettings.model_fields.keys())
+
+    unknown_keys = sorted(k for k in raw_config if k not in known_fields)
+    if unknown_keys:
+        raise ValueError(f"Unknown configuration keys: {unknown_keys}. Valid top-level keys: {sorted(known_fields)}")
+
+    raw_config = {k: v for k, v in raw_config.items() if k in known_fields}
+    raw_config = _expand_env_vars(raw_config)
     return ElspethSettings(**raw_config)
 
 

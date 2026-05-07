@@ -275,6 +275,7 @@ class TestConnectionURLFormat:
             port=port,
             path=path,
             scheme=scheme,
+            bare_hostname="example.com",
         )
         url = req.connection_url
         assert "[" not in url, f"IPv4 URL should not have brackets: {url}"
@@ -296,6 +297,7 @@ class TestConnectionURLFormat:
             port=port,
             path="/",
             scheme=scheme,
+            bare_hostname="example.com",
         )
         url = req.connection_url
         assert "[2606:4700:4700::1111]" in url, f"IPv6 URL must have brackets: {url}"
@@ -326,6 +328,7 @@ class TestConnectionURLFormat:
             port=443,
             path=path,
             scheme="https",
+            bare_hostname="example.com",
         )
         assert req.connection_url.endswith(path)
 

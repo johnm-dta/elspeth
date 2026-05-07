@@ -4,8 +4,6 @@ Validates that a checkpoint can be safely resumed with the current
 pipeline configuration by checking topological compatibility.
 """
 
-import structlog
-
 from elspeth.contracts import Checkpoint, ResumeCheck
 from elspeth.core.canonical import compute_full_topology_hash, stable_hash
 from elspeth.core.dag import ExecutionGraph
@@ -30,10 +28,6 @@ class CheckpointCompatibilityValidator:
     Now ANY topology change (including downstream or sibling branches)
     invalidates the checkpoint, enforcing: one run_id = one configuration.
     """
-
-    def __init__(self) -> None:
-        """Initialize validator."""
-        self._logger = structlog.get_logger(__name__)
 
     def validate(
         self,

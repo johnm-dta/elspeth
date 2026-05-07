@@ -1,0 +1,216 @@
+{
+  "verdict": "RESOLVED (iteration 2 fixes applied; awaiting re-review to confirm APPROVED)",
+  "iteration_2_resolution_date": "2026-04-17T00:00:00Z",
+  "iteration_2_fixes": {
+    "B5_NEW_cwd_missing": "RESOLVED — _run() helper now sets cwd=str(Path(__file__).resolve().parents[4]) mirroring test_enforce_plugin_hashes.py:62",
+    "FIXTURES_non_executable": "RESOLVED — Task 4.5 test bodies rewritten to use inline _make_app(tmp_path) + TestClient(app, raise_server_exceptions=False), targeting /api/sessions/{id}/messages (compose) and /api/sessions/{id}/recompose (the actual endpoints; there is no /compose)",
+    "W_MISSING_SLOG_ASSERTION": "RESOLVED — test_persist_crashed_session_failure_does_not_mask_plugin_bug now uses structlog.testing.capture_logs and asserts composer_crash_persistence_failed event fires with session_id and original_exc_class; a second test (test_persist_crashed_session_real_path_slog_emission) exercises the unpatched path as a smoke test for the Step 4a-pre structlog import",
+    "W_TASK_1_5_NOT_WIRED": "RESOLVED — Task 1.5 now emits docs/superpowers/plans/2026-04-17-composer-tool-argument-error.audit.md as an explicit artifact; Task 7 Step 4 refuses to proceed if that file is absent and reads it to seed the allowlist",
+    "W_CONDITIONAL_ASSERT": "RESOLVED — test_compose_unknown_exception_class_is_not_absorbed now uses unconditional `assert 'composer_plugin_error' not in response.text`; no more isinstance() guard",
+    "W_DOC_HALLUCINATION": "RESOLVED — Task 4 Step 3 prose corrected to 'ToolArgumentError inherits directly from Exception' with cross-reference to Task 1 Step 3 and Architecture section",
+    "W_GHA_CONVENTION": "RESOLVED — GHA workflow skeleton now uses direct-script form (python scripts/cicd/X.py) matching enforce-tier-model.yaml; the test helper retains module form with explicit cwd matching test_enforce_plugin_hashes.py. The split is documented as deliberate (both patterns already exist in the repo)",
+    "W_SQLALCHEMY_STYLE": "RESOLVED — _persist_crashed_session now uses `update(sessions_table).where(...).values(...)` imported-construct form matching service.py:271 convention",
+    "W_CLEANUP_GUARD_AWARENESS_from_systems_reviewer": "ADDED — Task 2 and Task 3 conversion sketches now include a defensive comment noting that the type guard MUST remain BEFORE the `try: with session_engine.begin()` cleanup block",
+    "BONUS_signature_simplification_from_architecture_reviewer": "ADDED — _persist_crashed_session signature simplified to `_persist_crashed_session(session_id: str)`; the `_ = (last_state, exc_class)` discard pattern removed (premature interface stabilization). Caller updated to pass only session_id. last_published_state tracking in _compose_loop removed since there is nowhere to persist it"
+  },
+  "previous_verdict": "CHANGES_REQUESTED (iteration 2) — two blockers (B5-NEW cwd; FIXTURES non-executable) plus 6 warnings",
+  "summary": "Re-review of updated plan. All five previous blockers (B1-B5) were addressed; B1-B4 are fully resolved and B5 is partially resolved. However, two new blocking issues surfaced during re-review: (1) B5-NEW, the Task 7 subprocess `_run()` helper omits `cwd`, which empirically causes `ModuleNotFoundError` for `python -m scripts.cicd.enforce_tool_error_imports`, and (2) FIXTURES-BLOCKING, Task 4.5's crash-response tests reference pytest fixtures (`client`, `mock_composer_service`, `compose_request_body`, `authed_session`, `recompose_request_body`) that do not exist in the target test module — the file uses an inline `_make_app(tmp_path)` + `TestClient(app, raise_server_exceptions=False)` pattern. Both are mechanical fixes, but as written the plan would fail at test collection. Plan is substantially stronger than prior iteration; one more surgical pass should land APPROVED.",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-17-composer-tool-argument-error.md",
+  "reviewed_at": "2026-04-17T00:00:00Z",
+  "review_iteration": 2,
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "previous_blockers_status": {
+    "B1_slog_import": {
+      "status": "RESOLVED",
+      "note": "Step 4a-pre added to Task 4 introducing slog import and test coverage."
+    },
+    "B2_crash_marker_schema": {
+      "status": "RESOLVED",
+      "note": "Scoped to updated_at bump only; schema migration filed as follow-up issue."
+    },
+    "B3_inheritance": {
+      "status": "RESOLVED",
+      "note": "ToolArgumentError(Exception) established in Task 1 Step 3 class definition and in tests."
+    },
+    "B4_log_prefix_scope": {
+      "status": "RESOLVED",
+      "note": "Literal strings used in logging calls; no cross-module coupling."
+    },
+    "B5_test_path": {
+      "status": "PARTIALLY_RESOLVED",
+      "note": "Path construction and parents[] calculation are correct, but cwd is still missing from subprocess.run — see B5-NEW."
+    }
+  },
+  "blocking_issues": [
+    {
+      "id": "B5-NEW",
+      "source": "reality",
+      "issue": "Task 7 `_run()` helper omits `cwd` in subprocess.run; `python -m scripts.cicd.enforce_tool_error_imports` fails with ModuleNotFoundError when invoked from a non-repo-root cwd.",
+      "evidence": "Empirically verified: running `python -m scripts.cicd.enforce_freeze_guards` from /tmp yields `ModuleNotFoundError: No module named 'scripts'`. Mirror test `test_enforce_plugin_hashes.py` correctly sets `cwd=str(Path(__file__).resolve().parents[4])`.",
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 9,
+      "resolution": "Add `cwd=str(Path(__file__).resolve().parents[4])` to the subprocess.run call in Task 7's `_run()` helper. Copy the exact form from test_enforce_plugin_hashes.py."
+    },
+    {
+      "id": "FIXTURES-BLOCKING",
+      "source": "reality+quality",
+      "issue": "Task 4.5 `TestComposePluginCrashResponse` references pytest fixtures (`client`, `mock_composer_service`, `compose_request_body`, `authed_session`, `recompose_request_body`) that do not exist in `tests/unit/web/sessions/test_routes.py`. The file uses inline `_make_app(tmp_path)` + `TestClient(app, raise_server_exceptions=False)`. Tests as written will fail at collection with FixtureError.",
+      "evidence": "Reality reviewer inspected target test module; Quality reviewer corroborates and notes `raise_server_exceptions=False` is required for the 500 assertions to work. Plan guidance 'adapt fixture names' understates the required change.",
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 9,
+      "resolution": "Rewrite Task 4.5 test bodies to use the existing inline pattern: instantiate app via `_make_app(tmp_path)`, wrap in `TestClient(app, raise_server_exceptions=False)`, and construct request bodies inline. Remove all fixture references and replace with the concrete construction already used elsewhere in the module."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W-MISSING-SLOG-ASSERTION",
+      "source": "quality+systems",
+      "issue": "`test_persist_crashed_session_failure_does_not_mask_plugin_bug` does not assert `slog.error` is called on the persistence-failure path. An implementation that silently swallows the failure without logging would pass the test, and the B1 slog import could be accidentally removed without detection.",
+      "severity": 2,
+      "likelihood": 2,
+      "reversibility": 2,
+      "priority_score": 8,
+      "recommendation": "Add an explicit `slog.error` call assertion (via mocker.spy or `caplog`) to the persistence-failure test. Consider a second test that exercises the real `_persist_crashed_session` crash-path end-to-end without patching the private method."
+    },
+    {
+      "id": "W-TASK-1.5-NOT-WIRED",
+      "source": "systems",
+      "issue": "Task 1.5's audit findings are not mechanically wired as an input to Task 7's allowlist scaffold. An agent implementing Task 7 without Task 1.5 findings in context produces an empty allowlist, which will trigger false failures on later conversions.",
+      "severity": 2,
+      "likelihood": 2,
+      "reversibility": 2,
+      "priority_score": 8,
+      "recommendation": "Add an explicit artifact dependency: Task 1.5 must emit a concrete list (committed to the plan or to a tracked file) that Task 7 reads to seed the allowlist. Add a pre-condition check to Task 7 that fails if that artifact is empty."
+    },
+    {
+      "id": "W-CONDITIONAL-ASSERT",
+      "source": "quality",
+      "issue": "`test_compose_unknown_exception_class_is_not_absorbed` uses `if isinstance(body.get('detail'), dict):` — if FastAPI returns a string detail (common for default 500s), the inner assertion is skipped and the test passes vacuously.",
+      "severity": 2,
+      "likelihood": 2,
+      "reversibility": 1,
+      "priority_score": 4,
+      "recommendation": "Replace the conditional with an unconditional assertion on the response shape, or split into two tests that each pin down the exact response body."
+    },
+    {
+      "id": "W-DOC-HALLUCINATION",
+      "source": "reality",
+      "issue": "Task 4 Step 3 explanatory text says 'ToolArgumentError inherits from ComposerServiceError → Exception', which contradicts the current Task 1 Step 3 definition `ToolArgumentError(Exception)`. Code is correct; explanatory prose is wrong.",
+      "severity": 1,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 3,
+      "recommendation": "Update the explanatory sentence in Task 4 Step 3 to match the actual inheritance (`ToolArgumentError(Exception)`) to avoid confusing the implementer."
+    },
+    {
+      "id": "W-GHA-CONVENTION",
+      "source": "reality+systems",
+      "issue": "GHA workflow proposes `python -m scripts.cicd.X`; three existing enforce-*.yaml workflows use `python scripts/cicd/X.py` (direct). Both run, but divergence creates inconsistent CI conventions. Plan's instruction to 'copy the closest existing workflow' would produce the direct form, creating divergence between tests and CI invocation.",
+      "severity": 1,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 3,
+      "recommendation": "Canonicalize one invocation form across tests and GHA. Prefer the direct-script form to match existing convention, and update Task 7 `_run()` to match — simplifying cwd/import resolution in the process."
+    },
+    {
+      "id": "W-SQLALCHEMY-STYLE",
+      "source": "reality",
+      "issue": "Plan uses `sessions_table.update()` (Table-bound); codebase convention uses `update(sessions_table)` (imported construct). Functionally identical.",
+      "severity": 1,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 3,
+      "recommendation": "Change to `update(sessions_table)` form to match codebase style; import `update` from sqlalchemy."
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "CODE_SMELL_SIMPLIFY",
+      "source": "architecture",
+      "suggestion": "The `_ = (last_state, exc_class)` discard pattern in `_persist_crashed_session` is premature interface stabilization. Simplify signature to `_persist_crashed_session(session_id: str)` until the schema migration lands and the extra parameters are actually persisted."
+    },
+    {
+      "type": "TEST_DESIGN",
+      "source": "architecture",
+      "suggestion": "`test_persist_crashed_session_failure_does_not_mask_plugin_bug` patches the private method directly, coupling the test to an implementation seam. Prefer patching `self._session_engine` to raise on commit; this exercises the real crash-persist code path."
+    },
+    {
+      "type": "FOLLOW_UP_ISSUE",
+      "source": "architecture",
+      "suggestion": "The duplicate route-handler catch list across /compose and /recompose is an accumulating smell. Do not address in this PR; file a follow-up issue to extract a shared exception-handling helper."
+    },
+    {
+      "type": "DEFENSIVE_COMMENT",
+      "source": "systems",
+      "suggestion": "Add a comment at tools.py:1800 and 1877 noting that the ToolArgumentError type guard must remain BEFORE the `except Exception` cleanup blocks. Moving it inside would cause the cleanup guard to intercept and swallow the argument error."
+    }
+  ],
+  "conflicts_resolved": [
+    {
+      "issue": "B5-NEW scope — is missing cwd a true blocker?",
+      "reality_view": "Blocker: empirically verified ModuleNotFoundError.",
+      "architecture_view": "Not raised.",
+      "quality_view": "Not raised.",
+      "systems_view": "Corroborates indirectly via W-GHA-INCONSISTENCY.",
+      "resolution": "Treated as blocker per Reality reviewer's empirical evidence. Tests as written will not collect/execute."
+    },
+    {
+      "issue": "FIXTURES-BLOCKING severity",
+      "reality_view": "Blocker: tests will fail at collection with FixtureError.",
+      "quality_view": "Blocker: also notes `raise_server_exceptions=False` requirement.",
+      "architecture_view": "Not raised.",
+      "systems_view": "Not raised.",
+      "resolution": "Two independent reviewers flagged this with direct evidence. Classified as blocker; resolution requires concrete rewrite, not just fixture renaming."
+    },
+    {
+      "issue": "Severity of missing slog.error assertion",
+      "quality_view": "Warning: silent-swallow implementation would pass test.",
+      "systems_view": "Warning: no smoke test for slog import.",
+      "architecture_view": "Not raised.",
+      "reality_view": "Not raised.",
+      "resolution": "Consolidated as single warning W-MISSING-SLOG-ASSERTION. Not a blocker (test exists; it just permits one silent-failure mode), but high-priority among warnings due to B1 regression risk."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 3,
+      "note": "Flagged B5-NEW (cwd omission) and FIXTURES-BLOCKING (non-existent fixtures). Warnings: W-DOC-HALLUCINATION, W-SQLALCHEMY-STYLE, W-GHA-CONVENTION."
+    },
+    "architecture": {
+      "status": "PASS",
+      "blocking": 0,
+      "warnings": 0,
+      "note": "No new architectural blockers. B2 and B3 resolutions confirmed sound. Offered three non-blocking code-quality recommendations."
+    },
+    "quality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 1,
+      "warnings": 2,
+      "note": "Corroborates FIXTURES-BLOCKING. Warnings: W-MISSING-SLOG-ASSERTION, W-CONDITIONAL-ASSERT."
+    },
+    "systems": {
+      "status": "ISSUES_FOUND",
+      "blocking": 0,
+      "warnings": 3,
+      "note": "No new blockers. Warnings consolidated: W-GHA-INCONSISTENCY (merged into W-GHA-CONVENTION), W-TASK-1.5-NOT-WIRED, W-NO-SMOKE-TEST-FOR-SLOG-IMPORT (merged into W-MISSING-SLOG-ASSERTION). Info-level note on cleanup-guard awareness comment."
+    }
+  },
+  "next_steps": {
+    "verdict": "CHANGES_REQUESTED",
+    "must_fix_before_execution": [
+      "B5-NEW: Add `cwd=str(Path(__file__).resolve().parents[4])` to Task 7 `_run()` subprocess.run call.",
+      "FIXTURES-BLOCKING: Rewrite Task 4.5 tests to use the inline `_make_app(tmp_path)` + `TestClient(app, raise_server_exceptions=False)` pattern; remove all fixture references."
+    ],
+    "strongly_recommended": [
+      "W-MISSING-SLOG-ASSERTION: Add slog.error assertion to the persistence-failure test.",
+      "W-TASK-1.5-NOT-WIRED: Make Task 1.5 artifact a mechanical input to Task 7."
+    ],
+    "expected_outcome": "Once the two blockers are addressed, the plan should land APPROVED or APPROVED_WITH_WARNINGS on the next pass. The plan is substantially stronger than the prior iteration and the remaining issues are surgical."
+  }
+}

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from elspeth.plugins.transforms.passthrough import PassThrough
 from elspeth.testing import make_pipeline_row
@@ -93,14 +94,13 @@ class TestPassThroughStrictSchemaContract(TransformContractTestBase):
 
     @pytest.fixture
     def transform(self) -> TransformProtocol:
-        """Create a PassThrough instance with strict schema and input validation."""
+        """Create a PassThrough instance with strict schema."""
         return PassThrough(
             {
                 "schema": {
                     "mode": "fixed",
                     "fields": ["id: int", "name: str"],
                 },
-                "validate_input": True,
             }
         )
 
@@ -109,16 +109,21 @@ class TestPassThroughStrictSchemaContract(TransformContractTestBase):
         """Provide a valid input row matching the strict schema."""
         return {"id": 1, "name": "test"}
 
-    def test_strict_passthrough_sets_validate_input_for_executor(self, transform: TransformProtocol) -> None:
-        """validate_input=True stored as attribute for executor enforcement.
-
-        Input validation is centralized in TransformExecutor. This test verifies
-        the transform correctly sets the attribute from config so the executor
-        rejects wrong types before calling process().
-        """
-        # Per Three-Tier Trust Model: wrong types in pipeline data = crash
-        # Enforcement is now centralized in the executor, not the plugin
-        assert transform.validate_input is True
+    @pytest.mark.parametrize(
+        ("invalid_input", "message"),
+        [
+            ({"id": "not-an-int", "name": "test"}, "id"),
+            ({"id": 1}, "name"),
+        ],
+    )
+    def test_strict_schema_rejects_invalid_rows_at_input_boundary(
+        self,
+        transform: TransformProtocol,
+        invalid_input: dict[str, Any],
+        message: str,
+    ) -> None:
+        with pytest.raises(ValidationError, match=message):
+            transform.input_schema.model_validate(invalid_input)
 
 
 class TestPassThroughPropertyBased:
@@ -141,30 +146,6 @@ class TestPassThroughPropertyBased:
     def ctx(self) -> Any:
         """Create a PluginContext."""
         return make_context(run_id="test")
-
-    @given(
-        data=st.dictionaries(
-            keys=st.text(min_size=1, max_size=20).filter(lambda s: s.isidentifier()),
-            values=(
-                st.none()
-                | st.booleans()
-                | st.integers(min_value=-(2**53 - 1), max_value=2**53 - 1)
-                | st.floats(allow_nan=False, allow_infinity=False)
-                | st.text(max_size=50)
-            ),
-            min_size=1,
-            max_size=10,
-        )
-    )
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_passthrough_preserves_arbitrary_dicts(self, transform: PassThrough, ctx: Any, data: dict[str, Any]) -> None:
-        """Property: PassThrough preserves any valid JSON-like dict."""
-        pipeline_row = make_pipeline_row(data)
-        result = transform.process(pipeline_row, ctx)
-
-        assert result.status == "success"
-        assert result.row is not None
-        assert result.row.to_dict() == data
 
     @given(
         data=st.dictionaries(

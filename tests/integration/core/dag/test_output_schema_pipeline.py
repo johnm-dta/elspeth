@@ -43,6 +43,7 @@ class MockSink:
     input_schema = None
     config: ClassVar[dict[str, Any]] = {}
     _on_write_failure: str = "discard"
+    declared_required_fields: ClassVar[frozenset[str]] = frozenset()
 
     def _reset_diversion_log(self) -> None:
         pass
@@ -58,6 +59,7 @@ class MockFieldAddingTransform:
     output_schema = None
     on_error: str | None = None
     on_success: str | None = "output"
+    passes_through_input: bool = False
 
     def __init__(
         self,
@@ -128,7 +130,7 @@ class TestRealTransformPropagation:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
+            source=source,  # type: ignore[arg-type]  # test fixture
             source_settings=source_settings,
             transforms=wired_transforms,
             sinks={sink_name: sink},
@@ -184,7 +186,7 @@ def _build_producer_consumer_graph(
         ),
     )
     return ExecutionGraph.from_plugin_instances(
-        source=source,
+        source=source,  # type: ignore[arg-type]  # test fixture
         source_settings=source_settings,
         transforms=[producer_wired, consumer_wired],
         sinks={"output": CollectSink("output")},
@@ -262,7 +264,7 @@ class TestEdgeValidationWithOutputSchemaContract:
 
         with pytest.raises(FrameworkBugError, match="declares output fields"):
             ExecutionGraph.from_plugin_instances(
-                source=source,
+                source=source,  # type: ignore[arg-type]  # test fixture
                 source_settings=SourceSettings(plugin="mock_source", on_success="source_out", options={}),
                 transforms=[wired],
                 sinks={"output": CollectSink("output")},

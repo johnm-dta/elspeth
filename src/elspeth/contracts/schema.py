@@ -25,12 +25,32 @@ are accepted, but quoted strings are recommended for clarity.
 
 from __future__ import annotations
 
+import keyword
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, cast
+
+from pydantic import Field
 
 # Supported field types for schema definitions
 SUPPORTED_TYPES = frozenset({"str", "int", "float", "bool", "any"})
+
+# Finite float: rejects NaN/Infinity per audit integrity requirements.
+# NaN/Infinity cannot be represented in RFC 8785 canonical JSON and must be
+# rejected at trust boundaries rather than silently corrupting the audit trail.
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+# Canonical mapping from schema field type strings to Python/Pydantic types.
+# Used by DAG graph validation (L1) and plugin schema factory (L3) to build
+# dynamic Pydantic models from config-driven schema definitions.
+FIELD_TYPE_MAP: dict[str, Any] = {
+    "str": str,
+    "int": int,
+    "float": FiniteFloat,
+    "bool": bool,
+    "any": Any,
+}
 
 # Pattern: "field_name: type" or "field_name: type?"
 # Field names must be valid Python identifiers (letters, digits, underscores)
@@ -40,6 +60,11 @@ SUPPORTED_TYPES = frozenset({"str", "int", "float", "bool", "any"})
 # This is intentional: field names map to Python attributes/dict keys
 FIELD_PATTERN = re.compile(r"^(\w+):\s*(str|int|float|bool|any)(\?)?$")
 
+# CLOSED LIST: only the text source has a fully deterministic observed-mode
+# output shape today. Do not extend this set without design review; broader
+# heuristic growth would rebuild runtime validation piecemeal in the composer.
+_TEXT_HEURISTIC_PLUGINS: frozenset[str] = frozenset({"text"})
+
 
 @dataclass(frozen=True, slots=True)
 class FieldDefinition:
@@ -48,19 +73,30 @@ class FieldDefinition:
     Attributes:
         name: Field name (must be valid Python identifier)
         field_type: One of: str, int, float, bool, any
-        required: If False, field can be missing or None
+        required: If False, field may be absent from the row
+        nullable: If True, field value may be None when present. Used by
+            coalesce merge logic to track whether a branch can produce None
+            values for this field (affecting collision policy semantics).
     """
 
     name: str
     field_type: Literal["str", "int", "float", "bool", "any"]
     required: bool = True
+    nullable: bool = False
 
     @classmethod
-    def parse(cls, spec: str) -> FieldDefinition:
-        """Parse a field specification string.
+    def parse(cls, spec: str | Mapping[str, Any]) -> FieldDefinition:
+        """Parse a field specification string or dict.
+
+        Accepts two formats:
+        - String: "name: str" or "score: float?"
+        - Dict (round-trip format): {"name": "x", "type": "str", "required": True, "nullable": False}
+
+        The dict format preserves all four states of (required, nullable) without loss,
+        unlike the string format where `?` conflates nullable=True with required=False.
 
         Args:
-            spec: Field spec like "name: str" or "score: float?"
+            spec: Field spec string or dict from to_dict() round-trip
 
         Returns:
             FieldDefinition instance
@@ -68,6 +104,53 @@ class FieldDefinition:
         Raises:
             ValueError: If spec is malformed or type is unknown
         """
+        # Handle dict format (round-trip from to_dict)
+        if isinstance(spec, Mapping):
+            if "name" not in spec or "type" not in spec:
+                raise ValueError(f"Dict field spec must have 'name' and 'type' keys, got {sorted(spec.keys())}")
+            name = spec["name"]
+            field_type = spec["type"]
+            if not isinstance(name, str) or not isinstance(field_type, str):
+                raise ValueError("Dict field spec 'name' and 'type' must be strings")
+            # Identifier validation: must match string-format rules for Python/Jinja/SQL safety
+            if not name.isidentifier():
+                # Provide helpful suggestion for common fixable cases
+                if name and name[0].isdigit():
+                    raise ValueError(
+                        f"Invalid field name '{name}' in dict field spec. "
+                        f"Field names must be valid Python identifiers "
+                        f"(cannot start with a digit)."
+                    )
+                suggested = name.replace("-", "_").replace(".", "_")
+                raise ValueError(
+                    f"Invalid field name '{name}' in dict field spec. "
+                    f"Field names must be valid Python identifiers "
+                    f"(letters, digits, underscores only). "
+                    f"Use '{suggested}' instead."
+                )
+            if field_type not in SUPPORTED_TYPES:
+                raise ValueError(f"Unknown type '{field_type}' in dict field spec. Supported types: {', '.join(sorted(SUPPORTED_TYPES))}")
+            # Required and nullable are mandatory for round-trip format.
+            # Missing keys are Tier 1 data corruption — crash, don't default.
+            if "required" not in spec:
+                raise ValueError("Dict field spec must have 'required' key for round-trip format")
+            if type(spec["required"]) is not bool:
+                raise ValueError(f"Dict field spec 'required' must be bool, got {type(spec['required']).__name__}")
+            if "nullable" not in spec:
+                raise ValueError("Dict field spec must have 'nullable' key for round-trip format")
+            nullable = spec["nullable"]
+            if type(nullable) is not bool:
+                raise ValueError(f"Dict field spec 'nullable' must be bool, got {type(nullable).__name__}")
+            # Type narrowing for mypy
+            dict_typed_field: Literal["str", "int", "float", "bool", "any"] = field_type  # type: ignore[assignment]
+            return cls(
+                name=name,
+                field_type=dict_typed_field,
+                required=spec["required"],
+                nullable=nullable,
+            )
+
+        # Handle string format
         spec = spec.strip()
         match = FIELD_PATTERN.match(spec)
 
@@ -117,14 +200,21 @@ class FieldDefinition:
             name=name,
             field_type=typed_field,
             required=optional_marker is None,
+            nullable=optional_marker is not None,
         )
 
     def to_dict(self) -> dict[str, str | bool]:
-        """Convert to dictionary for serialization."""
+        """Convert to dictionary for serialization.
+
+        Includes all semantic fields for audit trail completeness (D4 fix).
+        The nullable flag affects coalesce merge behavior and must be
+        traceable in the audit record.
+        """
         return {
             "name": self.name,
             "type": self.field_type,
             "required": self.required,
+            "nullable": self.nullable,
         }
 
 
@@ -144,7 +234,7 @@ def _parse_field_names_list(value: Any, field_name: str) -> tuple[str, ...] | No
     if value is None:
         return None
 
-    if not isinstance(value, list):
+    if not isinstance(value, (list, tuple)):
         raise ValueError(f"'{field_name}' must be a list of field names, got {type(value).__name__}")
 
     if len(value) == 0:
@@ -204,19 +294,24 @@ def _validate_contract_fields_subset(
         )
 
 
-def _normalize_field_spec(spec: Any, *, index: int) -> str:
-    """Normalize a field spec to string form.
+def _normalize_field_spec(spec: Any, *, index: int) -> str | Mapping[str, Any]:
+    """Normalize a field spec for parsing.
 
     Accepts:
     - String: "field_name: type" or "field_name: type?"
     - Dict (from YAML): {"field_name": "type"} or {"field_name": "type?"}
+    - Dict (round-trip): {"name": "x", "type": "str", "required": True, "nullable": False}
+
+    For round-trip dict format (with "name" and "type" keys), returns the dict
+    directly to preserve all fields including nullable. FieldDefinition.parse()
+    handles both string and dict inputs.
 
     Args:
-        spec: Field specification (string or single-key dict)
+        spec: Field specification (string or dict)
         index: Index in fields list (for error messages)
 
     Returns:
-        Normalized string spec like "field_name: type"
+        Normalized spec (string for YAML format, dict for round-trip format)
 
     Raises:
         ValueError: If spec format is invalid
@@ -224,9 +319,9 @@ def _normalize_field_spec(spec: Any, *, index: int) -> str:
     if isinstance(spec, str):
         return spec
 
-    if isinstance(spec, dict):
-        # Handle to_dict() round-trip format: {"name": "x", "type": "str", "required": true}
-        # This enables SchemaConfig.from_dict(schema_config.to_dict()) to work.
+    if isinstance(spec, Mapping):
+        # Handle to_dict() round-trip format: {"name": "x", "type": "str", "required": true, "nullable": false}
+        # Return the dict directly so FieldDefinition.parse() can preserve all fields.
         if "name" in spec and "type" in spec:
             name = spec["name"]
             type_spec = spec["type"]
@@ -245,8 +340,21 @@ def _normalize_field_spec(spec: Any, *, index: int) -> str:
                     f"got {type(spec['required']).__name__} ({spec['required']!r}). "
                     f"Use true/false (YAML) or True/False (Python), not strings."
                 )
-            optional = spec["required"] is False
-            return f"{name}: {type_spec}{'?' if optional else ''}"
+            # Require nullable for round-trip format (P2 soundness fix).
+            # Missing nullable is Tier 1 data corruption — crash, don't default.
+            if "nullable" not in spec:
+                raise ValueError(
+                    f"Field spec at index {index}: 'nullable' key is missing. "
+                    f"Round-trip dict format requires 'name', 'type', 'required', and 'nullable' keys."
+                )
+            if type(spec["nullable"]) is not bool:
+                raise ValueError(
+                    f"Field spec at index {index}: 'nullable' must be a bool, "
+                    f"got {type(spec['nullable']).__name__} ({spec['nullable']!r}). "
+                    f"Use true/false (YAML) or True/False (Python), not strings."
+                )
+            # Return dict directly - FieldDefinition.parse() handles dict input
+            return spec
 
         # YAML `- id: int` parses as {"id": "int"}
         if len(spec) != 1:
@@ -322,7 +430,7 @@ class SchemaConfig:
         return self.mode == "observed"
 
     @classmethod
-    def from_dict(cls, config: dict[str, Any]) -> SchemaConfig:
+    def from_dict(cls, config: Mapping[str, Any]) -> SchemaConfig:
         """Parse schema configuration from dict.
 
         Args:
@@ -336,8 +444,8 @@ class SchemaConfig:
         Raises:
             ValueError: If config is invalid (including non-dict input)
         """
-        if not isinstance(config, dict):
-            raise ValueError(f"Schema config must be a dict, got {type(config).__name__}")
+        if not isinstance(config, Mapping):
+            raise ValueError(f"Schema config must be a Mapping, got {type(config).__name__}")
 
         # Parse contract fields (valid for all schema modes)
         guaranteed_fields = _parse_field_names_list(config.get("guaranteed_fields"), "guaranteed_fields")
@@ -356,7 +464,7 @@ class SchemaConfig:
             fields_value = config.get("fields")
             # Allow only None or [] for backwards compatibility; any other value
             # is an explicit schema declaration and must be rejected.
-            if fields_value is not None and fields_value != []:
+            if fields_value is not None and fields_value != [] and fields_value != ():
                 raise ValueError(
                     "Observed schemas (mode: observed) cannot have explicit field definitions. "
                     "Use guaranteed_fields/required_fields for contracts instead."
@@ -391,7 +499,7 @@ class SchemaConfig:
         fields_value = config["fields"]
 
         # Parse field list
-        if not isinstance(fields_value, list):
+        if not isinstance(fields_value, (list, tuple)):
             raise ValueError(f"Schema fields must be a list, got {type(fields_value).__name__}")
 
         if len(fields_value) == 0:
@@ -418,6 +526,15 @@ class SchemaConfig:
         _validate_contract_fields_subset(guaranteed_fields, "guaranteed_fields", declared_names)
         _validate_contract_fields_subset(required_fields, "required_fields", declared_names)
         _validate_contract_fields_subset(audit_fields, "audit_fields", declared_names)
+        if guaranteed_fields is not None:
+            required_declared_names = frozenset(f.name for f in parsed_fields if f.required)
+            optional_guarantees = set(guaranteed_fields) - required_declared_names
+            if optional_guarantees:
+                raise ValueError(
+                    "'guaranteed_fields' contains optional fields not guaranteed by schema: "
+                    f"{', '.join(sorted(optional_guarantees))}. "
+                    "Mark them required or remove them from guaranteed_fields."
+                )
 
         return cls(
             mode=mode,
@@ -451,6 +568,87 @@ class SchemaConfig:
             result["audit_fields"] = list(self.audit_fields)
 
         return result
+
+    @property
+    def declares_guaranteed_fields(self) -> bool:
+        """Whether this schema explicitly declares what fields it guarantees.
+
+        The None-vs-empty-tuple distinction on guaranteed_fields is semantic:
+          None  = "no declaration" — the producer abstains from guarantee votes.
+                  In coalesce intersection logic, this branch is skipped.
+          ()    = "explicitly guarantees zero fields" — participates in
+                  intersection and collapses the result to the empty set.
+
+        Use this property instead of raw ``guaranteed_fields is not None``
+        checks to centralise the abstain-vs-empty contract.
+
+        See also:
+            has_effective_guarantees: Use in coalesce merge loops to determine
+                branch participation. Unlike this property, it also considers
+                typed fields as a source of guarantees (not just explicit
+                guaranteed_fields). For abstain-vs-empty semantic checks, use
+                THIS property; for "does this branch contribute guarantees at
+                all?", use has_effective_guarantees.
+        """
+        return self.guaranteed_fields is not None
+
+    @property
+    def has_effective_guarantees(self) -> bool:
+        """Whether this schema has any source of field guarantees.
+
+        Unlike declares_guaranteed_fields (which only checks explicit
+        guaranteed_fields), this property also considers typed fields
+        as a source of guarantees. A schema with mode="fixed", fields=(id, x)
+        where both are required, but guaranteed_fields=None, still guarantees
+        {id, x} via the type system.
+
+        A schema with fields defined but all optional (no required fields) still
+        participates in coalesce intersections — it has effective guarantees of
+        the EMPTY SET. This is distinct from a schema with fields=None which
+        abstains entirely from the intersection.
+
+        Use this property in coalesce merge loops to determine if a branch
+        should participate in the guarantee union/intersection. A branch with
+        has_effective_guarantees=False is truly abstaining — no explicit
+        declaration AND no typed fields at all.
+
+        Returns:
+          True if explicit guaranteed_fields is not None, OR
+          True if schema has typed fields (regardless of required status).
+
+        See also:
+            declares_guaranteed_fields: Use for abstain-vs-empty semantic
+                checks (None vs empty tuple). This property answers "did the
+                schema make an explicit guarantee declaration?", while
+                has_effective_guarantees answers "does the schema contribute
+                to coalesce intersection/union at all?"
+        """
+        if self.guaranteed_fields is not None:
+            return True
+        # Fields defined = participates (even if all optional → contributes empty set)
+        return self.fields is not None
+
+    @property
+    def participates_in_propagation(self) -> bool:
+        """Whether this schema participates in ADR-007 pass-through propagation.
+
+        True iff the schema has guarantees to contribute to the intersection
+        that a downstream pass-through transform computes. False iff the
+        schema abstains entirely.
+
+        Canonical participation predicate per ADR-009 §Clause 1. Both the
+        runtime DAG walker and the composer preview walker must consult this
+        property rather than using the underlying ``declares_guaranteed_fields``
+        or ``has_effective_guarantees`` directly, so future changes to
+        participation semantics (e.g., Track 2's ``can_drop_rows`` declaration)
+        land on this property alone.
+
+        Uses ``has_effective_guarantees`` (explicit declarations OR typed
+        fields). Fixed-mode schemas with typed required fields implicitly
+        guarantee those fields even without an explicit ``guaranteed_fields``
+        declaration; skipping them would under-propagate.
+        """
+        return self.has_effective_guarantees
 
     @property
     def allows_extra_fields(self) -> bool:
@@ -498,3 +696,164 @@ class SchemaConfig:
             return explicit | declared_required
 
         return explicit
+
+
+def raw_options_have_schema(options: Mapping[str, Any]) -> bool:
+    """Return whether raw plugin options expose schema config under either alias."""
+    return "schema" in options or "schema_config" in options
+
+
+def _get_raw_schema_value(options: Mapping[str, Any]) -> object | None:
+    """Return raw schema config from plugin options, honoring both alias names."""
+    if "schema" in options:
+        return cast(object, options["schema"])
+    if "schema_config" in options:
+        return cast(object, options["schema_config"])
+    return None
+
+
+def parse_raw_schema_config(raw_schema: object, *, owner: str) -> SchemaConfig | None:
+    """Parse raw schema config for contract validation.
+
+    Raises ValueError for conditions that should surface as pipeline
+    validation errors, not for programming errors at the call site.
+    """
+    if raw_schema is None:
+        return None
+    if not isinstance(raw_schema, Mapping):
+        raise ValueError(f"{owner} schema config must be a mapping, got {type(raw_schema).__name__}")
+    try:
+        return SchemaConfig.from_dict(raw_schema)
+    except ValueError as exc:
+        raise ValueError(f"{owner} schema config: {exc}") from exc
+
+
+def get_raw_schema_config(
+    options: Mapping[str, Any],
+    *,
+    owner: str,
+) -> SchemaConfig | None:
+    """Parse raw schema config from plugin options, honoring both alias names."""
+    return parse_raw_schema_config(_get_raw_schema_value(options), owner=owner)
+
+
+def get_aggregation_contract_options(
+    options: Mapping[str, Any],
+    *,
+    owner: str,
+) -> tuple[Mapping[str, Any], str]:
+    """Return the mapping that carries an aggregation's input contract.
+
+    Aggregation nodes accept their input contract under either flat
+    ``options`` or a nested ``options.options`` wrapper. This helper is the
+    single source of truth for that alias resolution; callers in
+    ``contracts/schema.py`` and ``web/composer/state.py`` rely on it.
+    Raises ``ValueError`` when ``options["options"]`` exists but is not a
+    ``Mapping`` — that is a misconfiguration, not a recoverable shape.
+    """
+    if "options" not in options:
+        return options, owner
+
+    nested_options = options["options"]
+    if not isinstance(nested_options, Mapping):
+        raise ValueError(f"{owner} aggregation wrapper options must be a mapping, got {type(nested_options).__name__}")
+    return nested_options, f"{owner} options"
+
+
+def _parse_raw_required_input_fields(
+    value: object,
+    *,
+    owner: str,
+    field_name: str,
+) -> tuple[str, ...] | None:
+    """Parse raw required_input_fields from node config.
+
+    Raises ValueError for conditions that should surface as pipeline
+    validation errors, not for programming errors at the call site.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raise ValueError(f"{owner} {field_name} must be a list of field names, not a bare string")
+    try:
+        return _parse_field_names_list(value, field_name)
+    except ValueError as exc:
+        raise ValueError(f"{owner} {exc}") from exc
+
+
+def get_raw_producer_guaranteed_fields(
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+    *,
+    owner: str,
+) -> frozenset[str]:
+    """Return producer guarantees from raw plugin config.
+
+    Raises ValueError for conditions that should surface as pipeline
+    validation errors, not for programming errors at the call site.
+    """
+    schema_config = get_raw_schema_config(options, owner=owner)
+    if schema_config is None:
+        return frozenset()
+
+    guaranteed = schema_config.get_effective_guaranteed_fields()
+    if plugin_name in _TEXT_HEURISTIC_PLUGINS and schema_config.mode == "observed" and not schema_config.declares_guaranteed_fields:
+        column = options.get("column")
+        if isinstance(column, str) and column.isidentifier() and not keyword.iskeyword(column):
+            return frozenset({column})
+    return guaranteed
+
+
+def get_raw_node_required_fields(
+    options: Mapping[str, Any],
+    *,
+    owner: str,
+    node_type: str | None = None,
+) -> frozenset[str]:
+    """Return explicit consumer requirements from raw node config.
+
+    Raises ValueError for conditions that should surface as pipeline
+    validation errors, not for programming errors at the call site.
+    """
+    if "required_input_fields" in options:
+        required_input = _parse_raw_required_input_fields(
+            options["required_input_fields"],
+            owner=owner,
+            field_name="required_input_fields",
+        )
+        if required_input is not None:
+            return frozenset(required_input)
+
+    contract_options = options
+    contract_owner = owner
+    if node_type == "aggregation":
+        contract_options, contract_owner = get_aggregation_contract_options(options, owner=owner)
+        if contract_options is not options and "required_input_fields" in contract_options:
+            required_input = _parse_raw_required_input_fields(
+                contract_options["required_input_fields"],
+                owner=owner,
+                field_name="options.required_input_fields",
+            )
+            if required_input is not None:
+                return frozenset(required_input)
+
+    schema_config = get_raw_schema_config(contract_options, owner=contract_owner)
+    if schema_config is None or schema_config.required_fields is None:
+        return frozenset()
+    return frozenset(schema_config.required_fields)
+
+
+def get_raw_sink_required_fields(
+    options: Mapping[str, Any],
+    *,
+    owner: str,
+) -> frozenset[str]:
+    """Return sink requirements from raw sink config.
+
+    Raises ValueError for conditions that should surface as pipeline
+    validation errors, not for programming errors at the call site.
+    """
+    schema_config = get_raw_schema_config(options, owner=owner)
+    if schema_config is None:
+        return frozenset()
+    return schema_config.get_effective_required_fields()

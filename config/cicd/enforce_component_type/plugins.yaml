@@ -1,0 +1,13 @@
+# Allowlist for enforce_component_type.py CT1 rule.
+#
+# DataPluginConfig and PathConfig are intermediate base classes that
+# intentionally leave _plugin_component_type unset. Their concrete
+# descendants must set it (enforced by __init_subclass__ at runtime
+# and by this CI check statically).
+#
+# Currently no allowlist entries are needed — all intermediate bases
+# use _component_type_exempt = True (detected by the scanner) and all
+# concrete configs set _plugin_component_type via their intermediate
+# base hierarchy. This file exists as the canonical location for any
+# future exemptions.
+per_file_rules: []

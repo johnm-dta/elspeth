@@ -1,0 +1,302 @@
+"""Tests for SQLAlchemy session table definitions."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import insert, inspect, select, text
+from sqlalchemy.exc import IntegrityError
+
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import (
+    chat_messages_table,
+    composition_states_table,
+    run_events_table,
+    runs_table,
+    sessions_table,
+)
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+@pytest.fixture
+def engine():
+    """Create an in-memory SQLite engine migrated to head."""
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    return eng
+
+
+class TestTableCreation:
+    """Verify all five tables are created with correct schemas."""
+
+    def test_all_tables_exist(self, engine) -> None:
+        inspector = inspect(engine)
+        table_names = inspector.get_table_names()
+        assert "sessions" in table_names
+        assert "chat_messages" in table_names
+        assert "composition_states" in table_names
+        assert "runs" in table_names
+        assert "run_events" in table_names
+
+    def test_sessions_columns(self, engine) -> None:
+        inspector = inspect(engine)
+        columns = {c["name"] for c in inspector.get_columns("sessions")}
+        assert columns >= {"id", "user_id", "auth_provider_type", "title", "created_at", "updated_at"}
+
+    def test_chat_messages_columns(self, engine) -> None:
+        inspector = inspect(engine)
+        columns = {c["name"] for c in inspector.get_columns("chat_messages")}
+        assert columns >= {
+            "id",
+            "session_id",
+            "role",
+            "content",
+            "tool_calls",
+            "created_at",
+        }
+
+    def test_composition_states_columns(self, engine) -> None:
+        inspector = inspect(engine)
+        columns = {c["name"] for c in inspector.get_columns("composition_states")}
+        assert columns >= {
+            "id",
+            "session_id",
+            "version",
+            "source",
+            "nodes",
+            "edges",
+            "outputs",
+            "metadata_",
+            "is_valid",
+            "validation_errors",
+            "created_at",
+            "derived_from_state_id",
+        }
+
+    def test_runs_columns(self, engine) -> None:
+        inspector = inspect(engine)
+        columns = {c["name"] for c in inspector.get_columns("runs")}
+        assert columns >= {
+            "id",
+            "session_id",
+            "state_id",
+            "status",
+            "started_at",
+            "finished_at",
+            "rows_processed",
+            "rows_succeeded",
+            "rows_failed",
+            "rows_routed_success",
+            "rows_routed_failure",
+            "rows_quarantined",
+            "error",
+            "landscape_run_id",
+            "pipeline_yaml",
+        }
+
+    def test_run_events_columns(self, engine) -> None:
+        inspector = inspect(engine)
+        columns = {c["name"] for c in inspector.get_columns("run_events")}
+        assert columns >= {"id", "run_id", "timestamp", "event_type", "data"}
+
+
+class TestCompositionStateUniqueConstraint:
+    """Verify the UNIQUE(session_id, version) constraint."""
+
+    def test_duplicate_version_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id_1 = str(uuid.uuid4())
+        state_id_2 = str(uuid.uuid4())
+
+        with engine.begin() as conn:
+            # Insert a session first (FK constraint)
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="alice",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            # First state version
+            conn.execute(
+                insert(composition_states_table).values(
+                    id=state_id_1,
+                    session_id=session_id,
+                    version=1,
+                    is_valid=False,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            # Duplicate version should fail
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(composition_states_table).values(
+                        id=state_id_2,
+                        session_id=session_id,
+                        version=1,
+                        is_valid=False,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+
+
+class TestSessionForeignKeys:
+    """Verify foreign key relationships."""
+
+    def test_chat_message_requires_valid_session(self, engine) -> None:
+        """Inserting a message with a nonexistent session_id should fail
+        if FK enforcement is on (SQLite needs PRAGMA foreign_keys=ON)."""
+        # SQLite does not enforce FK by default; this test verifies
+        # the column exists and accepts valid references.
+        session_id = str(uuid.uuid4())
+        msg_id = str(uuid.uuid4())
+
+        with engine.begin() as conn:
+            # Enable FK enforcement for SQLite
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="alice",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            conn.execute(
+                insert(chat_messages_table).values(
+                    id=msg_id,
+                    session_id=session_id,
+                    role="user",
+                    content="Hello",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            # Verify it was inserted
+            result = conn.execute(select(chat_messages_table).where(chat_messages_table.c.id == msg_id)).fetchone()
+            assert result is not None
+
+    def test_orphan_message_rejected_with_fk_enforcement(self, engine) -> None:
+        """With PRAGMA foreign_keys=ON, orphan messages are rejected."""
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(chat_messages_table).values(
+                        id=str(uuid.uuid4()),
+                        session_id="nonexistent-session",
+                        role="user",
+                        content="Orphan message",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+
+
+class TestCheckConstraints:
+    """Verify CHECK constraints reject invalid values."""
+
+    def test_invalid_chat_message_role_rejected(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="alice",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(chat_messages_table).values(
+                        id=str(uuid.uuid4()),
+                        session_id=session_id,
+                        role="invalid_role",
+                        content="Hello",
+                        created_at=datetime.now(UTC),
+                    )
+                )
+
+    def test_invalid_run_status_rejected(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="alice",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            conn.execute(
+                insert(composition_states_table).values(
+                    id=state_id,
+                    session_id=session_id,
+                    version=1,
+                    is_valid=True,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(runs_table).values(
+                        id=str(uuid.uuid4()),
+                        session_id=session_id,
+                        state_id=state_id,
+                        status="invalid_status",
+                        started_at=datetime.now(UTC),
+                        rows_processed=0,
+                        rows_failed=0,
+                    )
+                )
+
+    def test_invalid_run_event_type_rejected(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="alice",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            conn.execute(
+                insert(composition_states_table).values(
+                    id=state_id,
+                    session_id=session_id,
+                    version=1,
+                    is_valid=True,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            conn.execute(
+                insert(runs_table).values(
+                    id=run_id,
+                    session_id=session_id,
+                    state_id=state_id,
+                    status="pending",
+                    started_at=datetime.now(UTC),
+                    rows_processed=0,
+                    rows_failed=0,
+                )
+            )
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(run_events_table).values(
+                        id=str(uuid.uuid4()),
+                        run_id=run_id,
+                        timestamp=datetime.now(UTC),
+                        event_type="invalid_type",
+                        data="{}",
+                    )
+                )

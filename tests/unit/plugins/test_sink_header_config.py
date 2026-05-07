@@ -99,18 +99,18 @@ class TestSinkHeaderConfigValidation:
         # The error should indicate invalid header mode
         assert "invalid" in str(exc_info.value).lower()
 
-    def test_empty_custom_mapping_is_custom_mode(self) -> None:
-        """Empty dict {} is still CUSTOM mode (explicit no mapping)."""
-        config = SinkPathConfig.from_dict(
-            {
-                "path": "output.csv",
-                "schema": {"mode": "observed"},
-                "headers": {},
-            }
-        )
+    def test_empty_custom_mapping_rejected(self) -> None:
+        """Empty dict {} is rejected — use 'normalized' or 'original' instead."""
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
 
-        assert config.headers_mode == HeaderMode.CUSTOM
-        assert config.headers_mapping == {}
+        with pytest.raises(PluginConfigError, match="must not be empty"):
+            SinkPathConfig.from_dict(
+                {
+                    "path": "output.csv",
+                    "schema": {"mode": "observed"},
+                    "headers": {},
+                }
+            )
 
     def test_invalid_type_headers_raises(self) -> None:
         """Non-string, non-dict, non-None headers type is rejected."""

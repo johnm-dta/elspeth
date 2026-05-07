@@ -23,8 +23,8 @@ This manual covers day-to-day usage of the ELSPETH CLI for running auditable pip
 
 ```bash
 # Clone and install
-git clone https://github.com/tachyon-beep/elspeth-rapid.git
-cd elspeth-rapid
+git clone https://github.com/johnm-dta/elspeth.git
+cd elspeth
 uv venv && source .venv/bin/activate
 uv pip install -e ".[all]"  # Full installation with LLM support
 ```
@@ -40,9 +40,9 @@ elspeth --help
 
 ## Environment Configuration
 
-See [Environment Variables Reference](reference/environment-variables.md) for the complete list of supported variables, including LLM provider keys, Azure service credentials, and security settings.
+See [Environment Variables Reference](../reference/environment-variables.md) for the complete list of supported variables, including LLM provider keys, Azure service credentials, and security settings.
 
-**Quick start:** Copy `.env.example` to `.env` (or create a new `.env` file) and fill in your API keys. ELSPETH automatically loads `.env` files from the current or parent directories.
+**Quick start:** Create a `.env` file if you want local environment-based configuration, then fill in the required keys. ELSPETH automatically loads `.env` files from the current or parent directories.
 
 ---
 
@@ -59,6 +59,8 @@ Options:
   --env-file PATH  Path to .env file (skips automatic search)
   --verbose, -v    Enable verbose/debug logging
   --json-logs      Output structured JSON logs (for machine processing)
+  --install-completion  Install completion for the current shell
+  --show-completion     Show completion script for the current shell
   --help           Show help message
 ```
 
@@ -73,6 +75,7 @@ Options:
 | `purge` | Delete old payloads to free storage |
 | `resume` | Resume a failed run from checkpoint |
 | `health` | Check system health for deployment verification |
+| `web` | Start the web application server |
 
 ---
 
@@ -103,6 +106,9 @@ elspeth run --settings settings.yaml --execute
 
 # With verbose output
 elspeth run --settings settings.yaml --execute --verbose
+
+# JSON output (for machine processing)
+elspeth run --settings settings.yaml --execute --format json
 ```
 
 ### Run Output
@@ -128,28 +134,36 @@ elspeth plugins list
 Output:
 ```
 SOURCES:
+  azure_blob           - Load rows from Azure Blob Storage.
   csv                  - Load rows from a CSV file.
+  dataverse            - Load rows from Microsoft Dataverse via OData v4 REST API.
   json                 - Load rows from a JSON file.
   null                 - A source that yields no rows.
-  azure_blob           - Load rows from Azure Blob Storage.
+  text                 - Load one output row per text line into a configured column.
 
 TRANSFORMS:
-  passthrough          - Pass rows through unchanged.
+  batch_replicate      - Replicate rows based on a copies field.
+  batch_stats          - Compute aggregate statistics over a batch, optionally per group_by value.
   field_mapper         - Map, rename, and select row fields.
   json_explode         - Explode a JSON array field into multiple rows.
   keyword_filter       - Filter rows containing blocked content patterns.
+  passthrough          - Pass rows through unchanged.
+  truncate             - Truncate string fields to specified maximum lengths.
+  type_coerce          - Perform explicit, strict, per-field type normalization.
+  value_transform      - Apply expressions to compute new or modified field values.
+  web_scrape           - Fetch webpages, extract content, generate fingerprints.
   azure_content_safety - Analyze content using Azure Content Safety API.
-  azure_prompt_shield  - Detect jailbreak attempts and prompt injection.
-  llm                  - LLM transform (provider: azure, openrouter).
-  azure_batch_llm      - Batch LLM transform using Azure OpenAI Batch API.
-  batch_stats          - Compute aggregate statistics over a batch.
-  batch_replicate      - Replicate rows based on a copies field.
+  azure_prompt_shield  - Detect jailbreak attempts and prompt injection using Azure Prompt Shield.
+  llm                  - Unified LLM transform with provider dispatch and strategy selection.
+  rag_retrieval        - Enriches rows with retrieval-augmented context from search providers.
 
 SINKS:
-  csv                  - Write rows to a CSV file.
-  json                 - Write rows to a JSON file.
-  database             - Write rows to a database table.
   azure_blob           - Write rows to Azure Blob Storage.
+  chroma_sink          - Write rows to a Chroma vector database.
+  csv                  - Write rows to a CSV file.
+  database             - Write rows to a database table.
+  dataverse            - Write rows to Microsoft Dataverse via OData v4 REST API.
+  json                 - Write rows to a JSON file.
 ```
 
 ### Filter by Type
@@ -190,11 +204,14 @@ elspeth explain --run latest --token abc123 --database <path/to/audit.db>
 # Interactive TUI (default)
 elspeth explain --run latest --database <path/to/audit.db>
 
-# Plain text
+# Plain text (for non-interactive terminals or CI/CD)
 elspeth explain --run latest --no-tui --database <path/to/audit.db>
 
 # JSON output
 elspeth explain --run latest --json --database <path/to/audit.db>
+
+# Disambiguate when a row has multiple terminal tokens (e.g., forked rows)
+elspeth explain --run latest --row 42 --sink high_values --database <path/to/audit.db>
 ```
 
 ---
@@ -215,8 +232,8 @@ elspeth purge --retention-days 90
 # Skip confirmation prompt
 elspeth purge --retention-days 90 --yes
 
-# Specify database path explicitly
-elspeth purge --database ./runs/audit.db --retention-days 30
+# Specify database and payload directory explicitly
+elspeth purge --database ./runs/audit.db --payload-dir ./runs/payloads --retention-days 30
 ```
 
 **Note:** Purging deletes payload blobs but preserves hashes in the audit trail. You can still verify what data existed, you just can't retrieve the content.
@@ -230,8 +247,8 @@ If a run fails (e.g., API timeout, network error), you can resume from the last 
 ### Check Resume Status
 
 ```bash
-# Dry run - show resume information
-elspeth resume run-abc123
+# Dry run - show resume information (positional run_id argument)
+elspeth resume run-abc123 --settings settings.yaml --database ./runs/audit.db
 
 Output:
   Run run-abc123 can be resumed.
@@ -245,7 +262,10 @@ Output:
 ### Execute Resume
 
 ```bash
-elspeth resume run-abc123 --execute
+elspeth resume run-abc123 --execute --settings settings.yaml --database ./runs/audit.db
+
+# JSON output
+elspeth resume run-abc123 --execute --format json
 ```
 
 Resume mode:
@@ -290,13 +310,13 @@ elspeth health --json
 ```json
 {
   "status": "healthy",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "commit": "abc123f",
   "checks": {
-    "version": {"status": "ok", "value": "0.1.0"},
+    "version": {"status": "ok", "value": "0.5.0"},
     "python": {"status": "ok", "value": "3.11.9"},
     "database": {"status": "ok", "value": "connected"},
-    "plugins": {"status": "ok", "value": "4 sources, 11 transforms, 4 sinks"}
+    "plugins": {"status": "ok", "value": "6 sources, 16 transforms, 6 sinks"}
   }
 }
 ```
@@ -435,13 +455,13 @@ For more complex scenarios, see the configuration reference:
 - **Content Moderation with Routing** - Gates with condition expressions
 - **Fork/Join Patterns** - Parallel processing with coalesce
 
-See [Configuration Reference](reference/configuration.md) for the complete settings documentation.
+See [Configuration Reference](../reference/configuration.md) for the complete settings documentation.
 
 ---
 
 ## Troubleshooting
 
-For comprehensive troubleshooting, see the [Troubleshooting Guide](guides/troubleshooting.md).
+For comprehensive troubleshooting, see the [Troubleshooting Guide](troubleshooting.md).
 
 ### Quick Fixes
 

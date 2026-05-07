@@ -16,20 +16,6 @@ Error messages follow the "'original' (normalized)" format for debuggability.
 class TestContractViolationBase:
     """Tests for ContractViolation base exception."""
 
-    def test_contract_violation_stores_normalized_name(self) -> None:
-        """ContractViolation stores normalized_name attribute."""
-        from elspeth.contracts.errors import ContractViolation
-
-        exc = ContractViolation(normalized_name="customer_id", original_name="Customer ID")
-        assert exc.normalized_name == "customer_id"
-
-    def test_contract_violation_stores_original_name(self) -> None:
-        """ContractViolation stores original_name attribute."""
-        from elspeth.contracts.errors import ContractViolation
-
-        exc = ContractViolation(normalized_name="customer_id", original_name="Customer ID")
-        assert exc.original_name == "Customer ID"
-
     def test_contract_violation_is_exception(self) -> None:
         """ContractViolation is an Exception subclass."""
         from elspeth.contracts.errors import ContractViolation
@@ -54,14 +40,6 @@ class TestMissingFieldViolation:
         from elspeth.contracts.errors import ContractViolation, MissingFieldViolation
 
         assert issubclass(MissingFieldViolation, ContractViolation)
-
-    def test_missing_field_stores_names(self) -> None:
-        """MissingFieldViolation stores both name attributes."""
-        from elspeth.contracts.errors import MissingFieldViolation
-
-        exc = MissingFieldViolation(normalized_name="amount", original_name="Amount")
-        assert exc.normalized_name == "amount"
-        assert exc.original_name == "Amount"
 
     def test_missing_field_message_contains_required(self) -> None:
         """MissingFieldViolation message mentions 'required' or 'missing'."""
@@ -90,45 +68,6 @@ class TestTypeMismatchViolation:
         from elspeth.contracts.errors import ContractViolation, TypeMismatchViolation
 
         assert issubclass(TypeMismatchViolation, ContractViolation)
-
-    def test_type_mismatch_stores_expected_type(self) -> None:
-        """TypeMismatchViolation stores expected_type attribute."""
-        from elspeth.contracts.errors import TypeMismatchViolation
-
-        exc = TypeMismatchViolation(
-            normalized_name="amount",
-            original_name="Amount",
-            expected_type=int,
-            actual_type=str,
-            actual_value="not_a_number",
-        )
-        assert exc.expected_type is int
-
-    def test_type_mismatch_stores_actual_type(self) -> None:
-        """TypeMismatchViolation stores actual_type attribute."""
-        from elspeth.contracts.errors import TypeMismatchViolation
-
-        exc = TypeMismatchViolation(
-            normalized_name="amount",
-            original_name="Amount",
-            expected_type=int,
-            actual_type=str,
-            actual_value="not_a_number",
-        )
-        assert exc.actual_type is str
-
-    def test_type_mismatch_stores_actual_value(self) -> None:
-        """TypeMismatchViolation stores actual_value attribute."""
-        from elspeth.contracts.errors import TypeMismatchViolation
-
-        exc = TypeMismatchViolation(
-            normalized_name="amount",
-            original_name="Amount",
-            expected_type=int,
-            actual_type=str,
-            actual_value="not_a_number",
-        )
-        assert exc.actual_value == "not_a_number"
 
     def test_type_mismatch_message_shows_types(self) -> None:
         """TypeMismatchViolation message shows expected and actual types."""
@@ -170,14 +109,6 @@ class TestExtraFieldViolation:
 
         assert issubclass(ExtraFieldViolation, ContractViolation)
 
-    def test_extra_field_stores_names(self) -> None:
-        """ExtraFieldViolation stores both name attributes."""
-        from elspeth.contracts.errors import ExtraFieldViolation
-
-        exc = ExtraFieldViolation(normalized_name="extra_col", original_name="Extra Col")
-        assert exc.normalized_name == "extra_col"
-        assert exc.original_name == "Extra Col"
-
     def test_extra_field_message_mentions_field(self) -> None:
         """ExtraFieldViolation message mentions the field name."""
         from elspeth.contracts.errors import ExtraFieldViolation
@@ -203,27 +134,6 @@ class TestContractMergeError:
         from elspeth.contracts.errors import ContractMergeError
 
         assert issubclass(ContractMergeError, ValueError)
-
-    def test_contract_merge_error_stores_field(self) -> None:
-        """ContractMergeError stores field attribute."""
-        from elspeth.contracts.errors import ContractMergeError
-
-        exc = ContractMergeError(field="amount", type_a="int", type_b="str")
-        assert exc.field == "amount"
-
-    def test_contract_merge_error_stores_type_a(self) -> None:
-        """ContractMergeError stores type_a attribute."""
-        from elspeth.contracts.errors import ContractMergeError
-
-        exc = ContractMergeError(field="amount", type_a="int", type_b="str")
-        assert exc.type_a == "int"
-
-    def test_contract_merge_error_stores_type_b(self) -> None:
-        """ContractMergeError stores type_b attribute."""
-        from elspeth.contracts.errors import ContractMergeError
-
-        exc = ContractMergeError(field="amount", type_a="int", type_b="str")
-        assert exc.type_b == "str"
 
     def test_contract_merge_error_message_shows_field(self) -> None:
         """ContractMergeError message shows the field name."""

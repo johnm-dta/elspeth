@@ -80,3 +80,30 @@ class TestGetNestedField:
         data = {"user": "string_not_dict"}
         with pytest.raises(TypeError, match="expected dict"):
             get_nested_field(data, "user.name")
+
+    def test_literal_dotted_key_preferred_over_traversal(self) -> None:
+        """Exact key with dots takes precedence over nested traversal.
+
+        JSON keys like "meta.source" exist as literal top-level keys.
+        get_nested_field must return the exact key value, not traverse
+        into {"meta": {"source": ...}}.
+        """
+        from elspeth.plugins.infrastructure.utils import get_nested_field
+
+        data = {"meta.source": "api", "meta": {"source": "nested"}}
+        result = get_nested_field(data, "meta.source")
+        assert result == "api"
+
+    def test_dotted_key_without_nested_equivalent(self) -> None:
+        """Literal dotted key returned when no nested path exists."""
+        from elspeth.plugins.infrastructure.utils import get_nested_field
+
+        data = {"config.version": "2.0"}
+        assert get_nested_field(data, "config.version") == "2.0"
+
+    def test_dotted_traversal_still_works_when_no_exact_key(self) -> None:
+        """Dot traversal still works when no exact key match exists."""
+        from elspeth.plugins.infrastructure.utils import get_nested_field
+
+        data = {"meta": {"source": "nested"}}
+        assert get_nested_field(data, "meta.source") == "nested"

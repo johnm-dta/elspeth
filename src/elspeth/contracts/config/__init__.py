@@ -59,6 +59,7 @@ from elspeth.contracts.config.protocols import (
     RuntimeRateLimitProtocol,
     RuntimeRetryProtocol,
     RuntimeTelemetryProtocol,
+    ServiceRateLimitProtocol,
 )
 
 # =============================================================================
@@ -104,6 +105,7 @@ __all__ = [
     "RuntimeServiceRateLimit",
     "RuntimeTelemetryConfig",
     "RuntimeTelemetryProtocol",
+    "ServiceRateLimitProtocol",
     "get_runtime_field_name",
     "get_settings_field_name",
     "is_exempt_settings",

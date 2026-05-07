@@ -6,6 +6,7 @@ from typing import Any, cast
 
 from elspeth.contracts import SinkProtocol, SourceProtocol
 from elspeth.contracts.enums import RoutingMode
+from elspeth.contracts.types import SinkName
 from elspeth.core.config import SourceSettings
 from elspeth.core.dag.graph import ExecutionGraph
 from tests.fixtures.plugins import CollectSink, ListSource
@@ -22,13 +23,13 @@ def _build_graph(
     source_settings = SourceSettings(plugin="list_source", on_success="primary", options={})
 
     primary = CollectSink("primary")
-    primary._on_write_failure = primary_on_write_failure  # type: ignore[attr-defined]
+    primary._on_write_failure = primary_on_write_failure
 
     sinks: dict[str, Any] = {"primary": primary}
 
     if include_failsink:
         failsink = CollectSink("csv_failsink")
-        failsink._on_write_failure = failsink_on_write_failure  # type: ignore[attr-defined]
+        failsink._on_write_failure = failsink_on_write_failure
         sinks["csv_failsink"] = failsink
 
     return ExecutionGraph.from_plugin_instances(
@@ -66,5 +67,5 @@ class TestFailsinkEdges:
         edge = failsink_edges[0]
         # from_node should be the primary sink, to_node should be the failsink
         sink_id_map = graph.get_sink_id_map()
-        assert edge.from_node == sink_id_map["primary"]
-        assert edge.to_node == sink_id_map["csv_failsink"]
+        assert edge.from_node == sink_id_map[SinkName("primary")]
+        assert edge.to_node == sink_id_map[SinkName("csv_failsink")]

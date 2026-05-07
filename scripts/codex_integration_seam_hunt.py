@@ -33,6 +33,7 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     get_git_commit,
     is_cache_path,
     load_context,
+    make_codex_rate_limiter,
     print_summary,
     resolve_path,
     run_codex_with_retry_and_logging,
@@ -41,7 +42,6 @@ from codex_audit_common import (  # type: ignore[import-not-found]
     write_run_metadata,
     write_summary_file,
 )
-from pyrate_limiter import Duration, Limiter, Rate
 
 
 def _is_source_file(path: Path) -> bool:
@@ -223,8 +223,7 @@ async def _run_batches(
     failed_files: list[tuple[Path, Exception]] = []
     total_gated = 0
 
-    # Use pyrate-limiter for rate limiting
-    rate_limiter = Limiter(Rate(rate_limit, Duration.MINUTE)) if rate_limit else None
+    rate_limiter = make_codex_rate_limiter(rate_limit)
     pbar = AsyncTqdm(total=len(files), desc="Analyzing source files", unit="file")
 
     for batch in chunked(files, batch_size):
@@ -397,7 +396,7 @@ Examples:
 
     # Load template and context
     template_text = template_path.read_text(encoding="utf-8")
-    context_text = load_context(repo_root, extra_files=args.context_files)
+    context_text = load_context(repo_root, extra_files=args.context_files, include_skills=True)
     ensure_log_file(log_path, header_title="Codex Integration Seam Hunt Log")
 
     # Ensure output directory exists

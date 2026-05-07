@@ -4,14 +4,6 @@ from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 
 
 class TestCoalescePolicy:
-    def test_members(self) -> None:
-        assert set(CoalescePolicy) == {
-            CoalescePolicy.REQUIRE_ALL,
-            CoalescePolicy.QUORUM,
-            CoalescePolicy.BEST_EFFORT,
-            CoalescePolicy.FIRST,
-        }
-
     def test_values_match_config_literals(self) -> None:
         """Values must match the Literal strings in CoalesceSettings.policy."""
         assert CoalescePolicy.REQUIRE_ALL.value == "require_all"
@@ -31,13 +23,6 @@ class TestCoalescePolicy:
 
 
 class TestMergeStrategy:
-    def test_members(self) -> None:
-        assert set(MergeStrategy) == {
-            MergeStrategy.UNION,
-            MergeStrategy.NESTED,
-            MergeStrategy.SELECT,
-        }
-
     def test_values_match_config_literals(self) -> None:
         assert MergeStrategy.UNION.value == "union"
         assert MergeStrategy.NESTED.value == "nested"

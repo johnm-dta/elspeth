@@ -10,6 +10,36 @@ description: >
 
 # Engine Patterns Reference
 
+> **Model complexity warning:** Engine code touches audit integrity (Tier 1),
+> plugin boundaries, and DAG execution. Do not delegate engine work to fast/simple
+> models — they will produce plausible-looking code that violates composite PK
+> joins, bypasses production code paths in tests, or adds defensive `.get()` on
+> Tier 1 data. Use Sonnet or Opus and include this skill in the prompt.
+
+## Quick Decision Table (Mechanical — No Judgment Required)
+
+For engine code, match the situation to this table. First match wins.
+
+| I'm writing... | Key rule | Common mistake |
+|----------------|----------|----------------|
+| A Landscape query joining `node_states` | Use `node_states.run_id` directly, never join through `nodes` on `node_id` alone | Ambiguous join — `node_id` reused across runs |
+| A `json.loads()` on data from our DB | No try/except — crash on failure. This is Tier 1 data. | Adding `except json.JSONDecodeError: return {}` |
+| A test that builds an `ExecutionGraph` | Use `ExecutionGraph.from_plugin_instances()`, not manual construction | `graph._branch_to_coalesce = {...}` bypasses production logic |
+| A test that loads pipeline config | Use `instantiate_plugins_from_config()`, not manual plugin construction | Building plugins by hand skips validation that production does |
+| Canonical JSON for hashing | Use `rfc8785.dumps()` after `_normalize_for_canonical()`. Reject NaN/Infinity. | `json.dumps(sort_keys=True)` is not deterministic |
+| A `from_settings()` mapping | Map every Settings field explicitly. Run `scripts.check_contracts`. | Adding a field to Settings but forgetting the Runtime*Config mapping |
+| An aggregation trigger | Timeout fires on next row arrival, not during idle. Document this. | Assuming timeout fires in real-time |
+| A retry state row | `(token_id, node_id, attempt)` is unique. Each attempt = separate row. | Updating the previous attempt row instead of inserting a new one |
+| Secret handling code | HMAC fingerprint only. Never store the actual secret. | Logging the secret value, even at DEBUG level |
+| Header/field name logic | Normalize at source boundary only. Use `SchemaContract.original_name` for restoration. | Re-normalizing in transforms or sinks |
+
+## Fix Right, Not Quick
+
+If you are proposing a fix that involves "a patch or temporary workaround," STOP.
+We only have one chance to fix things pre-release. Make the fix right, not quick.
+This especially includes architectural defects. Lint failures, failing tests, and
+CI/CD issues must all be resolved to merge — no exceptions.
+
 ## Composite Primary Key Pattern: nodes Table
 
 **CRITICAL:** The `nodes` table has a composite primary key `(node_id, run_id)`. This means the same `node_id` can exist in multiple runs when the same pipeline runs multiple times.
@@ -55,7 +85,7 @@ source:
   plugin: csv
   options:
     schema:
-      fields: dynamic
+      mode: observed
       guaranteed_fields: [customer_id, amount]
 
 # Transform requires these fields in input
@@ -268,6 +298,204 @@ src/elspeth/
 +-- cli_helpers.py      # CLI utility functions
 +-- cli_formatters.py   # Event formatting for CLI output
 ```
+
+## Layer Architecture & Dependency Analysis (`enforce_tier_model.py`)
+
+ELSPETH's layer model (L0 contracts → L1 core → L2 engine → L3
+plugins/web/mcp/tui/cli/telemetry/testing) is enforced by
+`scripts/cicd/enforce_tier_model.py`. This script does **dual duty** (per
+ADR-006 Phase 5) — it is both the defensive-pattern scanner *and* the
+layer-import enforcer. Treat the two roles as separate even though they
+share a process.
+
+The script exposes **two subcommands** with different exit-code semantics:
+
+| Subcommand | Role | Exit code | Use for |
+|---|---|---|---|
+| `check` | Conformance gate | non-zero on violations | CI build gate, pre-commit hook, regression checks |
+| `dump-edges` | Architecture observation | always 0 | L2 cluster analysis, refactor planning, SCC discovery, dependency graph diffing |
+
+Mixing the two roles in one CLI invocation is forbidden — `check` is a
+build gate (failure stops CI), `dump-edges` is observational (failure
+would be tool-level, not architectural).
+
+### `check` — conformance gate
+
+```bash
+.venv/bin/python scripts/cicd/enforce_tier_model.py check \
+  --root src/elspeth \
+  --allowlist config/cicd/enforce_tier_model
+```
+
+Detects:
+
+- **Upward imports** (rule `L1`) — e.g., `engine/` importing from `plugins/`.
+- **TYPE_CHECKING-guarded upward imports** (rule `TC`) — warning, not
+  failure. Architecturally impure but no runtime coupling.
+- **Defensive-pattern violations** (rules `R1`–`R9`) — `.get()` on Tier 1
+  data, `hasattr()` use, silent exception handling, etc. (See the
+  skill's tier-model section for the full Tier 1/2/3 distinction.)
+
+Exit non-zero on any finding outside the allowlist. Allowlist entries
+live in `config/cicd/enforce_tier_model/` and require a justification
+comment. **Do not add allowlist entries to silence findings without a
+real architectural reason** — the allowlist is for documented
+exemptions, not for hiding bugs.
+
+### `dump-edges` — architecture observation
+
+```bash
+.venv/bin/python scripts/cicd/enforce_tier_model.py dump-edges \
+  --root src/elspeth \
+  --format json \
+  --output /tmp/l3-import-graph.json \
+  --no-timestamp
+```
+
+Emits the deterministic intra-layer import graph as a machine-readable
+artefact. Three output formats are supported and all derived from the
+same AST walk:
+
+| Format | Use for |
+|---|---|
+| `json` | Programmatic consumption (cite by JSON path); the load-bearing format |
+| `mermaid` | Inline visualisation in Markdown / docs |
+| `dot` | Graphviz rendering (`dot -Tsvg input.dot`) for high-fidelity diagrams |
+
+Key flags:
+
+| Flag | Effect |
+|---|---|
+| `--include-layer L3` (repeatable) | Filter edges by source/target layer; default L3 only |
+| `--collapse-to-subsystem` | Aggregate file-level edges to subsystem granularity (default ON) |
+| `--no-timestamp` | Emit a stable placeholder for the `generated_at` field; produces byte-identical output across runs |
+
+**Determinism contract:** Given the same source tree and `--no-timestamp`,
+output is byte-identical. This means the artefact can live in `git` or be
+diffed across branches without spurious churn. CI integration is permitted
+but optional — `dump-edges` is observational, not a gate.
+
+### JSON schema (v1.0)
+
+```json
+{
+  "schema_version": "1.0",
+  "generated_at": "...",
+  "tool_version": "...",
+  "scope": { "root": "src/elspeth", "layers_included": ["L3"], "collapsed_to_subsystem": true },
+  "nodes": [ { "id": "plugins/transforms/llm", "layer": "L3", "file_count": 12, "loc": 6431 }, ... ],
+  "edges": [
+    {
+      "from": "web/composer", "to": "plugins/transforms/llm",
+      "weight": 12,
+      "type_checking_only": false, "conditional": false, "reexport": false,
+      "sample_sites": [ { "file": "src/elspeth/web/composer/tools.py", "line": 142 } ]
+    }, ...
+  ],
+  "stats": {
+    "total_nodes": 33, "total_edges": 77,
+    "type_checking_edges": 0, "conditional_edges": 2, "reexport_edges": 0,
+    "scc_count": 5, "largest_scc_size": 7
+  },
+  "strongly_connected_components": [ ["web", "web/auth", ...], ... ]
+}
+```
+
+**Edge metadata semantics:**
+
+| Field | Meaning | Why it matters |
+|---|---|---|
+| `weight` | Count of distinct import statements producing this edge | High weight = load-bearing coupling; the edge is unlikely to be incidental |
+| `type_checking_only` | All sites are inside `if TYPE_CHECKING:` blocks | No runtime coupling; architecturally impure but not load-bearing |
+| `conditional` | All sites are inside `try`/`if`/etc. blocks at runtime | Coupling exists but is gated; investigate the gate condition |
+| `reexport` | Edge passes through an `__init__.py` re-export | Hidden coupling — easy to miss because the import statement looks intra-package |
+
+The `AND-across-sites` aggregation rule means a flag is `true` only if
+**every** underlying site qualifies. An edge with one TYPE_CHECKING site
+and one runtime site is `type_checking_only: false` — it is load-bearing.
+This is the right semantics for cluster analysis: "is this edge
+unconditionally coupled at runtime?" not "does any import statement
+happen to be conditional?"
+
+### Strongly-connected components (SCCs)
+
+Cycles between modules are detected via Tarjan's algorithm
+(`networkx.strongly_connected_components`). Non-trivial SCCs (size ≥2)
+are surfaced in `strongly_connected_components` and counted in
+`stats.scc_count` / `stats.largest_scc_size`.
+
+**Cycles are observational, not enforcement.** The script does not fail
+the build on cycle detection. Cycles are an architectural finding to be
+triaged: some are benign (Python's `package ↔ subpackage` re-export
+pattern), some are tactical accumulation (sub-packages mutually
+importing because no clean boundary was drawn).
+
+When you find a non-trivial SCC, the right response depends on the
+shape:
+
+| SCC shape | Interpretation | Action |
+|---|---|---|
+| `pkg ↔ pkg/sub` (size 2) | Re-export pattern — `__init__.py` exposes names from `pkg/sub` | Almost always benign; verify by reading `__init__.py` |
+| `pkg/a ↔ pkg/b` peer cycle | Sibling sub-packages mutually coupled | Real cycle; flag for cluster boundary review |
+| Multi-node tangle (size ≥4) | No acyclic decomposition possible | Treat as a unit in any cluster analysis; do NOT pretend to break it |
+
+The architecture analysis under
+`docs/arch-analysis-2026-04-29-1500/` found a 7-node SCC spanning every
+`web/*` sub-package. That cluster is analysed as a unit in
+`clusters/composer/`; do not attempt to decompose it without explicit
+architectural buy-in.
+
+### When to use which subcommand
+
+| Situation | Subcommand |
+|---|---|
+| CI build gate / pre-commit hook | `check` |
+| Pre-PR sanity scan after a refactor | `check` |
+| Investigating "where does X end up coupled to?" | `dump-edges` |
+| Planning a cluster split or sub-package extraction | `dump-edges --collapse-to-subsystem` |
+| Comparing two branches' coupling shape | `dump-edges --no-timestamp` then `diff` |
+| Producing an architecture diagram | `dump-edges --format mermaid` (inline) or `--format dot` (rendered) |
+
+Both subcommands respect the same `--root` and `--allowlist` flags. Both
+are AST-based — the script does **not** use grep, regex, or string
+matching to derive imports, so conditional, multi-line, and re-exported
+imports are all correctly attributed.
+
+### Citation discipline when consuming `dump-edges` output
+
+When writing analysis or design docs that cite the graph, **cite by JSON
+path**, not by paraphrasing the artefact's content. This is the same
+discipline the L1/L2/Phase 8 archaeology passes used:
+
+```text
+[ORACLE: stats.scc_count = 5, stats.largest_scc_size = 7]
+[ORACLE: edge plugins/sinks → plugins/infrastructure, weight 45]
+[ORACLE: edges with from='mcp' and to startswith 'composer_mcp' = 0]
+[ORACLE: strongly_connected_components[4] (7 members)]
+```
+
+Citation by path makes claims auditable: any reader can re-derive the
+claim by querying the JSON. Paraphrasing produces second-hand claims
+that drift from the artefact silently. The `--no-timestamp` flag exists
+specifically so the cited values stay stable.
+
+### Extending the script
+
+The script's path→layer table lives at the top of the file (search for
+`LAYER_TABLE` or the equivalent constant). Adding a new layer or
+re-classifying a path requires:
+
+1. Updating the table.
+2. Verifying `check` still passes (regression test against the live
+   tree).
+3. Re-running `dump-edges` and committing the updated artefact if the
+   workspace stores one.
+
+Tests live in `tests/unit/scripts/cicd/test_enforce_tier_model_dump_edges.py`
+and cover smoke, layer filtering, TYPE_CHECKING/conditional/reexport
+tagging, collapse-to-subsystem, SCC detection, determinism, CLI
+validation, and empty-input handling. Adding new metadata fields or
+output formats means adding tests alongside.
 
 ## Offensive Programming Examples
 

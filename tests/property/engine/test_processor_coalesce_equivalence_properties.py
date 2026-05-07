@@ -17,7 +17,7 @@ from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.processor import DAGTraversalContext, RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_row
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
 def _make_processor(
@@ -29,12 +29,12 @@ def _make_processor(
 ) -> tuple[RowProcessor, Mock]:
     """Construct a minimal processor with deterministic step/node mappings."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
+    factory = make_factory(db)
     run_id = "test-run"
     source_node_id = NodeID("source-0")
 
-    recorder.begin_run(config={}, canonical_version="v1", run_id=run_id)
-    recorder.register_node(
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    factory.data_flow.register_node(
         run_id=run_id,
         plugin_name="test-source",
         node_type=NodeType.SOURCE,
@@ -60,7 +60,8 @@ def _make_processor(
     )
 
     processor = RowProcessor(
-        recorder=recorder,
+        execution=factory.execution,
+        data_flow=factory.data_flow,
         span_factory=SpanFactory(),
         run_id=run_id,
         source_node_id=source_node_id,

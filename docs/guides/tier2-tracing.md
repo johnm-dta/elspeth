@@ -33,18 +33,8 @@ ELSPETH has two independent telemetry tiers:
 | Azure AI (App Insights) | Yes | Yes | No | No |
 | Langfuse | Yes | Yes | Yes | Yes |
 
-### Batch Plugins
-
-| Provider | azure_batch_llm | openrouter_batch_llm | Notes |
-|----------|----------------|---------------------|-------|
-| Azure AI | No | No | Batch API runs in Azure infrastructure - no SDK instrumentation |
-| Langfuse | Job-level only | Per-call | Azure Batch = async job submission; OpenRouter Batch = sync parallel HTTP |
-
 **Why Azure AI doesn't work with OpenRouter:**
 Azure AI tracing auto-instruments the OpenAI SDK. OpenRouter plugins use HTTP directly via `httpx`, so there's no SDK to instrument. Use Langfuse for OpenRouter tracing.
-
-**Why Azure AI doesn't work with Azure Batch:**
-The Azure Batch API submits jobs that run asynchronously in Azure's infrastructure. The OpenAI SDK is only used to submit and check status - the actual LLM inference happens outside your process. Langfuse can trace at the job level (submit/complete), but not individual row processing.
 
 ## Azure AI (Application Insights)
 

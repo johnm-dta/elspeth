@@ -161,3 +161,96 @@ class TestAugmentedSchemaExcludesAuditFields:
                 assert f"{prefix}{suffix}" not in field_names, (
                     f"Audit field '{prefix}{suffix}' should NOT be in output schema — audit fields belong in success_reason['metadata']"
                 )
+
+
+class TestSchemaFieldTypesAreReal:
+    """Bug fix for elspeth-8c9f3a41fe and elspeth-5c063fd55d.
+
+    LLM output schema builders must advertise real types, not Any | None.
+    """
+
+    def test_single_query_response_field_is_str(self) -> None:
+        """The response field must be typed as str, not any."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.transforms.llm import _build_augmented_output_schema
+
+        config = SchemaConfig(mode="flexible", fields=())
+        schema_cls = _build_augmented_output_schema(
+            base_schema_config=config,
+            response_field="llm_response",
+            schema_name="TestSchema",
+        )
+        fields = schema_cls.model_fields
+        # Response field itself → str
+        assert "llm_response" in fields
+        annotation = fields["llm_response"].annotation
+        assert annotation is not None
+        # Optional str is str | None
+        assert str in (annotation.__args__ if hasattr(annotation, "__args__") else (annotation,))
+
+    def test_single_query_model_field_is_str(self) -> None:
+        """The _model field must be typed as str, not any."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.transforms.llm import _build_augmented_output_schema
+
+        config = SchemaConfig(mode="flexible", fields=())
+        schema_cls = _build_augmented_output_schema(
+            base_schema_config=config,
+            response_field="llm_response",
+            schema_name="TestSchema",
+        )
+        fields = schema_cls.model_fields
+        assert "llm_response_model" in fields
+        annotation = fields["llm_response_model"].annotation
+        assert annotation is not None
+        assert str in (annotation.__args__ if hasattr(annotation, "__args__") else (annotation,))
+
+    def test_multi_query_response_fields_are_str(self) -> None:
+        """Multi-query prefixed response and model fields must be str."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.transforms.llm import _build_multi_query_output_schema
+
+        config = SchemaConfig(mode="flexible", fields=())
+        schema_cls = _build_multi_query_output_schema(
+            base_schema_config=config,
+            response_field="llm_response",
+            query_names=("quality",),
+            schema_name="TestSchema",
+        )
+        fields = schema_cls.model_fields
+        for name in ("quality_llm_response", "quality_llm_response_model"):
+            assert name in fields, f"Missing field {name}"
+            annotation = fields[name].annotation
+            assert annotation is not None
+            assert str in (annotation.__args__ if hasattr(annotation, "__args__") else (annotation,)), (
+                f"Field {name} should be str-typed, got {annotation}"
+            )
+
+    def test_multi_query_extracted_fields_preserve_types(self) -> None:
+        """Extracted output_fields must use their declared types, not any."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.transforms.llm import _build_multi_query_output_schema
+
+        config = SchemaConfig(mode="flexible", fields=())
+        schema_cls = _build_multi_query_output_schema(
+            base_schema_config=config,
+            response_field="llm_response",
+            query_names=("quality",),
+            schema_name="TestSchema",
+            extracted_fields={"quality": (("quality_score", "int"), ("quality_label", "str"))},
+        )
+        fields = schema_cls.model_fields
+        # quality_score should be int-typed
+        assert "quality_score" in fields
+        score_annotation = fields["quality_score"].annotation
+        assert score_annotation is not None
+        assert int in (score_annotation.__args__ if hasattr(score_annotation, "__args__") else (score_annotation,)), (
+            f"quality_score should be int-typed, got {score_annotation}"
+        )
+        # quality_label should be str-typed
+        assert "quality_label" in fields
+        label_annotation = fields["quality_label"].annotation
+        assert label_annotation is not None
+        assert str in (label_annotation.__args__ if hasattr(label_annotation, "__args__") else (label_annotation,)), (
+            f"quality_label should be str-typed, got {label_annotation}"
+        )

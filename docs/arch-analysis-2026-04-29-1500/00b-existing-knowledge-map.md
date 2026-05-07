@@ -1,0 +1,293 @@
+# 00b — Existing Knowledge Map
+
+Atomic claims extracted from the institutional documentation set. Each claim is independently citable. Downstream L1 catalog work MUST cite (`[CITES KNOW-N]`) or contradict (`[DIVERGES FROM KNOW-N]`) — never silently restate.
+
+## ARCHITECTURE.md
+
+- KNOW-A1. ELSPETH is described as an "Auditable Sense/Decide/Act pipeline framework". — ARCHITECTURE.md:At a Glance
+- KNOW-A2. Architecture covers 11 major subsystems (20+ including sub-components) across 5 architectural tiers. — ARCHITECTURE.md:At a Glance
+- KNOW-A3. Data flow is Source → Transforms/Gates → Sinks (all recorded). — ARCHITECTURE.md:At a Glance
+- KNOW-A4. Audit storage is SQLite/SQLCipher in dev and PostgreSQL in prod. — ARCHITECTURE.md:At a Glance
+- KNOW-A5. Extension model is pluggy-based plugin system. — ARCHITECTURE.md:At a Glance
+- KNOW-A6. Production LOC reported in ARCHITECTURE.md = ~103,900 (315 Python, 46 TSX, 1 CSS); production status is "Pre-release" RC-5 v0.5.0. — ARCHITECTURE.md:At a Glance
+- KNOW-A7. Test LOC reported = ~274,900 Python lines across 731 files (2.6:1 test-to-production ratio). — ARCHITECTURE.md:At a Glance
+- KNOW-A8. ARCHITECTURE.md last updated 2026-04-03 synchronized with RC-5 branch. — ARCHITECTURE.md:Header
+- KNOW-A9. Level-1 actors are Pipeline Operator (CLI/YAML) and Auditor (CLI/TUI). — ARCHITECTURE.md:Level 1: System Context
+- KNOW-A10. External systems consumed: Data Sources (CSV/JSON/APIs/databases), Data Destinations (files/databases/queues), LLM Providers (Azure OpenAI, OpenRouter). — ARCHITECTURE.md:Level 1: System Context
+- KNOW-A11. Container list (Level 2): CLI, TUI, MCP Server, Engine, Plugins, Landscape, Telemetry, Checkpoint, Rate Limiting, Core, Contracts. — ARCHITECTURE.md:Level 2: Container Diagram
+- KNOW-A12. CLI is built on Typer, ~2,200 LOC, exposes `run`, `explain`, `validate`, `resume`. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A13. TUI is built on Textual, ~800 LOC, used for interactive lineage exploration. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A14. MCP Server is ~3,600 LOC and exposes a read-only analysis API with domain-specific analyzers. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A15. Engine is ~12,000 LOC and owns run lifecycle, row processing, and DAG execution. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A16. Plugins subsystem is ~20,600 LOC and uses pluggy for extensible sources/transforms/sinks/LLM/clients. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A17. Landscape is ~8,300 LOC, built on SQLAlchemy Core, structured as facade + 4 repositories with SQLCipher support. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A18. Testing subsystem is ~9,500 LOC and includes ChaosLLM, ChaosWeb, and ChaosEngine test servers. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A19. Telemetry subsystem is ~1,200 LOC and exports OTLP, Datadog, and Azure Monitor. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A20. Checkpoint subsystem is ~600 LOC and provides crash recovery with topology validation. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A21. Rate Limiting is ~300 LOC, built on pyrate-limiter, with persistence support. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A22. Core is ~5,000 LOC: Config, canonical JSON, DAG package, payload store. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A23. Contracts is ~8,300 LOC: shared dataclasses, enums, protocols (leaf module). — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A24. Audit DB has 21 tables and supports SQLite/SQLCipher/PostgreSQL. — ARCHITECTURE.md:Container Responsibilities
+- KNOW-A25. Engine components include Orchestrator, RowProcessor, DAGNavigator, TokenManager, Executors, RetryManager, SpanFactory, Triggers, ExpressionParser. — ARCHITECTURE.md:3.1 Engine Components
+- KNOW-A26. Orchestrator is ~3,500 LOC at `orchestrator/`, RowProcessor is ~1,860 LOC at `processor.py`. — ARCHITECTURE.md:3.1 Engine Components
+- KNOW-A27. ExpressionParser lives in `core/expression_parser.py` (~652 LOC) — used by config validation. — ARCHITECTURE.md:3.1 Engine Components
+- KNOW-A28. CoalesceExecutor is ~1,054 LOC providing fork/join merge barrier with policy-driven merging. — ARCHITECTURE.md:3.1 Engine Components
+- KNOW-A29. Landscape is structured as LandscapeRecorder facade (~1,040 LOC, 89 methods) delegating to 4 repositories. — ARCHITECTURE.md:3.2 Landscape Components
+- KNOW-A30. Landscape's 4 repositories are RunLifecycleRepository, ExecutionRepository, DataFlowRepository, QueryRepository. — ARCHITECTURE.md:3.2 Landscape Components
+- KNOW-A31. ExecutionRepository is the largest repo at ~1,480 LOC (node states, routing events, outcomes, batches). — ARCHITECTURE.md:3.2 Landscape Components
+- KNOW-A32. Audit Trail has 21 tables organised into runs/nodes/edges → rows/tokens/token_parents → node_states/routing_events → calls/batches/artifacts plus error tables. — ARCHITECTURE.md:Audit Trail Tables
+- KNOW-A33. Composite PK `(node_id, run_id)` on `nodes` table requires using denormalized `node_states.run_id` directly in queries. — ARCHITECTURE.md:Audit Trail Tables
+- KNOW-A34. Plugin protocols are 4 runtime-checkable interfaces: Source, Transform, BatchTransform, Sink. — ARCHITECTURE.md:3.3 Plugins Components
+- KNOW-A35. Plugin ecosystem totals 25 plugins across 4 categories organised into infrastructure/, sources/, transforms/, sinks/. — ARCHITECTURE.md:3.3 Plugins Components
+- KNOW-A36. Source plugins ship: csv, json, azure_blob, null (4 sources). — ARCHITECTURE.md:3.3 Plugins Components
+- KNOW-A37. Transform plugins ship 13: field_mapper, passthrough, truncate, keyword_filter, batch_stats, batch_replicate, json_explode, web_scrape, content_safety, prompt_shield, LLM, azure_batch, openrouter_batch. — ARCHITECTURE.md:3.3 Plugins Components
+- KNOW-A38. Sink plugins ship: csv, json, database, azure_blob (4 sinks). — ARCHITECTURE.md:3.3 Plugins Components
+- KNOW-A39. Audited clients are 4: AuditedHTTPClient, AuditedLLMClient, ReplayerClient, VerifierClient. — ARCHITECTURE.md:3.3 Plugins Components
+- KNOW-A40. Plugin context is phase-typed via SourceContext, TransformContext, SinkContext, LifecycleContext protocols defined in `contracts/contexts.py`. — ARCHITECTURE.md:Plugin Context Protocols
+- KNOW-A41. Concrete `PluginContext` (in `contracts/plugin_context.py`) structurally satisfies all 4 phase protocols; engine executors mutate it between pipeline steps; plugins see narrowed read-only views via protocol typing. — ARCHITECTURE.md:Plugin Context Protocols
+- KNOW-A42. Pipeline execution flow records audit events at begin_run, register_node/edge, create_row/token, begin/complete_node_state, register_artifact, complete_run. — ARCHITECTURE.md:Pipeline Execution Flow
+- KNOW-A43. Telemetry events are emitted AFTER Landscape recording (Landscape = source of truth, telemetry = operational visibility). — ARCHITECTURE.md:Pipeline Execution Flow
+- KNOW-A44. Token terminal states are: COMPLETED, ROUTED, FORKED, CONSUMED_IN_BATCH, COALESCED, QUARANTINED, FAILED, EXPANDED. — ARCHITECTURE.md:Token Lifecycle
+- KNOW-A45. BUFFERED is non-terminal and becomes COMPLETED on flush. — ARCHITECTURE.md:Token Lifecycle
+- KNOW-A46. Token identity is tracked via row_id (stable), token_id (unique per instance), parent_token_id (lineage). — ARCHITECTURE.md:Fork/Join Processing Flow
+- KNOW-A47. Coalesce policies supported: require_all, quorum, best_effort, first. — ARCHITECTURE.md:Fork/Join Processing Flow
+- KNOW-A48. Merge strategies supported: union, nested, select. — ARCHITECTURE.md:Fork/Join Processing Flow
+- KNOW-A49. Deployment view: development uses SQLite/SQLCipher + local FS payloads; production uses PostgreSQL + S3/Azure Blob. — ARCHITECTURE.md:Deployment View
+- KNOW-A50. Telemetry granularity levels: lifecycle (~10-20 events/run), rows (N×M events), full (incl. external call details). — ARCHITECTURE.md:Telemetry Flow Diagram
+- KNOW-A51. Telemetry backpressure modes: block (wait), drop (lossy fast). — ARCHITECTURE.md:Telemetry Flow Diagram
+- KNOW-A52. Individual telemetry exporter failures are isolated — one failure does not affect others. — ARCHITECTURE.md:Telemetry Flow Diagram
+- KNOW-A53. Leaf Module Principle: `contracts/` package has ZERO outbound dependencies, preventing circular imports and enabling independent testing. — ARCHITECTURE.md:Dependency Graph
+- KNOW-A54. Import hierarchy is UI Layer → Engine/Plugins/Telemetry → Core → Contracts (leaf). — ARCHITECTURE.md:Dependency Graph
+- KNOW-A55. Schema validation Phase 1 requires upstream `guaranteed_fields` to be a superset of downstream `required_fields`. — ARCHITECTURE.md:Schema Contract Validation Flow
+- KNOW-A56. Schema validation Phase 2 verifies field types are compatible across plugin boundaries. — ARCHITECTURE.md:Schema Contract Validation Flow
+- KNOW-A57. Schema validation happens at DAG construction time before any data processing; failures crash immediately. — ARCHITECTURE.md:Schema Contract Validation Flow
+- KNOW-A58. `extract_jinja2_fields` (in `core/templates`) discovers required fields from Jinja2 templates. — ARCHITECTURE.md:Schema Contract Validation Flow
+- KNOW-A59. Trust tier handling: Tier 1 (Audit DB) full trust, never coerce, crash immediately on anomaly. — ARCHITECTURE.md:Trust Boundary Diagram
+- KNOW-A60. Trust tier handling: Tier 2 (Pipeline) elevated trust, never coerce, return error result on operation failure. — ARCHITECTURE.md:Trust Boundary Diagram
+- KNOW-A61. Trust tier handling: Tier 3 (External/Sources) zero trust, coerce at boundary, quarantine row on failure. — ARCHITECTURE.md:Trust Boundary Diagram
+- KNOW-A62. ARCHITECTURE.md ADR table claims 6 documented ADRs (001–006) and 8 ADRs total in the summary, predating ADRs 007–017. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A63. ADR-001 in ARCHITECTURE.md table: Plugin-level concurrency — Pool-based with FIFO ordering, maintains auditability while enabling parallelism. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A64. ADR-002 in ARCHITECTURE.md table: Routing copy mode limitation — Move-only (no copy), prevents ambiguous audit trail for routed tokens. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A65. ADR-003 in ARCHITECTURE.md table: Schema validation lifecycle — Two-phase (contract → type) at DAG construction. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A66. ADR-004 in ARCHITECTURE.md table: Explicit sink routing — Named DAG edges replace implicit convention. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A67. ADR-005 in ARCHITECTURE.md table: Declarative DAG wiring — `input`/`on_success` connections, every edge explicitly declared and validated. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A68. ADR-006 in ARCHITECTURE.md table: Layer dependency remediation — Strict 4-layer model (`contracts → core → engine → plugins`), 10 violations → 0, CI enforcement. — ARCHITECTURE.md:Architecture Decision Records
+- KNOW-A69. Implicit technology choices: SQLAlchemy Core (not ORM), pluggy, NetworkX, RFC 8785 (rfc8785), Textual, tenacity, pyrate-limiter, OpenTelemetry Protocol. — ARCHITECTURE.md:Implicit Architectural Decisions
+- KNOW-A70. Quality risks called out: large files (orchestrator ~2,070 LOC, processor ~1,860 LOC), aggregation state-machine complexity, composite PK joins, no generated API docs. — ARCHITECTURE.md:Areas for Future Improvement
+- KNOW-A71. Risk assessment marks Audit Integrity, Type Safety, Test Coverage, and Resume Safety all as Low Risk. — ARCHITECTURE.md:Risk Assessment
+- KNOW-A72. Summary key metrics: 11 major subsystems, 46 plugins (summary count, differs from 25 plugin total elsewhere), 8 ADRs, RC-5 status. — ARCHITECTURE.md:Summary
+
+## CLAUDE.md
+
+- KNOW-C1. CLAUDE.md states the human operator is neurodiverse; agents must relitigate unanswered questions instead of inferring consent. — CLAUDE.md:Human Operator Communication
+- KNOW-C2. ELSPETH is a domain-agnostic framework for auditable Sense/Decide/Act (SDA) pipelines, not LLM-specific. — CLAUDE.md:Project Overview
+- KNOW-C3. Decide step can be LLM, ML model, rules engine, or threshold check. — CLAUDE.md:Project Overview
+- KNOW-C4. CLAUDE.md instructs sessions to read code, comments, docstrings before changing anything; comments are institutional memory. — CLAUDE.md:You Are a New Employee
+- KNOW-C5. Constraints not mechanically enforced (types/tests/CI/named constants) are assumed lost between sessions. — CLAUDE.md:You Are a New Employee
+- KNOW-C6. Token efficiency instructions are explicitly disregarded; tasks have no token budget; correctness over simplicity. — CLAUDE.md:Efficiency
+- KNOW-C7. Auditability standard: every decision must be traceable to source data, configuration, and code version. — CLAUDE.md:Auditability Standard
+- KNOW-C8. Hashes survive payload deletion — integrity is always verifiable. — CLAUDE.md:Auditability Standard
+- KNOW-C9. The Landscape audit trail is the source of truth, not logs or metrics. — CLAUDE.md:Auditability Standard
+- KNOW-C10. Attributability test: for any output, `explain(recorder, run_id, token_id)` must prove complete lineage back to source. — CLAUDE.md:Auditability Standard
+- KNOW-C11. Tier 1 (Audit DB / Landscape): FULL TRUST, must be 100% pristine, crash immediately on anomaly, no coercion ever. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C12. Silently coercing bad data in audit trail is described as evidence tampering. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C13. Tier 2 (Pipeline post-source): ELEVATED TRUST, types are trustworthy, no coercion at transform/sink, plugins must wrap operations on values. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C14. Wrong types received by transform = upstream plugin bug; fix the plugin, do not coerce downstream. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C15. Tier 3 (External): ZERO TRUST, validate at boundary, coerce where possible, record what we got and didn't get, quarantine rows that can't be coerced. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C16. Coercion is meaning-preserving; fabrication is not. `"42"` → `42` is coercion; `None` → `0` is fabrication. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C17. Inferring an absent field from adjacent fields is fabrication, not coercion — record `None` instead. — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C18. Fabrication decision test asks: would auditor querying field get a value the external system actually provided? — CLAUDE.md:Three-Tier Trust Model
+- KNOW-C19. Source is the only place coercion is allowed in the trust flow diagram. — CLAUDE.md:The Trust Flow
+- KNOW-C20. Transform on row data: no coercion, wrap operations on values; transform on external calls: coercion OK because external response is Tier 3. — CLAUDE.md:Quick Reference
+- KNOW-C21. Plugins (Sources, Transforms, Aggregations, Sinks) are system-owned code, not user-provided extensions; gates are config-driven system operations, not plugins. — CLAUDE.md:Plugin Ownership
+- KNOW-C22. ELSPETH uses pluggy for clean architecture, NOT to accept arbitrary user plugins. — CLAUDE.md:Plugin Ownership
+- KNOW-C23. Plugin method exception → CRASH (bug in our code); never catch and log silently. — CLAUDE.md:Implications for Error Handling
+- KNOW-C24. Plugin returning wrong type → CRASH; never coerce to expected type. — CLAUDE.md:Implications for Error Handling
+- KNOW-C25. Plugin missing expected attribute → CRASH; do NOT use `getattr(x, 'attr', default)`. — CLAUDE.md:Implications for Error Handling
+- KNOW-C26. SDA core architecture: SENSE (Sources, exactly 1 per run) → DECIDE (Transforms/Gates, 0+ ordered) → ACT (Sinks, 1+ named destinations). — CLAUDE.md:The SDA Model
+- KNOW-C27. Key subsystems listed: Landscape, Plugin System (pluggy), SDA Engine (RowProcessor, Orchestrator, RetryManager, ArtifactPipeline), Canonical, Payload Store, Configuration (Dynaconf+Pydantic), Config Contracts. — CLAUDE.md:Key Subsystems
+- KNOW-C28. Pipelines compile to DAGs; linear pipelines are degenerate DAGs (single `continue` path). — CLAUDE.md:DAG Execution Model
+- KNOW-C29. Token identity tracks row instances through forks/joins via row_id, token_id, parent_token_id. — CLAUDE.md:DAG Execution Model
+- KNOW-C30. Transform subtypes: Row Transform (one row → one row), Gate (decides destination via continue/route_to_sink/fork_to_paths), Aggregation (collect N until trigger → emit), Coalesce (merge results from parallel paths). — CLAUDE.md:Transform Subtypes
+- KNOW-C31. Package management: use `uv` for ALL package management; never use `pip` directly. — CLAUDE.md:Development
+- KNOW-C32. Tier model enforcement script: `scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model`. — CLAUDE.md:Development
+- KNOW-C33. Config contracts verification script: `python -m scripts.check_contracts`. — CLAUDE.md:Development
+- KNOW-C34. CLI commands include `elspeth run`, `resume`, `validate`, `plugins list`, `purge`, `explain`. — CLAUDE.md:Development
+- KNOW-C35. `elspeth-mcp` is a read-only MCP server for analysing the audit DB; primary tools are `diagnose()`, `get_failure_context(run_id)`, `explain_token(run_id, token_id)`. — CLAUDE.md:Landscape MCP Analysis Server
+- KNOW-C36. Tech stack: Typer, Textual, Dynaconf+Pydantic, pluggy, pandas, SQLAlchemy Core, Alembic, tenacity, OpenTelemetry plus rfc8785, NetworkX, structlog, pyrate-limiter, DeepDiff, Hypothesis. — CLAUDE.md:Technology Stack
+- KNOW-C37. Optional packs: LLM (LiteLLM), Azure, Telemetry (ddtrace), Web (beautifulsoup4), Security (sqlcipher3), MCP. — CLAUDE.md:Technology Stack
+- KNOW-C38. Telemetry primacy order: audit fires first (sync, crash-on-failure), then telemetry (async, best-effort), then logging (only if both are down). — CLAUDE.md:Telemetry and Logging
+- KNOW-C39. Logger is NOT for pipeline activity; do not log row-level decisions, transform outcomes, or call results. — CLAUDE.md:Telemetry and Logging
+- KNOW-C40. Logger uses are limited to transitory debugging (`slog.debug`), audit system failures, and telemetry system failures. — CLAUDE.md:Telemetry and Logging
+- KNOW-C41. When a reviewer recommends `slog`, presume audit (Landscape) for critical run data, or operational telemetry for ephemeral signals. — CLAUDE.md:Telemetry and Logging
+- KNOW-C42. Always use `row.to_dict()` for explicit conversion, not `dict(row)`. — CLAUDE.md:Critical Implementation Patterns
+- KNOW-C43. Every row reaches exactly one terminal state; BUFFERED is non-terminal. — CLAUDE.md:Critical Implementation Patterns
+- KNOW-C44. Integration tests MUST use `ExecutionGraph.from_plugin_instances()` and `instantiate_plugins_from_config()` — never bypass production code paths in tests. — CLAUDE.md:Critical Implementation Patterns
+- KNOW-C45. Configuration precedence (high to low): runtime overrides → pipeline config → profile config → plugin pack defaults → system defaults. — CLAUDE.md:Configuration Precedence
+- KNOW-C46. Source code lives in `src/elspeth/` with subsystems: core/, contracts/, engine/, plugins/, telemetry/, testing/, mcp/, tui/, cli. — CLAUDE.md:Source Layout
+- KNOW-C47. Strict 4-layer model: L0 contracts/ (leaf), L1 core/, L2 engine/, L3 plugins/ (and mcp/, tui/, cli, telemetry/, testing/ at L3). — CLAUDE.md:Layer Dependency Rules
+- KNOW-C48. Imports must flow downward only — enforced by CI via `scripts/cicd/enforce_tier_model.py`. — CLAUDE.md:Layer Dependency Rules
+- KNOW-C49. Allowlist mechanism for tier-model enforcement is `config/cicd/enforce_tier_model/`. — CLAUDE.md:Layer Dependency Rules
+- KNOW-C50. TYPE_CHECKING imports are warnings (not failures) under tier-model enforcement. — CLAUDE.md:Layer Dependency Rules
+- KNOW-C51. Cross-layer resolution priority: move code down → extract primitive → restructure caller → NEVER add a lazy import with apologetic comment. — CLAUDE.md:When a New Cross-Layer Need Arises
+- KNOW-C52. No Legacy Code Policy: legacy code, backwards compatibility, and compatibility shims are strictly forbidden. WE HAVE NO USERS YET. — CLAUDE.md:No Legacy Code Policy
+- KNOW-C53. Anti-patterns banned: backwards compatibility code, legacy shims, deprecated code retention, migration helpers. — CLAUDE.md:No Legacy Code Policy
+- KNOW-C54. When something is removed or changed, DELETE THE OLD CODE COMPLETELY. — CLAUDE.md:No Legacy Code Policy
+- KNOW-C55. Git safety: never run `git reset --hard`, `git clean -f`, `git checkout -- <file>`, `git push --force`, or rebase pushed branches without explicit user permission. — CLAUDE.md:Git Safety
+- KNOW-C56. No git stash policy: stash/pop has caused data loss with pre-commit hooks; commit to a branch instead. — CLAUDE.md:Git Safety
+- KNOW-C57. Defensive programming forbidden: do not use `.get()`, `getattr()`, `isinstance()`, or silent exception handling to suppress errors from missing attrs/malformed data. — CLAUDE.md:Defensive Programming Forbidden
+- KNOW-C58. `hasattr()` is unconditionally banned — it swallows all exceptions from `@property` getters. — CLAUDE.md:Defensive Programming Forbidden
+- KNOW-C59. Defensive handling IS appropriate at trust boundaries — see `tier-model-deep-dive` skill. — CLAUDE.md:Defensive Programming Forbidden
+- KNOW-C60. Offensive programming encouraged: proactively detect invalid states; always use `from exc` to preserve exception chains. — CLAUDE.md:Offensive Programming Encouraged
+- KNOW-C61. Frozen dataclass `frozen=True` only prevents reassignment, not mutable contents — every frozen dataclass with container fields must enforce deep immutability in `__post_init__`. — CLAUDE.md:Frozen Dataclass Immutability
+- KNOW-C62. The canonical pattern is `freeze_fields(self, "field1", "field2")` from `elspeth.contracts.freeze`. — CLAUDE.md:Frozen Dataclass Immutability
+- KNOW-C63. `deep_freeze` recursively converts dict→MappingProxyType, list→tuple, set→frozenset including arbitrary Mapping types. — CLAUDE.md:Frozen Dataclass Immutability
+- KNOW-C64. Forbidden anti-patterns: `MappingProxyType(self.x)` (view, not copy), `MappingProxyType(dict(self.x))` (shallow only), `isinstance(self.x, dict)` as guard (misses Mapping subtypes). — CLAUDE.md:Forbidden Anti-Patterns
+- KNOW-C65. CI enforces freeze guards via `scripts/cicd/enforce_freeze_guards.py` with allowlist in `config/cicd/enforce_freeze_guards/`. — CLAUDE.md:Frozen Dataclass Immutability
+- KNOW-C66. Filigree is the issue tracker for the project; data lives in `.filigree/`; MCP tools `mcp__filigree__*` preferred over CLI. — CLAUDE.md:Filigree Issue Tracker
+
+## AGENTS.md
+
+- KNOW-G1. AGENTS.md repeats the neurodiverse human-operator communication policy: relitigate unanswered questions. — AGENTS.md:Human Operator Communication
+- KNOW-G2. AGENTS.md treats every session as a "new employee" starting with zero context. — AGENTS.md:You Are a New Employee
+- KNOW-G3. Comments labelled "CLOSED LIST", "Composer heuristic depends on this", or "do not extend" are load-bearing instructions to the next session. — AGENTS.md:You Are a New Employee
+- KNOW-G4. The staging web UI `https://elspeth.foundryside.dev` is a source-checkout systemd/Caddy deployment, NOT the generic Docker/VM image flow in `scripts/deploy-vm.sh`. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G5. Staging checkout is `/home/john/elspeth`; systemd unit source is `deploy/elspeth-web.service`; environment file `deploy/elspeth-web.env`; Caddy config `deploy/Caddyfile`. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G6. Reverse proxy is `elspeth.foundryside.dev` → `unix//run/elspeth/uvicorn.sock`; entrypoint is `.venv/bin/uvicorn elspeth.web.app:create_app --factory --uds /run/elspeth/uvicorn.sock`. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G7. FastAPI serves the SPA from `src/elspeth/web/frontend/dist/` after all API and WebSocket routes. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G8. `deploy/elspeth-web.env` is live operational config and may be untracked/ignored; do not trust `git status` to show edits. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G9. `ELSPETH_WEB__COMPOSER_EXPOSE_PROVIDER_ERRORS=true` is an opt-in staging/debug switch surfacing scrubbed LiteLLM provider detail in composer 502 responses. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G10. Frontend-only staging deploys: run `npm run test` + `npm run build` from `src/elspeth/web/frontend`; static-only changes normally do not require service restart. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G11. Backend Python changes, dependency changes, and changes to `deploy/elspeth-web.env` or systemd/Caddy require restarting `elspeth-web.service`. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G12. Sandbox caveat: agents must not claim live restart/verification if systemd or sudo is blocked; report the blocker and local artifact verification instead. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G13. There is an installed sudoers drop-in at `/etc/sudoers.d/elspeth-web-deploy` on the staging host. — AGENTS.md:Staging Site And Web Restart
+- KNOW-G14. Safe restart delegation policy: never put a repo-writable script directly into sudoers; prefer a small root-owned wrapper outside the repo (e.g. `/usr/local/sbin/restart-elspeth-web`). — AGENTS.md:Staging Site And Web Restart
+- KNOW-G15. Mandatory coding-standard skills must be loaded before code work: engine-patterns-reference, tier-model-deep-dive, logging-telemetry-policy, config-contracts-guide. — AGENTS.md:Mandatory Coding Standards
+- KNOW-G16. Skills must be loaded before brainstorming, planning, implementing, debugging, reviewing, or writing tests. — AGENTS.md:When to Load
+- KNOW-G17. Filigree hierarchy: milestones → phases → epics → features → tasks → bugs; releases (RC 3.4, RC 4) exist alongside the hierarchy. — AGENTS.md:How We Use Filigree
+- KNOW-G18. Issue retyping is encouraged via create-and-close pattern (Filigree's `update_issue` does not support changing types directly). — AGENTS.md:How We Use Filigree
+- KNOW-G19. Issue type usage: milestone (delivery theme), phase (workstream), epic (large body of work), feature (user-facing), task (atomic), bug (defective behavior). — AGENTS.md:Issue Type Usage
+- KNOW-G20. If a task has 3+ distinct deliverables or unresolved design decisions, promote to feature/epic and create child tasks. — AGENTS.md:Issue Type Usage
+- KNOW-G21. Design evaluations are tasks, not bugs ("Evaluate whether X should be eliminated" is a task). — AGENTS.md:Issue Type Usage
+- KNOW-G22. Issue title rules: no internal tracking prefixes, no stale metrics in titles, no process artifacts, no product prefixes, bugs describe problem not fix, em-dash separator, sentence case, no trailing period. — AGENTS.md:Issue Naming Conventions
+
+## PLUGIN.md
+
+- KNOW-P1. Plugin authoring requires Python 3.12+, Pydantic v2, and reading CLAUDE.md for the Three-Tier Trust Model. — PLUGIN.md:Prerequisites
+- KNOW-P2. Plugin types follow Sense/Decide/Act: SOURCE → TRANSFORM → SINK. — PLUGIN.md:Plugin Types Overview
+- KNOW-P3. Source has base class `BaseSource`, key method `load()`, context `SourceContext`. — PLUGIN.md:Plugin Types Overview
+- KNOW-P4. Transform has base class `BaseTransform`, key method `process()`, context `TransformContext`. — PLUGIN.md:Plugin Types Overview
+- KNOW-P5. Sink has base class `BaseSink`, key method `write()`, context `SinkContext`. — PLUGIN.md:Plugin Types Overview
+- KNOW-P6. Coercion is allowed in Source (external boundary) and forbidden in Transform/Sink (wrong types = upstream bug → crash). — PLUGIN.md:The Trust Model
+- KNOW-P7. Transforms inherit `TransformDataConfig` (not `PluginConfig`) for required `schema_config`. — PLUGIN.md:Creating a Transform Plugin
+- KNOW-P8. Transform-required attributes: `name` (class), `input_schema`, `output_schema`, `on_error`, `on_success`, `determinism`, `plugin_version`. — PLUGIN.md:Required Attributes
+- KNOW-P9. Determinism levels: DETERMINISTIC, EXTERNAL_CALL, IO_READ, IO_WRITE. — PLUGIN.md:Required Attributes
+- KNOW-P10. `TransformResult.success(row, success_reason={...})` requires the `success_reason` argument. — PLUGIN.md:TransformResult Options
+- KNOW-P11. `TransformResult.error({...})` routes failed rows to the `on_error` sink. — PLUGIN.md:TransformResult Options
+- KNOW-P12. `TransformResult.success_multi([...])` requires `creates_tokens=True`. — PLUGIN.md:TransformResult Options
+- KNOW-P13. Batch-aware transforms set `is_batch_aware = True`; receive `list[PipelineRow]` instead of `PipelineRow`. — PLUGIN.md:Advanced: Batch-Aware Transforms
+- KNOW-P14. Aggregation YAML uses `aggregations:` block with `trigger.count` and `output_mode: single`. — PLUGIN.md:Advanced: Batch-Aware Transforms
+- KNOW-P15. Deaggregation transforms set `creates_tokens = True`; engine creates new tokens for each output. — PLUGIN.md:Advanced: Deaggregation Transforms
+- KNOW-P16. `creates_tokens=False` + `success_multi()` raises RuntimeError. — PLUGIN.md:Advanced: Deaggregation Transforms
+- KNOW-P17. Sources MUST set `allow_coercion=True` on schema; Transforms/Sinks MUST set `allow_coercion=False`. — PLUGIN.md:Creating a Source Plugin
+- KNOW-P18. `SourceRow.valid({...})` proceeds to processing; `SourceRow.quarantined(...)` routes to `on_validation_failure` sink. — PLUGIN.md:SourceRow Options
+- KNOW-P19. Sinks must return `ArtifactDescriptor` containing `content_hash` (SHA-256 hex) and `size_bytes` for audit. — PLUGIN.md:Creating a Sink Plugin
+- KNOW-P20. Sinks have lifecycle hooks `on_start(ctx)` (LifecycleContext) called before `write()`. — PLUGIN.md:Creating a Sink Plugin
+- KNOW-P21. Sinks set `idempotent` class attribute (e.g. `False` for append). — PLUGIN.md:Creating a Sink Plugin
+- KNOW-P22. Plugin registration requires TWO places: pluggy hookimpl in `plugins/infrastructure/hookspecs.py` AND CLI registry `TRANSFORM_PLUGINS` dict in `cli.py`. — PLUGIN.md:Plugin Registration
+- KNOW-P23. Schema modes: `dynamic` (accept any), `strict` (only declared), `free` (declared required + extras allowed). — PLUGIN.md:Schema Modes
+- KNOW-P24. PLUGIN.md schema YAML examples additionally describe modes `observed` (accept anything) and `fixed` (only declared fields), plus `free`. — PLUGIN.md:YAML Examples
+- KNOW-P25. Supported schema field types: str, int, float, bool, any. — PLUGIN.md:Supported Types
+- KNOW-P26. Every plugin must pass protocol contract tests via `SourceContractPropertyTestBase` (14 tests), `TransformContractPropertyTestBase` (15 tests), or `SinkDeterminismContractTestBase` (17 tests). — PLUGIN.md:Test Base Classes
+- KNOW-P27. Source contract tests verify `name`, `output_schema`, `load()` returns iterator yielding only `SourceRow`, `close()` is idempotent. — PLUGIN.md:Source Contracts
+- KNOW-P28. Transform contract tests verify `name`, `input_schema`, `output_schema`, `process()` returns `TransformResult`, `close()` idempotent. — PLUGIN.md:Transform Contracts
+- KNOW-P29. Sink contract tests verify `name`, `input_schema`, `write()` returns `ArtifactDescriptor`, `content_hash` is SHA-256 hex, same data → same hash. — PLUGIN.md:Sink Contracts
+- KNOW-P30. Common error: "Plugin not found" → must register in both pluggy hookimpl and `cli.py`. — PLUGIN.md:Troubleshooting
+- KNOW-P31. Common error: "schema_config is required" → must extend `TransformDataConfig`, not `PluginConfig`. — PLUGIN.md:Troubleshooting
+- KNOW-P32. Common error: "has no attribute 'name'" → make `name` a class attribute, not instance attribute. — PLUGIN.md:Troubleshooting
+- KNOW-P33. Plugin checklist requires class-level `name`, schema attributes, `on_error`/`on_success` set in `__init__`, correct config base class, correct `allow_coercion`, registered in pluggy + cli, contract tests passing, idempotent `close()`. — PLUGIN.md:Checklist for New Plugins
+
+## ADRs (docs/architecture/adr/)
+
+- KNOW-ADR-000. ADR template located at `000-template.md`; project uses a modified Michael Nygard template. — ADR README
+- KNOW-ADR-001. Plugin-level concurrency [Status: Accepted, 2026-01-22] — Concurrency lives at the plugin boundary, not the orchestrator level; orchestrator processes rows sequentially through DAG, plugins MAY internally parallelize. — ADR-001
+- KNOW-ADR-001a. ADR-001 rejects orchestrator-level row parallelism, async/await throughout, and actor-model alternatives because they would non-determinise audit ordering or oversubscribe threads. — ADR-001
+- KNOW-ADR-001b. ADR-001 marks PRD-005 as DIVERGED in `docs/architecture/requirements.md`; `ConcurrencySettings.max_workers` exists for plugin use, not orchestrator-level parallelism. — ADR-001
+- KNOW-ADR-002. Routing copy-mode limitation [Status: Accepted, 2026-01-24] — COPY mode is only valid for FORK_TO_PATHS; ROUTE kind must use MOVE mode (validated at RoutingAction `__post_init__`). — ADR-002
+- KNOW-ADR-002a. ADR-002 preserves single-terminal-state-per-token invariant; FORK_TO_PATHS achieves "copy and continue" semantics by creating child tokens with their own terminal states. — ADR-002
+- KNOW-ADR-003. Schema validation lifecycle [Status: Accepted, 2026-01-24] — Restructure CLI to instantiate plugins BEFORE graph construction; build graph via `ExecutionGraph.from_plugin_instances()`; extract schemas from instance attributes. — ADR-003
+- KNOW-ADR-003a. ADR-003 deletes `from_config()` immediately per CLAUDE.md no-legacy policy; resume command requires NullSource override. — ADR-003
+- KNOW-ADR-003b. ADR-003 establishes that aggregations have separate `input_schema` (incoming rows) and `output_schema` (batch results). — ADR-003
+- KNOW-ADR-003c. ADR-003 requires every fork branch to have an explicit destination (coalesce `branches` list or matching sink name); no fallback. — ADR-003
+- KNOW-ADR-003d. ADR-003 specifies dynamic schemas skip validation; specific→dynamic→specific edges are valid; specific→specific incompatibilities crash. — ADR-003
+- KNOW-ADR-004. Explicit sink routing [Status: Approved with conditions, 2026-02-09] — Add `on_success` to TransformProtocol/SourceProtocol; remove `default_sink` from ElspethSettings; every terminal node must declare explicit sink. — ADR-004
+- KNOW-ADR-004a. ADR-004 separates `branch_name` (lineage metadata) from `on_success` (routing authority); fallback chains `result.token.branch_name or default_sink_name` are deleted. — ADR-004
+- KNOW-ADR-004b. ADR-004 invariant: `RowOutcome.COMPLETED` implies `RowResult.sink_name is not None` (enforced by property test). — ADR-004
+- KNOW-ADR-004c. ADR-004 adopted atomic change (no phased rollout) per No Legacy Code Policy; mid-chain `on_success` deferred to a future ADR. — ADR-004
+- KNOW-ADR-004d. ADR-004 quantified blast radius: ~472 references across 50 test files + 30 example YAMLs; ~70% mechanical, 30% manual. — ADR-004
+- KNOW-ADR-005. Declarative DAG wiring [Status: Approved, 2026-02-09; depends on ADR-004 + processor refactor] — Add `name`, `input` (named input connection), and lift `on_success` to settings level; YAML IS the graph. — ADR-005
+- KNOW-ADR-005a. ADR-005 enforces separate connection-name and sink-name namespaces; collision is a `GraphValidationError`. — ADR-005
+- KNOW-ADR-005b. ADR-005 forbids multiple `input:` on transforms (single input only; multi-input reserved for coalesce); two transforms sharing same `input:` is an ambiguous-fan-out validation error. — ADR-005
+- KNOW-ADR-005c. ADR-005 changes node ID derivation from `{prefix}_{plugin_name}_{config_hash}_{sequence}` to `{prefix}_{settings_name}_{config_hash}` — position-independent, human-readable. — ADR-005
+- KNOW-ADR-005d. ADR-005 blast radius ~900+ refs (larger than ADR-004); design decisions 3a3f-A (lift on_success), 0wfr (settings.name drives node IDs), 8q0m-A (aggregations stay post-transform). — ADR-005
+- KNOW-ADR-006. Layer dependency remediation [Status: Accepted, 2026-02-22] — Maintain strict 4-layer model (contracts → core → engine → plugins); relocate misplaced code rather than relax model. — ADR-006
+- KNOW-ADR-006a. ADR-006 documented 10 runtime layer violations dating to RC2 initial commit `f4f348de` (2026-02-02); systems analysis identified "Shifting the Burden" archetype. — ADR-006
+- KNOW-ADR-006b. ADR-006 Phase 1 moves ExpressionParser to `core/`; Phase 2 extracts `contracts/hashing.py`; Phase 3 moves fingerprint + DSN handling; Phase 4 adds RuntimeServiceRateLimit; Phase 5 enforces via CI gate. — ADR-006
+- KNOW-ADR-006c. ADR-006 explicitly rejects: foundation-tier model, Protocol/dependency-injection for hashing, new "primitives" layer below contracts, deferral. — ADR-006
+- KNOW-ADR-006d. ADR-006 documents the "Violation #11 Protocol": move down → extract primitive → restructure caller → never lazy-import. — ADR-006
+- KNOW-ADR-007. Pass-through contract propagation [Status: Accepted, 2026-04-19; AMENDED by ADR-009 and ADR-010] — Add `passes_through_input: bool = False` class attribute to BaseTransform/TransformProtocol/BatchTransformProtocol. — ADR-007
+- KNOW-ADR-007a. ADR-007 makes annotation unconditional: setting True is a contract that `process()` preserves every input field on every row regardless of content/state. — ADR-007
+- KNOW-ADR-007b. ADR-007 Decision 2: when pass-through transform has multiple predecessors, effective guarantees = intersection of participating predecessors' guarantees, unioned with own declared output fields. — ADR-007
+- KNOW-ADR-007c. ADR-007 Decision 3: composer preview must mirror runtime rejection for known pass-through plugins (fail-closed on probe failure). — ADR-007
+- KNOW-ADR-007d. ADR-007 amendment banner clarifies that new declarations should NOT copy ADR-007's bespoke walker/executor/harness pattern; they register under ADR-010 framework. — ADR-007
+- KNOW-ADR-008. Runtime contract cross-check [Status: Accepted, 2026-04-19; AMENDED by ADR-009 and ADR-010] — Add per-row runtime cross-check to `TransformExecutor.execute_transform` after `transform.process()` returns. — ADR-008
+- KNOW-ADR-008a. ADR-008 cross-check intersects emitted row's contract-set with payload-set: `runtime_observed = frozenset(emitted_row.contract.fields) & frozenset(emitted_row.keys())`. — ADR-008
+- KNOW-ADR-008b. ADR-008 NFR budget: median ≤ 25 µs / P99 ≤ 50 µs on a 200-field row. — ADR-008
+- KNOW-ADR-008c. `PassThroughContractViolation` is registered in `TIER_1_ERRORS` so `on_error` routing cannot silently absorb audit-integrity violations. — ADR-008
+- KNOW-ADR-008d. ADR-008 explicitly defers cross-checks for `creates_tokens`, `declared_output_fields`, `declared_required_fields`, schema-config modes — each requires its own ADR. — ADR-008
+- KNOW-ADR-009. Pass-through pathway fusion [Status: Accepted, 2026-04-19; SUPERSEDES ADR-007 §Decision 1, §Negative #2, §Neutral L83 and ADR-008 §Decision scope] — Closes duplicated walkers and single-path runtime cross-check. — ADR-009
+- KNOW-ADR-009a. ADR-009 Clause 1 introduces shared primitives `SchemaConfig.participates_in_propagation` (predicate) and `compose_propagation()` (aggregation rule). — ADR-009
+- KNOW-ADR-009b. ADR-009 Clause 2 places `verify_pass_through` in `engine/executors/pass_through.py` shared by `TransformExecutor._cross_check_pass_through` and `RowProcessor._cross_check_flush_output`. — ADR-009
+- KNOW-ADR-009c. ADR-009 batch-mode semantics: `OutputMode.TRANSFORM` uses batch-homogeneous intersection; `OutputMode.PASSTHROUGH` uses 1:1 pairing. — ADR-009
+- KNOW-ADR-009d. ADR-009 Clause 3 carve-out: `passes_through_input=True` is compatible with emitting zero rows (empty emission no-op); Track 2 will introduce `can_drop_rows` declaration with hard 90-day SLA after Track 1 merge. — ADR-009
+- KNOW-ADR-009e. ADR-009 Clause 4 governance: `tests/invariants/` houses forward and backward invariant tests; backward invariant fails CI when non-annotated transform with `probe_config()` preserves all fields across 15 probes. — ADR-009
+- KNOW-ADR-010. Declaration-trust framework [Status: Accepted, 2026-04-19; amended 2026-04-20 with H2 cluster] — Generalised contract protocol for plugin declarations; introduces `AuditEvidenceBase` ABC, `@tier_1_error` decorator + frozen registry, `DeclarationContract` protocol + frozen registry. — ADR-010
+- KNOW-ADR-010a. ADR-010 replaces structural `to_audit_dict` discriminator with nominal `AuditEvidenceBase` ABC (Critical Spoofing finding from security review). — ADR-010
+- KNOW-ADR-010b. `@tier_1_error(reason=...)` factory decorator: requires `reason` kwarg, restricts callers to `elspeth.contracts.*`, `elspeth.engine.*`, `elspeth.core.*`, freezes registry at orchestrator bootstrap. — ADR-010
+- KNOW-ADR-010c. `DeclarationContract` protocol carries `name`, `applies_to(plugin)`, `runtime_check(inputs, outputs)`, `payload_schema: type[TypedDict]`, `negative_example()`. — ADR-010
+- KNOW-ADR-010d. `static_check` is NOT in 2A protocol — walker refactor deferred entirely to Phase 2B. — ADR-010
+- KNOW-ADR-010e. H2 amendment (2026-04-20): 2A single-site Protocol replaced by nominal 4-site ABC; dispatcher adopts audit-complete semantics (collect-then-raise); manifest becomes per-site `EXPECTED_CONTRACT_SITES`. — ADR-010
+- KNOW-ADR-010f. Audit-complete dispatch raises `AggregateDeclarationContractViolation` (sibling to `DeclarationContractViolation`, NOT a subclass) when M > 1; M = 1 raises original violation via reference equality. — ADR-010
+- KNOW-ADR-010g. ADR-010 H1 NFR derivation: `budget_median(N, M) = 27 µs + (M − 1) × 25 µs + (N − M) × 1.5 µs`; `budget_p99 = 2 × budget_median`; ceiling N=16, M=5. — ADR-010
+- KNOW-ADR-010h. H5 payload-schema enforcement: every `DeclarationContractViolation` payload validated against subclass's `payload_schema` at construction (deny-by-default before deep-freeze). — ADR-010
+- KNOW-ADR-010i. ADR-010 dispatch sites: `pre_emission_check`, `post_emission_check`, `batch_flush_check`, `boundary_check`. — ADR-010
+- KNOW-ADR-010j. Per-surface rule-of-three (as of 2026-04-20): post_emission_check 4/3 (closed), batch_flush_check 4/3 (closed), pre_emission_check 1/3, boundary_check 2/3 (paired-landing rule for boundary subtype). — ADR-010
+- KNOW-ADR-010k. Hard SLA 2026-07-18 for Track 2 epic `elspeth-a3ac5d88c6`; 2026-10-19 review-date checkpoint for re-evaluating framework. — ADR-010
+- KNOW-ADR-010l. ADR-010 Amendment A2 (reversibility): framework is additive at 2A but materially weaker as adopters land; practical reversal window closes before first 2B adopter. — ADR-010
+- KNOW-ADR-011. Declared output fields contract [Status: Accepted, 2026-04-20; depends on ADR-010] — `DeclaredOutputFieldsContract` adopter on `post_emission_check` and `batch_flush_check`; per-emitted-row guarantee. — ADR-011
+- KNOW-ADR-011a. ADR-011 violation `DeclaredOutputFieldsViolation` is Tier 1; payload schema fields `declared`, `runtime_observed`, `missing` (sorted lists). — ADR-011
+- KNOW-ADR-011b. ADR-011 advances both post_emission_check and batch_flush_check from 1/3 to 2/3 toward rule-of-three closure. — ADR-011
+- KNOW-ADR-012. `can_drop_rows` governance contract [Status: Accepted, 2026-04-20; depends on ADR-010] — Adds `can_drop_rows: bool = False` to BaseTransform/TransformProtocol; `CanDropRowsContract` registers on post_emission_check and batch_flush_check. — ADR-012
+- KNOW-ADR-012a. ADR-012 retires ADR-009 Clause 3 carve-out mechanically — `verify_pass_through` no longer treats empty emission as unconditional no-op. — ADR-012
+- KNOW-ADR-012b. New terminal state `RowOutcome.DROPPED_BY_FILTER` records legitimate zero-emission success; queryable in Landscape, distinct from FAILED. — ADR-012
+- KNOW-ADR-012c. ADR-012 violation `UnexpectedEmptyEmissionViolation` is Tier 2 (declaration bug, not framework-state corruption). — ADR-012
+- KNOW-ADR-013. Declared required input fields contract [Status: Accepted, 2026-04-20; depends on ADR-010] — `DeclaredRequiredFieldsContract` adopter on `pre_emission_check` only; first adopter on that surface. — ADR-013
+- KNOW-ADR-013a. ADR-013 introduces new runtime attribute `declared_input_fields` on BaseTransform/TransformProtocol (intentionally NOT named `declared_required_fields` to avoid sink-name clash). — ADR-013
+- KNOW-ADR-013b. ADR-013 deliberately does not cover batch-aware transforms; batch-aware transforms with `declared_input_fields` fail closed at construction. — ADR-013
+- KNOW-ADR-013c. ADR-013 violation `DeclaredRequiredInputFieldsViolation` is Tier 1 (runtime input not satisfying declared preconditions = audit-integrity problem). — ADR-013
+- KNOW-ADR-014. Schema config mode contract [Status: Accepted, 2026-04-20; depends on ADR-010] — `SchemaConfigModeContract` adopter on post_emission_check and batch_flush_check; applies when `plugin._output_schema_config is not None`. — ADR-014
+- KNOW-ADR-014a. ADR-014 verifies declared mode (fixed/flexible/observed) matches emitted contract.mode AND emitted.contract.locked == True; for `fixed`, no undeclared extras (computed via union of contract fields and payload keys). — ADR-014
+- KNOW-ADR-014b. ADR-014 violation `SchemaConfigModeViolation` is Tier 1; payload includes `declared_mode`, `observed_mode`, `declared_locked`, `observed_locked`, optional `undeclared_extra_fields`. — ADR-014
+- KNOW-ADR-015. `creates_tokens` remains a permission flag, not a production declaration contract [Status: Accepted, 2026-04-20; depends on ADR-010] — Path 1 chosen: `creates_tokens=True` means multi-row expansion permitted, not required. — ADR-015
+- KNOW-ADR-015a. ADR-015 retires the proof-only `CreatesTokensContract` from `tests/invariants/test_framework_accepts_second_contract.py`; framework shape-diversity proof re-pointed at `DeclaredOutputFieldsContract`. — ADR-015
+- KNOW-ADR-015b. ADR-015 explicitly rejects production `CreatesTokensContract`: dispatcher cannot distinguish "single-row is correct, expansion was permitted" from "single-row is incorrect, expansion was required." — ADR-015
+- KNOW-ADR-016. Source guaranteed fields contract [Status: Accepted, 2026-04-20; depends on ADR-010] — `SourceGuaranteedFieldsContract` adopter on `boundary_check`; runtime observation = `row_contract.fields ∩ row_data.keys()`. — ADR-016
+- KNOW-ADR-016a. ADR-016 runs after token creation in `RowProcessor.process_row()`, never on `process_existing_row()` (resume must not re-cross source boundary). — ADR-016
+- KNOW-ADR-016b. ADR-016 records terminal FAILED token outcome plus FAILED source node state before re-raising Tier 1 exception; sources must expose `declared_guaranteed_fields` runtime attribute. — ADR-016
+- KNOW-ADR-017. Sink required fields contract [Status: Accepted, 2026-04-20; depends on ADR-010] — `SinkRequiredFieldsContract` adopter on `boundary_check`; runtime observation = `row_data.keys()`. — ADR-017
+- KNOW-ADR-017a. ADR-017 establishes a two-layer architecture: Layer 1 `SinkRequiredFieldsViolation` (dispatcher-owned pre-write contract) and Layer 2 `SinkTransactionalInvariantError` (inline transactional backstop for divergence between Layer 1 and commit). — ADR-017
+- KNOW-ADR-017b. ADR-017 runs before `_validate_sink_input()` and before sink I/O on both primary and failsink paths; the two signals must not be merged. — ADR-017
+
+## Cross-cutting summary
+
+The institutional documentation set explicitly claims a strict 4-layer subsystem boundary (L0 contracts → L1 core → L2 engine → L3 plugins/cli/tui/mcp/telemetry/testing/web), with `contracts/` declared as a leaf module with zero outbound dependencies (KNOW-A53, KNOW-C47). ADR-006 makes this layering historically emergent rather than designed and documents 10 violations being remediated. Architectural invariants enforced by CI include: tier-model enforcement (`scripts/cicd/enforce_tier_model.py`, KNOW-C32/KNOW-C48), freeze-guard enforcement (`scripts/cicd/enforce_freeze_guards.py`, KNOW-C65), config-contracts (`scripts/check_contracts`, KNOW-C33), audit-evidence nominal-base scanner (`enforce_audit_evidence_nominal.py`, KNOW-ADR-010a), and contract-manifest scanner (`enforce_contract_manifest.py`, KNOW-ADR-010e). Single-terminal-state-per-token is an audit invariant load-bearing throughout (KNOW-A44, KNOW-ADR-002a, KNOW-ADR-009b). Tensions surfaced: (1) ARCHITECTURE.md's plugin count of "46" in summary diverges from the "25 plugins" claim earlier in the same document and from the per-category enumeration (KNOW-A35 vs KNOW-A72); (2) ARCHITECTURE.md's table of ADRs lists only ADR-001 through ADR-006 while ADRs 007–017 are accepted — the architecture overview is stale relative to the ADR set; (3) PLUGIN.md describes schema modes as `dynamic`/`strict`/`free` in one table but uses `observed`/`fixed`/`free` in the YAML examples (KNOW-P23 vs KNOW-P24). No ADRs are marked Superseded or Deprecated, but ADRs 007 and 008 are heavily AMENDED by ADR-009 and ADR-010, and ADR-009 Clause 3 has been mechanically retired by ADR-012 (KNOW-ADR-012a). ADR-015 retires a proof-only contract but does not supersede a prior ADR.

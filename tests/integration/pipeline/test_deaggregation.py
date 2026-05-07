@@ -269,19 +269,19 @@ class TestDeaggregationAuditTrail:
 
     def test_records_token_expansion(self, run_pipeline: tuple[str, LandscapeDB]) -> None:
         """9 tokens created: 3 source tokens + 6 expanded tokens."""
-        from tests.fixtures.landscape import make_recorder
+        from tests.fixtures.landscape import make_factory
 
         run_id, db = run_pipeline
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Get all rows for this run
-        rows = recorder.get_rows(run_id)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 3, f"Expected 3 source rows, got {len(rows)}"
 
         # Count all tokens across all rows
         all_tokens = []
         for row in rows:
-            tokens = recorder.get_tokens(row.row_id)
+            tokens = factory.query.get_tokens(row.row_id)
             all_tokens.extend(tokens)
 
         # 3 source tokens + 6 expanded tokens = 9 total
@@ -289,20 +289,20 @@ class TestDeaggregationAuditTrail:
 
     def test_records_parent_relationships(self, run_pipeline: tuple[str, LandscapeDB]) -> None:
         """6 parent relationships in token_parents (one per expanded token)."""
-        from tests.fixtures.landscape import make_recorder
+        from tests.fixtures.landscape import make_factory
 
         run_id, db = run_pipeline
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Get all rows and their tokens
-        rows = recorder.get_rows(run_id)
+        rows = factory.query.get_rows(run_id)
 
         # Count parent relationships
         parent_count = 0
         for row in rows:
-            tokens = recorder.get_tokens(row.row_id)
+            tokens = factory.query.get_tokens(row.row_id)
             for token in tokens:
-                parents = recorder.get_token_parents(token.token_id)
+                parents = factory.query.get_token_parents(token.token_id)
                 parent_count += len(parents)
 
         # 6 expanded tokens each have 1 parent = 6 relationships
@@ -310,18 +310,18 @@ class TestDeaggregationAuditTrail:
 
     def test_expand_group_id_set(self, run_pipeline: tuple[str, LandscapeDB]) -> None:
         """6 tokens have expand_group_id set (the expanded tokens)."""
-        from tests.fixtures.landscape import make_recorder
+        from tests.fixtures.landscape import make_factory
 
         run_id, db = run_pipeline
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Get all rows and their tokens
-        rows = recorder.get_rows(run_id)
+        rows = factory.query.get_rows(run_id)
 
         # Count tokens with expand_group_id
         tokens_with_expand_group = 0
         for row in rows:
-            tokens = recorder.get_tokens(row.row_id)
+            tokens = factory.query.get_tokens(row.row_id)
             for token in tokens:
                 if token.expand_group_id is not None:
                     tokens_with_expand_group += 1

@@ -21,6 +21,8 @@ from elspeth.engine.orchestrator.types import (
     AggregationFlushResult,
     ExecutionCounters,
     PipelineConfig,
+    ValueSourceFinding,
+    ValueSourceValidationError,
 )
 
 
@@ -32,7 +34,8 @@ class TestAggregationFlushResult:
         result = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -44,7 +47,8 @@ class TestAggregationFlushResult:
         # Each field must be accessible and have the correct value
         assert result.rows_succeeded == 1
         assert result.rows_failed == 2
-        assert result.rows_routed == 3
+        assert result.rows_routed_success == 3
+        assert result.rows_routed_failure == 0
         assert result.rows_quarantined == 4
         assert result.rows_coalesced == 5
         assert result.rows_forked == 6
@@ -65,7 +69,8 @@ class TestAggregationFlushResult:
 
         assert result.rows_succeeded == 0
         assert result.rows_failed == 0
-        assert result.rows_routed == 0
+        assert result.rows_routed_success == 0
+        assert result.rows_routed_failure == 0
         assert result.rows_quarantined == 0
         assert result.rows_coalesced == 0
         assert result.rows_forked == 0
@@ -78,7 +83,8 @@ class TestAggregationFlushResult:
         result_a = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -89,7 +95,8 @@ class TestAggregationFlushResult:
         result_b = AggregationFlushResult(
             rows_succeeded=10,
             rows_failed=20,
-            rows_routed=30,
+            rows_routed_success=30,
+            rows_routed_failure=0,
             rows_quarantined=40,
             rows_coalesced=50,
             rows_forked=60,
@@ -102,7 +109,8 @@ class TestAggregationFlushResult:
 
         assert combined.rows_succeeded == 11
         assert combined.rows_failed == 22
-        assert combined.rows_routed == 33
+        assert combined.rows_routed_success == 33
+        assert combined.rows_routed_failure == 0
         assert combined.rows_quarantined == 44
         assert combined.rows_coalesced == 55
         assert combined.rows_forked == 66
@@ -115,7 +123,8 @@ class TestAggregationFlushResult:
         result_a = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -126,7 +135,8 @@ class TestAggregationFlushResult:
         result_b = AggregationFlushResult(
             rows_succeeded=10,
             rows_failed=20,
-            rows_routed=30,
+            rows_routed_success=30,
+            rows_routed_failure=0,
             rows_quarantined=40,
             rows_coalesced=50,
             rows_forked=60,
@@ -142,7 +152,8 @@ class TestAggregationFlushResult:
         result = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -155,6 +166,19 @@ class TestAggregationFlushResult:
         # Adding zero should return equivalent result
         assert result + zero == result
         assert zero + result == result
+
+    def test_to_dict_returns_plain_dict(self) -> None:
+        result = AggregationFlushResult(rows_succeeded=5, rows_routed_success=2, rows_routed_failure=0, routed_destinations={"sink_a": 2})
+        d = result.to_dict()
+        assert isinstance(d, dict)
+        assert isinstance(d["routed_destinations"], dict)
+        assert d["routed_destinations"] == {"sink_a": 2}
+
+    def test_to_dict_is_json_serializable(self) -> None:
+        import json
+
+        result = AggregationFlushResult(routed_destinations={"sink_a": 3})
+        json.dumps(result.to_dict())  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -262,14 +286,21 @@ class TestExecutionCountersToRunResultRequired:
     """Test that to_run_result requires status parameter (T18 safety fix)."""
 
     def test_status_is_required_parameter(self) -> None:
-        """After T18, status has no default — callers must be explicit."""
+        """After T18, status has no default — callers must be explicit.
+
+        Phase 2.2 (elspeth-0de989c56d): the biconditional invariant on
+        :class:`RunResult` rejects ``status=COMPLETED`` with zero counters
+        (``EMPTY`` is the right shape for an ingested-zero-rows run).
+        Use ``RUNNING`` / ``INTERRUPTED`` — the only statuses that bypass
+        the row-count predicate — for the explicit-status smoke test.
+        """
         counters = ExecutionCounters()
         # Must pass status explicitly
-        result = counters.to_run_result("run-1", status=RunStatus.COMPLETED)
-        assert result.status == RunStatus.COMPLETED
+        result = counters.to_run_result("run-1", status=RunStatus.RUNNING)
+        assert result.status == RunStatus.RUNNING
 
-        result2 = counters.to_run_result("run-1", status=RunStatus.RUNNING)
-        assert result2.status == RunStatus.RUNNING
+        result2 = counters.to_run_result("run-1", status=RunStatus.INTERRUPTED)
+        assert result2.status == RunStatus.INTERRUPTED
 
 
 class TestPipelineConfig:
@@ -309,7 +340,7 @@ class TestPipelineConfig:
     def test_tuple_fields_reject_append(self) -> None:
         config = self._make_config()
         with pytest.raises(AttributeError):
-            config.transforms.append(Mock())  # type: ignore[union-attr]
+            config.transforms.append(Mock())  # type: ignore[attr-defined]
 
     def test_mapping_proxy_fields_reject_assignment(self) -> None:
         config = self._make_config()
@@ -343,3 +374,81 @@ class TestPipelineConfig:
         assert isinstance(config.sinks, MappingProxyType)
         assert config.transforms == frozen_transforms
         assert config.sinks == frozen_sinks
+
+
+class TestValueSourceFinding:
+    """Pin the structured-finding contract.
+
+    The walker (``preflight.validate_value_source_compliance``) emits
+    these; the composer ``/validate`` consumer reads
+    ``component_id``/``field_name``/``reason`` directly. Replacing the
+    pre-existing string round-trip eliminated a silent
+    ``ValidationError(component_id=None)`` failure mode whenever the
+    finding format string drifted.
+    """
+
+    def test_construct_with_all_fields(self) -> None:
+        finding = ValueSourceFinding(
+            component_id="openrouter_node_1",
+            field_name="model",
+            reason="value 'foo/bar' is not in catalog 'openrouter'",
+        )
+        assert finding.component_id == "openrouter_node_1"
+        assert finding.field_name == "model"
+        assert finding.reason.startswith("value")
+
+    def test_format_round_trips_through_human_readable_string(self) -> None:
+        finding = ValueSourceFinding(
+            component_id="azure_node_1",
+            field_name="model",
+            reason="value 'a' must equal sibling 'deployment_name' (currently 'b')",
+        )
+        rendered = finding.format()
+        # The format is the operator-facing surface — pin its shape so
+        # log lines and ValidationCheck.detail strings stay stable.
+        assert rendered == ("component 'azure_node_1' field 'model': value 'a' must equal sibling 'deployment_name' (currently 'b')")
+
+    def test_frozen(self) -> None:
+        finding = ValueSourceFinding(
+            component_id="x",
+            field_name="y",
+            reason="z",
+        )
+        with pytest.raises(FrozenInstanceError):
+            finding.component_id = "other"  # type: ignore[misc]
+
+    @pytest.mark.parametrize(
+        ("component_id", "field_name", "reason", "match"),
+        [
+            ("", "model", "reason", "component_id must be non-empty"),
+            ("c", "", "reason", "field_name must be non-empty"),
+            ("c", "model", "", "reason must be non-empty"),
+        ],
+    )
+    def test_empty_field_rejected(self, component_id: str, field_name: str, reason: str, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            ValueSourceFinding(
+                component_id=component_id,
+                field_name=field_name,
+                reason=reason,
+            )
+
+
+class TestValueSourceValidationError:
+    """Pin the structured exception contract.
+
+    Replaces the previous ``findings: tuple[str, ...]`` shape — consumers
+    now read ``finding.component_id`` directly without parsing.
+    """
+
+    def test_carries_findings_tuple(self) -> None:
+        f1 = ValueSourceFinding(component_id="c1", field_name="m", reason="r1")
+        f2 = ValueSourceFinding(component_id="c2", field_name="m", reason="r2")
+        err = ValueSourceValidationError("two violations", findings=(f1, f2))
+        assert err.findings == (f1, f2)
+        # Message remains accessible via str() for ValidationCheck.detail.
+        assert str(err) == "two violations"
+
+    def test_findings_default_to_empty_tuple(self) -> None:
+        err = ValueSourceValidationError("no findings")
+        assert err.findings == ()

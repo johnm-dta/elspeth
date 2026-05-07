@@ -1,0 +1,568 @@
+
+============================================================
+VIOLATIONS FOUND: 69
+============================================================
+
+commencement.py:94:19
+  Rule: R5 - isinstance
+  Code: if not isinstance(result, bool):
+  Context: evaluate_commencement_gates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: commencement.py:R5:evaluate_commencement_gates:fp=18ca009ccd49b5e0
+
+batch_adapter.py:124:16
+  Rule: R9 - dict.pop-default
+  Code: self._entries.pop(self._key, None)
+  Context: RowWaiter.wait
+  Issue: dict.pop(key, default) hides missing-key bugs with implicit defaults
+  Fix: Access keys directly and fix the schema/contract if KeyError occurs
+  Allowlist key: batch_adapter.py:R9:RowWaiter:wait:fp=281637010027cfeb
+
+batch_adapter.py:136:15
+  Rule: R5 - isinstance
+  Code: if isinstance(entry.result, ExceptionResult):
+  Context: RowWaiter.wait
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: batch_adapter.py:R5:RowWaiter:wait:fp=0f387fe464ef789a
+
+coalesce_executor.py:1039:15
+  Rule: R5 - isinstance
+  Code: if isinstance(merge_exc, AuditIntegrityError):
+  Context: CoalesceExecutor._execute_merge
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=2116f4bed916112f
+
+coalesce_executor.py:1080:16
+  Rule: R4 - broad-except
+  Code: except Exception as cleanup_exc:
+  Context: CoalesceExecutor._execute_merge
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: coalesce_executor.py:R4:CoalesceExecutor:_execute_merge:fp=1bfc473915d635ef
+
+coalesce_executor.py:1138:29
+  Rule: R1 - dict.get
+  Code: winning_branch = field_origins.get(fc.normalized_name)
+  Context: CoalesceExecutor._merge_with_original_names
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: coalesce_executor.py:R1:CoalesceExecutor:_merge_with_original_names:fp=30128c9248e78bd6
+
+coalesce_executor.py:1141:32
+  Rule: R1 - dict.get
+  Code: original_name = branch_original_names.get(
+  Context: CoalesceExecutor._merge_with_original_names
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: coalesce_executor.py:R1:CoalesceExecutor:_merge_with_original_names:fp=8107fa6b3e882ecd
+
+coalesce_executor.py:1147:32
+  Rule: R1 - dict.get
+  Code: original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
+  Context: CoalesceExecutor._merge_with_original_names
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: coalesce_executor.py:R1:CoalesceExecutor:_merge_with_original_names:fp=4fc905549bb6ef1f
+
+dag_navigator.py:219:15
+  Rule: R5 - isinstance
+  Code: if isinstance(plugin, GateSettings):
+  Context: DAGNavigator.resolve_jump_target_sink
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dag_navigator.py:R5:DAGNavigator:resolve_jump_target_sink:fp=6b717dfbcce9a3ae
+
+dag_navigator.py:221:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(plugin, TransformProtocol) and plugin.on_success is not None:
+  Context: DAGNavigator.resolve_jump_target_sink
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dag_navigator.py:R5:DAGNavigator:resolve_jump_target_sink:fp=2bd427f521dee669
+
+dag_navigator.py:277:29
+  Rule: R5 - isinstance
+  Code: is_fork_origin = isinstance(plugin, GateSettings)
+  Context: DAGNavigator.create_continuation_work_item
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dag_navigator.py:R5:DAGNavigator:create_continuation_work_item:fp=76fc98687f62e53d
+
+triggers.py:129:19
+  Rule: R5 - isinstance
+  Code: if not isinstance(result, bool):
+  Context: TriggerEvaluator.record_accept
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: triggers.py:R5:TriggerEvaluator:record_accept:fp=3985f741fe191c64
+
+triggers.py:185:23
+  Rule: R5 - isinstance
+  Code: if not isinstance(result, bool):
+  Context: TriggerEvaluator.should_trigger
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: triggers.py:R5:TriggerEvaluator:should_trigger:fp=4280b12abecfe75a
+
+tokens.py:156:11
+  Rule: R5 - isinstance
+  Code: if isinstance(source_row.row, dict):
+  Context: TokenManager.create_quarantine_token
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: tokens.py:R5:TokenManager:create_quarantine_token:fp=8ec8856b43c9c369
+
+dependency_resolver.py:39:11
+  Rule: R5 - isinstance
+  Code: if not isinstance(loaded, dict):
+  Context: _load_depends_on
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dependency_resolver.py:R5:_load_depends_on:fp=f936e7a8efffb70d
+
+dependency_resolver.py:45:15
+  Rule: R1 - dict.get
+  Code: raw_deps = loaded.get("depends_on", [])
+  Context: _load_depends_on
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: dependency_resolver.py:R1:_load_depends_on:fp=0ecc84f5b6b35d41
+
+dependency_resolver.py:46:11
+  Rule: R5 - isinstance
+  Code: if not isinstance(raw_deps, list):
+  Context: _load_depends_on
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dependency_resolver.py:R5:_load_depends_on:fp=264c3e80726cfebb
+
+dependency_resolver.py:51:15
+  Rule: R5 - isinstance
+  Code: if not isinstance(dep, dict):
+  Context: _load_depends_on
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dependency_resolver.py:R5:_load_depends_on:fp=e35844f983fac115
+
+processor.py:697:12
+  Rule: R4 - broad-except
+  Code: except Exception as telemetry_failure:
+  Context: RowProcessor._handle_flush_error
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: processor.py:R4:RowProcessor:_handle_flush_error:fp=71d8fabe1b48000a
+
+processor.py:894:11
+  Rule: R5 - isinstance
+  Code: if isinstance(violation, PassThroughContractViolation):
+  Context: RowProcessor._record_flush_violation
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_record_flush_violation:fp=3d3f8757ea8f3321
+
+processor.py:927:12
+  Rule: R4 - broad-except
+  Code: except Exception as telemetry_failure:
+  Context: RowProcessor._record_flush_violation
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: processor.py:R4:RowProcessor:_record_flush_violation:fp=fa466d76f5232435
+
+processor.py:983:12
+  Rule: R4 - broad-except
+  Code: except Exception as telemetry_failure:
+  Context: RowProcessor._route_empty_emission_results
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: processor.py:R4:RowProcessor:_route_empty_emission_results:fp=e70811d518b4d79a
+
+processor.py:1533:15
+  Rule: R5 - isinstance
+  Code: if isinstance(e, PluginRetryableError):
+  Context: RowProcessor._execute_transform_with_retry.is_retryable
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_execute_transform_with_retry:is_retryable:fp=c3e856591e41648b
+
+processor.py:1535:19
+  Rule: R5 - isinstance
+  Code: return isinstance(e, ConnectionError | TimeoutError | OSError | CapacityError)
+  Context: RowProcessor._execute_transform_with_retry.is_retryable
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_execute_transform_with_retry:is_retryable:fp=4b9143e2adf228e8
+
+processor.py:1604:51
+  Rule: R5 - isinstance
+  Code: audit_context = failure.to_audit_dict() if isinstance(failure, AuditEvidenceBase) else None
+  Context: RowProcessor._record_source_boundary_failure
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_record_source_boundary_failure:fp=f170d59dc03730ff
+
+processor.py:1607:15
+  Rule: R5 - isinstance
+  Code: if isinstance(
+  Context: RowProcessor._record_source_boundary_failure
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_record_source_boundary_failure:fp=37e7598a5eaee66b
+
+processor.py:1653:8
+  Rule: R4 - broad-except
+  Code: except Exception as telemetry_failure:
+  Context: RowProcessor._record_source_boundary_failure
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: processor.py:R4:RowProcessor:_record_source_boundary_failure:fp=83b8970724893970
+
+processor.py:2072:23
+  Rule: R5 - isinstance
+  Code: if isinstance(result, tuple):
+  Context: RowProcessor._drain_work_queue
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_drain_work_queue:fp=6ba96fc2d06d4422
+
+processor.py:2644:15
+  Rule: R5 - isinstance
+  Code: if isinstance(plugin, TransformProtocol):
+  Context: RowProcessor._process_single_token
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_process_single_token:fp=8e473ee724fdbddf
+
+processor.py:2670:19
+  Rule: R5 - isinstance
+  Code: if isinstance(transform_outcome, _TransformTerminal):
+  Context: RowProcessor._process_single_token
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_process_single_token:fp=cacbedb4b4491fef
+
+processor.py:2674:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(plugin, GateSettings):
+  Context: RowProcessor._process_single_token
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_process_single_token:fp=cd26ce52e12eceb9
+
+processor.py:2686:19
+  Rule: R5 - isinstance
+  Code: if isinstance(gate_outcome, _GateTerminal):
+  Context: RowProcessor._process_single_token
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: processor.py:R5:RowProcessor:_process_single_token:fp=33d5463fbaf26e21
+
+orchestrator/core.py:388:8
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator._emit_phase_error
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_emit_phase_error:fp=39f4c251104737c4
+
+orchestrator/core.py:864:15
+  Rule: R5 - isinstance
+  Code: if isinstance(error, contract_errors.TIER_1_ERRORS):
+  Context: Orchestrator._cleanup_plugins.record_cleanup_error
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: orchestrator/core.py:R5:Orchestrator:_cleanup_plugins:record_cleanup_error:fp=2a97351fcfcff998
+
+orchestrator/core.py:882:12
+  Rule: R4 - broad-except
+  Code: except Exception as e:
+  Context: Orchestrator._cleanup_plugins
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=54ddfac8d3089262
+
+orchestrator/core.py:887:12
+  Rule: R4 - broad-except
+  Code: except Exception as e:
+  Context: Orchestrator._cleanup_plugins
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=0e0678c5e4732409
+
+orchestrator/core.py:892:12
+  Rule: R4 - broad-except
+  Code: except Exception as e:
+  Context: Orchestrator._cleanup_plugins
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=4197c34874445202
+
+orchestrator/core.py:899:12
+  Rule: R4 - broad-except
+  Code: except Exception as e:
+  Context: Orchestrator._cleanup_plugins
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=6b10554d9b7c2fcf
+
+orchestrator/core.py:906:12
+  Rule: R4 - broad-except
+  Code: except Exception as e:
+  Context: Orchestrator._cleanup_plugins
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=7b573bed266fa7cd
+
+orchestrator/core.py:913:12
+  Rule: R4 - broad-except
+  Code: except Exception as e:
+  Context: Orchestrator._cleanup_plugins
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=dfa9afaeaa7cefa0
+
+orchestrator/core.py:1323:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator._execute_export_phase
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:_execute_export_phase:fp=af179d8ce129b253
+
+orchestrator/core.py:1485:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator.run
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:run:fp=6242f8378aae8b98
+
+orchestrator/core.py:1516:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator.run
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:run:fp=008c6c3445ad9038
+
+orchestrator/core.py:1543:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator.run
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:run:fp=b2b3cf57ff73d9ac
+
+orchestrator/core.py:1890:20
+  Rule: R5 - isinstance
+  Code: isinstance(t, TransformProtocol)
+  Context: Orchestrator._initialize_run_context
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: orchestrator/core.py:R5:Orchestrator:_initialize_run_context:fp=ad255ec6815815f7
+
+orchestrator/core.py:2116:45
+  Rule: R5 - isinstance
+  Code: quarantine_data = source_item.row if isinstance(source_item.row, dict) else {"_raw": source_item.row}
+  Context: Orchestrator._handle_quarantine_row
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: orchestrator/core.py:R5:Orchestrator:_handle_quarantine_row:fp=0bb0388771014ae4
+
+orchestrator/core.py:2165:8
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError) as e:
+  Context: Orchestrator._handle_quarantine_row
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=6b9da809728cb399
+
+orchestrator/core.py:3156:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator.resume
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:resume:fp=712acd13c0bb5be3
+
+orchestrator/core.py:3167:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator.resume
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:resume:fp=937cf59944a07921
+
+orchestrator/core.py:3175:12
+  Rule: R4 - broad-except
+  Code: except Exception:
+  Context: Orchestrator.resume
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: orchestrator/core.py:R4:Orchestrator:resume:fp=4620e05713f2ecfa
+
+orchestrator/aggregation.py:66:11
+  Rule: R5 - isinstance
+  Code: if isinstance(t, TransformProtocol) and t.node_id == agg_node_id_str and t.is_batch_aware:
+  Context: find_aggregation_transform
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: orchestrator/aggregation.py:R5:find_aggregation_transform:fp=9b7a8ae4e9506299
+
+orchestrator/types.py:389:15
+  Rule: R5 - isinstance
+  Code: if not isinstance(self.unprocessed_rows, tuple):
+  Context: ResumeState.__post_init__
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: orchestrator/types.py:R5:ResumeState:__post_init__:fp=9cc95e49b7188966
+
+executors/gate.py:267:15
+  Rule: R5 - isinstance
+  Code: if isinstance(eval_result, bool):
+  Context: GateExecutor.execute_config_gate
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/gate.py:R5:GateExecutor:execute_config_gate:fp=68ff7b444bed568c
+
+executors/gate.py:269:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(eval_result, str):
+  Context: GateExecutor.execute_config_gate
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/gate.py:R5:GateExecutor:execute_config_gate:fp=89678e9942929fa8
+
+executors/gate.py:356:22
+  Rule: R1 - dict.get
+  Code: edge_id = self._edge_map.get((typed_node_id, dest))
+  Context: GateExecutor._record_routing
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: executors/gate.py:R1:GateExecutor:_record_routing:fp=7957c7b3993f565b
+
+executors/gate.py:370:26
+  Rule: R1 - dict.get
+  Code: edge_id = self._edge_map.get((typed_node_id, dest))
+  Context: GateExecutor._record_routing
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: executors/gate.py:R1:GateExecutor:_record_routing:fp=38dabd7f2719bfd0
+
+executors/sink.py:150:8
+  Rule: R4 - broad-except
+  Code: except Exception as cleanup_exc:
+  Context: SinkExecutor._best_effort_cleanup
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: executors/sink.py:R4:SinkExecutor:_best_effort_cleanup:fp=8222c68f9d57e8b4
+
+executors/sink.py:466:16
+  Rule: R4 - broad-except
+  Code: except Exception as cleanup_exc:
+  Context: SinkExecutor.write
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: executors/sink.py:R4:SinkExecutor:write:fp=84c71e1b5c77f36b
+
+executors/sink.py:536:27
+  Rule: R5 - isinstance
+  Code: if not isinstance(write_result, SinkWriteResult):
+  Context: SinkExecutor.write
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/sink.py:R5:SinkExecutor:write:fp=ee203332826e6fd2
+
+executors/sink.py:542:27
+  Rule: R5 - isinstance
+  Code: if not isinstance(artifact_info, ArtifactDescriptor):
+  Context: SinkExecutor.write
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/sink.py:R5:SinkExecutor:write:fp=b12197151a5f1e19
+
+executors/sink.py:765:35
+  Rule: R5 - isinstance
+  Code: if not isinstance(failsink_write_result, SinkWriteResult):
+  Context: SinkExecutor.write
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/sink.py:R5:SinkExecutor:write:fp=24b32b1d4dc40b85
+
+executors/sink.py:771:35
+  Rule: R5 - isinstance
+  Code: if not isinstance(failsink_artifact_info, ArtifactDescriptor):
+  Context: SinkExecutor.write
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/sink.py:R5:SinkExecutor:write:fp=8c66dfa7710892e5
+
+executors/state_guard.py:266:15
+  Rule: R5 - isinstance
+  Code: if not isinstance(exc_val, AuditEvidenceBase):
+  Context: NodeStateGuard._extract_audit_evidence_context
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=86d1554e15f3f1f6
+
+executors/state_guard.py:271:19
+  Rule: R5 - isinstance
+  Code: if not isinstance(context, Mapping):
+  Context: NodeStateGuard._extract_audit_evidence_context
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=81df711769fff87f
+
+executors/state_guard.py:275:8
+  Rule: R4 - broad-except
+  Code: except Exception as exc:
+  Context: NodeStateGuard._extract_audit_evidence_context
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: executors/state_guard.py:R4:NodeStateGuard:_extract_audit_evidence_context:fp=d9eb19b04d13628e
+
+executors/declaration_dispatch.py:137:8
+  Rule: R6 - silent-except
+  Code: except DeclarationContractViolation as exc:
+  Context: _dispatch
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: executors/declaration_dispatch.py:R6:_dispatch:fp=15d9ff75661bacf0
+
+executors/declaration_dispatch.py:142:8
+  Rule: R6 - silent-except
+  Code: except PluginContractViolation as exc:
+  Context: _dispatch
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: executors/declaration_dispatch.py:R6:_dispatch:fp=eaaceb67467655f7
+
+executors/transform.py:258:57
+  Rule: R5 - isinstance
+  Code: mixin: BatchTransformMixin | None = transform if isinstance(transform, BatchTransformMixin) else None
+  Context: TransformExecutor.execute_transform
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/transform.py:R5:TransformExecutor:execute_transform:fp=ceb069c0dd604d93
+
+executors/transform.py:440:23
+  Rule: R5 - isinstance
+  Code: if isinstance(e, TimeoutError) and mixin is not None:
+  Context: TransformExecutor.execute_transform
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: executors/transform.py:R5:TransformExecutor:execute_transform:fp=9b9a2fd95dff2780
+
+============================================================
+CHECK FAILED
+============================================================
+
+To allowlist a violation, add an entry to /tmp/empty_allowlist_to_isolate_layer_conformance.yaml
+Example entry:
+{'expires': '2026-05-28',
+ 'key': 'commencement.py:R5:evaluate_commencement_gates:fp=18ca009ccd49b5e0',
+ 'owner': '<your-name>',
+ 'reason': '<explain why this is at a trust boundary>',
+ 'safety': '<explain how failures are handled>'}

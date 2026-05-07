@@ -1,0 +1,112 @@
+# Fork/Coalesce Example — Union Merge with `fail` Collision Policy
+#
+# *** THIS PIPELINE IS DESIGNED TO FAIL. ***
+#
+# Demonstrates `union_collision_policy: fail` — on ANY field-name
+# collision, the coalesce raises `CoalesceCollisionError`. The orchestrator
+# catches the error, marks the coalesce node FAILED, and persists the full
+# collision record (`union_field_origins`, `union_field_collision_values`)
+# to `node_states.context_after_json` so auditors can see exactly which
+# fields collided, which branches produced the conflicting values, and
+# what those values were.
+#
+#   source ─(raw)─> [fork_gate] ─┬─ path_a ─> truncate(20) ─(trunc_a)─┐
+#                                 └─ path_b ─> truncate(50) ─(trunc_b)─┤
+#                                                                       X  <- collision, FAIL
+#
+# Both branches carry the same column set (id, product, price, category,
+# description), so every field name overlaps. The `fail` policy treats
+# ANY overlap as an error — it does not distinguish "same value" from
+# "different value." If you want the runtime to silently reconcile
+# overlaps, use `last_wins` or `first_wins` instead.
+#
+# Expected result: `elspeth run` exits non-zero. The audit database at
+# runs/union_fail.db will contain a FAILED coalesce node state with the
+# full collision record preserved. Inspect via:
+#
+#   elspeth-mcp --database sqlite:///examples/fork_coalesce/runs/union_fail.db
+#
+# NOTE: `union_collision_policy` is orthogonal to the arrival `policy`
+# (require_all / quorum / best_effort / first). They are separate axes:
+# arrival policy decides WHEN to merge; collision policy decides HOW to
+# reconcile overlapping field names once merging begins.
+
+source:
+  plugin: csv
+  on_success: raw
+  options:
+    path: examples/fork_coalesce/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'product: str'
+      - 'price: int'
+      - 'category: str'
+      - 'description: str'
+    on_validation_failure: discard
+
+gates:
+- name: fork_gate
+  input: raw
+  condition: "True"
+  routes:
+    'true': fork
+    'false': output
+  fork_to:
+    - path_a
+    - path_b
+
+- name: route_output
+  input: merge_results
+  condition: "True"
+  routes:
+    'true': output
+    'false': output
+
+transforms:
+- name: truncate_branch_a
+  plugin: truncate
+  input: path_a
+  on_success: trunc_a
+  on_error: discard
+  options:
+    fields:
+      description: 20
+    suffix: "..."
+    schema:
+      mode: observed
+
+- name: truncate_branch_b
+  plugin: truncate
+  input: path_b
+  on_success: trunc_b
+  on_error: discard
+  options:
+    fields:
+      description: 50
+    suffix: "..."
+    schema:
+      mode: observed
+
+coalesce:
+- name: merge_results
+  branches:
+    path_a: trunc_a
+    path_b: trunc_b
+  policy: require_all
+  merge: union
+  union_collision_policy: fail   # DELIBERATE: any collision raises CoalesceCollisionError
+
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/fork_coalesce/output/union_fail.json
+      schema:
+        mode: observed
+      format: jsonl
+
+landscape:
+  url: sqlite:///examples/fork_coalesce/runs/union_fail.db

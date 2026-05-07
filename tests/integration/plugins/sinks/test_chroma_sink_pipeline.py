@@ -14,6 +14,7 @@ import pytest
 
 from elspeth.contracts.errors import DuplicateDocumentError
 from elspeth.plugins.sinks.chroma_sink import ChromaSink
+from tests.fixtures.base_classes import inject_write_failure
 
 
 class TestChromaSinkIntegration:
@@ -42,7 +43,7 @@ class TestChromaSinkIntegration:
             },
         }
 
-        sink = ChromaSink(config)
+        sink = inject_write_failure(ChromaSink(config))
 
         start_ctx = MagicMock()
         start_ctx.run_id = "integration-test-run"
@@ -94,7 +95,9 @@ class TestChromaSinkIntegration:
         assert collection.count() == 3
 
         results = collection.get(ids=["d1", "d2", "d3"], include=["documents", "metadatas"])
+        assert results["documents"] is not None
         assert "Photosynthesis" in results["documents"][0]
+        assert results["metadatas"] is not None
         assert results["metadatas"][0]["topic"] == "biology"
 
     def test_upsert_is_idempotent(self, tmp_path: Path) -> None:
@@ -111,7 +114,7 @@ class TestChromaSinkIntegration:
         }
 
         for _ in range(3):
-            sink = ChromaSink(config)
+            sink = inject_write_failure(ChromaSink(config))
             ctx = MagicMock()
             ctx.run_id = "idem-run"
             ctx.telemetry_emit = MagicMock()
@@ -141,7 +144,7 @@ class TestChromaSinkIntegration:
         }
 
         # First write
-        sink = ChromaSink(config)
+        sink = inject_write_failure(ChromaSink(config))
         ctx = MagicMock()
         ctx.run_id = "run-1"
         ctx.telemetry_emit = MagicMock()
@@ -152,7 +155,7 @@ class TestChromaSinkIntegration:
         sink.close()
 
         # Second write with same ID — should be skipped
-        sink2 = ChromaSink(config)
+        sink2 = inject_write_failure(ChromaSink(config))
         ctx2 = MagicMock()
         ctx2.run_id = "run-2"
         ctx2.telemetry_emit = MagicMock()
@@ -168,6 +171,7 @@ class TestChromaSinkIntegration:
         assert collection.count() == 2
 
         results = collection.get(ids=["d1"], include=["documents"])
+        assert results["documents"] is not None
         assert results["documents"][0] == "Original"  # Not "Updated"
 
     @pytest.mark.parametrize("on_duplicate", ["overwrite", "error"])
@@ -188,7 +192,7 @@ class TestChromaSinkIntegration:
         hashes = []
 
         for _ in range(2):
-            sink = ChromaSink(config)
+            sink = inject_write_failure(ChromaSink(config))
             ctx = MagicMock()
             ctx.run_id = "hash-run"
             ctx.telemetry_emit = MagicMock()
@@ -221,7 +225,7 @@ class TestChromaSinkIntegration:
         }
 
         # First write: d1 and d2 both new
-        sink = ChromaSink(config)
+        sink = inject_write_failure(ChromaSink(config))
         ctx = MagicMock()
         ctx.run_id = "run-1"
         ctx.telemetry_emit = MagicMock()
@@ -232,7 +236,7 @@ class TestChromaSinkIntegration:
         sink.close()
 
         # Second write: d1 already exists, only d3 is new
-        sink2 = ChromaSink(config)
+        sink2 = inject_write_failure(ChromaSink(config))
         ctx2 = MagicMock()
         ctx2.run_id = "run-2"
         ctx2.telemetry_emit = MagicMock()

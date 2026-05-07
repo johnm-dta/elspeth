@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
     ContractAuditRecord,
@@ -23,11 +24,13 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.dependency_config import PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import generate_id, now
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.schema import (
@@ -40,7 +43,20 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
 
 
-_TERMINAL_RUN_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.INTERRUPTED})
+# Phase 2.2 (elspeth-0de989c56d): COMPLETED_WITH_FAILURES and EMPTY join the
+# terminal set so the engine can finalize runs into the four-value taxonomy
+# without a separate "intermediate" lifecycle hop.  The same terminal-write
+# guarantees apply: completed_at is set, the row becomes immutable, and
+# update_run_status() can no longer overwrite it.
+_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_FAILURES,
+        RunStatus.FAILED,
+        RunStatus.EMPTY,
+        RunStatus.INTERRUPTED,
+    }
+)
 
 
 class RunLifecycleRepository:
@@ -83,6 +99,11 @@ class RunLifecycleRepository:
         Returns:
             Run model with generated run_id
         """
+        if status == RunStatus.COMPLETED:
+            raise AuditIntegrityError(
+                "begin_run() cannot create a COMPLETED run. Use complete_run() so completed_at is recorded in the audit trail."
+            )
+
         run_id = run_id or generate_id()
         settings_json = canonical_json(config)
         config_hash = stable_hash(config)
@@ -95,6 +116,15 @@ class RunLifecycleRepository:
             audit_record = ContractAuditRecord.from_contract(schema_contract)
             schema_contract_json = audit_record.to_json()
             schema_contract_hash = schema_contract.version_hash()
+
+        # ADR-010 §Decision 3 M3: record the declaration +
+        # Tier-1 registries that were in force at run start. Canonicalised
+        # JSON so the value is stable across Python invocations and suitable
+        # for hash-based cross-run regression detection. Must run AFTER the
+        # orchestrator has frozen both registries; begin_run is called from
+        # Orchestrator.run() which sequences prepare_for_run() (which
+        # freezes) before this call.
+        runtime_val_manifest_json = canonical_json(build_runtime_val_manifest())
 
         run = Run(
             run_id=run_id,
@@ -113,11 +143,12 @@ class RunLifecycleRepository:
                 config_hash=run.config_hash,
                 settings_json=run.settings_json,
                 canonical_version=run.canonical_version,
-                status=run.status,
+                status=run.status.value,
                 reproducibility_grade=run.reproducibility_grade,
                 source_schema_json=source_schema_json,
                 schema_contract_json=schema_contract_json,
                 schema_contract_hash=schema_contract_hash,
+                runtime_val_manifest_json=runtime_val_manifest_json,
             )
         )
 
@@ -156,18 +187,42 @@ class RunLifecycleRepository:
         # Only include reproducibility_grade in UPDATE when explicitly provided.
         # Passing None would overwrite an existing grade with NULL (Bug 318f74).
         values: dict[str, Any] = {
-            "status": status,
+            "status": status.value,
             "completed_at": timestamp,
         }
         if reproducibility_grade is not None:
             values["reproducibility_grade"] = reproducibility_grade
 
-        self._ops.execute_update(runs_table.update().where(runs_table.c.run_id == run_id).values(**values))
+        # Atomic conditional UPDATE: only succeeds when current status is NOT
+        # already terminal.  Once a run reaches COMPLETED/FAILED/INTERRUPTED,
+        # its terminal status and completed_at are the legal record and must
+        # not be overwritten (Bug 3c77199a70).  The resume path transitions
+        # FAILED/INTERRUPTED → RUNNING via update_run_status() first, so by the
+        # time complete_run() is called the status is RUNNING.
+        _terminal_values = [s.value for s in _TERMINAL_RUN_STATUSES]
+        with self._db.connection() as conn:
+            result = conn.execute(
+                runs_table.update()
+                .where(runs_table.c.run_id == run_id)
+                .where(runs_table.c.status.notin_(_terminal_values))
+                .values(**values)
+            )
+            if result.rowcount == 0:
+                existing = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == run_id)).fetchone()
+                if existing is not None and existing.status in _terminal_values:
+                    raise AuditIntegrityError(
+                        f"Cannot complete run {run_id}: already terminal "
+                        f"(status={existing.status!r}). Terminal runs are immutable — "
+                        f"the audit record's status and completed_at timestamp cannot "
+                        f"be overwritten. Resume path must transition to RUNNING via "
+                        f"update_run_status() before re-completing."
+                    )
+                raise AuditIntegrityError(f"Cannot complete run {run_id}: run not found")
 
-        result = self.get_run(run_id)
-        if result is None:
-            raise AuditIntegrityError(f"Run {run_id} not found after INSERT/UPDATE - database corruption or transaction failure")
-        return result
+        run = self.get_run(run_id)
+        if run is None:
+            raise AuditIntegrityError(f"Run {run_id} not found after UPDATE - database corruption or transaction failure")
+        return run
 
     def get_run(self, run_id: str) -> Run | None:
         """Get a run by ID.
@@ -220,6 +275,29 @@ class RunLifecycleRepository:
                 f"expected str — audit data corruption (Tier 1 violation)"
             )
         return source_schema_json
+
+    def get_runtime_val_manifest(self, run_id: str) -> str:
+        """Get the runtime-VAL manifest captured at run start."""
+        query = select(runs_table.c.runtime_val_manifest_json).where(runs_table.c.run_id == run_id)
+        run_row = self._ops.execute_fetchone(query)
+
+        if run_row is None:
+            raise AuditIntegrityError(f"Run {run_id} not found in database")
+
+        runtime_val_manifest_json = run_row.runtime_val_manifest_json
+        if runtime_val_manifest_json is None:
+            raise AuditIntegrityError(
+                f"Run {run_id} has no runtime VAL manifest stored. "
+                "Resume cannot verify declaration-contract or Tier-1 registry parity "
+                "without this evidence — audit trail is incomplete."
+            )
+
+        if type(runtime_val_manifest_json) is not str:
+            raise AuditIntegrityError(
+                f"Run {run_id} runtime_val_manifest_json is {type(runtime_val_manifest_json).__name__}, "
+                "expected str — audit data corruption (Tier 1 violation)"
+            )
+        return runtime_val_manifest_json
 
     def record_source_field_resolution(
         self,
@@ -328,6 +406,21 @@ class RunLifecycleRepository:
 
         return validated_mapping
 
+    def _execute_atomic_inserts(self, *, context: str, statements: list[Any]) -> None:
+        """Execute one or more INSERTs in a single transaction with audit error normalization."""
+        if not statements:
+            return
+        try:
+            with self._db.connection() as conn:
+                for stmt in statements:
+                    result = conn.execute(stmt)
+                    if result.rowcount == 0:
+                        raise LandscapeRecordError(f"{context} — zero rows affected (audit write failure)")
+        except LandscapeRecordError:
+            raise
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(f"{context} — database rejected audit write: {type(exc).__name__}: {exc}") from exc
+
     def update_run_status(self, run_id: str, status: RunStatus) -> None:
         """Update run status without setting completed_at.
 
@@ -349,12 +442,23 @@ class RunLifecycleRepository:
             record is final. FAILED and INTERRUPTED runs CAN be transitioned back
             to RUNNING during resume (orchestrator recovery path).
         """
+        if status == RunStatus.COMPLETED:
+            raise AuditIntegrityError(
+                "update_run_status() cannot set status to COMPLETED. Use complete_run() so completed_at is recorded in the audit trail."
+            )
+
         with self._db.connection() as conn:
+            # When resuming to RUNNING, clear completed_at atomically.
+            # A run cannot be simultaneously RUNNING and completed — that's
+            # an impossible state that confuses operational tooling and auditors.
+            values: dict[str, Any] = {"status": status.value}
+            if status == RunStatus.RUNNING:
+                values["completed_at"] = None
             result = conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
                 .where(runs_table.c.status != RunStatus.COMPLETED.value)
-                .values(status=status)
+                .values(**values)
             )
             if result.rowcount == 0:
                 existing = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == run_id)).fetchone()
@@ -483,25 +587,24 @@ class RunLifecycleRepository:
         """
         if not resolutions:
             return
-        with self._db.connection() as conn:
-            for rec in resolutions:
-                result = conn.execute(
-                    secret_resolutions_table.insert().values(
-                        resolution_id=generate_id(),
-                        run_id=run_id,
-                        timestamp=rec.timestamp,
-                        env_var_name=rec.env_var_name,
-                        source=rec.source,
-                        vault_url=rec.vault_url,
-                        secret_name=rec.secret_name,
-                        fingerprint=rec.fingerprint,
-                        resolution_latency_ms=rec.resolution_latency_ms,
-                    )
-                )
-                if result.rowcount == 0:
-                    raise AuditIntegrityError(
-                        f"Secret resolution insert failed for run {run_id} — zero rows affected (audit write failure)"
-                    )
+        statements = [
+            secret_resolutions_table.insert().values(
+                resolution_id=generate_id(),
+                run_id=run_id,
+                timestamp=rec.timestamp,
+                env_var_name=rec.env_var_name,
+                source=rec.source,
+                vault_url=rec.vault_url,
+                secret_name=rec.secret_name,
+                fingerprint=rec.fingerprint,
+                resolution_latency_ms=rec.resolution_latency_ms,
+            )
+            for rec in resolutions
+        ]
+        self._execute_atomic_inserts(
+            context=f"record_secret_resolutions run_id={run_id}",
+            statements=statements,
+        )
 
     def get_secret_resolutions_for_run(self, run_id: str) -> list[SecretResolution]:
         """Get all secret resolution records for a run.
@@ -595,13 +698,10 @@ class RunLifecycleRepository:
         if not rows_to_insert:
             return
 
-        with self._db.connection() as conn:
-            for row_data in rows_to_insert:
-                result = conn.execute(preflight_results_table.insert().values(**row_data))
-                if result.rowcount == 0:
-                    raise AuditIntegrityError(
-                        f"Pre-flight result insert failed for run {run_id} — zero rows affected (audit write failure)"
-                    )
+        self._execute_atomic_inserts(
+            context=f"record_preflight_results run_id={run_id}",
+            statements=[preflight_results_table.insert().values(**row_data) for row_data in rows_to_insert],
+        )
 
     def record_readiness_check(
         self,
@@ -610,7 +710,7 @@ class RunLifecycleRepository:
         name: str,
         collection: str,
         reachable: bool,
-        count: int,
+        count: int | None,
         message: str,
     ) -> None:
         """Record a readiness check result in the audit trail.
@@ -635,10 +735,10 @@ class RunLifecycleRepository:
             "created_at": now(),
         }
 
-        with self._db.connection() as conn:
-            result = conn.execute(preflight_results_table.insert().values(**row_data))
-            if result.rowcount == 0:
-                raise AuditIntegrityError(f"Readiness check insert failed for run {run_id} — zero rows affected (audit write failure)")
+        self._execute_atomic_inserts(
+            context=f"record_readiness_check run_id={run_id}",
+            statements=[preflight_results_table.insert().values(**row_data)],
+        )
 
     def list_runs(self, *, status: RunStatus | None = None) -> list[Run]:
         """List all runs in the database.
@@ -652,7 +752,7 @@ class RunLifecycleRepository:
         query = select(runs_table).order_by(runs_table.c.started_at.desc())
 
         if status is not None:
-            query = query.where(runs_table.c.status == status)
+            query = query.where(runs_table.c.status == status.value)
 
         rows = self._ops.execute_fetchall(query)
         return [self._run_loader.load(row) for row in rows]
@@ -684,7 +784,10 @@ class RunLifecycleRepository:
                 f"Cannot set export_error with status={status.value}. Error messages are only valid with FAILED status."
             )
 
-        updates: dict[str, Any] = {"export_status": status}
+        updates: dict[str, Any] = {
+            "export_status": status,
+            "exported_at": None,
+        }
 
         if status == ExportStatus.COMPLETED:
             updates["exported_at"] = now()

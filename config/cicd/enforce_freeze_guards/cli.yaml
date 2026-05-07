@@ -1,13 +1,1 @@
-per_file_rules:
-- pattern: cli_helpers.py
-  rules:
-  - FG1
-  reason: PluginBundle.sinks and .aggregations use MappingProxyType wrap — values are plugin instances (not nested dicts)
-  expires: null
-  max_hits: 2
-- pattern: cli_helpers.py
-  rules:
-  - FG2
-  reason: PluginBundle isinstance guards check if already frozen — construction from both dict and MappingProxyType callers
-  expires: null
-  max_hits: 3
+per_file_rules: []

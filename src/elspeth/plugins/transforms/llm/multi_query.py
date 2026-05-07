@@ -13,13 +13,10 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-import structlog
 from pydantic import Field, model_validator
 
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.config_base import PluginConfig
-
-logger = structlog.get_logger(__name__)
 
 
 class OutputFieldType(StrEnum):
@@ -108,6 +105,13 @@ class QuerySpec:
             raise ValueError("name must be non-empty")
         if not self.input_fields:
             raise ValueError("input_fields must be non-empty")
+        if self.max_tokens is not None:
+            if isinstance(self.max_tokens, bool):
+                raise TypeError(f"max_tokens must be int, got bool ({self.max_tokens!r})")
+            if not isinstance(self.max_tokens, int):
+                raise TypeError(f"max_tokens must be int, got {type(self.max_tokens).__name__}")
+            if self.max_tokens <= 0:
+                raise ValueError(f"max_tokens must be > 0, got {self.max_tokens}")
         object.__setattr__(self, "input_fields", MappingProxyType(dict(self.input_fields)))
         if self.output_fields is not None:
             object.__setattr__(self, "output_fields", tuple(self.output_fields))
@@ -229,10 +233,10 @@ def resolve_queries(
             )
 
     # Validate: check output field suffix collisions across queries
-    from elspeth.plugins.transforms.llm import LLM_AUDIT_SUFFIXES, LLM_GUARANTEED_SUFFIXES
+    from elspeth.plugins.transforms.llm import LLM_AUDIT_SUFFIXES, MULTI_QUERY_GUARANTEED_SUFFIXES
 
     reserved_suffixes = set()
-    for suffix in LLM_GUARANTEED_SUFFIXES + LLM_AUDIT_SUFFIXES:
+    for suffix in MULTI_QUERY_GUARANTEED_SUFFIXES + LLM_AUDIT_SUFFIXES:
         if suffix:
             reserved_suffixes.add(suffix.lstrip("_"))
     # System-reserved suffixes used by multi-query error handling
@@ -244,11 +248,10 @@ def resolve_queries(
             for field in spec.output_fields:
                 # Warn on reserved suffixes
                 if field.suffix in reserved_suffixes:
-                    logger.warning(
-                        "reserved_suffix_conflict",
-                        query=spec.name,
-                        suffix=field.suffix,
-                        detail="Output field suffix matches a reserved LLM suffix, may cause conflicts",
+                    raise ValueError(
+                        f"Query '{spec.name}' output field suffix '{field.suffix}' collides with "
+                        f"reserved LLM suffix. Reserved suffixes: {sorted(reserved_suffixes)}. "
+                        f"Choose a different suffix to prevent silent data loss."
                     )
                 # Check for cross-query output key collisions.
                 # Output keys are "{query_name}_{suffix}" (see MultiQueryStrategy),

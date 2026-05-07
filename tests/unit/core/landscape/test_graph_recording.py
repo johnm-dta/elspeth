@@ -9,17 +9,18 @@ from elspeth.contracts import Determinism, NodeType, RoutingMode
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
-def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, LandscapeRecorder]:
+def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory]:
     db = make_landscape_db()
-    recorder = make_recorder(db)
-    recorder.begin_run(config={}, canonical_version="v1", run_id=run_id)
-    return db, recorder
+    factory = make_factory(db)
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    return db, factory
 
 
 def _make_contract(
@@ -56,9 +57,9 @@ class TestRegisterNode:
     """Tests for DataFlowRepository.register_node."""
 
     def test_creates_node_with_config_hash_and_json(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         config = {"key": "value", "nested": {"a": 1}}
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -72,8 +73,8 @@ class TestRegisterNode:
         assert stored_config == config
 
     def test_generates_node_id_when_not_provided(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -85,8 +86,8 @@ class TestRegisterNode:
         assert len(node.node_id) > 0
 
     def test_uses_explicit_node_id(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -98,8 +99,8 @@ class TestRegisterNode:
         assert node.node_id == "my-explicit-node"
 
     def test_stores_sequence_in_pipeline(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="field_mapper",
             node_type=NodeType.TRANSFORM,
@@ -111,8 +112,8 @@ class TestRegisterNode:
         assert node.sequence_in_pipeline == 3
 
     def test_sequence_none_by_default(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -123,8 +124,8 @@ class TestRegisterNode:
         assert node.sequence_in_pipeline is None
 
     def test_stores_determinism(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="llm_classifier",
             node_type=NodeType.TRANSFORM,
@@ -136,8 +137,8 @@ class TestRegisterNode:
         assert node.determinism == Determinism.EXTERNAL_CALL
 
     def test_determinism_defaults_to_deterministic(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="field_mapper",
             node_type=NodeType.TRANSFORM,
@@ -159,8 +160,8 @@ class TestRegisterNode:
         ],
     )
     def test_all_determinism_variants(self, determinism: Determinism) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="test_plugin",
             node_type=NodeType.TRANSFORM,
@@ -172,8 +173,8 @@ class TestRegisterNode:
         assert node.determinism == determinism
 
     def test_stores_node_type(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="threshold_gate",
             node_type=NodeType.GATE,
@@ -195,8 +196,8 @@ class TestRegisterNode:
         ],
     )
     def test_all_node_type_variants(self, node_type: NodeType) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="test_plugin",
             node_type=node_type,
@@ -207,8 +208,8 @@ class TestRegisterNode:
         assert node.node_type == node_type
 
     def test_stores_plugin_name_and_version(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -220,8 +221,8 @@ class TestRegisterNode:
         assert node.plugin_version == "3.2.1"
 
     def test_stores_run_id(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -232,9 +233,9 @@ class TestRegisterNode:
         assert node.run_id == "run-1"
 
     def test_schema_mode_from_schema_config(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         schema = SchemaConfig.from_dict({"mode": "observed"})
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -245,8 +246,8 @@ class TestRegisterNode:
         assert node.schema_mode == "observed"
 
     def test_stores_schema_hash_when_provided(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -258,8 +259,8 @@ class TestRegisterNode:
         assert node.schema_hash == "abc123hash"
 
     def test_schema_hash_none_by_default(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -270,8 +271,8 @@ class TestRegisterNode:
         assert node.schema_hash is None
 
     def test_registered_at_is_set(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -282,8 +283,8 @@ class TestRegisterNode:
         assert node.registered_at is not None
 
     def test_two_nodes_get_distinct_ids(self) -> None:
-        _db, recorder = _setup()
-        node_a = recorder.register_node(
+        _db, factory = _setup()
+        node_a = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -291,7 +292,7 @@ class TestRegisterNode:
             config={},
             schema_config=_DYNAMIC_SCHEMA,
         )
-        node_b = recorder.register_node(
+        node_b = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="field_mapper",
             node_type=NodeType.TRANSFORM,
@@ -302,8 +303,8 @@ class TestRegisterNode:
         assert node_a.node_id != node_b.node_id
 
     def test_config_hash_changes_with_different_config(self) -> None:
-        _db, recorder = _setup()
-        node_a = recorder.register_node(
+        _db, factory = _setup()
+        node_a = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -311,7 +312,7 @@ class TestRegisterNode:
             config={"path": "a.csv"},
             schema_config=_DYNAMIC_SCHEMA,
         )
-        node_b = recorder.register_node(
+        node_b = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -322,8 +323,8 @@ class TestRegisterNode:
         assert node_a.config_hash != node_b.config_hash
 
     def test_config_hash_stable_for_same_config(self) -> None:
-        _db, recorder = _setup()
-        node_a = recorder.register_node(
+        _db, factory = _setup()
+        node_a = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -332,7 +333,7 @@ class TestRegisterNode:
             node_id="node-a",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        node_b = recorder.register_node(
+        node_b = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -344,8 +345,8 @@ class TestRegisterNode:
         assert node_a.config_hash == node_b.config_hash
 
     def test_empty_config(self) -> None:
-        _db, recorder = _setup()
-        node = recorder.register_node(
+        _db, factory = _setup()
+        node = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="null_source",
             node_type=NodeType.SOURCE,
@@ -367,8 +368,8 @@ class TestRegisterEdge:
     """Tests for DataFlowRepository.register_edge."""
 
     def test_creates_edge(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -377,7 +378,7 @@ class TestRegisterEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -386,7 +387,7 @@ class TestRegisterEdge:
             node_id="xfm",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="xfm",
@@ -398,8 +399,8 @@ class TestRegisterEdge:
         assert edge.run_id == "run-1"
 
     def test_generates_edge_id_when_not_provided(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -408,7 +409,7 @@ class TestRegisterEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -417,7 +418,7 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="sink",
@@ -428,8 +429,8 @@ class TestRegisterEdge:
         assert len(edge.edge_id) > 0
 
     def test_uses_explicit_edge_id(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -438,7 +439,7 @@ class TestRegisterEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -447,7 +448,7 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="sink",
@@ -458,8 +459,8 @@ class TestRegisterEdge:
         assert edge.edge_id == "my-edge-id"
 
     def test_stores_label(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="gate",
             node_type=NodeType.GATE,
@@ -468,7 +469,7 @@ class TestRegisterEdge:
             node_id="gate",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -477,7 +478,7 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="gate",
             to_node_id="sink",
@@ -487,8 +488,8 @@ class TestRegisterEdge:
         assert edge.label == "high_risk"
 
     def test_stores_default_mode(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="gate",
             node_type=NodeType.GATE,
@@ -497,7 +498,7 @@ class TestRegisterEdge:
             node_id="gate",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -506,7 +507,7 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="gate",
             to_node_id="sink",
@@ -516,8 +517,8 @@ class TestRegisterEdge:
         assert edge.default_mode == RoutingMode.COPY
 
     def test_created_at_is_set(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -526,7 +527,7 @@ class TestRegisterEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -535,7 +536,7 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="sink",
@@ -545,8 +546,8 @@ class TestRegisterEdge:
         assert edge.created_at is not None
 
     def test_two_edges_get_distinct_ids(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -555,7 +556,7 @@ class TestRegisterEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="xfm",
             node_type=NodeType.TRANSFORM,
@@ -564,7 +565,7 @@ class TestRegisterEdge:
             node_id="xfm",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -573,14 +574,14 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge_a = recorder.register_edge(
+        edge_a = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="xfm",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        edge_b = recorder.register_edge(
+        edge_b = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="xfm",
             to_node_id="sink",
@@ -594,8 +595,8 @@ class TestRegisterEdge:
         [RoutingMode.MOVE, RoutingMode.COPY, RoutingMode.DIVERT],
     )
     def test_all_routing_mode_variants(self, mode: RoutingMode) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -604,7 +605,7 @@ class TestRegisterEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -613,7 +614,7 @@ class TestRegisterEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge = recorder.register_edge(
+        edge = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="sink",
@@ -632,8 +633,8 @@ class TestGetNode:
     """Tests for DataFlowRepository.get_node with composite PK."""
 
     def test_roundtrip(self) -> None:
-        _db, recorder = _setup()
-        original = recorder.register_node(
+        _db, factory = _setup()
+        original = factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -643,7 +644,7 @@ class TestGetNode:
             sequence=0,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        fetched = recorder.get_node("src-node", "run-1")
+        fetched = factory.data_flow.get_node("src-node", "run-1")
         assert fetched is not None
         assert fetched.node_id == original.node_id
         assert fetched.run_id == original.run_id
@@ -653,13 +654,13 @@ class TestGetNode:
         assert fetched.sequence_in_pipeline == 0
 
     def test_returns_none_for_unknown_node(self) -> None:
-        _db, recorder = _setup()
-        result = recorder.get_node("nonexistent", "run-1")
+        _db, factory = _setup()
+        result = factory.data_flow.get_node("nonexistent", "run-1")
         assert result is None
 
     def test_returns_none_for_unknown_run(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -668,16 +669,16 @@ class TestGetNode:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        result = recorder.get_node("src", "run-999")
+        result = factory.data_flow.get_node("src", "run-999")
         assert result is None
 
     def test_same_node_id_in_different_runs(self) -> None:
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        recorder.begin_run(config={}, canonical_version="v1", run_id="run-A")
-        recorder.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory = make_factory(db)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
 
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-A",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -686,7 +687,7 @@ class TestGetNode:
             node_id="shared-id",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-B",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -696,8 +697,8 @@ class TestGetNode:
             schema_config=_DYNAMIC_SCHEMA,
         )
 
-        fetched_a = recorder.get_node("shared-id", "run-A")
-        fetched_b = recorder.get_node("shared-id", "run-B")
+        fetched_a = factory.data_flow.get_node("shared-id", "run-A")
+        fetched_b = factory.data_flow.get_node("shared-id", "run-B")
 
         assert fetched_a is not None
         assert fetched_b is not None
@@ -707,8 +708,8 @@ class TestGetNode:
         assert fetched_b.run_id == "run-B"
 
     def test_returns_none_for_both_unknown(self) -> None:
-        _db, recorder = _setup()
-        result = recorder.get_node("nonexistent", "no-such-run")
+        _db, factory = _setup()
+        result = factory.data_flow.get_node("nonexistent", "no-such-run")
         assert result is None
 
 
@@ -721,8 +722,8 @@ class TestGetNodes:
     """Tests for DataFlowRepository.get_nodes ordering and completeness."""
 
     def test_returns_all_nodes_for_run(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -732,7 +733,7 @@ class TestGetNodes:
             sequence=0,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -742,7 +743,7 @@ class TestGetNodes:
             sequence=1,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv_sink",
             node_type=NodeType.SINK,
@@ -752,13 +753,13 @@ class TestGetNodes:
             sequence=2,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        nodes = recorder.get_nodes("run-1")
+        nodes = factory.data_flow.get_nodes("run-1")
         assert len(nodes) == 3
 
     def test_ordered_by_sequence(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         # Register out of order
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -768,7 +769,7 @@ class TestGetNodes:
             sequence=5,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -778,7 +779,7 @@ class TestGetNodes:
             sequence=0,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -788,13 +789,13 @@ class TestGetNodes:
             sequence=2,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        nodes = recorder.get_nodes("run-1")
+        nodes = factory.data_flow.get_nodes("run-1")
         sequences = [n.sequence_in_pipeline for n in nodes]
         assert sequences == [0, 2, 5]
 
     def test_null_sequence_sorted_last(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -804,7 +805,7 @@ class TestGetNodes:
             sequence=0,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="unsequenced",
             node_type=NodeType.TRANSFORM,
@@ -813,7 +814,7 @@ class TestGetNodes:
             node_id="no-seq",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -823,23 +824,23 @@ class TestGetNodes:
             sequence=1,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        nodes = recorder.get_nodes("run-1")
+        nodes = factory.data_flow.get_nodes("run-1")
         assert nodes[0].sequence_in_pipeline == 0
         assert nodes[1].sequence_in_pipeline == 1
         assert nodes[2].sequence_in_pipeline is None
 
     def test_empty_for_unknown_run(self) -> None:
-        _db, recorder = _setup()
-        nodes = recorder.get_nodes("no-such-run")
+        _db, factory = _setup()
+        nodes = factory.data_flow.get_nodes("no-such-run")
         assert nodes == []
 
     def test_does_not_return_nodes_from_other_runs(self) -> None:
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        recorder.begin_run(config={}, canonical_version="v1", run_id="run-A")
-        recorder.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory = make_factory(db)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
 
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-A",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -848,7 +849,7 @@ class TestGetNodes:
             node_id="src-a",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-B",
             plugin_name="json",
             node_type=NodeType.SOURCE,
@@ -858,8 +859,8 @@ class TestGetNodes:
             schema_config=_DYNAMIC_SCHEMA,
         )
 
-        nodes_a = recorder.get_nodes("run-A")
-        nodes_b = recorder.get_nodes("run-B")
+        nodes_a = factory.data_flow.get_nodes("run-A")
+        nodes_b = factory.data_flow.get_nodes("run-B")
 
         assert len(nodes_a) == 1
         assert nodes_a[0].node_id == "src-a"
@@ -867,8 +868,8 @@ class TestGetNodes:
         assert nodes_b[0].node_id == "src-b"
 
     def test_multiple_nodes_preserves_attributes(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -879,7 +880,7 @@ class TestGetNodes:
             determinism=Determinism.IO_READ,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="gate",
             node_type=NodeType.GATE,
@@ -890,7 +891,7 @@ class TestGetNodes:
             determinism=Determinism.DETERMINISTIC,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        nodes = recorder.get_nodes("run-1")
+        nodes = factory.data_flow.get_nodes("run-1")
         assert len(nodes) == 2
         src_node = nodes[0]
         gate_node = nodes[1]
@@ -903,9 +904,9 @@ class TestGetNodes:
 
     def test_null_sequence_nodes_deterministic_ordering(self) -> None:
         """Bug qfxc: multiple NULL-sequence nodes must have deterministic order."""
-        _db, recorder = _setup()
+        _db, factory = _setup()
         # Register multiple nodes with NULL sequence — order must be stable
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="pluginC",
             node_type=NodeType.TRANSFORM,
@@ -914,7 +915,7 @@ class TestGetNodes:
             node_id="node-c",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="pluginA",
             node_type=NodeType.TRANSFORM,
@@ -923,7 +924,7 @@ class TestGetNodes:
             node_id="node-a",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="pluginB",
             node_type=NodeType.TRANSFORM,
@@ -934,8 +935,8 @@ class TestGetNodes:
         )
 
         # Call get_nodes() twice and verify identical ordering
-        nodes_first = recorder.get_nodes("run-1")
-        nodes_second = recorder.get_nodes("run-1")
+        nodes_first = factory.data_flow.get_nodes("run-1")
+        nodes_second = factory.data_flow.get_nodes("run-1")
 
         ids_first = [n.node_id for n in nodes_first]
         ids_second = [n.node_id for n in nodes_second]
@@ -955,8 +956,8 @@ class TestGetEdges:
     """Tests for DataFlowRepository.get_edges."""
 
     def test_returns_all_edges_for_run(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -965,7 +966,7 @@ class TestGetEdges:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="xfm",
             node_type=NodeType.TRANSFORM,
@@ -974,7 +975,7 @@ class TestGetEdges:
             node_id="xfm",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -983,26 +984,26 @@ class TestGetEdges:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_edge(
+        factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="xfm",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        recorder.register_edge(
+        factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="xfm",
             to_node_id="sink",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        edges = recorder.get_edges("run-1")
+        edges = factory.data_flow.get_edges("run-1")
         assert len(edges) == 2
 
     def test_empty_list_when_no_edges(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1011,21 +1012,21 @@ class TestGetEdges:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edges = recorder.get_edges("run-1")
+        edges = factory.data_flow.get_edges("run-1")
         assert edges == []
 
     def test_empty_for_unknown_run(self) -> None:
-        _db, recorder = _setup()
-        edges = recorder.get_edges("no-such-run")
+        _db, factory = _setup()
+        edges = factory.data_flow.get_edges("no-such-run")
         assert edges == []
 
     def test_does_not_return_edges_from_other_runs(self) -> None:
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        recorder.begin_run(config={}, canonical_version="v1", run_id="run-A")
-        recorder.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory = make_factory(db)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
 
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-A",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1034,7 +1035,7 @@ class TestGetEdges:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-A",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -1043,7 +1044,7 @@ class TestGetEdges:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_edge(
+        factory.data_flow.register_edge(
             run_id="run-A",
             from_node_id="src",
             to_node_id="sink",
@@ -1051,14 +1052,14 @@ class TestGetEdges:
             mode=RoutingMode.MOVE,
         )
 
-        edges_a = recorder.get_edges("run-A")
-        edges_b = recorder.get_edges("run-B")
+        edges_a = factory.data_flow.get_edges("run-A")
+        edges_b = factory.data_flow.get_edges("run-B")
         assert len(edges_a) == 1
         assert edges_b == []
 
     def test_edges_ordered_by_creation(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1067,7 +1068,7 @@ class TestGetEdges:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="xfm1",
             node_type=NodeType.TRANSFORM,
@@ -1076,7 +1077,7 @@ class TestGetEdges:
             node_id="xfm1",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="xfm2",
             node_type=NodeType.TRANSFORM,
@@ -1085,7 +1086,7 @@ class TestGetEdges:
             node_id="xfm2",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -1094,28 +1095,28 @@ class TestGetEdges:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge_1 = recorder.register_edge(
+        edge_1 = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="xfm1",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        edge_2 = recorder.register_edge(
+        edge_2 = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="xfm1",
             to_node_id="xfm2",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        edge_3 = recorder.register_edge(
+        edge_3 = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="xfm2",
             to_node_id="sink",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        edges = recorder.get_edges("run-1")
+        edges = factory.data_flow.get_edges("run-1")
         edge_ids = [e.edge_id for e in edges]
         assert edge_ids == [edge_1.edge_id, edge_2.edge_id, edge_3.edge_id]
 
@@ -1129,8 +1130,8 @@ class TestGetEdge:
     """Tests for DataFlowRepository.get_edge -- Tier 1 audit integrity."""
 
     def test_roundtrip(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1139,7 +1140,7 @@ class TestGetEdge:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -1148,7 +1149,7 @@ class TestGetEdge:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        original = recorder.register_edge(
+        original = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="sink",
@@ -1156,7 +1157,7 @@ class TestGetEdge:
             mode=RoutingMode.MOVE,
             edge_id="edge-1",
         )
-        fetched = recorder.get_edge("edge-1")
+        fetched = factory.data_flow.get_edge("edge-1")
         assert fetched.edge_id == original.edge_id
         assert fetched.from_node_id == "src"
         assert fetched.to_node_id == "sink"
@@ -1165,14 +1166,14 @@ class TestGetEdge:
         assert fetched.run_id == "run-1"
 
     def test_raises_audit_integrity_error_for_unknown_edge(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         with pytest.raises(AuditIntegrityError, match="Audit integrity violation"):
-            recorder.get_edge("nonexistent-edge")
+            factory.data_flow.get_edge("nonexistent-edge")
 
     def test_raises_audit_integrity_error_message_includes_edge_id(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         with pytest.raises(AuditIntegrityError, match="nonexistent-xyz"):
-            recorder.get_edge("nonexistent-xyz")
+            factory.data_flow.get_edge("nonexistent-xyz")
 
 
 # ---------------------------------------------------------------------------
@@ -1184,8 +1185,8 @@ class TestGetEdgeMap:
     """Tests for DataFlowRepository.get_edge_map."""
 
     def test_returns_correct_mapping(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="gate",
             node_type=NodeType.GATE,
@@ -1194,7 +1195,7 @@ class TestGetEdgeMap:
             node_id="gate",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink_a",
             node_type=NodeType.SINK,
@@ -1203,7 +1204,7 @@ class TestGetEdgeMap:
             node_id="sink_a",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink_b",
             node_type=NodeType.SINK,
@@ -1212,39 +1213,39 @@ class TestGetEdgeMap:
             node_id="sink_b",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        edge_a = recorder.register_edge(
+        edge_a = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="gate",
             to_node_id="sink_a",
             label="high_risk",
             mode=RoutingMode.MOVE,
         )
-        edge_b = recorder.register_edge(
+        edge_b = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="gate",
             to_node_id="sink_b",
             label="low_risk",
             mode=RoutingMode.MOVE,
         )
-        edge_map = recorder.get_edge_map("run-1")
+        edge_map = factory.data_flow.get_edge_map("run-1")
         assert edge_map[("gate", "high_risk")] == edge_a.edge_id
         assert edge_map[("gate", "low_risk")] == edge_b.edge_id
 
     def test_raises_for_no_edges(self) -> None:
         """get_edge_map raises AuditIntegrityError when run has no edges registered."""
-        _db, recorder = _setup()
+        _db, factory = _setup()
         with pytest.raises(AuditIntegrityError, match="no edges registered"):
-            recorder.get_edge_map("run-1")
+            factory.data_flow.get_edge_map("run-1")
 
     def test_raises_for_unknown_run(self) -> None:
         """get_edge_map raises AuditIntegrityError for unknown run (no edges either)."""
-        _db, recorder = _setup()
+        _db, factory = _setup()
         with pytest.raises(AuditIntegrityError, match="no edges registered"):
-            recorder.get_edge_map("no-such-run")
+            factory.data_flow.get_edge_map("no-such-run")
 
     def test_multiple_source_nodes_with_different_labels(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1253,7 +1254,7 @@ class TestGetEdgeMap:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="gate",
             node_type=NodeType.GATE,
@@ -1262,7 +1263,7 @@ class TestGetEdgeMap:
             node_id="gate",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="xfm",
             node_type=NodeType.TRANSFORM,
@@ -1271,7 +1272,7 @@ class TestGetEdgeMap:
             node_id="xfm",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="sink",
             node_type=NodeType.SINK,
@@ -1280,28 +1281,28 @@ class TestGetEdgeMap:
             node_id="sink",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        e1 = recorder.register_edge(
+        e1 = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="src",
             to_node_id="gate",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        e2 = recorder.register_edge(
+        e2 = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="gate",
             to_node_id="xfm",
             label="continue",
             mode=RoutingMode.MOVE,
         )
-        e3 = recorder.register_edge(
+        e3 = factory.data_flow.register_edge(
             run_id="run-1",
             from_node_id="gate",
             to_node_id="sink",
             label="escalate",
             mode=RoutingMode.MOVE,
         )
-        edge_map = recorder.get_edge_map("run-1")
+        edge_map = factory.data_flow.get_edge_map("run-1")
         assert len(edge_map) == 3
         assert edge_map[("src", "continue")] == e1.edge_id
         assert edge_map[("gate", "continue")] == e2.edge_id
@@ -1317,8 +1318,8 @@ class TestGetNodeContracts:
     """Tests for DataFlowRepository.get_node_contracts."""
 
     def test_returns_none_none_when_no_contracts_set(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1327,24 +1328,24 @@ class TestGetNodeContracts:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp, out = recorder.get_node_contracts("run-1", "src")
+        inp, out = factory.data_flow.get_node_contracts("run-1", "src")
         assert inp is None
         assert out is None
 
     def test_crashes_for_unknown_node_by_default(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         with pytest.raises(AuditIntegrityError, match="Node not found"):
-            recorder.get_node_contracts("run-1", "nonexistent")
+            factory.data_flow.get_node_contracts("run-1", "nonexistent")
 
     def test_returns_none_none_for_unknown_node_when_allowed(self) -> None:
-        _db, recorder = _setup()
-        inp, out = recorder.get_node_contracts("run-1", "nonexistent", allow_missing=True)
+        _db, factory = _setup()
+        inp, out = factory.data_flow.get_node_contracts("run-1", "nonexistent", allow_missing=True)
         assert inp is None
         assert out is None
 
     def test_crashes_for_unknown_run_by_default(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1354,11 +1355,11 @@ class TestGetNodeContracts:
             schema_config=_DYNAMIC_SCHEMA,
         )
         with pytest.raises(AuditIntegrityError, match="Node not found"):
-            recorder.get_node_contracts("run-999", "src")
+            factory.data_flow.get_node_contracts("run-999", "src")
 
     def test_returns_none_none_for_unknown_run_when_allowed(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1367,12 +1368,12 @@ class TestGetNodeContracts:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp, out = recorder.get_node_contracts("run-999", "src", allow_missing=True)
+        inp, out = factory.data_flow.get_node_contracts("run-999", "src", allow_missing=True)
         assert inp is None
         assert out is None
 
     def test_returns_input_contract_when_provided(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         input_contract = _make_contract(
             mode="FIXED",
             fields=(
@@ -1381,7 +1382,7 @@ class TestGetNodeContracts:
             ),
             locked=True,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -1391,18 +1392,18 @@ class TestGetNodeContracts:
             input_contract=input_contract,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp, out = recorder.get_node_contracts("run-1", "xfm")
+        inp, out = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert inp is not None
         assert out is None
 
     def test_returns_output_contract_when_provided(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         output_contract = _make_contract(
             mode="OBSERVED",
             fields=(_make_field("result", str),),
             locked=True,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -1412,12 +1413,12 @@ class TestGetNodeContracts:
             output_contract=output_contract,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp, out = recorder.get_node_contracts("run-1", "xfm")
+        inp, out = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert inp is None
         assert out is not None
 
     def test_returns_both_contracts_when_provided(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         input_contract = _make_contract(
             mode="FIXED",
             fields=(_make_field("customer_id", str, source="declared"),),
@@ -1428,7 +1429,7 @@ class TestGetNodeContracts:
             fields=(_make_field("result", str),),
             locked=True,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -1439,12 +1440,12 @@ class TestGetNodeContracts:
             output_contract=output_contract,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp, out = recorder.get_node_contracts("run-1", "xfm")
+        inp, out = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert inp is not None
         assert out is not None
 
     def test_roundtrip_preserves_contract_fields(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         input_contract = _make_contract(
             mode="FIXED",
             fields=(
@@ -1453,7 +1454,7 @@ class TestGetNodeContracts:
             ),
             locked=True,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -1463,7 +1464,7 @@ class TestGetNodeContracts:
             input_contract=input_contract,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp, _ = recorder.get_node_contracts("run-1", "xfm")
+        inp, _ = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert inp is not None
         assert inp.mode == "FIXED"
         assert inp.locked is True
@@ -1481,8 +1482,8 @@ class TestUpdateNodeOutputContract:
     """Tests for DataFlowRepository.update_node_output_contract."""
 
     def test_sets_output_contract_on_node_without_one(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1491,7 +1492,7 @@ class TestUpdateNodeOutputContract:
             node_id="src",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        _, out = recorder.get_node_contracts("run-1", "src")
+        _, out = factory.data_flow.get_node_contracts("run-1", "src")
         assert out is None
 
         new_contract = _make_contract(
@@ -1502,19 +1503,19 @@ class TestUpdateNodeOutputContract:
             ),
             locked=True,
         )
-        recorder.update_node_output_contract("run-1", "src", new_contract)
+        factory.data_flow.update_node_output_contract("run-1", "src", new_contract)
 
-        _, out = recorder.get_node_contracts("run-1", "src")
+        _, out = factory.data_flow.get_node_contracts("run-1", "src")
         assert out is not None
 
     def test_overwrites_existing_output_contract(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         original_contract = _make_contract(
             mode="OBSERVED",
             fields=(_make_field("old_field", str),),
             locked=True,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -1524,7 +1525,7 @@ class TestUpdateNodeOutputContract:
             output_contract=original_contract,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        _, out_before = recorder.get_node_contracts("run-1", "xfm")
+        _, out_before = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert out_before is not None
         assert len(out_before.fields) == 1
 
@@ -1536,20 +1537,20 @@ class TestUpdateNodeOutputContract:
             ),
             locked=True,
         )
-        recorder.update_node_output_contract("run-1", "xfm", updated_contract)
+        factory.data_flow.update_node_output_contract("run-1", "xfm", updated_contract)
 
-        _, out_after = recorder.get_node_contracts("run-1", "xfm")
+        _, out_after = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert out_after is not None
         assert len(out_after.fields) == 2
 
     def test_does_not_affect_input_contract(self) -> None:
-        _db, recorder = _setup()
+        _db, factory = _setup()
         input_contract = _make_contract(
             mode="FIXED",
             fields=(_make_field("x", int, source="declared"),),
             locked=True,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="mapper",
             node_type=NodeType.TRANSFORM,
@@ -1559,7 +1560,7 @@ class TestUpdateNodeOutputContract:
             input_contract=input_contract,
             schema_config=_DYNAMIC_SCHEMA,
         )
-        inp_before, _ = recorder.get_node_contracts("run-1", "xfm")
+        inp_before, _ = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert inp_before is not None
 
         output_contract = _make_contract(
@@ -1567,9 +1568,9 @@ class TestUpdateNodeOutputContract:
             fields=(_make_field("y", str),),
             locked=True,
         )
-        recorder.update_node_output_contract("run-1", "xfm", output_contract)
+        factory.data_flow.update_node_output_contract("run-1", "xfm", output_contract)
 
-        inp_after, out_after = recorder.get_node_contracts("run-1", "xfm")
+        inp_after, out_after = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert inp_after is not None
         assert out_after is not None
         # Input contract unchanged
@@ -1577,8 +1578,8 @@ class TestUpdateNodeOutputContract:
         assert inp_after.fields[0].normalized_name == "x"
 
     def test_roundtrip_preserves_updated_fields(self) -> None:
-        _db, recorder = _setup()
-        recorder.register_node(
+        _db, factory = _setup()
+        factory.data_flow.register_node(
             run_id="run-1",
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -1596,9 +1597,9 @@ class TestUpdateNodeOutputContract:
             ),
             locked=True,
         )
-        recorder.update_node_output_contract("run-1", "src", contract)
+        factory.data_flow.update_node_output_contract("run-1", "src", contract)
 
-        _, out = recorder.get_node_contracts("run-1", "src")
+        _, out = factory.data_flow.get_node_contracts("run-1", "src")
         assert out is not None
         assert out.mode == "OBSERVED"
         assert out.locked is True

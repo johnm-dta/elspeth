@@ -106,7 +106,7 @@ class TestCallReplayer:
     """Tests for CallReplayer."""
 
     def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder."""
+        """Create a mock ExecutionRepository."""
         recorder = MagicMock()
         recorder.find_call_by_request_hash = MagicMock(return_value=None)
         recorder.get_call_response_data = MagicMock(return_value=CallDataResult(state=CallDataState.STORE_NOT_CONFIGURED, data=None))

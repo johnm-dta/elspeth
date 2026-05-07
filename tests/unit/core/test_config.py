@@ -404,28 +404,25 @@ class TestLandscapeSettings:
         from elspeth.core.config import LandscapeSettings
 
         # Not a valid URL format at all
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(ValidationError, match="invalid database URL format"):
             LandscapeSettings(url="not-a-valid-url")
-        assert "Invalid database URL format" in str(exc_info.value)
 
         # Missing scheme/driver
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(ValidationError, match="invalid database URL format"):
             LandscapeSettings(url="://localhost/db")
-        assert "Invalid database URL format" in str(exc_info.value)
 
     def test_landscape_settings_url_validation_rejects_empty(self) -> None:
         """Empty URL is rejected."""
         from elspeth.core.config import LandscapeSettings
 
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(ValidationError, match="must not be blank"):
             LandscapeSettings(url="")
-        assert "Invalid database URL format" in str(exc_info.value) or "missing driver" in str(exc_info.value).lower()
 
     def test_sqlcipher_backend_requires_sqlite_url(self) -> None:
         """backend='sqlcipher' with a PostgreSQL URL is rejected."""
         from elspeth.core.config import LandscapeSettings
 
-        with pytest.raises(ValidationError, match="requires a SQLite URL"):
+        with pytest.raises(ValidationError, match="requires URL scheme"):
             LandscapeSettings(backend="sqlcipher", url="postgresql://user:pass@host/db")
 
     def test_sqlcipher_backend_valid(self) -> None:
@@ -1141,7 +1138,7 @@ class TestGateSettings:
         gate = GateSettings(
             name="complex_gate",
             input="source_out",
-            condition="row['confidence'] >= 0.85 and row.get('category', 'unknown') != 'spam'",
+            condition="row['confidence'] >= 0.85 and row['category'] != 'spam'",
             routes={"true": "quality_ok", "false": "quarantine"},
         )
         assert "and" in gate.condition
@@ -1876,6 +1873,76 @@ class TestCoalesceSettings:
                 policy="require_all",
                 merge="select",
                 select_branch="enriched_primary",
+            )
+
+    # --- union_collision_policy (Task 2 of coalesce field provenance fix) ---
+
+    def test_coalesce_settings_union_collision_policy_default(self) -> None:
+        """Omitting union_collision_policy defaults to 'last_wins' (preserves existing behavior)."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        assert settings.union_collision_policy == "last_wins"
+
+    def test_coalesce_settings_union_collision_policy_explicit_last_wins(self) -> None:
+        """Explicitly setting 'last_wins' validates cleanly."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+            union_collision_policy="last_wins",
+        )
+
+        assert settings.union_collision_policy == "last_wins"
+
+    def test_coalesce_settings_union_collision_policy_first_wins(self) -> None:
+        """Setting 'first_wins' validates cleanly."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+            union_collision_policy="first_wins",
+        )
+
+        assert settings.union_collision_policy == "first_wins"
+
+    def test_coalesce_settings_union_collision_policy_fail(self) -> None:
+        """Setting 'fail' validates cleanly."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+            union_collision_policy="fail",
+        )
+
+        assert settings.union_collision_policy == "fail"
+
+    def test_coalesce_settings_union_collision_policy_invalid_raises(self) -> None:
+        """Invalid union_collision_policy values are rejected by the Literal type at parse time."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError):
+            CoalesceSettings(
+                name="merge_results",
+                branches=["path_a", "path_b"],
+                policy="require_all",
+                merge="union",
+                union_collision_policy="crash",
             )
 
 
@@ -2779,6 +2846,61 @@ sinks:
         assert sanitized == url
         assert fingerprint is None
         assert had_password is False
+
+    def test_dsn_query_param_password_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Query-param ?password=secret must be scrubbed from sanitized URL.
+
+        Regression test for elspeth-ef062449ca: _sanitize_dsn() only checked
+        parsed.password (userinfo), missing credentials in query parameters.
+        """
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "postgresql://user@host/db?password=secret&sslmode=require"
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert "secret" not in sanitized
+        assert "sslmode=require" in sanitized
+        assert had_password is True
+
+    def test_dsn_query_param_pwd_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Query-param ?pwd=secret must also be scrubbed."""
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "postgresql://user@host/db?pwd=secret&sslmode=require"
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert "secret" not in sanitized
+        assert had_password is True
+
+    def test_dsn_odbc_connect_pwd_scrubbed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ODBC connect string PWD= inside ?odbc_connect= must be scrubbed."""
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BSQL+Server%7D%3BPWD%3Dsecret123"
+        sanitized, _fingerprint, had_password = _sanitize_dsn(url)
+
+        assert "secret123" not in sanitized
+        assert had_password is True
+
+    def test_dsn_query_param_password_no_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Query-param password without userinfo password still detected."""
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        # No userinfo password — only query param
+        url = "postgresql://host/db?password=secret"
+        sanitized, fingerprint, had_password = _sanitize_dsn(url)
+
+        assert "secret" not in sanitized
+        assert had_password is True
+        assert fingerprint is not None
 
 
 class TestRunModeSettings:

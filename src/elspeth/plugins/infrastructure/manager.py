@@ -3,6 +3,7 @@
 Uses pluggy for hook-based plugin registration.
 """
 
+import threading
 from typing import Any
 
 import pluggy
@@ -19,9 +20,25 @@ from elspeth.plugins.infrastructure.hookspecs import (
     ElspethSourceSpec,
     ElspethTransformSpec,
 )
-from elspeth.plugins.infrastructure.validation import PluginConfigValidator
+from elspeth.plugins.infrastructure.validation import (
+    ValidationError,
+    validate_sink_config,
+    validate_source_config,
+    validate_transform_config,
+)
 
 _logger = structlog.get_logger(__name__)
+
+
+class PluginNotFoundError(ValueError):
+    """Raised when a plugin name is not found in the registry."""
+
+
+def _raise_if_invalid(errors: list[ValidationError], label: str, name: str) -> None:
+    """Raise ValueError with formatted message if validation errors exist."""
+    if errors:
+        error_lines = [f"  - {err.field}: {err.message}" for err in errors]
+        raise ValueError(f"Invalid configuration for {label} '{name}':\n" + "\n".join(error_lines))
 
 
 class PluginManager:
@@ -47,9 +64,6 @@ class PluginManager:
         self._sources: dict[str, type[SourceProtocol]] = {}
         self._transforms: dict[str, type[TransformProtocol]] = {}
         self._sinks: dict[str, type[SinkProtocol]] = {}
-
-        # Config validator
-        self._validator = PluginConfigValidator()
 
     def register_builtin_plugins(self) -> None:
         """Discover and register all built-in plugins.
@@ -164,7 +178,7 @@ class PluginManager:
             return self._sources[name]
 
         available = sorted(self._sources.keys())
-        raise ValueError(f"Unknown source plugin: {name}. Available source plugins: {available}")
+        raise PluginNotFoundError(f"Unknown source plugin: {name}. Available source plugins: {available}")
 
     def get_transform_by_name(self, name: str) -> type[TransformProtocol]:
         """Get transform plugin class by name.
@@ -182,7 +196,7 @@ class PluginManager:
             return self._transforms[name]
 
         available = sorted(self._transforms.keys())
-        raise ValueError(f"Unknown transform plugin: {name}. Available transform plugins: {available}")
+        raise PluginNotFoundError(f"Unknown transform plugin: {name}. Available transform plugins: {available}")
 
     def get_sink_by_name(self, name: str) -> type[SinkProtocol]:
         """Get sink plugin class by name.
@@ -200,7 +214,7 @@ class PluginManager:
             return self._sinks[name]
 
         available = sorted(self._sinks.keys())
-        raise ValueError(f"Unknown sink plugin: {name}. Available sink plugins: {available}")
+        raise PluginNotFoundError(f"Unknown sink plugin: {name}. Available sink plugins: {available}")
 
     # === Plugin creation with validation ===
 
@@ -218,12 +232,8 @@ class PluginManager:
             ValueError: If config is invalid or plugin type not found
         """
         # Validate config first
-        errors = self._validator.validate_source_config(source_type, config)
-        if errors:
-            # Format errors into readable message with field names
-            error_lines = [f"  - {err.field}: {err.message}" for err in errors]
-            error_msg = f"Invalid configuration for source '{source_type}':\n" + "\n".join(error_lines)
-            raise ValueError(error_msg)
+        errors = validate_source_config(source_type, config)
+        _raise_if_invalid(errors, "source", source_type)
 
         # Get plugin class
         plugin_cls = self.get_source_by_name(source_type)
@@ -245,12 +255,8 @@ class PluginManager:
             ValueError: If config is invalid or plugin type not found
         """
         # Validate config first
-        errors = self._validator.validate_transform_config(transform_type, config)
-        if errors:
-            # Format errors into readable message with field names
-            error_lines = [f"  - {err.field}: {err.message}" for err in errors]
-            error_msg = f"Invalid configuration for transform '{transform_type}':\n" + "\n".join(error_lines)
-            raise ValueError(error_msg)
+        errors = validate_transform_config(transform_type, config)
+        _raise_if_invalid(errors, "transform", transform_type)
 
         # Get plugin class
         plugin_cls = self.get_transform_by_name(transform_type)
@@ -272,15 +278,44 @@ class PluginManager:
             ValueError: If config is invalid or plugin type not found
         """
         # Validate config first
-        errors = self._validator.validate_sink_config(sink_type, config)
-        if errors:
-            # Format errors into readable message with field names
-            error_lines = [f"  - {err.field}: {err.message}" for err in errors]
-            error_msg = f"Invalid configuration for sink '{sink_type}':\n" + "\n".join(error_lines)
-            raise ValueError(error_msg)
+        errors = validate_sink_config(sink_type, config)
+        _raise_if_invalid(errors, "sink", sink_type)
 
         # Get plugin class
         plugin_cls = self.get_sink_by_name(sink_type)
 
         # Instantiate with validated config
         return plugin_cls(config)
+
+
+# --- Shared singleton ---
+
+_shared_instance: PluginManager | None = None
+_shared_lock = threading.Lock()
+
+
+def get_shared_plugin_manager() -> PluginManager:
+    """Return the shared plugin manager singleton.
+
+    Creates a PluginManager and calls register_builtin_plugins() on first
+    invocation.  Returns the same instance on all subsequent calls.
+    Used by both CLI and web entry points.
+
+    Thread-safe: a lock ensures only one thread performs initialization.
+    If registration fails, the global is NOT set — the next call will retry
+    rather than returning a half-initialized manager.
+    """
+    global _shared_instance
+    instance = _shared_instance
+    if instance is not None:
+        return instance
+    with _shared_lock:
+        # Double-checked locking: another thread may have initialized
+        # while we waited for the lock.
+        instance = _shared_instance
+        if instance is not None:
+            return instance
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+        _shared_instance = manager
+        return manager

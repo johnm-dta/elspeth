@@ -25,9 +25,10 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.events import (
     GateEvaluated,
@@ -99,17 +100,17 @@ class MockExporter:
 
     def export(self, event: TelemetryEvent) -> None:
         if self._fail_export:
-            raise RuntimeError(f"Simulated export failure in {self._name}")
+            raise ConnectionError(f"Simulated export failure in {self._name}")
         self.exports.append(event)
 
     def flush(self) -> None:
         if self._fail_flush:
-            raise RuntimeError(f"Simulated flush failure in {self._name}")
+            raise ConnectionError(f"Simulated flush failure in {self._name}")
         self.flush_count += 1
 
     def close(self) -> None:
         if self._fail_close:
-            raise RuntimeError(f"Simulated close failure in {self._name}")
+            raise ConnectionError(f"Simulated close failure in {self._name}")
         self.close_count += 1
 
 
@@ -122,7 +123,7 @@ class ToggleableExporter(MockExporter):
 
     def export(self, event: TelemetryEvent) -> None:
         if self._fail_export:
-            raise RuntimeError(f"Simulated failure in {self._name}")
+            raise ConnectionError(f"Simulated failure in {self._name}")
         self.exports.append(event)
 
 
@@ -210,7 +211,8 @@ def make_token_completed(run_id: str, row_id: str, timestamp: datetime | None = 
         run_id=run_id,
         row_id=row_id,
         token_id=f"token-{row_id}",
-        outcome=RowOutcome.COMPLETED,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.DEFAULT_FLOW,
         sink_name="output",
     )
 
@@ -456,12 +458,20 @@ class TelemetryManagerStateMachine(RuleBasedStateMachine):
 
     @rule()
     def check_success_resets_consecutive_count(self) -> None:
-        """After any success (partial or full), consecutive_total_failures is 0."""
+        """After any success (partial or full), consecutive_total_failures is 0.
+
+        Note: With circuit breakers, a "success" only happens if the exporter
+        is actually called. If all circuit breakers are OPEN, no export occurs
+        and the counter is not reset.
+        """
         if self.manager._disabled:
             return
 
-        # If last event was a success (any exporter worked)
-        if not self.all_exporters_failing:
+        # Check if any circuit breaker is OPEN - if so, success may not have occurred
+        any_breaker_open = any(breaker.is_open() for breaker in self.manager._circuit_breakers.values())
+
+        # If last event was a success (any exporter worked) AND all breakers were closed
+        if not self.all_exporters_failing and not any_breaker_open:
             assert self.manager._consecutive_total_failures == 0
 
 
@@ -476,6 +486,9 @@ class AllExportersFailStateMachine(RuleBasedStateMachine):
     - Consecutive failure counter increments correctly
     - Disabled threshold is honored
     - Events stop being counted after disable
+
+    Note: Circuit breakers trip after 5 failures, so we set max_consecutive_failures=5
+    to ensure the manager disables before breakers trip OPEN.
     """
 
     def __init__(self) -> None:
@@ -483,7 +496,9 @@ class AllExportersFailStateMachine(RuleBasedStateMachine):
         self.failing1 = MockExporter("failing1", fail_export=True)
         self.failing2 = MockExporter("failing2", fail_export=True)
 
-        self.config = MockConfig(fail_on_total_exporter_failure=False)
+        # max_consecutive_failures must be ≤ breaker's failure_threshold (5)
+        # so the manager disables before breakers trip OPEN.
+        self.config = MockConfig(fail_on_total_exporter_failure=False, max_consecutive_failures=5)
         self.manager = TelemetryManager(
             self.config,
             exporters=[self.failing1, self.failing2],
@@ -516,13 +531,13 @@ class AllExportersFailStateMachine(RuleBasedStateMachine):
     def dropped_count_frozen_after_disable(self) -> None:
         """Dropped count stops incrementing after disable."""
         if self.manager._disabled:
-            # Dropped count should be frozen at exactly 10 (the threshold)
-            assert self.manager.health_metrics["events_dropped"] == 10
+            # Dropped count should be frozen at exactly 5 (the threshold)
+            assert self.manager.health_metrics["events_dropped"] == 5
 
     @invariant()
     def disable_happens_at_threshold(self) -> None:
         """Manager disables exactly at max_consecutive_failures threshold."""
-        if self.events_sent_before_disable >= 10:
+        if self.events_sent_before_disable >= 5:
             assert self.manager._disabled is True
 
 

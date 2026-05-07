@@ -2,7 +2,7 @@
 
 Functions: diagnose, get_failure_context, get_recent_activity.
 
-All functions accept (db, recorder) as their first two parameters.
+All functions accept (db, factory) as their first two parameters.
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from elspeth.contracts.enums import TerminalPath
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.types import (
     DiagnosticReport,
     ErrorResult,
@@ -21,7 +23,7 @@ from elspeth.mcp.types import (
 )
 
 
-def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
+def diagnose(db: LandscapeDB, factory: RecorderFactory) -> DiagnosticReport:
     """Emergency diagnostic: What's broken right now?
 
     Scans for failed runs, high error rates, stuck runs, and recent problems.
@@ -29,7 +31,7 @@ def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
 
     Returns:
         Diagnostic summary with problems, recent failures, and recommendations
@@ -177,7 +179,7 @@ def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
             quarantined_count = (
                 conn.execute(
                     select(func.count(token_outcomes_table.c.outcome_id))
-                    .where(token_outcomes_table.c.outcome == "quarantined")
+                    .where(token_outcomes_table.c.path == TerminalPath.QUARANTINED_AT_SOURCE.value)
                     .where(token_outcomes_table.c.run_id.in_(recent_run_ids))
                 ).scalar()
                 or 0
@@ -217,7 +219,7 @@ def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
     }
 
 
-def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str, limit: int = 10) -> FailureContextReport | ErrorResult:
+def get_failure_context(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int = 10) -> FailureContextReport | ErrorResult:
     """Get comprehensive context about failures in a run.
 
     Use this when investigating why a run failed. Returns failed node states,
@@ -225,7 +227,7 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to investigate
         limit: Max failures to return
 
@@ -241,7 +243,7 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
         validation_errors_table,
     )
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
@@ -259,7 +261,7 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
                 nodes_table.c.plugin_name,
                 nodes_table.c.node_type,
             )
-            .join(
+            .outerjoin(
                 nodes_table,
                 (node_states_table.c.node_id == nodes_table.c.node_id) & (node_states_table.c.run_id == nodes_table.c.run_id),
             )
@@ -304,6 +306,16 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
             .limit(limit)
         ).fetchall()
 
+    # Corruption guard: failed node_states always reference a node — missing node is Tier 1 corruption
+    for s in failed_states:
+        if s.plugin_name is None:
+            msg = (
+                f"Tier-1 corruption: node_states row (state_id={s.state_id!r}) "
+                f"references node_id={s.node_id!r} but no matching node exists "
+                f"in nodes table for run_id={run_id!r}"
+            )
+            raise AuditIntegrityError(msg)
+
     failed_state_list = [
         {
             "state_id": s.state_id,
@@ -316,6 +328,16 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
         }
         for s in failed_states
     ]
+
+    # Corruption guard: transform_errors always reference a transform node
+    for e in transform_errors:
+        if e.plugin_name is None:
+            msg = (
+                f"Tier-1 corruption: transform_errors row references "
+                f"transform_id={e.transform_id!r} but no matching node exists "
+                f"in nodes table for run_id={run_id!r}"
+            )
+            raise AuditIntegrityError(msg)
 
     transform_error_list = [
         {
@@ -334,7 +356,7 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
                 f"Tier-1 corruption: validation_errors row has node_id={e.node_id!r} "
                 f"but no matching node in nodes table for run_id={run_id!r}"
             )
-            raise RuntimeError(msg)
+            raise AuditIntegrityError(msg)
         plugin = e.plugin_name  # None means no associated plugin node — don't fabricate "unknown"
         validation_error_list.append(
             {
@@ -369,14 +391,14 @@ def get_failure_context(db: LandscapeDB, recorder: LandscapeRecorder, run_id: st
     }
 
 
-def get_recent_activity(db: LandscapeDB, recorder: LandscapeRecorder, minutes: int = 60) -> RecentActivityReport:
+def get_recent_activity(db: LandscapeDB, factory: RecorderFactory, minutes: int = 60) -> RecentActivityReport:
     """Get recent pipeline activity timeline.
 
     Use this to understand what happened recently when investigating issues.
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         minutes: Look back this many minutes (default 60)
 
     Returns:

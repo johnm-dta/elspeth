@@ -8,9 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts.enums import RunStatus
-from elspeth.contracts.errors import AuditIntegrityError, DependencyFailedError, FrameworkBugError
+from elspeth.contracts.errors import DependencyFailedError, GracefulShutdownError
 from elspeth.contracts.pipeline_runner import PipelineRunner
 from elspeth.core.canonical import canonical_json
 from elspeth.core.dependency_config import DependencyConfig, DependencyRunResult
@@ -25,21 +27,39 @@ def _load_depends_on(settings_path: Path) -> list[dict[str, str]]:
 
     Tier 3 boundary: validates structure of operator-authored YAML.
     """
-    with settings_path.open() as f:
-        data = yaml.safe_load(f) or {}
+    with settings_path.open(encoding="utf-8") as f:
+        try:
+            loaded = yaml.safe_load(f)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Invalid YAML in {settings_path}: {exc}") from exc
+
+    if loaded is None:
+        return []
+
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{settings_path} must be a YAML mapping (key: value), got {type(loaded).__name__}")
+
     # Tier 3 boundary: raw YAML from operator-authored files.
     # Absent depends_on means "no dependencies" (not "unknown") — empty list
     # is meaning-preserving, matching the common case for leaf pipelines.
-    deps: list[dict[str, str]] = data.get("depends_on", [])
-    if not isinstance(deps, list):
-        raise ValueError(f"depends_on in {settings_path} must be a list, got {type(deps).__name__}")
-    for i, dep in enumerate(deps):
+    raw_deps = loaded.get("depends_on", [])
+    if not isinstance(raw_deps, list):
+        raise ValueError(f"depends_on in {settings_path} must be a list, got {type(raw_deps).__name__}")
+
+    deps: list[dict[str, str]] = []
+    for i, dep in enumerate(raw_deps):
         if not isinstance(dep, dict):
             raise ValueError(f"depends_on[{i}] in {settings_path} must be a mapping, got {type(dep).__name__}")
         if "name" not in dep:
             raise ValueError(f"depends_on[{i}] in {settings_path} missing required key 'name'")
         if "settings" not in dep:
             raise ValueError(f"depends_on[{i}] in {settings_path} missing required key 'settings'")
+        try:
+            validated = DependencyConfig.model_validate(dep)
+        except ValidationError as exc:
+            raise ValueError(f"Invalid depends_on[{i}] in {settings_path}: {exc}") from exc
+        deps.append({"name": validated.name, "settings": validated.settings})
+
     return deps
 
 
@@ -115,10 +135,12 @@ def resolve_dependencies(
             run_result = runner(dep_path)
         except KeyboardInterrupt:
             raise
-        except (FrameworkBugError, AuditIntegrityError):
-            # Fatal errors propagate unwrapped — the CLI's fatal-error
+        except contract_errors.TIER_1_ERRORS:
+            # Tier 1 errors propagate unwrapped — the CLI's fatal-error
             # handler must see these at their original severity, not
             # downgraded to an ordinary DependencyFailedError.
+            raise
+        except GracefulShutdownError:
             raise
         except (TypeError, AttributeError, NotImplementedError, AssertionError, NameError, KeyError, RecursionError):
             # Programming errors crash through — these indicate bugs

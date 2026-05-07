@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+import elspeth.contracts.errors as contract_errors
+from elspeth.contracts.errors import FrameworkBugError
 from elspeth.plugins.infrastructure.batching.ports import OutputPort
 from elspeth.plugins.infrastructure.batching.row_reorder_buffer import (
     RowReorderBuffer,
@@ -194,6 +195,10 @@ class BatchTransformMixin:
             ValueError: If ctx.token is None
             ShutdownError: If batch processing is shut down
         """
+        # Guard: reject rows after shutdown signal (before touching buffer)
+        if self._batch_shutdown.is_set():
+            raise ShutdownError("Batch processing has been shut down")
+
         # No defensive fallback - ctx.token is required (CLAUDE.md compliance)
         if ctx.token is None:
             raise ValueError("BatchTransformMixin requires ctx.token to be set. This is a bug in the calling code.")
@@ -211,14 +216,35 @@ class BatchTransformMixin:
                 self._batch_submissions[(token.token_id, state_id)] = ticket
 
         # Submit to worker pool
-        self._batch_executor.submit(
-            self._process_and_complete,
-            ticket,
-            token,
-            row,
-            ctx,
-            processor,
-        )
+        try:
+            self._batch_executor.submit(
+                self._process_and_complete,
+                ticket,
+                token,
+                row,
+                ctx,
+                processor,
+            )
+        except RuntimeError:
+            # The row has already been admitted to the FIFO buffer. Convert a
+            # shutdown-time submit race into an explicit row failure so the
+            # waiter/output path is satisfied and no ticket is stranded.
+            if state_id is not None:
+                with self._batch_submissions_lock:
+                    submission_key = (token.token_id, state_id)
+                    if submission_key in self._batch_submissions:
+                        self._batch_submissions.pop(submission_key)
+
+            from elspeth.contracts import TransformResult
+
+            shutdown_result = TransformResult.error(
+                {
+                    "reason": "shutdown_requested",
+                    "error": "thread pool shut down during submission",
+                },
+                retryable=False,
+            )
+            self._complete_ticket(ticket, token, shutdown_result, state_id)
 
     def _process_and_complete(
         self,
@@ -250,33 +276,39 @@ class BatchTransformMixin:
 
         try:
             result = processor(row, ctx)
-        except (FrameworkBugError, AuditIntegrityError):
-            raise  # System bugs and audit corruption must crash immediately — never wrap
         except Exception as e:
-            # Plugin bug - wrap exception for propagation to orchestrator
-            # The waiter will re-raise this exception in the main thread
+            # Worker threads cannot crash the orchestrator directly. Transport
+            # both plugin bugs and Tier 1 exceptions through the waiter path so
+            # the orchestrator thread re-raises the original exception instead
+            # of timing out waiting for a result.
             tb = traceback.format_exc()
-
-            # Import here to avoid circular dependency at module load time
             from elspeth.contracts import ExceptionResult
 
             exception_result = ExceptionResult(exception=e, traceback=tb)
-            # KeyError means ticket was evicted due to timeout — discard late result.
-            # This is expected when a waiter times out and retry proceeds
-            # while the original worker was still processing.
-            try:
-                self._batch_buffer.complete(ticket, (token, exception_result, state_id))
-            except KeyError:
-                _logger.debug("late_result_discarded", token_id=token.token_id, state_id=state_id, reason="timeout_evicted")
+            self._complete_ticket(ticket, token, exception_result, state_id)
             return
 
         # Mark complete — result will be released in FIFO order
         # Include state_id for retry-safe waiter matching
-        # KeyError means ticket was evicted due to timeout — discard late result.
+        self._complete_ticket(ticket, token, result, state_id)
+
+    def _complete_ticket(
+        self,
+        ticket: RowTicket,
+        token: TokenInfo,
+        result: TransformResult | ExceptionResult,
+        state_id: str | None,
+    ) -> None:
+        """Complete a ticket, discarding late results after timeout eviction."""
         try:
             self._batch_buffer.complete(ticket, (token, result, state_id))
-        except KeyError:
-            _logger.debug("late_result_discarded", token_id=token.token_id, state_id=state_id, reason="timeout_evicted")
+        except (KeyError, ShutdownError):
+            _logger.debug(
+                "late_result_discarded",
+                token_id=token.token_id,
+                state_id=state_id,
+                reason="timeout_evicted_or_shutdown",
+            )
 
     def _release_loop(self) -> None:
         """Release thread: emit results in FIFO order to output port.
@@ -344,8 +376,8 @@ class BatchTransformMixin:
                     # Emit exception result so waiter can re-raise in orchestrator thread
                     # state_id is from the current entry (captured above before exception)
                     self._batch_output.emit(token, exception_result, state_id)
-                except (FrameworkBugError, AuditIntegrityError):
-                    raise  # System bugs and audit corruption must crash immediately
+                except contract_errors.TIER_1_ERRORS:
+                    raise  # Tier 1 errors must crash immediately
                 except Exception as emit_err:
                     # Port is completely broken — crash the release thread.
                     # A broken output port is a system bug: silently continuing
@@ -417,7 +449,7 @@ class BatchTransformMixin:
 
         return self._batch_buffer.evict(ticket)
 
-    def shutdown_batch_processing(self, timeout: float = 30.0) -> None:
+    def shutdown_batch_processing(self, timeout: float = 30.0, *, wait_for_workers: bool = True) -> None:
         """Shutdown batch processing gracefully.
 
         Call this in close() or cleanup.
@@ -432,6 +464,11 @@ class BatchTransformMixin:
         the buffer raises ShutdownError. This ensures the loop keeps emitting
         completed results until the buffer is explicitly shut down AFTER
         workers have finished.
+
+        When wait_for_workers is False, shutdown is cancellation-oriented:
+        queued work is cancelled and completed late results are discarded
+        rather than blocking close() behind provider calls that the run has
+        already abandoned.
         """
         # 1. Signal shutdown (accept_row will raise ShutdownError on new submits)
         self._batch_shutdown.set()
@@ -439,7 +476,7 @@ class BatchTransformMixin:
         # 2. Wait for worker pool to finish current tasks.
         #    After this returns, all workers have called complete() on their
         #    tickets, so the release loop can drain every remaining entry.
-        self._batch_executor.shutdown(wait=True)
+        self._batch_executor.shutdown(wait=wait_for_workers, cancel_futures=not wait_for_workers)
 
         # 3. Shutdown buffer -- this wakes the release thread with ShutdownError
         #    so it exits after draining all completed entries.

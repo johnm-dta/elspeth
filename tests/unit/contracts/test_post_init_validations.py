@@ -8,8 +8,10 @@ import pytest
 
 from elspeth.contracts.config.runtime import RuntimeTelemetryConfig
 from elspeth.contracts.enums import BackpressureMode, RoutingKind, RoutingMode, TelemetryGranularity
+from elspeth.contracts.errors import ConfigGateReason
 from elspeth.contracts.routing import EdgeInfo, RoutingAction, RoutingSpec
 from elspeth.contracts.sink import OutputValidationResult
+from elspeth.contracts.types import NodeID
 
 
 class TestRuntimeTelemetryConfigPostInit:
@@ -68,18 +70,18 @@ class TestRoutingSpecPostInit:
 class TestEdgeInfoPostInit:
     def test_rejects_empty_from_node(self) -> None:
         with pytest.raises(ValueError, match="from_node must not be empty"):
-            EdgeInfo(from_node="", to_node="b", label="x", mode=RoutingMode.MOVE)
+            EdgeInfo(from_node=NodeID(""), to_node=NodeID("b"), label="x", mode=RoutingMode.MOVE)
 
     def test_rejects_empty_to_node(self) -> None:
         with pytest.raises(ValueError, match="to_node must not be empty"):
-            EdgeInfo(from_node="a", to_node="", label="x", mode=RoutingMode.MOVE)
+            EdgeInfo(from_node=NodeID("a"), to_node=NodeID(""), label="x", mode=RoutingMode.MOVE)
 
     def test_rejects_empty_label(self) -> None:
         with pytest.raises(ValueError, match="label must not be empty"):
-            EdgeInfo(from_node="a", to_node="b", label="", mode=RoutingMode.MOVE)
+            EdgeInfo(from_node=NodeID("a"), to_node=NodeID("b"), label="", mode=RoutingMode.MOVE)
 
     def test_accepts_valid(self) -> None:
-        edge = EdgeInfo(from_node="a", to_node="b", label="continue", mode=RoutingMode.MOVE)
+        edge = EdgeInfo(from_node=NodeID("a"), to_node=NodeID("b"), label="continue", mode=RoutingMode.MOVE)
         assert edge.from_node == "a"
 
 
@@ -88,7 +90,7 @@ class TestRoutingActionReasonCopy:
 
     def test_direct_construction_copies_reason(self) -> None:
         """Direct construction should deep-copy reason to prevent mutation."""
-        reason = {"condition": "x > 1", "result": "true"}
+        reason: ConfigGateReason = {"condition": "x > 1", "result": "true"}
         action = RoutingAction(
             kind=RoutingKind.CONTINUE,
             destinations=(),
@@ -98,16 +100,48 @@ class TestRoutingActionReasonCopy:
         # Mutating the original dict should NOT affect the action
         reason["condition"] = "MUTATED"
         assert action.reason is not None
-        assert action.reason["condition"] == "x > 1"
+        assert action.reason["condition"] == "x > 1"  # type: ignore[typeddict-item]
 
     def test_factory_also_protects(self) -> None:
         """Factory methods also protect via __post_init__ copy."""
-        reason = {"condition": "x > 1", "result": "true"}
+        reason: ConfigGateReason = {"condition": "x > 1", "result": "true"}
         action = RoutingAction.continue_(reason=reason)
         reason["condition"] = "MUTATED"
         assert action.reason is not None
-        assert action.reason["condition"] == "x > 1"
+        assert action.reason["condition"] == "x > 1"  # type: ignore[typeddict-item]
 
     def test_none_reason_accepted(self) -> None:
         action = RoutingAction.continue_()
         assert action.reason is None
+
+
+class TestOutputValidationResultDeepFreeze:
+    """Collection fields must be deeply frozen on direct construction."""
+
+    def test_direct_construction_freezes_lists(self) -> None:
+        from elspeth.contracts.sink import OutputValidationResult
+
+        target: list[str] = ["a", "b"]
+        result = OutputValidationResult(
+            valid=True,
+            target_fields=target,  # type: ignore[arg-type]
+        )
+        target.append("mutated")
+        assert isinstance(result.target_fields, tuple)
+        assert "mutated" not in result.target_fields
+
+    def test_all_collection_fields_frozen(self) -> None:
+        from elspeth.contracts.sink import OutputValidationResult
+
+        result = OutputValidationResult(
+            valid=False,
+            target_fields=["a"],  # type: ignore[arg-type]
+            schema_fields=["b"],  # type: ignore[arg-type]
+            missing_fields=["c"],  # type: ignore[arg-type]
+            extra_fields=["d"],  # type: ignore[arg-type]
+            error_message="mismatch",
+        )
+        assert isinstance(result.target_fields, tuple)
+        assert isinstance(result.schema_fields, tuple)
+        assert isinstance(result.missing_fields, tuple)
+        assert isinstance(result.extra_fields, tuple)

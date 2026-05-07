@@ -8,27 +8,27 @@ import pytest
 from elspeth.testing import make_pipeline_row
 
 
-class TestRowOutcome:
-    """Terminal states for rows."""
+class TestTerminalPairEnums:
+    """ADR-019 terminal pair enums are part of the plugin result API."""
 
     def test_all_terminal_states_exist(self) -> None:
-        from elspeth.plugins.infrastructure.results import RowOutcome
+        from elspeth.plugins.infrastructure.results import TerminalOutcome, TerminalPath
 
-        # Every row must reach exactly one terminal state
-        assert RowOutcome.COMPLETED.value == "completed"
-        assert RowOutcome.ROUTED.value == "routed"
-        assert RowOutcome.FORKED.value == "forked"
-        assert RowOutcome.CONSUMED_IN_BATCH.value == "consumed_in_batch"
-        assert RowOutcome.COALESCED.value == "coalesced"
-        assert RowOutcome.QUARANTINED.value == "quarantined"
-        assert RowOutcome.FAILED.value == "failed"
+        assert TerminalOutcome.SUCCESS.value == "success"
+        assert TerminalOutcome.FAILURE.value == "failure"
+        assert TerminalOutcome.TRANSIENT.value == "transient"
+        assert TerminalPath.DEFAULT_FLOW.value == "default_flow"
+        assert TerminalPath.GATE_ROUTED.value == "gate_routed"
+        assert TerminalPath.BATCH_CONSUMED.value == "batch_consumed"
+        assert TerminalPath.BUFFERED.value == "buffered"
 
     def test_outcome_is_enum(self) -> None:
         from enum import Enum
 
-        from elspeth.plugins.infrastructure.results import RowOutcome
+        from elspeth.plugins.infrastructure.results import TerminalOutcome, TerminalPath
 
-        assert issubclass(RowOutcome, Enum)
+        assert issubclass(TerminalOutcome, Enum)
+        assert issubclass(TerminalPath, Enum)
 
 
 class TestRoutingAction:
@@ -347,8 +347,9 @@ class TestSourceRow:
     def test_valid_factory_passes_post_init(self) -> None:
         """SourceRow.valid() produces a row that passes __post_init__ validation."""
         from elspeth.contracts import SourceRow
+        from elspeth.testing import make_contract
 
-        row = SourceRow.valid({"a": 1})
+        row = SourceRow.valid({"a": 1}, contract=make_contract({"a": 1}))
         assert not row.is_quarantined
         assert row.quarantine_error is None
         assert row.quarantine_destination is None
@@ -369,16 +370,18 @@ class TestPluginsPublicAPI:
     def test_results_importable(self) -> None:
         from elspeth.plugins.infrastructure.results import (
             RoutingAction,
-            RowOutcome,
             SourceRow,
+            TerminalOutcome,
+            TerminalPath,
             TransformResult,
         )
 
         # NOTE: AcceptResult deleted in aggregation structural cleanup
         # NOTE: GateResult removed — gates are config-driven, not plugins
         assert RoutingAction is not None
-        assert RowOutcome is not None
         assert SourceRow is not None
+        assert TerminalOutcome is not None
+        assert TerminalPath is not None
         assert TransformResult is not None
 
     def test_context_importable(self) -> None:

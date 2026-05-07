@@ -35,8 +35,9 @@ from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.base_classes import create_observed_contract
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
 def _create_test_schema_contract() -> SchemaContract:
@@ -62,13 +63,13 @@ class TestAggregationRecoveryIntegration:
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         return {
             "db": db,
             "checkpoint_manager": checkpoint_mgr,
             "recovery_manager": recovery_mgr,
-            "recorder": recorder,
+            "factory": factory,
         }
 
     @pytest.fixture
@@ -92,11 +93,11 @@ class TestAggregationRecoveryIntegration:
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
-        recorder = test_env["recorder"]
+        factory: RecorderFactory = test_env["factory"]
 
         # === PHASE 1: Normal execution until crash ===
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"count": 3}}},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=_create_test_schema_contract(),
@@ -108,26 +109,26 @@ class TestAggregationRecoveryIntegration:
         # Record source rows and create tokens
         tokens = []
         for i in range(3):
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": i * 100},
             )
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
 
         # Create batch and add members
-        batch = recorder.create_batch(
+        batch = factory.execution.create_batch(
             run_id=run.run_id,
             aggregation_node_id="sum_aggregator",
         )
         for i, token in enumerate(tokens):
-            recorder.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
+            factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
 
         # Simulate checkpoint before flush — construct typed DTO
         agg_state = AggregationCheckpointState(
-            version="3.0",
+            version="4.0",
             nodes={
                 "sum_aggregator": AggregationNodeCheckpoint(
                     tokens=tuple(
@@ -140,6 +141,7 @@ class TestAggregationRecoveryIntegration:
                             expand_group_id=None,
                             row_data={"id": i, "value": i * 100},
                             contract_version="test",
+                            contract={"mode": "OBSERVED", "locked": True, "version_hash": "test", "fields": []},
                         )
                         for i, t in enumerate(tokens)
                     ),
@@ -147,7 +149,6 @@ class TestAggregationRecoveryIntegration:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
-                    contract={"mode": "OBSERVED", "locked": True, "version_hash": "test", "fields": []},
                 ),
             },
         )
@@ -161,8 +162,8 @@ class TestAggregationRecoveryIntegration:
         )
 
         # Simulate crash during flush
-        recorder.update_batch_status(batch.batch_id, BatchStatus.EXECUTING)
-        recorder.complete_run(run.run_id, status=RunStatus.FAILED)
+        factory.execution.update_batch_status(batch.batch_id, BatchStatus.EXECUTING)
+        factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.FAILED)
 
         # === PHASE 2: Verify recovery is possible ===
 
@@ -177,32 +178,32 @@ class TestAggregationRecoveryIntegration:
         # === PHASE 3: Execute recovery steps ===
 
         # Find incomplete batches
-        incomplete = recorder.get_incomplete_batches(run.run_id)
+        incomplete = factory.execution.get_incomplete_batches(run.run_id)
         assert len(incomplete) == 1
         assert incomplete[0].batch_id == batch.batch_id
         assert incomplete[0].status == BatchStatus.EXECUTING
 
         # Mark executing as failed (crash interrupted)
-        recorder.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+        factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
 
         # Retry the batch
-        retry_batch = recorder.retry_batch(batch.batch_id)
+        retry_batch = factory.execution.retry_batch(batch.batch_id)
         assert retry_batch.attempt == 1
         assert retry_batch.status == BatchStatus.DRAFT
 
         # Verify members were copied
-        retry_members = recorder.get_batch_members(retry_batch.batch_id)
+        retry_members = factory.execution.get_batch_members(retry_batch.batch_id)
         assert len(retry_members) == 3
 
         # === PHASE 4: Verify final state ===
 
         # Original batch is failed
-        original_batch = recorder.get_batch(batch.batch_id)
+        original_batch = factory.execution.get_batch(batch.batch_id)
         assert original_batch is not None
         assert original_batch.status == BatchStatus.FAILED
 
         # Retry batch exists
-        all_batches = recorder.get_batches(run.run_id, node_id="sum_aggregator")
+        all_batches = factory.execution.get_batches(run.run_id, node_id="sum_aggregator")
         assert len(all_batches) == 2  # Original + retry
 
         # Verify attempt progression
@@ -214,9 +215,9 @@ class TestAggregationRecoveryIntegration:
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
-        recorder = test_env["recorder"]
+        factory: RecorderFactory = test_env["factory"]
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"aggregations": ["sum", "count"]},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=_create_test_schema_contract(),
@@ -234,32 +235,32 @@ class TestAggregationRecoveryIntegration:
         # Create rows and tokens
         tokens = []
         for i in range(4):
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": i * 10},
             )
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
 
         # Create batch for sum_aggregator (completed successfully)
-        sum_batch = recorder.create_batch(
+        sum_batch = factory.execution.create_batch(
             run_id=run.run_id,
             aggregation_node_id="sum_aggregator",
         )
         for i, token in enumerate(tokens[:2]):
-            recorder.add_batch_member(sum_batch.batch_id, token.token_id, ordinal=i)
-        recorder.update_batch_status(sum_batch.batch_id, BatchStatus.COMPLETED)
+            factory.execution.add_batch_member(sum_batch.batch_id, token.token_id, ordinal=i)
+        factory.execution.update_batch_status(sum_batch.batch_id, BatchStatus.COMPLETED)
 
         # Create batch for count_aggregator (crashed during execution)
-        count_batch = recorder.create_batch(
+        count_batch = factory.execution.create_batch(
             run_id=run.run_id,
             aggregation_node_id="count_aggregator",
         )
         for i, token in enumerate(tokens[2:]):
-            recorder.add_batch_member(count_batch.batch_id, token.token_id, ordinal=i)
-        recorder.update_batch_status(count_batch.batch_id, BatchStatus.EXECUTING)
+            factory.execution.add_batch_member(count_batch.batch_id, token.token_id, ordinal=i)
+        factory.execution.update_batch_status(count_batch.batch_id, BatchStatus.EXECUTING)
 
         # Checkpoint at last processed token — typed DTO
         checkpoint_mgr.create_checkpoint(
@@ -268,7 +269,7 @@ class TestAggregationRecoveryIntegration:
             node_id="count_aggregator",
             sequence_number=3,
             aggregation_state=AggregationCheckpointState(
-                version="3.0",
+                version="4.0",
                 nodes={
                     "count_aggregator": AggregationNodeCheckpoint(
                         tokens=tuple(
@@ -281,6 +282,7 @@ class TestAggregationRecoveryIntegration:
                                 expand_group_id=None,
                                 row_data={},
                                 contract_version="test",
+                                contract={"mode": "OBSERVED", "locked": True, "version_hash": "test", "fields": []},
                             )
                             for t in tokens[2:]
                         ),
@@ -288,21 +290,20 @@ class TestAggregationRecoveryIntegration:
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
-                        contract={"mode": "OBSERVED", "locked": True, "version_hash": "test", "fields": []},
                     ),
                 },
             ),
             graph=mock_graph,
         )
 
-        recorder.complete_run(run.run_id, status=RunStatus.FAILED)
+        factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.FAILED)
 
         # Verify recovery
         check = recovery_mgr.can_resume(run.run_id, mock_graph)
         assert check.can_resume is True
 
         # Only count_aggregator batch should be incomplete
-        incomplete = recorder.get_incomplete_batches(run.run_id)
+        incomplete = factory.execution.get_incomplete_batches(run.run_id)
         assert len(incomplete) == 1
         assert incomplete[0].aggregation_node_id == "count_aggregator"
         assert incomplete[0].status == BatchStatus.EXECUTING
@@ -311,9 +312,9 @@ class TestAggregationRecoveryIntegration:
         """Verify batch member ordinals are preserved through retry."""
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
-        recorder = test_env["recorder"]
+        factory: RecorderFactory = test_env["factory"]
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "order_preservation"},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=_create_test_schema_contract(),
@@ -324,26 +325,26 @@ class TestAggregationRecoveryIntegration:
         # Create 5 rows with specific order
         tokens = []
         for i in range(5):
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id="source",
                 row_index=i,
                 data={"seq": i, "data": f"item_{i}"},
             )
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
 
         # Create batch with specific member ordering
-        batch = recorder.create_batch(
+        batch = factory.execution.create_batch(
             run_id=run.run_id,
             aggregation_node_id="sum_aggregator",
         )
         # Add in reverse order to test ordinal preservation
         for i, token in enumerate(reversed(tokens)):
-            recorder.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
+            factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=i)
 
         # Mark as failed for retry
-        recorder.update_batch_status(batch.batch_id, BatchStatus.FAILED)
+        factory.execution.update_batch_status(batch.batch_id, BatchStatus.FAILED)
 
         # Checkpoint
         checkpoint_mgr.create_checkpoint(
@@ -355,11 +356,11 @@ class TestAggregationRecoveryIntegration:
         )
 
         # Retry
-        retry_batch = recorder.retry_batch(batch.batch_id)
+        retry_batch = factory.execution.retry_batch(batch.batch_id)
 
         # Verify member order is preserved
-        original_members = recorder.get_batch_members(batch.batch_id)
-        retry_members = recorder.get_batch_members(retry_batch.batch_id)
+        original_members = factory.execution.get_batch_members(batch.batch_id)
+        retry_members = factory.execution.get_batch_members(retry_batch.batch_id)
 
         assert len(retry_members) == len(original_members)
         for orig, retry in zip(original_members, retry_members, strict=False):
@@ -369,9 +370,9 @@ class TestAggregationRecoveryIntegration:
     def test_recovery_cannot_retry_non_failed_batch(self, test_env: dict[str, Any]) -> None:
         """Verify retry_batch only works on failed batches."""
         db = test_env["db"]
-        recorder = test_env["recorder"]
+        factory: RecorderFactory = test_env["factory"]
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "retry_validation"},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=_create_test_schema_contract(),
@@ -379,33 +380,33 @@ class TestAggregationRecoveryIntegration:
 
         self._register_nodes_raw(db, run.run_id)
 
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id="source",
             row_index=0,
             data={"id": 0},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
-        batch = recorder.create_batch(
+        batch = factory.execution.create_batch(
             run_id=run.run_id,
             aggregation_node_id="sum_aggregator",
         )
-        recorder.add_batch_member(batch.batch_id, token.token_id, ordinal=0)
+        factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=0)
 
         # Test with draft status
         with pytest.raises(AuditIntegrityError, match="can only retry failed batches"):
-            recorder.retry_batch(batch.batch_id)
+            factory.execution.retry_batch(batch.batch_id)
 
         # Test with executing status
-        recorder.update_batch_status(batch.batch_id, BatchStatus.EXECUTING)
+        factory.execution.update_batch_status(batch.batch_id, BatchStatus.EXECUTING)
         with pytest.raises(AuditIntegrityError, match="can only retry failed batches"):
-            recorder.retry_batch(batch.batch_id)
+            factory.execution.retry_batch(batch.batch_id)
 
         # Test with completed status
-        recorder.update_batch_status(batch.batch_id, BatchStatus.COMPLETED)
+        factory.execution.update_batch_status(batch.batch_id, BatchStatus.COMPLETED)
         with pytest.raises(AuditIntegrityError, match="can only retry failed batches"):
-            recorder.retry_batch(batch.batch_id)
+            factory.execution.retry_batch(batch.batch_id)
 
     def _register_nodes_raw(
         self,
@@ -495,11 +496,11 @@ class TestAggregationRecoveryIntegration:
 
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
-        recorder = test_env["recorder"]
+        factory: RecorderFactory = test_env["factory"]
 
         # === PHASE 1: Original run with timeout trigger ===
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"timeout_seconds": 60}}},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=_create_test_schema_contract(),
@@ -514,15 +515,22 @@ class TestAggregationRecoveryIntegration:
         # Simulate accepting 3 rows over time
         tokens = []
         for i in range(3):
-            row_obj = recorder.create_row(
+            row_obj = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": i * 100},
             )
-            token = recorder.create_token(row_id=row_obj.row_id)
+            token = factory.data_flow.create_token(row_id=row_obj.row_id)
             tokens.append(token)
             evaluator.record_accept()
+
+        batch = factory.execution.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="sum_aggregator",
+        )
+        for ordinal, token in enumerate(tokens):
+            factory.execution.add_batch_member(batch.batch_id, token.token_id, ordinal=ordinal)
 
         # Verify initial state: 3 rows accepted, no trigger yet
         assert evaluator.batch_count == 3
@@ -555,17 +563,17 @@ class TestAggregationRecoveryIntegration:
                     expand_group_id=None,
                     row_data={},
                     contract_version=contract_version,
+                    contract=contract.to_checkpoint_format(),
                 )
                 for t in tokens
             ),
-            batch_id="batch-001",
+            batch_id=batch.batch_id,
             elapsed_age_seconds=elapsed,  # Bug #6 fix: store elapsed time
             count_fire_offset=evaluator.get_count_fire_offset(),  # P2-2026-02-01
             condition_fire_offset=evaluator.get_condition_fire_offset(),  # P2-2026-02-01
-            contract=contract.to_checkpoint_format(),
         )
         agg_state = AggregationCheckpointState(
-            version="3.0",
+            version="4.0",
             nodes={"sum_aggregator": sum_agg_node},
         )
 
@@ -582,7 +590,7 @@ class TestAggregationRecoveryIntegration:
         )
 
         # Simulate crash
-        recorder.complete_run(run.run_id, status=RunStatus.FAILED)
+        factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.FAILED)
 
         # === PHASE 2: Resume and verify timeout preservation ===
 
@@ -606,7 +614,7 @@ class TestAggregationRecoveryIntegration:
         }
 
         executor = AggregationExecutor(
-            recorder=recorder,
+            execution=factory.execution,
             span_factory=span_factory,
             step_resolver=lambda node_id: 1,
             run_id=run.run_id,

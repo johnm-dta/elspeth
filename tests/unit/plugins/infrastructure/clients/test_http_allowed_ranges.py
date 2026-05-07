@@ -25,11 +25,11 @@ from elspeth.core.security.web import SSRFSafeRequest
 
 
 @pytest.fixture
-def mock_recorder():
-    """Minimal LandscapeRecorder mock for AuditedHTTPClient."""
-    recorder = Mock()
-    recorder.record_call = Mock()
-    return recorder
+def mock_execution():
+    """Minimal ExecutionRepository mock for AuditedHTTPClient."""
+    execution = Mock()
+    execution.record_call = Mock()
+    return execution
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ class TestRedirectAllowedRangesThreading:
     capture the kwargs it receives during redirect processing.
     """
 
-    def test_allowed_ranges_passed_to_redirect_validation(self, mock_recorder, mock_telemetry_emit) -> None:
+    def test_allowed_ranges_passed_to_redirect_validation(self, mock_execution, mock_telemetry_emit) -> None:
         """allowed_ranges from get_ssrf_safe reaches validate_url_for_ssrf in redirect hop."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
@@ -65,6 +65,7 @@ class TestRedirectAllowedRangesThreading:
             port=80,
             path="/start",
             scheme="http",
+            bare_hostname="example.com",
         )
 
         # Build a redirect SSRFSafeRequest that validate_url_for_ssrf would return
@@ -75,10 +76,11 @@ class TestRedirectAllowedRangesThreading:
             port=80,
             path="/redirected",
             scheme="http",
+            bare_hostname="localhost",
         )
 
         client = AuditedHTTPClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="test-run",
             telemetry_emit=mock_telemetry_emit,
@@ -135,7 +137,7 @@ class TestRedirectAllowedRangesThreading:
         finally:
             client.close()
 
-    def test_empty_allowed_ranges_default_preserved_in_redirect(self, mock_recorder, mock_telemetry_emit) -> None:
+    def test_empty_allowed_ranges_default_preserved_in_redirect(self, mock_execution, mock_telemetry_emit) -> None:
         """When no allowed_ranges is passed to get_ssrf_safe, redirect hops get default ()."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
@@ -146,6 +148,7 @@ class TestRedirectAllowedRangesThreading:
             port=80,
             path="/start",
             scheme="http",
+            bare_hostname="example.com",
         )
 
         redirect_safe_request = SSRFSafeRequest(
@@ -155,10 +158,11 @@ class TestRedirectAllowedRangesThreading:
             port=80,
             path="/page",
             scheme="http",
+            bare_hostname="other.example.com",
         )
 
         client = AuditedHTTPClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="test-run",
             telemetry_emit=mock_telemetry_emit,
@@ -208,7 +212,7 @@ class TestRedirectAllowedRangesThreading:
         finally:
             client.close()
 
-    def test_allowed_ranges_not_threaded_when_no_redirect(self, mock_recorder, mock_telemetry_emit) -> None:
+    def test_allowed_ranges_not_threaded_when_no_redirect(self, mock_execution, mock_telemetry_emit) -> None:
         """When response is not a redirect, validate_url_for_ssrf is not called again."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
@@ -221,10 +225,11 @@ class TestRedirectAllowedRangesThreading:
             port=80,
             path="/page",
             scheme="http",
+            bare_hostname="example.com",
         )
 
         client = AuditedHTTPClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="test-run",
             telemetry_emit=mock_telemetry_emit,

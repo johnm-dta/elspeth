@@ -1,7 +1,10 @@
 """Plugin protocols — structural contracts for Source, Transform, Sink plugins.
 
 These protocols define what methods plugins must implement.
-They're used for type checking, not runtime enforcement (that's pluggy's job).
+They're primarily used for type checking (that's pluggy's job for runtime
+enforcement), with one exception: TransformProtocol is @runtime_checkable
+because the engine uses isinstance() to discriminate transforms from gates
+and coalesce nodes during DAG traversal.
 
 Plugin Types:
 - Source: Loads data into the system (one per run)
@@ -21,13 +24,37 @@ if TYPE_CHECKING:
     from elspeth.contracts.data import PluginSchema
     from elspeth.contracts.diversion import SinkWriteResult
     from elspeth.contracts.results import SourceRow, TransformResult
-    from elspeth.contracts.schema_contract import PipelineRow
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
 
 
-@runtime_checkable
+class PluginConfigProtocol(Protocol):
+    """Minimal type shape for plugin config classes.
+
+    Captures only the interface that callers of get_config_model() actually
+    use: from_dict() for validation and model_json_schema() for schema
+    generation.  Defined here in L0/contracts to avoid a structural
+    dependency from contracts → plugins/infrastructure/config_base.
+    """
+
+    @classmethod
+    def from_dict(
+        cls,
+        config: object,
+        *,
+        plugin_name: str | None = None,
+    ) -> Any:
+        """Create config from dict with validation."""
+        ...
+
+    @classmethod
+    def model_json_schema(cls) -> dict[str, Any]:
+        """Return JSON Schema for this config model."""
+        ...
+
+
 class SourceProtocol(Protocol):
-    """Protocol for source plugins.
+    """Protocol for source plugins — type-checking only, not @runtime_checkable.
 
     Sources load data into the system. There is exactly one source per run.
 
@@ -53,7 +80,7 @@ class SourceProtocol(Protocol):
                 with open(self.path) as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        yield SourceRow.valid(row)
+                        yield SourceRow.valid(row, contract=contract)
     """
 
     name: str
@@ -64,6 +91,7 @@ class SourceProtocol(Protocol):
     # Audit metadata
     determinism: Determinism
     plugin_version: str
+    source_file_hash: str | None
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -72,6 +100,10 @@ class SourceProtocol(Protocol):
     # Success routing: sink name for rows that pass source validation
     # All sources must set this - config-based sources get it from SourceDataConfig
     on_success: str
+
+    # Producer-guarantee declaration surface (ADR-016).
+    # Set from the source's effective SchemaConfig guarantees at construction.
+    declared_guaranteed_fields: frozenset[str]
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
@@ -136,6 +168,46 @@ class SourceProtocol(Protocol):
         """
         ...
 
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfigProtocol] | None:
+        """Return the Pydantic config model for this plugin type.
+
+        Returns None for sources with no config (e.g. NullSource).
+        Override for dynamic dispatch based on config contents.
+        """
+        ...
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Return the full JSON Schema advertising this plugin's configuration.
+
+        Contract
+        --------
+        The catalog flattens this schema at discovery time, before any
+        runtime config has been selected, so the return value MUST
+        describe the plugin's **complete** configuration surface —
+        every field a caller could legally supply under every
+        runtime-selected branch.
+
+        Single-model plugins inherit a default (on
+        :class:`~elspeth.plugins.infrastructure.base.BaseSource`) that
+        renders ``cls.config_model.model_json_schema()`` (or ``{}`` when
+        ``config_model`` is None, e.g. NullSource).
+
+        Plugins whose *effective* configuration is a discriminated union
+        — even if ``config_model`` is set to a base class used as a
+        dispatch anchor, as LLMTransform does — **MUST** override this
+        to emit ``oneOf`` + ``$defs`` over every branch. Rendering the
+        anchor alone publishes a contract missing every variant-specific
+        required field, which is exactly the contract this API exists to
+        prevent.
+
+        This docstring is the canonical contract cross-referenced from
+        the Transform, BatchTransform, and Sink Protocol variants and
+        from the three base-class default implementations.
+        """
+        ...
+
 
 @runtime_checkable
 class TransformProtocol(Protocol):
@@ -186,6 +258,7 @@ class TransformProtocol(Protocol):
     # Audit metadata
     determinism: Determinism
     plugin_version: str
+    source_file_hash: str | None
 
     # Lifecycle guard (set by BaseTransform.on_start()).
     # The TransformExecutor checks this before process() to ensure on_start()
@@ -196,11 +269,28 @@ class TransformProtocol(Protocol):
     # When True, transform must implement BatchTransformProtocol instead
     is_batch_aware: bool
 
+    # Batch-aware row-mode opt-in. Batch-aware plugins default to aggregation
+    # placement unless they explicitly set this True.
+    supports_row_mode_when_batch_aware: bool
+
     # Token creation flag for deaggregation
     # When True, process() may return TransformResult.success_multi(rows)
     # and new tokens will be created for each output row.
     # When False, success_multi() is only valid in passthrough aggregation mode.
     creates_tokens: bool
+
+    # Pass-through contract flag (ADR-007).
+    # When True, process() UNCONDITIONALLY emits rows containing every field
+    # present on the input row (plus declared_output_fields), regardless of
+    # row content or runtime state. Enables the DAG validator to propagate
+    # predecessor guarantees through this transform. Verified at runtime by
+    # TransformExecutor's cross-check; mis-annotation raises
+    # PassThroughContractViolation (TIER_1).
+    passes_through_input: bool
+
+    # ADR-012 empty-emission governance declaration.
+    # True means the transform may intentionally emit zero rows on success.
+    can_drop_rows: bool
 
     # Field collision enforcement (centralized in TransformExecutor).
     # Transforms that add fields to the output row declare WHAT fields they add
@@ -209,6 +299,11 @@ class TransformProtocol(Protocol):
     # mandatory (not opt-in per plugin). Empty frozenset = no fields added = no check.
     declared_output_fields: frozenset[str]
 
+    # ADR-013 pre-emission declaration surface.
+    # Normalized from TransformDataConfig.required_input_fields at construction
+    # time. Empty frozenset = no required-input declaration.
+    declared_input_fields: frozenset[str]
+
     # DAG contract: output schema for transforms that declare output fields.
     # Set by BaseTransform._build_output_schema_config() after declared_output_fields
     # is populated. None for shape-preserving transforms that add no fields.
@@ -216,10 +311,14 @@ class TransformProtocol(Protocol):
     # a corresponding _output_schema_config (raises FrameworkBugError otherwise).
     _output_schema_config: SchemaConfig | None
 
-    # Input validation (centralized in TransformExecutor).
-    # When True, executor validates input against input_schema before process().
-    # Defaults to False — only enabled via plugin config (validate_input: true).
-    validate_input: bool
+    def effective_static_contract(self) -> frozenset[str]:
+        """Return the transform's static output guarantee surface.
+
+        Runtime declaration dispatchers use this public method instead of
+        reaching into ``_output_schema_config`` directly, so missing or stale
+        output-schema declarations crash at the transform boundary.
+        """
+        ...
 
     # Error routing configuration
     # Injected by cli_helpers.py bridge from TransformSettings.on_error.
@@ -271,10 +370,34 @@ class TransformProtocol(Protocol):
         """Called after all rows processed or on error, before close(). Individually protected."""
         ...
 
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfigProtocol] | None:
+        """Return the Pydantic config model for this plugin type.
 
-@runtime_checkable
+        Override for dynamic dispatch (e.g. LLMTransform selects provider-specific
+        model based on config["provider"]).
+        """
+        ...
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Return the full JSON Schema advertising this plugin's configuration.
+
+        Same contract as :meth:`SourceProtocol.get_config_schema` — see
+        there for the canonical specification, including the
+        MUST-override rule for plugins whose effective configuration is
+        a discriminated union. LLMTransform is the
+        motivating example: it dispatches on ``config["provider"]`` at
+        runtime, so :meth:`~elspeth.plugins.transforms.llm.transform.LLMTransform.get_config_schema`
+        overrides to emit ``oneOf`` + ``$defs`` over every provider
+        variant; most other transforms inherit the default single-model
+        rendering on :class:`~elspeth.plugins.infrastructure.base.BaseTransform`.
+        """
+        ...
+
+
 class BatchTransformProtocol(Protocol):
-    """Protocol for batch-aware transforms.
+    """Protocol for batch-aware transforms — type-checking only, not @runtime_checkable.
 
     Batch transforms receive lists of rows and emit results. Used in aggregation
     nodes where the engine buffers rows until trigger fires.
@@ -327,14 +450,29 @@ class BatchTransformProtocol(Protocol):
     # Audit metadata
     determinism: Determinism
     plugin_version: str
+    source_file_hash: str | None
 
     # Batch support flag (must be True for BatchTransformProtocol)
     is_batch_aware: bool
+
+    # Batch-aware row-mode opt-in. Batch-aware plugins default to aggregation
+    # placement unless they explicitly set this True.
+    supports_row_mode_when_batch_aware: bool
 
     # Token creation flag for deaggregation
     # When True, process() may return TransformResult.success_multi(rows)
     # and new tokens will be created for each output row.
     creates_tokens: bool
+
+    # Pass-through contract flag (ADR-007).
+    # When True, process() UNCONDITIONALLY emits rows containing every field
+    # present on each input row. Enables DAG validator propagation; verified
+    # at runtime by TransformExecutor's cross-check (per-row in batch mode).
+    # Mis-annotation raises PassThroughContractViolation (TIER_1).
+    passes_through_input: bool
+
+    # ADR-013 pre-emission declaration surface.
+    declared_input_fields: frozenset[str]
 
     # Error routing configuration
     # Injected by cli_helpers.py bridge from AggregationSettings/TransformSettings.
@@ -378,10 +516,28 @@ class BatchTransformProtocol(Protocol):
         """Called after all rows processed or on error, before close(). Individually protected."""
         ...
 
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfigProtocol] | None:
+        """Return the Pydantic config model for this plugin type.
 
-@runtime_checkable
+        Override for dynamic dispatch based on config contents.
+        """
+        ...
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Return the full JSON Schema advertising this plugin's configuration.
+
+        Same contract as :meth:`SourceProtocol.get_config_schema` — see
+        there for the canonical specification, including the
+        MUST-override rule for plugins whose effective configuration is
+        a discriminated union.
+        """
+        ...
+
+
 class SinkProtocol(Protocol):
-    """Protocol for sink plugins.
+    """Protocol for sink plugins — type-checking only, not @runtime_checkable.
 
     Sinks output data to external destinations.
     There can be multiple sinks per run.
@@ -433,6 +589,7 @@ class SinkProtocol(Protocol):
     # Audit metadata
     determinism: Determinism
     plugin_version: str
+    source_file_hash: str | None
 
     # Resume capability
     supports_resume: bool  # Can this sink append to existing output on resume?
@@ -441,11 +598,6 @@ class SinkProtocol(Protocol):
     # Sinks that declare required fields have them checked BEFORE write().
     # Empty frozenset = no required-field check = all fields optional.
     declared_required_fields: frozenset[str]
-
-    # Input validation (centralized in SinkExecutor).
-    # When True, executor validates input against input_schema before write().
-    # Defaults to False — only enabled via plugin config (validate_input: true).
-    validate_input: bool
 
     # Write failure routing — injected by cli_helpers from SinkSettings.
     # "discard" = drop failed rows with audit record, else = failsink name.
@@ -568,6 +720,25 @@ class SinkProtocol(Protocol):
         """
         ...
 
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfigProtocol] | None:
+        """Return the Pydantic config model for this plugin type.
+
+        Override for dynamic dispatch based on config contents.
+        """
+        ...
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Return the full JSON Schema advertising this plugin's configuration.
+
+        Same contract as :meth:`SourceProtocol.get_config_schema` — see
+        there for the canonical specification, including the
+        MUST-override rule for plugins whose effective configuration is
+        a discriminated union.
+        """
+        ...
+
 
 class DisplayHeaderHost(Protocol):
     """Structural type for sinks that use display header functions.
@@ -587,4 +758,4 @@ class DisplayHeaderHost(Protocol):
     _resolved_display_headers: dict[str, str] | None
     _display_headers_resolved: bool
     _needs_resume_field_resolution: bool
-    _output_contract: Any  # SchemaContract | None — Any to avoid circular import
+    _output_contract: "SchemaContract | None"

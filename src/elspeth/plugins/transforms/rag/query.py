@@ -8,9 +8,10 @@ Three modes, all anchored on query_field:
 
 from __future__ import annotations
 
-import multiprocessing
-import queue
+import multiprocessing as mp
 import re
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -20,35 +21,31 @@ if TYPE_CHECKING:
 from jinja2 import TemplateSyntaxError, UndefinedError
 from jinja2.exceptions import SecurityError
 
+from elspeth.contracts.errors import TransformErrorReason
 from elspeth.plugins.infrastructure.templates import (
     TemplateError,
     create_sandboxed_environment,
 )
 
-# Fork context for regex subprocess — avoids spawn overhead on Linux and allows
-# the worker process to be forcibly terminated (SIGTERM) when regex times out.
-# spawn context cannot be used because the worker function is a closure and
-# closures are not picklable across spawn boundaries.
-_FORK_CTX = multiprocessing.get_context("fork")
-
 
 def _regex_worker(
     pattern: re.Pattern[str],
     text: str,
-    result_queue: multiprocessing.Queue,  # type: ignore[type-arg]
-) -> None:
-    """Run regex search in a child process and send picklable result to queue.
+) -> tuple[bool, str | None, str | None]:
+    """Run regex search in a worker process and return picklable result.
 
-    Sends a 3-tuple: (matched: bool, group0: str | None, group1: str | None).
-    re.Match objects are not picklable, so we extract the data before sending.
+    Returns a 3-tuple: (matched: bool, group0: str | None, group1: str | None).
+    re.Match objects are not picklable, so we extract the data before returning.
+
+    This is a module-level function (not a method or closure) to ensure it is
+    picklable across process boundaries — required by ProcessPoolExecutor.
     """
     match = pattern.search(text)
     if match is None:
-        result_queue.put((False, None, None))
-    else:
-        g0 = match.group(0)
-        g1 = match.group(1) if pattern.groups else None
-        result_queue.put((True, g0, g1))
+        return (False, None, None)
+    g0 = match.group(0)
+    g1 = match.group(1) if pattern.groups else None
+    return (True, g0, g1)
 
 
 @dataclass(frozen=True)
@@ -56,7 +53,7 @@ class QueryResult:
     """Result of query construction."""
 
     query: str | None = None
-    error: dict[str, Any] | None = None
+    error: TransformErrorReason | None = None
 
 
 class QueryBuilder:
@@ -67,9 +64,10 @@ class QueryBuilder:
     - Template: query_field + query_template (Jinja2)
     - Regex: query_field + query_pattern (re capture group)
 
-    Regex mode spawns a child process per call to enforce the timeout deadline.
+    Regex mode uses a ProcessPoolExecutor (max 1 worker) for timeout enforcement.
     Python threads cannot be interrupted while running C extension code (re module),
-    so process-level isolation with SIGTERM is the only reliable timeout mechanism.
+    so process-level isolation is the only reliable timeout mechanism for ReDoS.
+    The pool amortizes process creation cost across all rows in the run.
     """
 
     def __init__(
@@ -84,6 +82,7 @@ class QueryBuilder:
         self._regex_timeout = regex_timeout
         self._compiled_template: Template | None = None
         self._compiled_pattern: re.Pattern[str] | None = None
+        self._regex_pool: ProcessPoolExecutor | None = None
 
         if query_template is not None:
             env = create_sandboxed_environment()
@@ -94,6 +93,9 @@ class QueryBuilder:
 
         if query_pattern is not None:
             self._compiled_pattern = re.compile(query_pattern)
+            # Lazily create the process pool on first use. Single worker
+            # bounds concurrent process count while amortizing spawn cost.
+            self._regex_pool = ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn"))
 
     def build(self, row_data: dict[str, Any]) -> QueryResult:
         """Construct a search query from row data."""
@@ -101,11 +103,11 @@ class QueryBuilder:
 
         if extracted is None:
             return QueryResult(
-                error={
-                    "reason": "invalid_input",
-                    "field": self._query_field,
-                    "cause": "null_value",
-                }
+                error=TransformErrorReason(
+                    reason="invalid_input",
+                    field=self._query_field,
+                    cause="null_value",
+                )
             )
 
         if self._compiled_template is not None:
@@ -129,102 +131,75 @@ class QueryBuilder:
             query = self._compiled_template.render(query=extracted, row=row_data)
         except (UndefinedError, SecurityError, OverflowError, ZeroDivisionError, ArithmeticError, TypeError, ValueError) as e:
             return QueryResult(
-                error={
-                    "reason": "template_rendering_failed",
-                    "error": str(e),
-                    "field": self._query_field,
-                }
+                error=TransformErrorReason(
+                    reason="template_rendering_failed",
+                    error=str(e),
+                    field=self._query_field,
+                )
             )
         return self._validate_non_empty(query)
 
     def _build_regex(self, extracted: Any) -> QueryResult:
         assert self._compiled_pattern is not None  # guaranteed by build() guard
+        assert self._regex_pool is not None  # created when pattern is compiled
         if not isinstance(extracted, str):
             raise TypeError(
                 f"query_field '{self._query_field}' expected str, got {type(extracted).__name__} "
                 f"— upstream plugin bug (Tier 2 data must not be coerced)"
             )
-        text = extracted
-        result_queue: multiprocessing.Queue = _FORK_CTX.Queue()  # type: ignore[type-arg]
+
+        future = self._regex_pool.submit(_regex_worker, self._compiled_pattern, extracted)
         try:
-            return self._run_regex_subprocess(text, result_queue)
-        finally:
-            result_queue.close()
-            result_queue.join_thread()
-
-    def _run_regex_subprocess(
-        self,
-        text: str,
-        result_queue: multiprocessing.Queue,  # type: ignore[type-arg]
-    ) -> QueryResult:
-        """Execute regex in subprocess and interpret result.
-
-        Separated from _build_regex to keep the try/finally cleanup clean.
-        """
-        assert self._compiled_pattern is not None  # mypy type narrowing (caller guarantees)
-        p = _FORK_CTX.Process(
-            target=_regex_worker,
-            args=(self._compiled_pattern, text, result_queue),
-        )
-        p.start()
-        p.join(timeout=self._regex_timeout)
-
-        if p.is_alive():
-            p.terminate()
-            p.join(timeout=2.0)
-            if p.is_alive():
-                p.kill()
-                p.join()
+            matched, group0, group1 = future.result(timeout=self._regex_timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            # future.cancel() only prevents queued tasks from starting — it
+            # cannot kill a worker already executing C extension code (re module).
+            # shutdown(wait=False) does NOT terminate running workers; the stuck
+            # process stays alive as an orphan. We must explicitly kill it.
+            #
+            # _processes is a private dict[int, Process] — there is no public
+            # API to force-kill pool workers in CPython's ProcessPoolExecutor.
+            stuck_processes = list(self._regex_pool._processes.values())
+            self._regex_pool.shutdown(wait=False, cancel_futures=True)
+            for proc in stuck_processes:
+                if proc.is_alive():
+                    proc.kill()
+            self._regex_pool = ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn"))
             return QueryResult(
-                error={
-                    "reason": "no_regex_match",
-                    "field": self._query_field,
-                    "cause": "regex_timeout",
-                }
+                error=TransformErrorReason(
+                    reason="no_regex_match",
+                    field=self._query_field,
+                    cause="regex_timeout",
+                )
             )
-
-        # Check for subprocess crash BEFORE reading the queue.
-        # _regex_worker is system-owned code — a crash is a code bug, not a data issue.
-        # Per offensive programming rules: plugin bugs crash, they don't quarantine.
-        if p.exitcode != 0:
+        except Exception as exc:
+            # _regex_worker is system-owned code — a crash is a code bug, not a data issue.
             raise RuntimeError(
-                f"Regex worker subprocess crashed with exitcode {p.exitcode} "
-                f"while evaluating pattern {self._compiled_pattern.pattern!r} "
-                f"against field '{self._query_field}'. This is a bug in the regex "
+                f"Regex worker failed while evaluating pattern "
+                f"{self._compiled_pattern.pattern!r} against field "
+                f"'{self._query_field}': {exc}. This is a bug in the regex "
                 f"worker or the Python regex engine — not a data issue."
-            )
-
-        try:
-            matched, group0, group1 = result_queue.get_nowait()
-        except queue.Empty as exc:
-            # exitcode == 0 but queue empty — _regex_worker completed without
-            # putting a result. This should be impossible if _regex_worker is
-            # correct — it always puts exactly one tuple. Crash, don't fabricate.
-            raise RuntimeError(
-                f"Regex worker subprocess exited cleanly (exitcode 0) but produced "
-                f"no result for pattern {self._compiled_pattern.pattern!r} on field "
-                f"'{self._query_field}'. This is a bug in _regex_worker — it must "
-                f"always put exactly one result on the queue."
             ) from exc
 
         if not matched:
             return QueryResult(
-                error={
-                    "reason": "no_regex_match",
-                    "field": self._query_field,
-                    "pattern": self._compiled_pattern.pattern,
-                }
+                error=TransformErrorReason(
+                    reason="no_regex_match",
+                    field=self._query_field,
+                    pattern=self._compiled_pattern.pattern,
+                )
             )
 
         # Use group1 if the pattern has capture groups (may be None if non-participating)
         captured = group1 if self._compiled_pattern.groups else group0
         if captured is None:
             return QueryResult(
-                error={
-                    "reason": "no_regex_match",
-                    "field": self._query_field,
-                    "cause": "capture_group_empty",
-                }
+                error=TransformErrorReason(
+                    reason="no_regex_match",
+                    field=self._query_field,
+                    cause="capture_group_empty",
+                )
             )
 
         return self._validate_non_empty(captured)
@@ -232,13 +207,16 @@ class QueryBuilder:
     def _validate_non_empty(self, query: str) -> QueryResult:
         if not query.strip():
             return QueryResult(
-                error={
-                    "reason": "invalid_input",
-                    "field": self._query_field,
-                    "cause": "empty_query",
-                }
+                error=TransformErrorReason(
+                    reason="invalid_input",
+                    field=self._query_field,
+                    cause="empty_query",
+                )
             )
         return QueryResult(query=query)
 
     def close(self) -> None:
-        """No-op. Retained for API symmetry — no persistent resources to release."""
+        """Shut down the regex process pool if one was created."""
+        if self._regex_pool is not None:
+            self._regex_pool.shutdown(wait=False)
+            self._regex_pool = None

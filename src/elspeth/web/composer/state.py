@@ -1,0 +1,2177 @@
+"""CompositionState and supporting data models for pipeline composition.
+
+All dataclasses are frozen with slots. Container fields (options, routes,
+fork_to, branches) are deep-frozen via freeze_fields() in __post_init__.
+Mutation methods return new instances — they never modify the original.
+
+Layer: L3 (application).
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
+from typing import Any, Literal, Self, TypedDict
+
+from pydantic import ValidationError as PydanticValidationError
+
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.guarantee_propagation import compose_propagation
+from elspeth.contracts.plugin_semantics import SemanticEdgeContract
+from elspeth.contracts.schema import (
+    SchemaConfig,
+    get_aggregation_contract_options,
+    get_raw_node_required_fields,
+    get_raw_producer_guaranteed_fields,
+    get_raw_schema_config,
+    get_raw_sink_required_fields,
+    raw_options_have_schema,
+)
+from elspeth.core.config import TriggerConfig
+from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
+from elspeth.engine.orchestrator.validation import (
+    _ALLOWED_FAILSINK_PLUGINS,
+)
+
+NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
+EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"]
+
+_DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
+_MISSING_DECLARED_INPUT_FIELDS = object()
+_DISCARD_ROUTE_TARGET = "discard"
+
+# Sink plugin names whose configuration requires a `path` option (W6 warning).
+# MUST be a subset of the runtime sink registry — drift here means composer
+# pre-validation either misses required-path warnings (false negative) or
+# advertises plugins that don't exist (false positive). Enforced by
+# tests/unit/web/composer/test_skill_drift.py::test_file_sinks_subset_of_registered_sinks.
+_FILE_SINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineMetadata:
+    """Pipeline-level metadata.
+
+    All fields are scalars or None. frozen=True is sufficient.
+    """
+
+    name: str = "Untitled Pipeline"
+    description: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        """Reconstruct from a plain dict (inverse of to_dict serialisation)."""
+        return cls(
+            name=d["name"],
+            description=d["description"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSpec:
+    """Pipeline source configuration.
+
+    Attributes:
+        plugin: Source plugin name (e.g. "csv", "json", "dataverse").
+        on_success: Named connection point for the first downstream node.
+        options: Plugin-specific configuration (path, schema, etc.).
+        on_validation_failure: How to handle rows that fail schema validation.
+    """
+
+    plugin: str
+    on_success: str
+    options: Mapping[str, Any]
+    on_validation_failure: str
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options")
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        """Reconstruct from a plain dict (inverse of to_dict serialisation)."""
+        return cls(
+            plugin=d["plugin"],
+            on_success=d["on_success"],
+            options=d["options"],
+            on_validation_failure=d["on_validation_failure"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSpec:
+    """Transform, gate, aggregation, or coalesce node.
+
+    Attributes:
+        id: Unique node identifier within the pipeline.
+        node_type: One of "transform", "gate", "aggregation", "coalesce".
+        plugin: Plugin name. None for gates and coalesces.
+        input: Named connection point this node reads from.
+        on_success: Named connection point for successful output. None for gates.
+        on_error: Named connection point for error output. None if not diverted.
+        options: Plugin-specific configuration.
+        condition: Gate expression. None for non-gates.
+        routes: Gate route mapping. None for non-gates.
+        fork_to: Fork destinations for fork gates. None for non-fork nodes.
+        branches: Branch inputs for coalesce nodes. None for non-coalesce nodes.
+        policy: Coalesce policy. None for non-coalesce nodes.
+        merge: Coalesce merge strategy. None for non-coalesce nodes.
+        trigger: Aggregation batch trigger config. None for non-aggregation nodes.
+        output_mode: Aggregation output mode ("passthrough" or "transform"). None for non-aggregation nodes.
+        expected_output_count: Aggregation expected output count. None for non-aggregation nodes.
+    """
+
+    id: str
+    node_type: NodeType
+    plugin: str | None
+    input: str
+    on_success: str | None
+    on_error: str | None
+    options: Mapping[str, Any]
+    condition: str | None
+    routes: Mapping[str, str] | None
+    fork_to: tuple[str, ...] | None
+    branches: tuple[str, ...] | None
+    policy: str | None
+    merge: str | None
+    trigger: Mapping[str, Any] | None = None
+    output_mode: str | None = None
+    expected_output_count: int | None = None
+
+    def __post_init__(self) -> None:
+        # Mapping fields must be deep-frozen. Scalar, enum, and tuple fields
+        # (fork_to, branches) are already immutable and need no guard.
+        freeze_fields(self, "options")
+        if self.routes is not None:
+            freeze_fields(self, "routes")
+        if self.trigger is not None:
+            freeze_fields(self, "trigger")
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        """Reconstruct from a plain dict (inverse of to_dict serialisation).
+
+        Optional fields (condition, routes, fork_to, branches, policy, merge,
+        trigger, output_mode, expected_output_count) default to None when
+        absent from the dict. fork_to and branches are converted from list to
+        tuple since to_dict() serialises tuples as lists.
+        """
+        fork_to = d["fork_to"] if "fork_to" in d else None
+        branches = d["branches"] if "branches" in d else None
+        return cls(
+            id=d["id"],
+            node_type=d["node_type"],
+            plugin=d["plugin"],
+            input=d["input"],
+            on_success=d["on_success"],
+            on_error=d["on_error"],
+            options=d["options"],
+            condition=d["condition"] if "condition" in d else None,
+            routes=d["routes"] if "routes" in d else None,
+            fork_to=tuple(fork_to) if fork_to is not None else None,
+            branches=tuple(branches) if branches is not None else None,
+            policy=d["policy"] if "policy" in d else None,
+            merge=d["merge"] if "merge" in d else None,
+            trigger=d["trigger"] if "trigger" in d else None,
+            output_mode=d["output_mode"] if "output_mode" in d else None,
+            expected_output_count=d["expected_output_count"] if "expected_output_count" in d else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeSpec:
+    """Connection between two nodes.
+
+    Attributes:
+        id: Unique edge identifier.
+        from_node: Source node ID (or "source" for the pipeline source).
+        to_node: Destination node ID or sink name.
+        edge_type: One of "on_success", "on_error", "route_true", "route_false", "fork".
+        label: Display label (e.g. the route key for gate edges).
+    """
+
+    id: str
+    from_node: str
+    to_node: str
+    edge_type: EdgeType
+    label: str | None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        """Reconstruct from a plain dict (inverse of to_dict serialisation)."""
+        return cls(
+            id=d["id"],
+            from_node=d["from_node"],
+            to_node=d["to_node"],
+            edge_type=d["edge_type"],
+            label=d["label"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSpec:
+    """Sink configuration.
+
+    Attributes:
+        name: Sink name (used as connection point in edges and routes).
+        plugin: Sink plugin name (e.g. "csv", "json", "database").
+        options: Plugin-specific configuration.
+        on_write_failure: How to handle write failures ("discard" or a sink name).
+    """
+
+    name: str
+    plugin: str
+    options: Mapping[str, Any]
+    on_write_failure: str
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options")
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        """Reconstruct from a plain dict (inverse of to_dict serialisation)."""
+        return cls(
+            name=d["name"],
+            plugin=d["plugin"],
+            options=d["options"],
+            on_write_failure=d["on_write_failure"],
+        )
+
+
+Severity = Literal["high", "medium", "low"]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationEntry:
+    """Structured validation message with component attribution.
+
+    All fields are scalars. frozen=True is sufficient.
+    """
+
+    component: str
+    message: str
+    severity: Severity
+
+    def to_dict(self) -> dict[str, str]:
+        """Serialize to a plain dict for JSON responses."""
+        return {"component": self.component, "message": self.message, "severity": self.severity}
+
+
+EdgeContractDict = TypedDict(
+    "EdgeContractDict",
+    {
+        "from": str,
+        "to": str,
+        "producer_guarantees": list[str],
+        "consumer_requires": list[str],
+        "missing_fields": list[str],
+        "satisfied": bool,
+    },
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeContract:
+    """Schema contract check result for a single producer->consumer edge."""
+
+    from_id: str
+    to_id: str
+    producer_guarantees: tuple[str, ...]
+    consumer_requires: tuple[str, ...]
+    missing_fields: tuple[str, ...]
+    satisfied: bool
+
+    def to_dict(self) -> EdgeContractDict:
+        """Serialize to a plain dict for JSON responses."""
+        return {
+            "from": self.from_id,
+            "to": self.to_id,
+            "producer_guarantees": list(self.producer_guarantees),
+            "consumer_requires": list(self.consumer_requires),
+            "missing_fields": list(self.missing_fields),
+            "satisfied": self.satisfied,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationSummary:
+    """Stage 1 validation result.
+
+    errors block execution. warnings are advisory but actionable.
+    suggestions are optional improvements. edge_contracts shows
+    per-edge schema contract check results. semantic_contracts shows
+    per-edge semantic contract check results (Phase 1: line_explode +
+    web_scrape only). All are tuples for structured component
+    attribution.
+    """
+
+    is_valid: bool
+    errors: tuple[ValidationEntry, ...]
+    warnings: tuple[ValidationEntry, ...] = ()
+    suggestions: tuple[ValidationEntry, ...] = ()
+    edge_contracts: tuple[EdgeContract, ...] = ()
+    semantic_contracts: tuple[SemanticEdgeContract, ...] = ()
+
+
+def _source_options_have_schema(options: Mapping[str, Any]) -> bool:
+    """Return whether source options carry a schema under the current contract.
+
+    Composer state can contain either the user-facing ``schema`` alias or the
+    internal ``schema_config`` field name, because plugin config parsing allows
+    population by either key. Read-only summaries and validation must use the
+    same rule so they cannot drift.
+    """
+    return raw_options_have_schema(options)
+
+
+def _known_batch_aware_transform_plugins() -> frozenset[str]:
+    """Return transform names whose runtime config rejects declared inputs."""
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    transforms = get_shared_plugin_manager().get_transforms()
+    return frozenset(cls.name for cls in transforms if cls.is_batch_aware)
+
+
+def _known_batch_aware_transform_plugins_requiring_aggregation() -> frozenset[str]:
+    """Return batch-aware transform names that do not support row-mode dispatch."""
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    transforms = get_shared_plugin_manager().get_transforms()
+    return frozenset(cls.name for cls in transforms if cls.is_batch_aware and not cls.supports_row_mode_when_batch_aware)
+
+
+def _declared_input_fields_option(options: Mapping[str, Any]) -> object:
+    """Return the raw declared-input-field option, including wrapper-shaped aggregations."""
+    if _DECLARED_INPUT_FIELDS_OPTION in options:
+        return options[_DECLARED_INPUT_FIELDS_OPTION]
+
+    if "options" in options:
+        nested_options = options["options"]
+        if isinstance(nested_options, Mapping) and _DECLARED_INPUT_FIELDS_OPTION in nested_options:
+            return nested_options[_DECLARED_INPUT_FIELDS_OPTION]
+
+    return _MISSING_DECLARED_INPUT_FIELDS
+
+
+def _batch_aware_required_input_fields_error(
+    node_id: str,
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+) -> str | None:
+    """Reject ADR-013 declared input fields on batch-aware transform configs."""
+    if plugin_name is None or plugin_name not in _known_batch_aware_transform_plugins():
+        return None
+
+    declared_input_fields = _declared_input_fields_option(options)
+    if declared_input_fields is _MISSING_DECLARED_INPUT_FIELDS or declared_input_fields in (None, [], ()):
+        return None
+
+    return (
+        f"Node '{node_id}' sets required_input_fields={declared_input_fields!r}, "
+        f"but transform '{plugin_name}' is batch-aware. ADR-013 declared input "
+        "fields only have a non-batch pre-emission dispatch site; remove "
+        "required_input_fields and express batch input requirements with "
+        "schema.required_fields."
+    )
+
+
+def _batch_aware_placement_error(
+    node_id: str,
+    node_type: str,
+    plugin_name: str | None,
+    output_mode: str | None,
+) -> str | None:
+    """Reject batch-only transforms from row-mode composer placement."""
+    if plugin_name is None or plugin_name not in _known_batch_aware_transform_plugins_requiring_aggregation():
+        return None
+
+    if node_type == "transform":
+        message = (
+            f"Node '{node_id}' uses batch-aware transform '{plugin_name}' as node_type='transform'. "
+            "Batch-aware transforms require the aggregation/batch path unless the plugin explicitly supports row mode. "
+            "Configure this node as node_type='aggregation' with an aggregation trigger, or use a row-level transform instead."
+        )
+        if plugin_name == "batch_replicate":
+            message += " For batch_replicate, set output_mode: transform so replicated rows create new downstream tokens."
+        return message
+
+    if plugin_name == "batch_replicate" and node_type == "aggregation" and output_mode != "transform":
+        return (
+            f"Node '{node_id}' uses batch_replicate, which deaggregates a batch into new rows. "
+            "Configure it as an aggregation with output_mode: transform so replicated rows create new downstream tokens."
+        )
+
+    return None
+
+
+def _batch_distribution_profile_contract_options(node: NodeSpec) -> Mapping[str, Any]:
+    if node.node_type != "aggregation":
+        return node.options
+    contract_options, _owner = get_aggregation_contract_options(node.options, owner=f"node:{node.id}")
+    return contract_options
+
+
+def _batch_distribution_profile_value_field_message(
+    *,
+    value_field: str,
+    field_type: str,
+) -> str:
+    return (
+        f"batch_distribution_profile.value_field '{value_field}' is numeric-only, "
+        f"but upstream declares type {field_type} "
+        "(batch_distribution_profile.value_field.numeric). "
+        "Categorical distributions, barrier counts, and theme frequency should use batch_top_k "
+        "with field set to the categorical column and group_by as needed, not batch_distribution_profile."
+    )
+
+
+def _producer_declared_field_type(
+    producer_id: str,
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+    *,
+    node_by_id: Mapping[str, NodeSpec],
+    field_name: str,
+) -> str | None:
+    """Return a declared schema field type for a producer, or None when unknown."""
+    owner = "source" if producer_id == "source" else f"node:{producer_id}"
+    raw_schema = get_raw_schema_config(options, owner=owner)
+    if raw_schema is not None and raw_schema.fields is not None:
+        for field in raw_schema.fields:
+            if field.name == field_name:
+                return field.field_type
+        return None
+
+    if producer_id == "source":
+        return None
+
+    if producer_id not in node_by_id:
+        return None
+    producer_node = node_by_id[producer_id]
+    if producer_node.plugin is None:
+        return None
+    if producer_node.node_type not in {"transform", "aggregation"}:
+        return None
+
+    try:
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        transform = get_shared_plugin_manager().create_transform(
+            producer_node.plugin,
+            deep_thaw(producer_node.options),
+        )
+    except Exception as exc:
+        if _is_static_contract_probe_exception(exc):
+            return None
+        raise
+
+    output_schema = transform._output_schema_config
+    if output_schema is None or output_schema.fields is None:
+        return None
+    for field in output_schema.fields:
+        if field.name == field_name:
+            return field.field_type
+    return None
+
+
+def _is_static_contract_probe_exception(exc: Exception) -> bool:
+    """Return True for expected draft/config failures from static probes."""
+    from elspeth.plugins.infrastructure.config_base import PluginConfigError
+    from elspeth.plugins.infrastructure.manager import PluginNotFoundError
+    from elspeth.plugins.infrastructure.templates import TemplateError
+    from elspeth.plugins.infrastructure.validation import UnknownPluginTypeError
+
+    if isinstance(exc, (PluginConfigError, PluginNotFoundError, TemplateError, UnknownPluginTypeError)):
+        return True
+    return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
+
+
+def _batch_distribution_profile_value_field_entries(
+    source: SourceSpec | None,
+    nodes: tuple[NodeSpec, ...],
+) -> tuple[tuple[ValidationEntry, ...], tuple[ValidationEntry, ...]]:
+    """Validate numeric-only batch_distribution_profile value_field contracts."""
+    from elspeth.web.composer._producer_resolver import ProducerResolver
+
+    errors: list[ValidationEntry] = []
+    warnings: list[ValidationEntry] = []
+    node_by_id = {node.id: node for node in nodes}
+    resolver = ProducerResolver.build(
+        source=source,
+        nodes=nodes,
+        sink_names=frozenset(),
+    )
+    numeric_types = {"int", "float"}
+
+    for node in nodes:
+        if node.plugin != "batch_distribution_profile":
+            continue
+        options = _batch_distribution_profile_contract_options(node)
+        if "value_field" not in options:
+            continue
+        value_field = options["value_field"]
+        if type(value_field) is not str or not value_field.strip():
+            continue
+        value_field = value_field.strip()
+
+        producer = resolver.walk_to_real_producer(node.input)
+        if producer is None:
+            warnings.append(
+                ValidationEntry(
+                    f"node:{node.id}",
+                    (
+                        f"batch_distribution_profile.value_field '{value_field}' is numeric-only, "
+                        "but the upstream producer is unresolved "
+                        "(batch_distribution_profile.value_field.numeric). "
+                        "If this field is categorical, use batch_top_k instead."
+                    ),
+                    "high",
+                )
+            )
+            continue
+
+        field_type = _producer_declared_field_type(
+            producer.producer_id,
+            producer.plugin_name,
+            producer.options,
+            node_by_id=node_by_id,
+            field_name=value_field,
+        )
+        if field_type is None:
+            warnings.append(
+                ValidationEntry(
+                    f"node:{node.id}",
+                    (
+                        f"batch_distribution_profile.value_field '{value_field}' is numeric-only, "
+                        "but upstream schema is observed or does not declare the field type. "
+                        "Inspect a data sample before execute "
+                        "(batch_distribution_profile.value_field.numeric); "
+                        "categorical distributions should use batch_top_k."
+                    ),
+                    "high",
+                )
+            )
+            continue
+        if field_type in numeric_types:
+            continue
+        errors.append(
+            ValidationEntry(
+                f"node:{node.id}",
+                _batch_distribution_profile_value_field_message(
+                    value_field=value_field,
+                    field_type=field_type,
+                ),
+                "high",
+            )
+        )
+
+    return tuple(errors), tuple(warnings)
+
+
+def _runtime_connection_targets(
+    source: SourceSpec | None,
+    nodes: tuple[NodeSpec, ...],
+) -> set[str]:
+    """Collect runtime routing targets from connection fields.
+
+    Stage 1 validity must follow the same routing model as generate_yaml()
+    and DAG build: source/node connection fields define runtime topology, while
+    non-sink UI edges are advisory/editor state.
+    """
+    targets: set[str] = set()
+    if source is not None:
+        targets.add(source.on_success)
+    for node in nodes:
+        if node.node_type == "coalesce" and node.on_success is None:
+            targets.add(node.id)
+        elif node.on_success is not None:
+            targets.add(node.on_success)
+        if node.on_error is not None and node.on_error != "discard":
+            targets.add(node.on_error)
+        if node.routes is not None:
+            targets.update(target for target in node.routes.values() if target != _DISCARD_ROUTE_TARGET)
+        if node.fork_to is not None:
+            targets.update(node.fork_to)
+    return targets
+
+
+def _runtime_consumer_connections(nodes: tuple[NodeSpec, ...]) -> set[str]:
+    """Return connection names runtime can resolve to processing nodes."""
+    consumers = {node.input for node in nodes if node.node_type != "coalesce"}
+    for node in nodes:
+        if node.node_type == "coalesce" and node.branches is not None:
+            consumers.update(node.branches)
+    return consumers
+
+
+def _validate_runtime_route_destinations(
+    source: SourceSpec | None,
+    nodes: tuple[NodeSpec, ...],
+    outputs: tuple[OutputSpec, ...],
+) -> tuple[ValidationEntry, ...]:
+    """Mirror runtime DAG routing destination checks for terminal fields."""
+    errors: list[ValidationEntry] = []
+    output_names = {output.name for output in outputs}
+    consumer_connections = _runtime_consumer_connections(nodes)
+    _err = ValidationEntry
+
+    if source is not None:
+        target = source.on_success
+        if target not in output_names and target not in consumer_connections:
+            errors.append(
+                _err(
+                    "source",
+                    f"Source on_success '{target}' is neither a sink nor a known connection.",
+                    "high",
+                )
+            )
+
+    for node in nodes:
+        if node.node_type == "transform":
+            if node.on_success is not None and node.on_success not in output_names and node.on_success not in consumer_connections:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Transform '{node.id}' on_success '{node.on_success}' is neither a sink nor a known connection.",
+                        "high",
+                    )
+                )
+            if node.on_error is not None and node.on_error != "discard" and node.on_error not in output_names:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Transform '{node.id}' on_error '{node.on_error}' references unknown sink.",
+                        "high",
+                    )
+                )
+            continue
+
+        if node.node_type == "aggregation":
+            if node.on_success is not None and node.on_success not in output_names and node.on_success not in consumer_connections:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Aggregation '{node.id}' on_success '{node.on_success}' is neither a sink nor a known connection.",
+                        "high",
+                    )
+                )
+            continue
+
+        if node.node_type == "coalesce":
+            if node.on_success is None:
+                continue
+            if node.on_success in consumer_connections:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Coalesce '{node.id}' has on_success='{node.on_success}'. "
+                        "Coalesce on_success must point to a sink when configured.",
+                        "high",
+                    )
+                )
+            elif node.on_success not in output_names:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Coalesce '{node.id}' on_success references unknown sink '{node.on_success}'.",
+                        "high",
+                    )
+                )
+
+    return tuple(errors)
+
+
+def _validate_gate_expression(condition: str) -> str | None:
+    """Validate a gate condition expression at composition time.
+
+    Returns an error message if the expression is syntactically invalid or
+    contains forbidden constructs, or None if valid.
+
+    Uses a deferred import to keep the expression-parser dependency local to
+    the validation path. The import is L3→L1, which is layer-legal.
+    """
+    from elspeth.core.expression_parser import (
+        ExpressionParser,
+        ExpressionSecurityError,
+        ExpressionSyntaxError,
+    )
+
+    try:
+        ExpressionParser(condition)
+    except ExpressionSyntaxError as e:
+        return f"Invalid gate condition syntax: {e}"
+    except ExpressionSecurityError as e:
+        return f"Forbidden construct in gate condition: {e}"
+    return None
+
+
+def _locked_input_field_set(options: Mapping[str, Any], owner: str) -> frozenset[str] | None:
+    """Return the consumer's accepted-input field set when its input is locked.
+
+    Mirrors ``_create_explicit_schema`` (schema_factory.py): a generated input
+    Pydantic model gets ``extra="forbid"`` only when ``schema.mode == "fixed"``.
+    For ``mode: flexible`` (extras allowed) and ``mode: observed`` (no field
+    constraints), returns None so the membership rule short-circuits.
+
+    The accepted set IS the declared ``schema.fields`` — that is what the
+    Pydantic model whitelists. Fields enumerated only via ``required_fields``
+    or ``audit_fields`` do not appear in the input model and therefore are not
+    part of the accepted set.
+    """
+    schema_config = get_raw_schema_config(options, owner=owner)
+    if schema_config is None or schema_config.mode != "fixed" or schema_config.fields is None:
+        return None
+    return frozenset(field.name for field in schema_config.fields)
+
+
+def _consumer_locked_input_set(node: NodeSpec) -> frozenset[str] | None:
+    """Return the consumer node's accepted-input set when input is locked.
+
+    Aggregation nodes carry their contract under either flat ``options`` or a
+    nested ``options.options`` wrapper; resolve via ``get_aggregation_contract_options``
+    so locked-input detection uses the same alias resolution as the rest of
+    the contract pipeline. The augmented owner string the helper returns is
+    discarded so the caller's existing error-message wording is preserved.
+    """
+    owner = f"node:{node.id}"
+    if node.node_type == "aggregation":
+        contract_options, _ = get_aggregation_contract_options(node.options, owner=owner)
+        return _locked_input_field_set(contract_options, owner=owner)
+    return _locked_input_field_set(node.options, owner=owner)
+
+
+def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
+    """Return the sink's accepted-input set when its input contract is locked."""
+    return _locked_input_field_set(output.options, owner=f"output:{output.name}")
+
+
+def _check_schema_contracts(
+    source: SourceSpec | None,
+    nodes: tuple[NodeSpec, ...],
+    outputs: tuple[OutputSpec, ...],
+) -> tuple[
+    tuple[ValidationEntry, ...],
+    tuple[ValidationEntry, ...],
+    tuple[EdgeContract, ...],
+]:
+    """Validate producer/consumer schema contracts across declarative routing."""
+    from elspeth.web.composer._producer_resolver import ProducerEntry, ProducerResolver
+
+    errors: list[ValidationEntry] = []
+    contract_warnings: list[ValidationEntry] = []
+    edge_contracts: list[EdgeContract] = []
+    parse_failed_producers: set[str] = set()
+    contract_probe_failed_producers: set[str] = set()
+    sink_names = {output.name for output in outputs}
+    sink_names_frozen = frozenset(sink_names)
+    internal_connection_names: set[str] = set()
+
+    _err = ValidationEntry
+    _warn = ValidationEntry
+
+    if any(node.id == "source" for node in nodes):
+        errors.append(
+            _err(
+                "pipeline",
+                "Reserved node id 'source' cannot be used in composer state because contract walk-back uses it as the source sentinel.",
+                "high",
+            )
+        )
+        return tuple(errors), tuple(contract_warnings), ()
+
+    # The resolver builds the connection -> producer map (with the
+    # source-as-source-sentinel and same-node carve-out semantics), and
+    # reports which connections have multiple distinct producers.
+    resolver = ProducerResolver.build(
+        source=source,
+        nodes=nodes,
+        sink_names=sink_names_frozen,
+    )
+    node_by_id = {node.id: node for node in nodes}
+
+    # Schema-specific bookkeeping: track per-connection producer
+    # description (for richer duplicate-error messages) and the separate
+    # direct-to-sink producers map (sink-targeted edges that the
+    # resolver intentionally excludes from walk-back). Mirror the
+    # resolver's registration order so first-seen descriptions match
+    # the resolver's first-seen producer.
+    producer_desc: dict[str, str] = {}
+    duplicate_descs: dict[str, list[str]] = {}
+    direct_sink_producers: dict[str, list[ProducerEntry]] = {}
+
+    def _record_description(connection_name: str, description: str) -> None:
+        if connection_name in producer_desc:
+            if connection_name not in duplicate_descs:
+                duplicate_descs[connection_name] = []
+            duplicate_descs[connection_name].append(description)
+            return
+        producer_desc[connection_name] = description
+        if connection_name not in sink_names:
+            internal_connection_names.add(connection_name)
+
+    def _record_direct_sink(
+        sink_name: str,
+        producer_id: str,
+        plugin_name: str | None,
+        options: Mapping[str, Any],
+    ) -> None:
+        if sink_name not in direct_sink_producers:
+            direct_sink_producers[sink_name] = []
+        direct_sink_producers[sink_name].append(ProducerEntry(producer_id=producer_id, plugin_name=plugin_name, options=options))
+
+    if source is not None:
+        if source.on_success in sink_names:
+            _record_direct_sink(
+                source.on_success,
+                "source",
+                source.plugin,
+                source.options,
+            )
+        else:
+            _record_description(source.on_success, f"source '{source.plugin}'")
+
+    for node in nodes:
+        if node.node_type == "coalesce" and node.on_success is None:
+            _record_description(node.id, f"coalesce '{node.id}'")
+        elif node.on_success is not None:
+            if node.on_success in sink_names:
+                _record_direct_sink(node.on_success, node.id, node.plugin, node.options)
+            else:
+                _record_description(node.on_success, f"node '{node.id}' on_success")
+        if node.on_error is not None and node.on_error != "discard":
+            if node.on_error in sink_names:
+                _record_direct_sink(node.on_error, node.id, node.plugin, node.options)
+            else:
+                _record_description(node.on_error, f"node '{node.id}' on_error")
+        if node.routes is not None:
+            for route_label, target in node.routes.items():
+                if target == _DISCARD_ROUTE_TARGET:
+                    continue
+                if target in sink_names:
+                    _record_direct_sink(target, node.id, node.plugin, node.options)
+                    continue
+                # Same-node carve-out: a gate with multiple route labels
+                # mapping to the same target is idempotent, not a
+                # duplicate. The resolver applies the same carve-out, so
+                # description tracking must mirror it to keep error
+                # messages aligned.
+                resolver_owner = resolver.find_producer_for(target)
+                if resolver_owner is not None and resolver_owner.producer_id == node.id and target in producer_desc:
+                    continue
+                _record_description(target, f"gate '{node.id}' route '{route_label}'")
+        if node.fork_to is not None:
+            for branch_name in node.fork_to:
+                if branch_name in sink_names:
+                    # Fork branches that terminate at sinks behave like
+                    # direct-to-sink edges from the gate: the runtime
+                    # contract walks from the sink back through the gate
+                    # to the gate's upstream producer (matched in
+                    # _walk_producer_entry_to_real_producer's fork-vs-sink
+                    # branch). Record both the direct-sink producer entry
+                    # and the description so duplicate-error formatting
+                    # remains identical to pre-resolver behaviour.
+                    _record_direct_sink(branch_name, node.id, node.plugin, node.options)
+                    continue
+                _record_description(branch_name, f"gate '{node.id}' fork '{branch_name}'")
+
+    # Surface duplicate-producer errors using the captured descriptions.
+    for connection_name in sorted(resolver.duplicate_connections):
+        first_desc = producer_desc[connection_name]
+        # duplicate_descs may be missing if the duplicate was suppressed
+        # by the same-node route carve-out; in that case the resolver
+        # would not flag a duplicate either, so this branch is purely
+        # defensive against future divergence.
+        second_desc = duplicate_descs[connection_name][0]
+        errors.append(
+            _err(
+                f"connection:{connection_name}",
+                f"Duplicate producer for connection '{connection_name}': {first_desc} and {second_desc}.",
+                "high",
+            )
+        )
+
+    consumer_claims: list[tuple[str, str, str]] = [
+        (node.input, node.id, f"node '{node.id}'") for node in nodes if node.node_type != "coalesce"
+    ]
+    consumer_counts = Counter(connection_name for connection_name, _node_id, _desc in consumer_claims)
+    duplicate_consumers = sorted(name for name, count in consumer_counts.items() if count > 1)
+    for connection_name in duplicate_consumers:
+        dup_entries = [(node_id, desc) for name, node_id, desc in consumer_claims if name == connection_name]
+        first_node, first_desc = dup_entries[0]
+        second_node, second_desc = dup_entries[1]
+        errors.append(
+            _err(
+                f"connection:{connection_name}",
+                f"Duplicate consumer for connection '{connection_name}': "
+                f"{first_desc} ({first_node}) and {second_desc} ({second_node}). "
+                "Use a gate for fan-out.",
+                "high",
+            )
+        )
+
+    internal_connection_names.update(connection_name for connection_name, _node_id, _desc in consumer_claims)
+    overlap = sorted(internal_connection_names & sink_names)
+    if overlap:
+        errors.append(
+            _err(
+                "pipeline",
+                f"Connection names overlap with sink names: {overlap}. Connection names and sink names must be disjoint.",
+                "high",
+            )
+        )
+
+    if errors:
+        return tuple(errors), tuple(contract_warnings), ()
+
+    def _walk_producer_entry_to_real_producer(
+        producer: ProducerEntry,
+        *,
+        connection_name: str,
+        warnings: list[ValidationEntry],
+    ) -> ProducerEntry | None:
+        """Schema-specific walk-back with coalesce/fork warning emission.
+
+        Differs from ``ProducerResolver.walk_to_real_producer`` in two
+        ways: it traverses fork gates and coalesce nodes only to emit
+        skip-with-warning entries (the resolver returns None silently),
+        and it stops at coalesce nodes because schema-contract
+        propagation through coalesce branches is out of scope here.
+        """
+        visited_connections: set[str] = set()
+        current_producer = producer
+        while True:
+            if current_producer.producer_id == "source":
+                return current_producer
+
+            producer_node = resolver.get_node(current_producer.producer_id)
+            if producer_node is None:
+                return None
+            if producer_node.node_type == "coalesce":
+                warnings.append(
+                    _warn(
+                        f"node:{producer_node.id}",
+                        f"Contract check skipped because connection '{connection_name}' is produced by coalesce node '{producer_node.id}'; runtime validator will check this edge.",
+                        "medium",
+                    )
+                )
+                return None
+            if producer_node.node_type != "gate":
+                return current_producer
+            if producer_node.fork_to is not None and connection_name not in sink_names:
+                warnings.append(
+                    _warn(
+                        f"node:{producer_node.id}",
+                        f"Contract check skipped because fork gate '{producer_node.id}' produces connection '{connection_name}'; branch-aware contract validation is out of scope for composer preview.",
+                        "medium",
+                    )
+                )
+                return None
+            current_connection = producer_node.input
+            if current_connection in visited_connections:
+                warnings.append(
+                    _warn(
+                        f"connection:{connection_name}",
+                        f"Contract check skipped for connection '{connection_name}' because producer walk-back encountered a routing loop.",
+                        "medium",
+                    )
+                )
+                return None
+            visited_connections.add(current_connection)
+            next_producer = resolver.find_producer_for(current_connection)
+            if next_producer is None:
+                return None
+            current_producer = next_producer
+
+    def _walk_to_real_producer(
+        connection_name: str,
+        *,
+        warnings: list[ValidationEntry],
+    ) -> ProducerEntry | None:
+        producer = resolver.find_producer_for(connection_name)
+        if producer is None:
+            return None
+        return _walk_producer_entry_to_real_producer(
+            producer,
+            connection_name=connection_name,
+            warnings=warnings,
+        )
+
+    def _producer_owner(producer: ProducerEntry) -> str:
+        return "source" if producer.producer_id == "source" else f"node:{producer.producer_id}"
+
+    def _producer_label(producer: ProducerEntry) -> str:
+        if producer.plugin_name is not None:
+            return producer.plugin_name
+        return node_by_id[producer.producer_id].node_type
+
+    def _known_pass_through_plugins() -> frozenset[str]:
+        """Lazily compute the set of pass-through plugin names from the live registry.
+
+        Re-derived per call rather than cached at module-load — a plugin
+        registered after composer module import (dynamic packs, test fixture
+        ordering) was previously invisible to the fail-closed path. Cardinality
+        is bounded by the annotated-transform set (short, known at startup).
+
+        Reads ``cls.passes_through_input`` directly — no ``getattr`` defensive
+        default. After the Phase A annotation, ``BaseTransform`` supplies the
+        field for every transform class; a missing attribute IS a framework
+        bug and must crash here loudly, not be silently coerced to ``False``.
+        """
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        transforms = get_shared_plugin_manager().get_transforms()
+        return frozenset(cls.name for cls in transforms if cls.passes_through_input)
+
+    def _is_config_probe_exception(exc: Exception) -> bool:
+        """Return True only for expected draft/config failures from probe construction."""
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+        from elspeth.plugins.infrastructure.manager import PluginNotFoundError
+        from elspeth.plugins.infrastructure.templates import TemplateError
+        from elspeth.plugins.infrastructure.validation import UnknownPluginTypeError
+
+        if isinstance(exc, (PluginConfigError, PluginNotFoundError, TemplateError, UnknownPluginTypeError)):
+            return True
+        return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
+
+    def _effective_producer_vote(producer: ProducerEntry) -> tuple[bool, frozenset[str]]:
+        """Return (participates, guarantees) for preview propagation.
+
+        Raw schema blocks are the baseline. For transform/aggregation nodes,
+        prefer the plugin's computed output contract when construction succeeds;
+        this keeps composer preview aligned with runtime for shape-changing
+        producers like field_mapper/json_explode without turning incomplete
+        draft configs into hard Stage 1 errors.
+
+        Pass-through parity (ADR-007): for a transform whose plugin class is
+        annotated ``passes_through_input=True``, the composer preview must
+        mirror the runtime propagation — intersect the effective guarantees
+        of upstream producers with the transform's own declared output. If
+        the constructor probe fails for a *known* pass-through plugin, the
+        composer fails closed (returns ``frozenset()``) so Stage 1 rejects
+        the pipeline rather than silently serving a permissive preview that
+        would diverge from runtime rejection.
+        """
+        raw_schema = get_raw_schema_config(
+            producer.options,
+            owner=_producer_owner(producer),
+        )
+        raw_guaranteed = get_raw_producer_guaranteed_fields(
+            producer.plugin_name,
+            producer.options,
+            owner=_producer_owner(producer),
+        )
+        raw_participates = raw_schema is not None and raw_schema.participates_in_propagation
+        if not raw_participates and raw_guaranteed:
+            # Text-source heuristics can synthesize guarantees even when the
+            # observed-mode schema itself abstains.
+            raw_participates = True
+
+        if producer.producer_id == "source":
+            return raw_participates, raw_guaranteed
+
+        producer_node = node_by_id[producer.producer_id]
+        if producer_node.node_type not in {"transform", "aggregation"} or producer_node.plugin is None:
+            return raw_participates, raw_guaranteed
+
+        is_known_pass_through = producer_node.plugin in _known_pass_through_plugins()
+
+        try:
+            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+            transform = get_shared_plugin_manager().create_transform(
+                producer_node.plugin,
+                deep_thaw(producer_node.options),
+            )
+            is_pass_through_instance = transform.passes_through_input
+            output_schema_config = transform._output_schema_config
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
+            # Keep Stage 1 tolerant of partially configured draft nodes for
+            # non-pass-through transforms — constructor-time errors must not
+            # crash preview/export endpoints. For known pass-through plugins
+            # we fail closed instead, because returning the raw (more permissive)
+            # guarantees would let the composer accept pipelines the runtime
+            # would reject.
+            #
+            # REDACTED: ``str(exc)`` from plugin constructors can carry
+            # plugin option values (API URLs, file paths, DSN fragments,
+            # occasionally secrets if an option is mis-typed into a connection
+            # string), file system paths from credential-file readers, and
+            # arbitrary library text routed from third-party validators. The
+            # preview response surfaces these warnings directly to the
+            # composer UI, where they render into an unauthenticated-
+            # reachable error payload (preview is open to any logged-in
+            # session owner, not just operators with secret-read grants).
+            # Class name only — the triage signal ("something about this
+            # plugin's config is wrong") is preserved; detailed diagnosis
+            # belongs in server logs, not the UI warning list.
+            if producer.producer_id not in contract_probe_failed_producers:
+                contract_probe_failed_producers.add(producer.producer_id)
+                if is_known_pass_through:
+                    contract_warnings.append(
+                        _warn(
+                            f"node:{producer.producer_id}",
+                            f"Computed contract probe for node '{producer.producer_id}' failed during preview "
+                            f"({type(exc).__name__}); pipeline rejected "
+                            f"(pass-through transform requires successful probe to mirror runtime propagation).",
+                            "high",
+                        )
+                    )
+                else:
+                    contract_warnings.append(
+                        _warn(
+                            f"node:{producer.producer_id}",
+                            f"Computed contract probe for node '{producer.producer_id}' failed during preview "
+                            f"({type(exc).__name__}); falling back to raw schema declarations.",
+                            "medium",
+                        )
+                    )
+            if is_known_pass_through:
+                return True, frozenset()
+            return raw_participates, raw_guaranteed
+
+        if is_pass_through_instance:
+            base = output_schema_config.get_effective_guaranteed_fields() if output_schema_config is not None else frozenset()
+            inherited = _intersect_predecessor_guarantees(producer_node)
+            # ADR-009 §Clause 1: share the aggregation rule with graph.py.
+            # Composer's producer-graph is single-upstream at this level
+            # (coalesce absorbs fan-in via pre-computed output), so we pass a
+            # one-element predecessor_guarantees list to compose_propagation.
+            participates = output_schema_config.participates_in_propagation if output_schema_config is not None else raw_participates
+            return participates, compose_propagation(base, [inherited])
+
+        if output_schema_config is None:
+            return raw_participates, raw_guaranteed
+
+        base = output_schema_config.get_effective_guaranteed_fields()
+        return output_schema_config.participates_in_propagation, base
+
+    def _effective_producer_guarantees(producer: ProducerEntry) -> frozenset[str]:
+        """Return the producer guarantees Stage 1 should compare."""
+        _participates, guarantees = _effective_producer_vote(producer)
+        return guarantees
+
+    def _connection_propagation_vote(connection_name: str) -> tuple[bool, frozenset[str]]:
+        """Resolve a connection's propagation vote across structural nodes.
+
+        Unlike ``_walk_to_real_producer()``, this helper is only used for
+        pass-through inheritance and therefore follows structural fan-out/fan-in
+        nodes instead of treating them as preview-stopping boundaries.
+        """
+        producer = resolver.find_producer_for(connection_name)
+        if producer is None:
+            return False, frozenset()
+
+        if producer.producer_id == "source":
+            return _effective_producer_vote(producer)
+
+        producer_node = node_by_id[producer.producer_id]
+        if producer_node.node_type == "gate":
+            return _connection_propagation_vote(producer_node.input)
+
+        if producer_node.node_type == "coalesce":
+            if not producer_node.branches:
+                return False, frozenset()
+
+            branch_schemas: dict[str, SchemaConfig] = {}
+            for branch_connection in producer_node.branches:
+                branch_participates, branch_guarantees = _connection_propagation_vote(branch_connection)
+                if not branch_participates:
+                    continue
+                branch_schemas[branch_connection] = SchemaConfig(
+                    mode="observed",
+                    fields=None,
+                    guaranteed_fields=tuple(sorted(branch_guarantees)),
+                )
+
+            if not branch_schemas:
+                return False, frozenset()
+
+            merged = merge_guaranteed_fields(
+                branch_schemas,
+                require_all=producer_node.policy == "require_all",
+            )
+            return True, frozenset(merged or ())
+
+        return _effective_producer_vote(producer)
+
+    def _intersect_predecessor_guarantees(node: NodeSpec) -> frozenset[str]:
+        """Mirror the runtime propagation walk in the composer's producer graph.
+
+        Per ADR-009 §Clause 1, the aggregation rule (``compose_propagation``)
+        and the participation predicate (``SchemaConfig.participates_in_propagation``)
+        are shared with ``graph.py::_walk_effective_guaranteed_fields``. The
+        traversal logic remains separate — the composer walks a
+        producer-graph (L3, connection-by-connection via
+        ``_connection_propagation_vote``)
+        while graph.py walks the runtime DAG (L1, multi-predecessor). The
+        two views legitimately differ; unifying traversal would pollute
+        layers without eliminating duplication.
+
+        For pass-through inheritance, the composer must preserve structural
+        guarantee semantics across fork gates and coalesce nodes instead of
+        treating them as preview-stopping boundaries. The recursive
+        connection vote helper follows those structural nodes and returns the
+        effective guarantee set the downstream pass-through transform should
+        intersect with its own declarations.
+        """
+        _participates, guarantees = _connection_propagation_vote(node.input)
+        return guarantees
+
+    def _format_fields(fields: frozenset[str]) -> str:
+        return ", ".join(sorted(fields)) if fields else "(none)"
+
+    def _producer_emit_set(producer: ProducerEntry) -> frozenset[str]:
+        """Return the producer's *predicted emit* field set.
+
+        This is distinct from ``_effective_producer_guarantees``: that one returns
+        the producer's *declared* output set (``get_effective_guaranteed_fields``,
+        which unions ``guaranteed_fields`` with declared-required ``fields``).
+        Field-set membership rules need the *actual* emission — the set the
+        runtime will see — which equals ``_output_schema_config.guaranteed_fields``
+        for transforms whose plugins compute their own emit set
+        (``field_mapper``, ``batch_stats``, etc.). When the two sets diverge,
+        the transform itself is internally inconsistent (caught by the per-node
+        self-consistency loop below); using the declared set for downstream
+        Rule A/B checks would cascade Rule C breakage into spurious extras
+        attribution at downstream consumers/sinks.
+
+        For sources (no instance) and probe-failed transforms, falls back to
+        the declared set — those are the cases where we don't have a separate
+        emission inference, and the declared/raw set is the best signal.
+        """
+        if producer.producer_id == "source":
+            return _effective_producer_guarantees(producer)
+
+        producer_node = node_by_id.get(producer.producer_id)
+        if producer_node is None or producer_node.plugin is None:
+            return _effective_producer_guarantees(producer)
+        if producer_node.node_type not in {"transform", "aggregation"}:
+            return _effective_producer_guarantees(producer)
+
+        try:
+            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+            transform = get_shared_plugin_manager().create_transform(
+                producer_node.plugin,
+                deep_thaw(producer_node.options),
+            )
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
+            return _effective_producer_guarantees(producer)
+
+        output_config = transform._output_schema_config
+        if output_config is None or output_config.guaranteed_fields is None:
+            # No computed emit set available — fall back to declared.
+            return _effective_producer_guarantees(producer)
+        return frozenset(output_config.guaranteed_fields)
+
+    for node in nodes:
+        try:
+            consumer_required = get_raw_node_required_fields(
+                node.options,
+                owner=f"node:{node.id}",
+                node_type=node.node_type,
+            )
+        except ValueError as exc:
+            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+            continue
+
+        try:
+            consumer_locked_input = _consumer_locked_input_set(node)
+        except ValueError as exc:
+            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+            continue
+
+        if not consumer_required and consumer_locked_input is None:
+            continue
+
+        actual_producer = _walk_to_real_producer(
+            node.input,
+            warnings=contract_warnings,
+        )
+        if actual_producer is None or actual_producer.producer_id in parse_failed_producers:
+            continue
+
+        try:
+            producer_guaranteed = _effective_producer_guarantees(actual_producer)
+        except ValueError as exc:
+            errors.append(_err(_producer_owner(actual_producer), f"Invalid contract config: {exc}", "high"))
+            parse_failed_producers.add(actual_producer.producer_id)
+            continue
+
+        if consumer_required:
+            missing_fields = consumer_required - producer_guaranteed
+            edge_contracts.append(
+                EdgeContract(
+                    from_id=actual_producer.producer_id,
+                    to_id=node.id,
+                    producer_guarantees=tuple(sorted(producer_guaranteed)),
+                    consumer_requires=tuple(sorted(consumer_required)),
+                    missing_fields=tuple(sorted(missing_fields)),
+                    satisfied=not missing_fields,
+                )
+            )
+            if missing_fields:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
+                        f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_required)}]. "
+                        f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
+                        f"Missing fields: [{_format_fields(missing_fields)}].",
+                        "high",
+                    )
+                )
+
+        # Rule A: producer emits a field that consumer's locked input forbids.
+        # The runtime check is the auto-generated input Pydantic model with
+        # ``extra="forbid"`` (schema_factory.py: triggered by ``mode: fixed``);
+        # composer-time we mirror the same predicate against the producer's
+        # *predicted emit set* (not its declared set — see _producer_emit_set).
+        if consumer_locked_input is not None:
+            try:
+                producer_emit = _producer_emit_set(actual_producer)
+            except ValueError:
+                # Already surfaced above via _effective_producer_guarantees.
+                continue
+            extras = producer_emit - consumer_locked_input
+            if extras:
+                # When consumer is itself a field_mapper, suggesting "insert a
+                # field_mapper upstream" is degenerate — the operator is already
+                # at one. The same applies to declared `fields` expansion: for
+                # field_mapper, the input contract IS the declared output schema,
+                # so widening fields means widening the schema declaration too.
+                if node.plugin == "field_mapper":
+                    fix_suggestion = (
+                        f"Fix by adding {sorted(extras)!r} to the consumer's schema.fields, "
+                        f"OR by setting schema.mode: flexible on the consumer, "
+                        f"OR by adjusting upstream config so the extra field(s) are not emitted."
+                    )
+                else:
+                    fix_suggestion = (
+                        "Fix by relaxing the consumer schema (mode: flexible) or by inserting a "
+                        "field_mapper with select_only: true to drop the extras before this consumer."
+                    )
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
+                        f"Consumer ({node.plugin or node.node_type}) input is locked (mode: fixed) and accepts: "
+                        f"[{_format_fields(consumer_locked_input)}]. "
+                        f"Producer ({_producer_label(actual_producer)}) will emit: "
+                        f"[{_format_fields(producer_emit)}]. "
+                        f"Extra fields rejected by consumer input contract: [{_format_fields(extras)}]. "
+                        f"{fix_suggestion}",
+                        "high",
+                    )
+                )
+
+    for output in outputs:
+        try:
+            sink_required = get_raw_sink_required_fields(
+                output.options,
+                owner=f"output:{output.name}",
+            )
+        except ValueError as exc:
+            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+            continue
+
+        try:
+            sink_locked_input = _sink_locked_input_set(output)
+        except ValueError as exc:
+            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+            continue
+
+        if not sink_required and sink_locked_input is None:
+            continue
+
+        if output.name in direct_sink_producers:
+            sink_producers = tuple(direct_sink_producers[output.name])
+        else:
+            actual_producer = _walk_to_real_producer(
+                output.name,
+                warnings=contract_warnings,
+            )
+            sink_producers = () if actual_producer is None else (actual_producer,)
+
+        seen_sink_contract_producers: set[str] = set()
+        for sink_producer in sink_producers:
+            actual_producer = _walk_producer_entry_to_real_producer(
+                sink_producer,
+                connection_name=output.name,
+                warnings=contract_warnings,
+            )
+            if actual_producer is None:
+                continue
+            # Multiple direct routes from the same producer can converge on one
+            # sink. edge_contracts has no route-label field, so emit one
+            # producer->sink contract check per real upstream producer.
+            if actual_producer.producer_id in seen_sink_contract_producers:
+                continue
+            seen_sink_contract_producers.add(actual_producer.producer_id)
+            if actual_producer.producer_id in parse_failed_producers:
+                continue
+
+            try:
+                producer_guaranteed = _effective_producer_guarantees(actual_producer)
+            except ValueError as exc:
+                errors.append(_err(_producer_owner(actual_producer), f"Invalid contract config: {exc}", "high"))
+                parse_failed_producers.add(actual_producer.producer_id)
+                continue
+
+            if sink_required:
+                missing_fields = sink_required - producer_guaranteed
+                edge_contracts.append(
+                    EdgeContract(
+                        from_id=actual_producer.producer_id,
+                        to_id=f"output:{output.name}",
+                        producer_guarantees=tuple(sorted(producer_guaranteed)),
+                        consumer_requires=tuple(sorted(sink_required)),
+                        missing_fields=tuple(sorted(missing_fields)),
+                        satisfied=not missing_fields,
+                    )
+                )
+                if missing_fields:
+                    errors.append(
+                        _err(
+                            f"output:{output.name}",
+                            f"Schema contract violation: '{actual_producer.producer_id}' -> 'output:{output.name}'. "
+                            f"Sink '{output.name}' requires fields: [{_format_fields(sink_required)}]. "
+                            f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
+                            f"Missing fields: [{_format_fields(missing_fields)}].",
+                            "high",
+                        )
+                    )
+
+            # Rule B: producer emits a field that sink's locked input forbids.
+            # Same predicate as Rule A but routed at the sink boundary; runtime
+            # surface is the auto-generated sink Pydantic model with
+            # ``extra="forbid"`` triggered by ``mode: fixed`` on the sink schema.
+            if sink_locked_input is not None:
+                try:
+                    producer_emit = _producer_emit_set(actual_producer)
+                except ValueError:
+                    continue
+                extras = producer_emit - sink_locked_input
+                if extras:
+                    errors.append(
+                        _err(
+                            f"output:{output.name}",
+                            f"Schema contract violation: '{actual_producer.producer_id}' -> 'output:{output.name}'. "
+                            f"Sink '{output.name}' input is locked (mode: fixed) and accepts: "
+                            f"[{_format_fields(sink_locked_input)}]. "
+                            f"Producer ({_producer_label(actual_producer)}) will emit: "
+                            f"[{_format_fields(producer_emit)}]. "
+                            f"Extra fields rejected by sink input contract: [{_format_fields(extras)}]. "
+                            f"Fix by relaxing the sink schema (mode: flexible) or by inserting a "
+                            f"field_mapper with select_only: true to drop the extras before this sink.",
+                            "high",
+                        )
+                    )
+
+    # Rule C: per-transform self-consistency between declared output schema
+    # and the *actual* predicted emit set, scoped to plugins whose emit set
+    # can be computed deterministically from config alone. Currently:
+    # ``field_mapper`` with ``select_only=True`` — the actual output is
+    # exactly ``mapping.values()``, so any declared output field absent from
+    # mapping targets cannot be emitted.
+    #
+    # Why this is plugin-scoped rather than generic: ``_output_schema_config.
+    # guaranteed_fields`` has plugin-specific semantics. For field_mapper it
+    # IS the actual emit set (computed by ``_build_field_mapper_output_schema_config``
+    # from the mapping). For additive plugins like ``line_explode``/``web_scrape``
+    # it is a *lower bound* on emission (only the fields the transform itself
+    # adds — passes-through input fields are not enumerated), so a generic
+    # ``get_effective_guaranteed_fields() - guaranteed_fields`` check would
+    # mis-attribute every passthrough field as "missing". The runtime check
+    # ``verify_schema_config_mode`` only sees the actually emitted row, so it
+    # does not have this disambiguation problem; we earn that ambiguity-free
+    # signal composer-time only by restricting to plugins where emit is fully
+    # determined by config.
+    #
+    # As more reductive plugins land, extend the predicate below — do NOT
+    # generalize by removing the plugin gate without first lifting an
+    # ``actual_emit_set`` declaration onto each plugin class.
+    for node in nodes:
+        if node.node_type not in {"transform", "aggregation"} or node.plugin is None:
+            continue
+        if node.plugin != "field_mapper":
+            continue
+        if node.id in parse_failed_producers:
+            continue
+        # Read select_only directly from the raw options so the plugin gate
+        # short-circuits before construction and stays free of access to
+        # private plugin instance attributes from outside the plugin layer.
+        # The semantics match ``FieldMapperConfig.select_only``: bool with
+        # default False; any non-false-y option value triggers the reductive
+        # emit semantics that make Rule C applicable.
+        if not bool(node.options.get("select_only", False)):
+            # Without select_only, field_mapper preserves input fields by
+            # default and falls into the additive/loose-bound regime that we
+            # cannot adjudicate without knowing the upstream emit set.
+            continue
+        try:
+            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+            transform = get_shared_plugin_manager().create_transform(
+                node.plugin,
+                deep_thaw(node.options),
+            )
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
+            continue
+
+        output_config = transform._output_schema_config
+        if output_config is None:
+            continue
+
+        predicted_emit = frozenset(output_config.guaranteed_fields or ())
+        declared_required = output_config.get_effective_guaranteed_fields()
+        missing = declared_required - predicted_emit
+        if not missing:
+            continue
+        errors.append(
+            _err(
+                f"node:{node.id}",
+                f"Transform contract violation: node '{node.id}' ({node.plugin}) declares output fields "
+                f"[{_format_fields(declared_required)}] (required) but with select_only: true the mapping will only emit "
+                f"[{_format_fields(predicted_emit)}]. "
+                f"Declared required output fields not produced by this transform: [{_format_fields(missing)}]. "
+                f"Fix by removing the missing field(s) from the schema declaration, OR by extending "
+                f"`mapping` so the transform actually emits them, OR by setting select_only: false.",
+                "high",
+            )
+        )
+
+    return tuple(errors), tuple(contract_warnings), tuple(edge_contracts)
+
+
+@dataclass(frozen=True, slots=True)
+class CompositionState:
+    """Immutable, versioned snapshot of a pipeline under construction.
+
+    Every edit produces a new instance with incremented version.
+    All container fields are deep-frozen via freeze_fields().
+
+    Attributes:
+        source: The pipeline's single data source. None until set.
+        nodes: Ordered tuple of transform, gate, aggregation, coalesce nodes.
+        edges: Connections between nodes.
+        outputs: Sink configurations.
+        metadata: Pipeline name and description.
+        version: Monotonically increasing per session, starting at 1.
+    """
+
+    source: SourceSpec | None
+    nodes: tuple[NodeSpec, ...]
+    edges: tuple[EdgeSpec, ...]
+    outputs: tuple[OutputSpec, ...]
+    metadata: PipelineMetadata
+    version: int
+
+    def __post_init__(self) -> None:
+        if self.version < 1:
+            raise ValueError(f"CompositionState.version must be >= 1, got {self.version}")
+
+    # --- Mutation methods ---
+
+    def with_source(self, source: SourceSpec) -> CompositionState:
+        """Return new state with the given source, version incremented."""
+        return replace(self, source=source, version=self.version + 1)
+
+    def without_source(self) -> CompositionState:
+        """Return new state with the source removed, version incremented."""
+        return replace(self, source=None, version=self.version + 1)
+
+    def with_node(self, node: NodeSpec) -> CompositionState:
+        """Add or replace a node (matched by id). Version incremented."""
+        existing_ids = [n.id for n in self.nodes]
+        if node.id in existing_ids:
+            # Replace at original position to preserve order
+            idx = existing_ids.index(node.id)
+            node_list = list(self.nodes)
+            node_list[idx] = node
+            nodes = tuple(node_list)
+        else:
+            # Append new node
+            nodes = (*self.nodes, node)
+        return replace(self, nodes=nodes, version=self.version + 1)
+
+    def without_node(self, node_id: str) -> CompositionState | None:
+        """Remove node by id. Returns None if node not found."""
+        if not any(n.id == node_id for n in self.nodes):
+            return None
+        nodes = tuple(n for n in self.nodes if n.id != node_id)
+        # Also remove edges referencing this node
+        edges = tuple(e for e in self.edges if e.from_node != node_id and e.to_node != node_id)
+        return replace(self, nodes=nodes, edges=edges, version=self.version + 1)
+
+    def with_edge(self, edge: EdgeSpec) -> CompositionState:
+        """Add or replace an edge (matched by id). Version incremented."""
+        existing_ids = [e.id for e in self.edges]
+        if edge.id in existing_ids:
+            idx = existing_ids.index(edge.id)
+            edge_list = list(self.edges)
+            edge_list[idx] = edge
+            edges = tuple(edge_list)
+        else:
+            edges = (*self.edges, edge)
+        return replace(self, edges=edges, version=self.version + 1)
+
+    def without_edge(self, edge_id: str) -> CompositionState | None:
+        """Remove edge by id. Returns None if edge not found."""
+        if not any(e.id == edge_id for e in self.edges):
+            return None
+        edges = tuple(e for e in self.edges if e.id != edge_id)
+        return replace(self, edges=edges, version=self.version + 1)
+
+    def with_output(self, output: OutputSpec) -> CompositionState:
+        """Add or replace an output (matched by name). Version incremented."""
+        existing_names = [o.name for o in self.outputs]
+        if output.name in existing_names:
+            idx = existing_names.index(output.name)
+            output_list = list(self.outputs)
+            output_list[idx] = output
+            outputs = tuple(output_list)
+        else:
+            outputs = (*self.outputs, output)
+        return replace(self, outputs=outputs, version=self.version + 1)
+
+    def without_output(self, output_name: str) -> CompositionState | None:
+        """Remove output by name. Returns None if output not found."""
+        if not any(o.name == output_name for o in self.outputs):
+            return None
+        outputs = tuple(o for o in self.outputs if o.name != output_name)
+        return replace(self, outputs=outputs, version=self.version + 1)
+
+    def with_metadata(self, patch: dict[str, Any]) -> CompositionState:
+        """Update metadata fields from partial dict. Version incremented."""
+        current = self.metadata
+        name = patch["name"] if "name" in patch else current.name
+        description = patch["description"] if "description" in patch else current.description
+        new_meta = PipelineMetadata(
+            name=name,
+            description=description,
+        )
+        return replace(self, metadata=new_meta, version=self.version + 1)
+
+    # --- Serialization ---
+
+    def to_dict(self) -> dict[str, Any]:
+        """Recursively unwrap frozen containers to plain Python types.
+
+        Converts MappingProxyType -> dict, tuple -> list recursively.
+        The result is suitable for yaml.dump() and JSON serialization.
+        """
+
+        result: dict[str, Any] = {
+            "version": self.version,
+            "metadata": {
+                "name": self.metadata.name,
+                "description": self.metadata.description,
+            },
+            "source": None,
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        if self.source is not None:
+            result["source"] = {
+                "plugin": self.source.plugin,
+                "on_success": self.source.on_success,
+                "options": deep_thaw(self.source.options),
+                "on_validation_failure": self.source.on_validation_failure,
+            }
+
+        for node in self.nodes:
+            node_dict: dict[str, Any] = {
+                "id": node.id,
+                "node_type": node.node_type,
+                "plugin": node.plugin,
+                "input": node.input,
+                "on_success": node.on_success,
+                "on_error": node.on_error,
+                "options": deep_thaw(node.options),
+            }
+            if node.condition is not None:
+                node_dict["condition"] = node.condition
+            if node.routes is not None:
+                node_dict["routes"] = deep_thaw(node.routes)
+            if node.fork_to is not None:
+                node_dict["fork_to"] = list(node.fork_to)
+            if node.branches is not None:
+                node_dict["branches"] = list(node.branches)
+            if node.policy is not None:
+                node_dict["policy"] = node.policy
+            if node.merge is not None:
+                node_dict["merge"] = node.merge
+            if node.trigger is not None:
+                node_dict["trigger"] = deep_thaw(node.trigger)
+            if node.output_mode is not None:
+                node_dict["output_mode"] = node.output_mode
+            if node.expected_output_count is not None:
+                node_dict["expected_output_count"] = node.expected_output_count
+            result["nodes"].append(node_dict)
+
+        for edge in self.edges:
+            result["edges"].append(
+                {
+                    "id": edge.id,
+                    "from_node": edge.from_node,
+                    "to_node": edge.to_node,
+                    "edge_type": edge.edge_type,
+                    "label": edge.label,
+                }
+            )
+
+        for output in self.outputs:
+            result["outputs"].append(
+                {
+                    "name": output.name,
+                    "plugin": output.plugin,
+                    "options": deep_thaw(output.options),
+                    "on_write_failure": output.on_write_failure,
+                }
+            )
+
+        return result
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        """Reconstruct from a plain dict (inverse of to_dict serialisation).
+
+        Calls from_dict() on each nested Spec type. This is the only way
+        to construct CompositionState from deserialised JSON (Spec AC #18).
+        The round-trip invariant holds:
+            state == CompositionState.from_dict(state.to_dict())
+        """
+        source_data = d["source"]
+        return cls(
+            source=SourceSpec.from_dict(source_data) if source_data is not None else None,
+            nodes=tuple(NodeSpec.from_dict(n) for n in d["nodes"]),
+            edges=tuple(EdgeSpec.from_dict(e) for e in d["edges"]),
+            outputs=tuple(OutputSpec.from_dict(o) for o in d["outputs"]),
+            metadata=PipelineMetadata.from_dict(d["metadata"]),
+            version=d["version"],
+        )
+
+    # --- Validation ---
+
+    def validate(self) -> ValidationSummary:
+        """Run Stage 1 composition-time validation.
+
+        Pure function of the current state — no DAG build or session mutation.
+        Returns ValidationSummary with is_valid and human-readable errors.
+        """
+        errors: list[ValidationEntry] = []
+        _err = ValidationEntry  # local alias for brevity
+
+        # 1. Source exists
+        if self.source is None:
+            errors.append(_err("source", "No source configured.", "high"))
+
+        # 2. At least one output
+        if not self.outputs:
+            errors.append(_err("pipeline", "No sinks configured.", "high"))
+
+        # 3. Edge references valid
+        node_ids = {n.id for n in self.nodes}
+        output_names = {o.name for o in self.outputs}
+        valid_from = node_ids | {"source"}
+        valid_to = node_ids | output_names
+        for edge in self.edges:
+            if edge.from_node not in valid_from:
+                errors.append(_err(f"edge:{edge.id}", f"Edge '{edge.id}' references unknown node '{edge.from_node}' as from_node.", "high"))
+            if edge.to_node not in valid_to:
+                errors.append(_err(f"edge:{edge.id}", f"Edge '{edge.id}' references unknown node '{edge.to_node}' as to_node.", "high"))
+
+        # 4. Node IDs unique
+        seen_node_ids: set[str] = set()
+        for node in self.nodes:
+            if node.id in seen_node_ids:
+                errors.append(_err(f"node:{node.id}", f"Duplicate node ID: '{node.id}'.", "high"))
+            seen_node_ids.add(node.id)
+
+        # 5. Output names unique
+        seen_output_names: set[str] = set()
+        for output in self.outputs:
+            if output.name in seen_output_names:
+                errors.append(_err(f"output:{output.name}", f"Duplicate output name: '{output.name}'.", "high"))
+            seen_output_names.add(output.name)
+
+        # 6. Edge IDs unique
+        seen_edge_ids: set[str] = set()
+        for edge in self.edges:
+            if edge.id in seen_edge_ids:
+                errors.append(_err(f"edge:{edge.id}", f"Duplicate edge ID: '{edge.id}'.", "high"))
+            seen_edge_ids.add(edge.id)
+
+        # 7. Node type field consistency
+        for node in self.nodes:
+            batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
+            if batch_placement_error is not None:
+                errors.append(_err(f"node:{node.id}", batch_placement_error, "high"))
+
+            batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
+            if batch_required_error is not None:
+                errors.append(_err(f"node:{node.id}", batch_required_error, "high"))
+
+            if node.node_type == "gate":
+                if node.condition is None:
+                    errors.append(_err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'condition'.", "high"))
+                else:
+                    # Validate expression content — defense-in-depth catches
+                    # malformed conditions from any entry path (including
+                    # session deserialization).
+                    expr_error = _validate_gate_expression(node.condition)
+                    if expr_error is not None:
+                        errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {expr_error}", "high"))
+                if node.routes is None:
+                    errors.append(_err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'routes'.", "high"))
+            elif node.node_type == "transform":
+                # Negative constraints — transforms must not have gate fields
+                if node.condition is not None:
+                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' must not have 'condition' field.", "high"))
+                if node.routes is not None:
+                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' must not have 'routes' field.", "high"))
+                # Positive constraints — engine requires these as non-empty strings
+                # (TransformSettings.plugin, .on_success, .on_error in config.py
+                #  — field validators call .strip() and reject empty/blank)
+                if not node.plugin:
+                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' is missing required field 'plugin'.", "high"))
+                if not node.on_success or not node.on_success.strip():
+                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' is missing required field 'on_success'.", "high"))
+                if not node.on_error or not node.on_error.strip():
+                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' is missing required field 'on_error'.", "high"))
+            elif node.node_type == "coalesce":
+                if node.branches is None:
+                    errors.append(_err(f"node:{node.id}", f"Coalesce '{node.id}' is missing required field 'branches'.", "high"))
+                if node.policy is None:
+                    errors.append(_err(f"node:{node.id}", f"Coalesce '{node.id}' is missing required field 'policy'.", "high"))
+            elif node.node_type == "aggregation":
+                if not node.plugin:
+                    errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' is missing required field 'plugin'.", "high"))
+                # Engine requires on_error as non-empty string
+                # (AggregationSettings.on_error in config.py)
+                if not node.on_error or not node.on_error.strip():
+                    errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' is missing required field 'on_error'.", "high"))
+                # Runtime treats a missing/empty trigger as end-of-source-only.
+                # If early triggers are present, validate them through the same
+                # TriggerConfig parser used by settings load.
+                if node.trigger is not None:
+                    try:
+                        TriggerConfig.model_validate(deep_thaw(node.trigger))
+                    except PydanticValidationError as exc:
+                        detail = "; ".join(str(error["msg"]) for error in exc.errors())
+                        errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' trigger is invalid: {detail}", "high"))
+                # output_mode must be a valid OutputMode value when present
+                if node.output_mode is not None and node.output_mode not in ("passthrough", "transform"):
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Aggregation '{node.id}' output_mode must be 'passthrough' or 'transform', got '{node.output_mode}'.",
+                            "high",
+                        )
+                    )
+
+        errors.extend(_validate_runtime_route_destinations(self.source, self.nodes, self.outputs))
+
+        # 8. Connection completeness
+        source_on_success = self.source.on_success if self.source else None
+        runtime_connections = _runtime_connection_targets(self.source, self.nodes)
+        for node in self.nodes:
+            if node.node_type == "coalesce":
+                missing_branches = sorted(branch for branch in node.branches or () if branch not in runtime_connections)
+                if missing_branches:
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Coalesce '{node.id}' branches {missing_branches} are not reachable from any runtime connection.",
+                            "high",
+                        )
+                    )
+                continue
+
+            if node.input not in runtime_connections:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Node '{node.id}' input '{node.input}' is not reachable from any runtime connection "
+                        "(source.on_success, node.on_success/on_error, routes, or fork_to).",
+                        "high",
+                    )
+                )
+
+        # Generic semantic-contract check.
+        from elspeth.web.composer._semantic_validator import validate_semantic_contracts
+
+        semantic_errors, semantic_contracts = validate_semantic_contracts(self)
+        errors.extend(semantic_errors)
+
+        numeric_contract_errors, numeric_contract_warnings = _batch_distribution_profile_value_field_entries(self.source, self.nodes)
+        errors.extend(numeric_contract_errors)
+
+        # --- Warnings (advisory, non-blocking) ---
+        warnings: list[ValidationEntry] = []
+        _warn = ValidationEntry
+        warnings.extend(numeric_contract_warnings)
+
+        # Build connection-field targets (wiring that doesn't require edges)
+        connection_targets = _runtime_connection_targets(self.source, self.nodes)
+
+        # W1: Output has no runtime routing reference (on_success / on_error / routes)
+        # Edges are UI-only — generate_yaml() uses only connection fields,
+        # so an edge to a sink without a matching connection field is a
+        # false positive for reachability.
+        #
+        # Also count implicit engine-level routes: on_validation_failure
+        # and on_write_failure route data to outputs without explicit
+        # connection fields.
+        implicit_targets: set[str] = set()
+        if self.source is not None and self.source.on_validation_failure != "discard":
+            implicit_targets.add(self.source.on_validation_failure)
+        for output in self.outputs:
+            if output.on_write_failure != "discard":
+                implicit_targets.add(output.on_write_failure)
+        for output in self.outputs:
+            if output.name not in connection_targets and output.name not in implicit_targets:
+                warnings.append(
+                    _warn(
+                        f"output:{output.name}",
+                        f"Output '{output.name}' is not referenced by any on_success, on_error, or route — it will never receive data.",
+                        "medium",
+                    )
+                )
+
+        # W2: Source on_success target doesn't match any node input or output name
+        if source_on_success is not None:
+            node_inputs = {n.input for n in self.nodes if n.input is not None}
+            if source_on_success not in node_inputs and source_on_success not in output_names:
+                warnings.append(
+                    _warn(
+                        "source",
+                        f"Source on_success '{source_on_success}' does not match any node input or output — data may not flow.",
+                        "medium",
+                    )
+                )
+
+        # W3: Node has no outgoing edges and no connection-field targets
+        edge_sources = {e.from_node for e in self.edges}
+        for node in self.nodes:
+            has_edge_out = node.id in edge_sources
+            has_connection_out = (
+                node.on_success is not None or node.on_error is not None or (node.routes is not None and len(node.routes) > 0)
+            )
+            if not has_edge_out and not has_connection_out:
+                warnings.append(
+                    _warn(
+                        f"node:{node.id}",
+                        f"Node '{node.id}' has no outgoing edges — its output is not connected to any downstream node or sink.",
+                        "medium",
+                    )
+                )
+
+        # W4: Sink plugin/filename extension mismatch
+        _plugin_exts: dict[str, set[str]] = {
+            "csv": {".csv"},
+            "json": {".json", ".jsonl"},
+            "jsonl": {".jsonl"},
+        }
+        for output in self.outputs:
+            if "path" not in output.options:
+                continue
+            path_val = output.options["path"]
+            if type(path_val) is not str:
+                continue
+
+            ext = PurePosixPath(path_val).suffix.lower()
+            if output.plugin not in _plugin_exts:
+                continue
+            accepted = _plugin_exts[output.plugin]
+            if ext and ext not in accepted:
+                warnings.append(
+                    _warn(
+                        f"output:{output.name}",
+                        f"Output '{output.name}' uses plugin '{output.plugin}' but filename extension suggests a different format.",
+                        "low",
+                    )
+                )
+
+        # W5: Transform/aggregation node has empty or incomplete options
+        # These plugins require configuration to do anything useful.
+        _plugins_requiring_config: dict[str, tuple[str, str]] = {
+            "value_transform": ("operations", "no operations defined — nothing will be computed"),
+            "type_coerce": ("conversions", "no conversions defined — no types will be changed"),
+            "llm": ("template", "no template defined — nothing will be sent to the model"),
+            "field_mapper": ("mapping", "no mapping defined — no fields will be renamed"),
+            "truncate": ("fields", "no fields specified — nothing will be truncated"),
+            "keyword_filter": ("keywords", "no keywords defined — all rows will pass through"),
+            "web_scrape": ("url_field", "no url_field specified — cannot determine which field contains URLs"),
+            "json_explode": ("field", "no field specified — cannot determine which field to explode"),
+        }
+        for node in self.nodes:
+            if node.plugin in _plugins_requiring_config:
+                required_key, reason = _plugins_requiring_config[node.plugin]
+                if not node.options or required_key not in node.options:
+                    warnings.append(
+                        _warn(
+                            f"node:{node.id}",
+                            f"Transform '{node.id}' ({node.plugin}) appears incomplete: {reason}.",
+                            "medium",
+                        )
+                    )
+                # Also check for empty list/dict/tuple values (lists are frozen to tuples)
+                elif node.options[required_key] in ([], (), {}, None, ""):
+                    warnings.append(
+                        _warn(
+                            f"node:{node.id}",
+                            f"Transform '{node.id}' ({node.plugin}) has empty '{required_key}': {reason}.",
+                            "medium",
+                        )
+                    )
+
+        # W6: File sink missing required path
+        for output in self.outputs:
+            if output.plugin in _FILE_SINK_PLUGINS:
+                if not output.options or "path" not in output.options:
+                    warnings.append(
+                        _warn(
+                            f"output:{output.name}",
+                            f"Output '{output.name}' ({output.plugin}) has no path configured — cannot write to file.",
+                            "medium",
+                        )
+                    )
+                elif not output.options["path"]:
+                    warnings.append(
+                        _warn(
+                            f"output:{output.name}",
+                            f"Output '{output.name}' ({output.plugin}) has empty path — cannot write to file.",
+                            "medium",
+                        )
+                    )
+
+        # W7: on_write_failure reference validation
+        # Mirrors rules from engine/orchestrator/validation.py so LLMs get
+        # early feedback instead of failing at pipeline build time.
+        _failsink_eligible = _ALLOWED_FAILSINK_PLUGINS
+        output_name_set = {o.name for o in self.outputs}
+        output_by_name = {o.name: o for o in self.outputs}
+        for output in self.outputs:
+            dest = output.on_write_failure
+            if dest == "discard":
+                continue
+            # Rule 2: must reference an existing output
+            if dest not in output_name_set:
+                warnings.append(
+                    _warn(
+                        f"output:{output.name}",
+                        f"Output '{output.name}' on_write_failure references '{dest}' which is not a configured output.",
+                        "high",
+                    )
+                )
+                continue  # Skip dependent checks
+            # Rule 3: no self-reference
+            if dest == output.name:
+                warnings.append(
+                    _warn(
+                        f"output:{output.name}",
+                        f"Output '{output.name}' on_write_failure references itself — a sink cannot be its own failsink.",
+                        "high",
+                    )
+                )
+                continue
+            # Rule 4: target must use an eligible file plugin
+            target = output_by_name[dest]
+            if target.plugin not in _failsink_eligible:
+                warnings.append(
+                    _warn(
+                        f"output:{output.name}",
+                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use csv or json.",
+                        "medium",
+                    )
+                )
+            # Rule 5: no chains — target must use 'discard'
+            if target.on_write_failure != "discard":
+                warnings.append(
+                    _warn(
+                        f"output:{output.name}",
+                        f"Output '{output.name}' on_write_failure references '{dest}', but '{dest}' has on_write_failure='{target.on_write_failure}' — failsink targets must use 'discard' (no chains).",
+                        "medium",
+                    )
+                )
+
+        # W8: Source on_validation_failure reference validation
+        # Mirrors rules from engine/orchestrator/validation.py so LLMs get
+        # early feedback instead of failing at pipeline build time.
+        if self.source is not None:
+            vf_dest = self.source.on_validation_failure
+            if vf_dest != "discard" and vf_dest not in output_name_set:
+                warnings.append(
+                    _warn(
+                        "source",
+                        f"Source on_validation_failure references '{vf_dest}' which is not a configured output — "
+                        "validation failures will cause a pipeline build error.",
+                        "high",
+                    )
+                )
+
+        # --- Suggestions (optional improvements) ---
+        suggestions: list[ValidationEntry] = []
+        _sug = ValidationEntry
+
+        # S1: No error routing
+        has_gate = any(n.node_type == "gate" for n in self.nodes)
+        has_error_routing = any(e.edge_type == "on_error" for e in self.edges) or any(n.on_error is not None for n in self.nodes)
+        if not has_gate and not has_error_routing and self.nodes:
+            suggestions.append(
+                _sug("pipeline", "Consider adding error routing — rows that fail transforms currently have no explicit destination.", "low")
+            )
+
+        # S2: Single output to external sink — suggest a local fallback
+        # Local file sinks (csv, json) don't benefit from a backup:
+        # if the filesystem is failing, a second file will fail too.
+        # External sinks (database, azure_blob, dataverse, http) benefit from a
+        # local recovery file when the external system is unavailable.
+        # MUST be a subset of the runtime sink registry — phantoms are
+        # behaviour-neutral here (the check fires for non-members, so a phantom
+        # plugin name can never appear in a valid pipeline anyway), but kept
+        # consistent with _FILE_SINK_PLUGINS / _ALLOWED_FAILSINK_PLUGINS.
+        _local_file_sinks = {"csv", "json"}
+        if len(self.outputs) == 1:
+            output = self.outputs[0]
+            if output.plugin not in _local_file_sinks:
+                suggestions.append(
+                    _sug(
+                        "pipeline",
+                        f"Single external output ('{output.plugin}'). Consider adding a local file output for recovery if the external system is unavailable.",
+                        "low",
+                    )
+                )
+
+        # S3: Source has no schema under the current composer/plugin config contract
+        if self.source is not None:
+            has_schema = _source_options_have_schema(self.source.options)
+            if not has_schema:
+                suggestions.append(
+                    _sug("source", "Source has no explicit schema. Downstream field references depend on runtime column names.", "low")
+                )
+
+        # 9. Schema contract validation
+        contract_errors, contract_warnings, edge_contracts = _check_schema_contracts(self.source, self.nodes, self.outputs)
+        errors.extend(contract_errors)
+        warnings.extend(contract_warnings)
+
+        return ValidationSummary(
+            is_valid=len(errors) == 0,
+            errors=tuple(errors),
+            warnings=tuple(warnings),
+            suggestions=tuple(suggestions),
+            edge_contracts=edge_contracts,
+            semantic_contracts=semantic_contracts,
+        )

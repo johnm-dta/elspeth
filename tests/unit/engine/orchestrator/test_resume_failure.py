@@ -13,8 +13,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import NodeID, RunStatus
+from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
+from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.engine.orchestrator import prepare_for_run
 from elspeth.engine.orchestrator.core import Orchestrator
 from tests.fixtures.landscape import make_landscape_db
 
@@ -57,10 +61,12 @@ class TestResumeFinalizesAsFailed:
         payload_store = MagicMock()
         settings = MagicMock()
 
-        # Mock recorder to capture finalize_run calls
-        mock_recorder = MagicMock()
-        mock_recorder.get_source_schema.return_value = '{"mode": "observed"}'
-        mock_recorder.get_run_contract.return_value = MagicMock()
+        # Mock factory to capture finalize_run calls
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.run_lifecycle.get_source_schema.return_value = '{"mode": "observed"}'
+        mock_factory.run_lifecycle.get_run_contract.return_value = MagicMock()
+        prepare_for_run()
+        mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
 
         # Mock RecoveryManager
         mock_recovery = MagicMock()
@@ -71,7 +77,7 @@ class TestResumeFinalizesAsFailed:
         # Make _process_resumed_rows raise a RuntimeError (non-shutdown)
         with (
             patch.object(orch, "_process_resumed_rows", side_effect=RuntimeError("test failure")),
-            patch("elspeth.engine.orchestrator.core.LandscapeRecorder", return_value=mock_recorder),
+            patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
             patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", return_value=MagicMock()),
             patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
             patch.object(orch, "_emit_telemetry"),
@@ -87,7 +93,7 @@ class TestResumeFinalizesAsFailed:
 
         # Verify finalize_run was called with FAILED status
         # finalize_run(run_id, status) — status can be positional or keyword
-        finalize_calls = mock_recorder.finalize_run.call_args_list
+        finalize_calls = mock_factory.run_lifecycle.finalize_run.call_args_list
         found_failed = False
         for call in finalize_calls:
             args, kwargs = call
@@ -111,42 +117,98 @@ class TestBuildProcessorCallsCleanupOnFailure:
     _cleanup_plugins(config, ctx, include_source=True) on failure.
     """
 
-    def test_source_code_has_cleanup_in_build_processor_except(self) -> None:
-        """Verify the fix is in place: _build_processor failure triggers cleanup.
-
-        This test inspects the source code to confirm the try/except pattern
-        exists around _build_processor that calls _cleanup_plugins.
-        The full run() path requires too many dependencies for a unit test,
-        so we verify the fix structurally.
+    def test_cleanup_plugins_runs_full_teardown(self) -> None:
+        """Verify _cleanup_plugins cleans up all plugin types:
+        transforms get on_complete + close, sinks get close, source gets close.
         """
-        import ast
-        import inspect
+        from elspeth.contracts.plugin_context import PluginContext
 
-        source = inspect.getsource(Orchestrator)
-        tree = ast.parse(source)
-
-        # Find _execute_run method and look for the pattern:
-        # try: _build_processor(...) except: _cleanup_plugins(...)
-        found_pattern = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Try):
-                # Check if the try body contains _build_processor call
-                try_source = ast.dump(node)
-                if "_build_processor" in try_source and "_cleanup_plugins" in try_source:
-                    found_pattern = True
-                    break
-
-        assert found_pattern, (
-            "Expected try/except around _build_processor that calls _cleanup_plugins. "
-            "This pattern ensures plugin resources are cleaned up when processor "
-            "construction fails after on_start has been called."
-        )
-
-    def test_cleanup_plugins_callable(self) -> None:
-        """Sanity check: _cleanup_plugins method exists and is callable."""
         db = make_landscape_db()
         orch = _make_orchestrator(db)
-        assert callable(orch._cleanup_plugins)
+        ctx = PluginContext(run_id="test", config={}, landscape=None)
+
+        config = MagicMock()
+        tracked_transform = MagicMock()
+        tracked_transform.name = "tracked"
+        config.transforms = [tracked_transform]
+        config.sinks = {}
+        config.source = MagicMock()
+
+        orch._cleanup_plugins(config, ctx)
+
+        tracked_transform.on_complete.assert_called_once()
+        tracked_transform.close.assert_called_once()
+        config.source.close.assert_called_once()
+
+    def test_build_processor_failure_path_cleans_up_with_source(self) -> None:
+        """When _build_processor raises inside _initialize_run_context,
+        _cleanup_plugins must be called with include_source matching the
+        run path.
+
+        This test exercises the actual except handler in _initialize_run_context
+        (line 1665-1667), not just _cleanup_plugins in isolation. The original
+        bug leaked already-started plugins — especially the source — because
+        the except block didn't exist. A regression to include_source=False
+        or removal of the except block will cause this test to fail.
+        """
+        from elspeth.engine.orchestrator.types import GraphArtifacts
+
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+
+        # Minimal config with trackable plugins
+        config = MagicMock()
+        tracked_source = MagicMock()
+        tracked_transform = MagicMock()
+        tracked_transform.name = "tracked"
+        tracked_transform.node_id = None
+        config.source = tracked_source
+        config.transforms = [tracked_transform]
+        config.sinks = {}
+        config.config = {}
+
+        graph = MagicMock()
+        graph.get_route_resolution_map.return_value = {}
+        settings = MagicMock()
+        payload_store = MagicMock()
+        mock_factory = MagicMock(spec=RecorderFactory)
+
+        artifacts = GraphArtifacts(
+            edge_map={},
+            source_id=NodeID("source-1"),
+            sink_id_map={},
+            transform_id_map={0: NodeID("transform-1")},
+            config_gate_id_map={},
+            coalesce_id_map={},
+        )
+
+        # _build_processor fails after on_start has been called on all plugins
+        with (
+            patch.object(orch, "_build_processor", side_effect=RuntimeError("processor build failed")),
+            patch.object(orch, "_cleanup_plugins", wraps=orch._cleanup_plugins) as spy_cleanup,
+            pytest.raises(RuntimeError, match="processor build failed"),
+        ):
+            orch._initialize_run_context(
+                mock_factory,
+                "test-run",
+                config,
+                graph,
+                settings,
+                artifacts,
+                payload_store,
+                include_source_on_start=True,
+            )
+
+        # Verify _cleanup_plugins was called with include_source=True.
+        # This is the key assertion: if someone changes the except handler
+        # to pass include_source=False, or removes it, this fails.
+        spy_cleanup.assert_called_once()
+        call_kwargs = spy_cleanup.call_args
+        assert call_kwargs.kwargs.get("include_source") is True, (
+            f"_cleanup_plugins must be called with include_source=True when source was started. Got: {call_kwargs}"
+        )
+        # The config passed must be the same config object
+        assert call_kwargs.args[0] is config
 
 
 class TestCleanupPluginsReRaisesSystemExceptions:
@@ -162,10 +224,10 @@ class TestCleanupPluginsReRaisesSystemExceptions:
     """
 
     def test_source_code_has_reraise_guard(self) -> None:
-        """Verify record_cleanup_error re-raises FrameworkBugError/AuditIntegrityError.
+        """Verify record_cleanup_error re-raises Tier 1 errors via TIER_1_ERRORS.
 
         Structural test: inspect the source to confirm the isinstance check
-        exists inside record_cleanup_error.
+        with TIER_1_ERRORS exists inside record_cleanup_error.
         """
         import ast
         import inspect
@@ -176,26 +238,22 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         source = textwrap.dedent(source)
         tree = ast.parse(source)
 
-        # Look for isinstance check with FrameworkBugError in the function
-        source_text = source
-        assert "FrameworkBugError" in source_text, "_cleanup_plugins must check for FrameworkBugError in record_cleanup_error"
-        assert "AuditIntegrityError" in source_text, "_cleanup_plugins must check for AuditIntegrityError in record_cleanup_error"
+        # Look for TIER_1_ERRORS usage in the function
+        assert "TIER_1_ERRORS" in source, "_cleanup_plugins must use TIER_1_ERRORS guard in record_cleanup_error"
 
-        # Find a Raise inside an If that checks isinstance — the re-raise guard
+        # Find a Raise inside an If that checks isinstance with TIER_1_ERRORS
         found_reraise = False
         for node in ast.walk(tree):
             if isinstance(node, ast.If):
                 if_source = ast.dump(node)
-                if "isinstance" in if_source and "FrameworkBugError" in if_source:
+                if "isinstance" in if_source and "TIER_1_ERRORS" in if_source:
                     # Check that the if body contains a raise
                     for child in ast.walk(node):
                         if isinstance(child, ast.Raise):
                             found_reraise = True
                             break
 
-        assert found_reraise, (
-            "Expected isinstance(error, (FrameworkBugError, AuditIntegrityError)) guard with raise inside record_cleanup_error"
-        )
+        assert found_reraise, "Expected isinstance(error, TIER_1_ERRORS) guard with raise inside record_cleanup_error"
 
     def test_framework_bug_error_propagates_through_cleanup(self) -> None:
         """FrameworkBugError from plugin.on_complete() must propagate, not be swallowed."""

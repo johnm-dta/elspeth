@@ -24,8 +24,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 # ---------------------------------------------------------------------------
 # Shared config helpers
@@ -158,6 +159,10 @@ class TestAssertToRaiseConversions:
         This protects the invariant that _file and _writer are always set
         together.  We trigger it by patching _open_file to leave _writer=None
         while letting the rows-non-empty branch pass.
+
+        Uses append mode because write mode stages before opening the file
+        and uses a separate code path (_open_file_write_mode).  The guard
+        under test lives in the append/subsequent-call branch.
         """
         import tempfile
         from pathlib import Path
@@ -166,14 +171,17 @@ class TestAssertToRaiseConversions:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "out.csv"
-            sink = CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "observed"},
-                }
+            sink = inject_write_failure(
+                CSVSink(
+                    {
+                        "path": str(output_path),
+                        "schema": {"mode": "observed"},
+                        "mode": "append",
+                    }
+                )
             )
-            recorder = make_recorder()
-            ctx = make_context(run_id="test-run", landscape=recorder)
+            factory = make_factory()
+            ctx = make_context(run_id="test-run", landscape=factory.plugin_audit_writer())
 
             # Patch _open_file so it opens _file but leaves _writer as None.
             # This simulates partial initialisation — the exact state the guard
@@ -207,6 +215,10 @@ class TestAssertToRaiseConversions:
 
         We trigger it by patching _open_file to set _file and _writer but
         leave _fieldnames=None.
+
+        Uses append mode because write mode stages before opening the file
+        and uses a separate code path.  The guard under test lives in the
+        append/subsequent-call branch.
         """
         import tempfile
         from pathlib import Path
@@ -215,14 +227,17 @@ class TestAssertToRaiseConversions:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "out.csv"
-            sink = CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "observed"},
-                }
+            sink = inject_write_failure(
+                CSVSink(
+                    {
+                        "path": str(output_path),
+                        "schema": {"mode": "observed"},
+                        "mode": "append",
+                    }
+                )
             )
-            recorder = make_recorder()
-            ctx = make_context(run_id="test-run", landscape=recorder)
+            factory = make_factory()
+            ctx = make_context(run_id="test-run", landscape=factory.plugin_audit_writer())
 
             mock_writer = MagicMock()
 

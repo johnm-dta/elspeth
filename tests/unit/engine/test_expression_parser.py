@@ -120,14 +120,10 @@ class TestExpressionParserRowGet:
         parser = ExpressionParser("row.get('missing') is None")
         assert parser.evaluate({}) is True
 
-    def test_row_get_with_default(self) -> None:
-        parser = ExpressionParser("row.get('status', 'unknown') == 'unknown'")
-        assert parser.evaluate({}) is True
-        assert parser.evaluate({"status": "active"}) is False
-
-    def test_row_get_with_default_when_key_exists(self) -> None:
-        parser = ExpressionParser("row.get('status', 'default') == 'active'")
-        assert parser.evaluate({"status": "active"}) is True
+    def test_row_get_with_default_rejected(self) -> None:
+        """row.get(key, default) is fabrication — defaults inject synthetic data."""
+        with pytest.raises(ExpressionSecurityError, match="fabricate"):
+            ExpressionParser("row.get('status', 'unknown') == 'unknown'")
 
 
 class TestExpressionParserNoneChecks:
@@ -193,7 +189,7 @@ class TestExpressionParserTernary:
         assert parser.evaluate({"score": 0.5}) == "low"
 
     def test_ternary_in_comparison(self) -> None:
-        parser = ExpressionParser("(row.get('priority', 'normal') if row.get('urgent') else 'low') == 'high'")
+        parser = ExpressionParser("(row['priority'] if row.get('urgent') else 'low') == 'high'")
         assert parser.evaluate({"urgent": True, "priority": "high"}) is True
         assert parser.evaluate({"urgent": False, "priority": "high"}) is False
 
@@ -286,11 +282,15 @@ class TestExpressionParserSecurityRejections:
             ExpressionParser("some_var == 'value'")
 
     def test_reject_row_get_too_few_args(self) -> None:
-        with pytest.raises(ExpressionSecurityError, match="requires 1 or 2 arguments"):
+        with pytest.raises(ExpressionSecurityError, match="exactly 1 argument"):
             ExpressionParser("row.get()")
 
+    def test_reject_row_get_with_default(self) -> None:
+        with pytest.raises(ExpressionSecurityError, match="exactly 1 argument"):
+            ExpressionParser("row.get('a', 'default')")
+
     def test_reject_row_get_too_many_args(self) -> None:
-        with pytest.raises(ExpressionSecurityError, match="requires 1 or 2 arguments"):
+        with pytest.raises(ExpressionSecurityError, match="exactly 1 argument"):
             ExpressionParser("row.get('a', 'b', 'c')")
 
     def test_reject_row_get_with_kwargs(self) -> None:
@@ -430,18 +430,16 @@ class TestExpressionParserRealWorldExamples:
         assert parser.evaluate({"category": "normal", "score": 0.5}) is False
 
     def test_content_length_gate(self) -> None:
-        """Route based on content length — the chaosweb use case."""
-        parser = ExpressionParser("len(str(row.get('page_content', ''))) >= 50")
+        """Route based on content length — direct len() on string field."""
+        parser = ExpressionParser("len(row['page_content']) >= 50")
         long_content = "x" * 100
         short_content = "x" * 10
         assert parser.evaluate({"page_content": long_content}) is True
         assert parser.evaluate({"page_content": short_content}) is False
-        # Missing field uses default empty string → length 0
-        assert parser.evaluate({}) is False
 
 
 class TestExpressionParserSafeBuiltins:
-    """Test safe built-in function calls: len, str, int, float, bool, abs."""
+    """Test safe built-in function calls: len, abs (non-coercive only)."""
 
     # --- len() ---
 
@@ -459,72 +457,33 @@ class TestExpressionParserSafeBuiltins:
         parser = ExpressionParser("len(row['data']) == 2")
         assert parser.evaluate({"data": {"a": 1, "b": 2}}) is True
 
-    def test_len_with_row_get_default(self) -> None:
-        parser = ExpressionParser("len(row.get('items', [])) == 0")
-        assert parser.evaluate({}) is True
+    def test_len_with_row_get(self) -> None:
+        """len() on row.get() (single-arg) works — None from missing key raises at runtime."""
+        parser = ExpressionParser("len(row['items']) == 0")
+        assert parser.evaluate({"items": []}) is True
         assert parser.evaluate({"items": [1]}) is False
 
-    # --- str() ---
+    # --- Coercive builtins rejected ---
 
-    def test_str_on_number(self) -> None:
-        parser = ExpressionParser("str(row['code']) == '42'")
-        assert parser.evaluate({"code": 42}) is True
-        assert parser.evaluate({"code": 43}) is False
+    def test_str_rejected(self) -> None:
+        """str() is coercive — silently normalizes Tier 2 data in gate expressions."""
+        with pytest.raises(ExpressionSecurityError, match="Forbidden"):
+            ExpressionParser("str(row['code']) == '42'")
 
-    def test_str_on_none(self) -> None:
-        parser = ExpressionParser("str(row.get('x')) == 'None'")
-        assert parser.evaluate({}) is True
+    def test_int_rejected(self) -> None:
+        """int() is coercive — masks upstream contract violations."""
+        with pytest.raises(ExpressionSecurityError, match="Forbidden"):
+            ExpressionParser("int(row['amount']) > 100")
 
-    def test_str_nested_in_len(self) -> None:
-        """len(str(...)) composition — the chaosweb pattern."""
-        parser = ExpressionParser("len(str(row.get('value', ''))) >= 5")
-        assert parser.evaluate({"value": "hello"}) is True
-        assert parser.evaluate({"value": "hi"}) is False
+    def test_float_rejected(self) -> None:
+        """float() is coercive — masks upstream contract violations."""
+        with pytest.raises(ExpressionSecurityError, match="Forbidden"):
+            ExpressionParser("float(row['score']) >= 0.5")
 
-    # --- int() ---
-
-    def test_int_on_string(self) -> None:
-        parser = ExpressionParser("int(row['amount']) > 100")
-        assert parser.evaluate({"amount": "200"}) is True
-        assert parser.evaluate({"amount": "50"}) is False
-
-    def test_int_on_float(self) -> None:
-        parser = ExpressionParser("int(row['ratio']) == 3")
-        assert parser.evaluate({"ratio": 3.7}) is True
-
-    def test_int_invalid_string_raises_evaluation_error(self) -> None:
-        parser = ExpressionParser("int(row['text'])")
-        with pytest.raises(ExpressionEvaluationError, match=r"int.*evaluation error"):
-            parser.evaluate({"text": "not_a_number"})
-
-    # --- float() ---
-
-    def test_float_on_string(self) -> None:
-        parser = ExpressionParser("float(row['score']) >= 0.5")
-        assert parser.evaluate({"score": "0.75"}) is True
-        assert parser.evaluate({"score": "0.25"}) is False
-
-    def test_float_on_int(self) -> None:
-        parser = ExpressionParser("float(row['count']) == 5.0")
-        assert parser.evaluate({"count": 5}) is True
-
-    def test_float_invalid_string_raises_evaluation_error(self) -> None:
-        parser = ExpressionParser("float(row['text'])")
-        with pytest.raises(ExpressionEvaluationError, match=r"float.*evaluation error"):
-            parser.evaluate({"text": "nope"})
-
-    # --- bool() ---
-
-    def test_bool_on_zero(self) -> None:
-        parser = ExpressionParser("bool(row['count']) == False")
-        assert parser.evaluate({"count": 0}) is True
-        assert parser.evaluate({"count": 1}) is False
-
-    def test_bool_on_empty_string(self) -> None:
-        parser = ExpressionParser("bool(row.get('text', ''))")
-        assert parser.evaluate({"text": "hello"}) is True
-        assert parser.evaluate({"text": ""}) is False
-        assert parser.evaluate({}) is False
+    def test_bool_rejected(self) -> None:
+        """bool() is coercive — silently converts to boolean instead of crashing."""
+        with pytest.raises(ExpressionSecurityError, match="Forbidden"):
+            ExpressionParser("bool(row['count']) == False")
 
     # --- abs() ---
 
@@ -542,11 +501,10 @@ class TestExpressionParserSafeBuiltins:
 
     # --- Composition ---
 
-    def test_nested_builtin_calls(self) -> None:
-        """Multiple safe builtins can be composed."""
-        parser = ExpressionParser("len(str(int(row['value']))) <= 3")
-        assert parser.evaluate({"value": 42}) is True  # "42" → len 2
-        assert parser.evaluate({"value": 99999}) is False  # "99999" → len 5
+    def test_nested_coercive_builtin_rejected(self) -> None:
+        """Coercive builtins rejected even when nested in non-coercive ones."""
+        with pytest.raises(ExpressionSecurityError, match="Forbidden"):
+            ExpressionParser("len(str(int(row['value']))) <= 3")
 
     # --- Rejection of kwargs ---
 
@@ -1139,7 +1097,7 @@ class TestIsBooleanExpression:
         non_boolean = [
             "row['category']",
             "row['status']",
-            "row.get('category', 'default')",
+            "row.get('category')",
         ]
         for expr in non_boolean:
             parser = ExpressionParser(expr)
@@ -1182,22 +1140,13 @@ class TestIsBooleanExpression:
         assert not ExpressionParser("'hello'").is_boolean_expression()
 
     # =========================================================================
-    # bool() call classification (E1 bug fix)
+    # Coercive builtins removed — bool() no longer in _SAFE_BUILTINS
     # =========================================================================
 
-    def test_bool_call_classified_as_boolean(self) -> None:
-        """bool(row['x']) is always boolean — bool() returns bool."""
-        parser = ExpressionParser("bool(row['x'])")
-        assert parser.is_boolean_expression()
-        # Verify runtime behavior matches classification
-        assert parser.evaluate({"x": "truthy"}) is True
-        assert parser.evaluate({"x": ""}) is False
-
-    def test_bool_call_with_zero_args_classified_as_boolean(self) -> None:
-        """bool() with zero args is boolean — returns False."""
-        parser = ExpressionParser("bool()")
-        assert parser.is_boolean_expression()
-        assert parser.evaluate({}) is False
+    def test_bool_call_rejected_at_parse_time(self) -> None:
+        """bool() is coercive and no longer allowed in expressions."""
+        with pytest.raises(ExpressionSecurityError, match="Forbidden"):
+            ExpressionParser("bool(row['x'])")
 
     def test_non_bool_call_classified_as_non_boolean(self) -> None:
         """len(row['x']) is not boolean — len() returns int."""
@@ -1205,13 +1154,6 @@ class TestIsBooleanExpression:
         assert not parser.is_boolean_expression()
         # Verify it returns int at runtime
         assert parser.evaluate({"x": [1, 2, 3]}) == 3
-
-    def test_bool_call_in_comparison_classified_as_boolean(self) -> None:
-        """bool(row['x']) == True is boolean — comparison of bool call."""
-        parser = ExpressionParser("bool(row['x']) == True")
-        assert parser.is_boolean_expression()
-        assert parser.evaluate({"x": 1}) is True
-        assert parser.evaluate({"x": 0}) is False
 
 
 class TestExpressionParserBugFixes:
@@ -1342,10 +1284,10 @@ class TestExpressionParserBugFixes:
         parser = ExpressionParser("row.get('status') == 'active'")
         assert parser.evaluate({"status": "active"}) is True
 
-    def test_allow_row_get_with_default(self) -> None:
-        """'row.get(key, default)' is allowed."""
-        parser = ExpressionParser("row.get('status', 'unknown') == 'unknown'")
-        assert parser.evaluate({}) is True
+    def test_reject_row_get_with_default_fabrication(self) -> None:
+        """'row.get(key, default)' is rejected — defaults are fabrication."""
+        with pytest.raises(ExpressionSecurityError, match="fabricate"):
+            ExpressionParser("row.get('status', 'unknown') == 'unknown'")
 
     # =========================================================================
     # Subscript Restriction (P3-2026-01-21)
@@ -1377,12 +1319,14 @@ class TestExpressionParserBugFixes:
         assert parser.evaluate({"data": {"nested": "value"}}) is True
 
     def test_allow_row_get_result_subscript(self) -> None:
-        """Subscript on row.get() result is allowed."""
-        parser = ExpressionParser("row.get('data', {})['key'] == 'value'")
+        """Subscript on row.get() result is allowed (single-arg only)."""
+        parser = ExpressionParser("row.get('data')['key'] == 'value'")
         assert parser.evaluate({"data": {"key": "value"}}) is True
-        # Default case
-        parser2 = ExpressionParser("row.get('missing', {'key': 'default'})['key'] == 'default'")
-        assert parser2.evaluate({}) is True
+
+    def test_reject_row_get_default_subscript(self) -> None:
+        """row.get(key, default)[...] rejected — 2-arg get is fabrication."""
+        with pytest.raises(ExpressionSecurityError, match="fabricate"):
+            ExpressionParser("row.get('data', {})['key'] == 'value'")
 
 
 class TestExpressionEvaluationError:
@@ -1650,14 +1594,13 @@ class TestExpressionParserDictContext:
         context = {"collections": {"present": 42}, "env": {}}
         assert parser.evaluate(context) is True
 
-    def test_dict_context_get_with_default(self) -> None:
-        """`.get(key, default)` works on dict-context allowed names."""
-        parser = ExpressionParser(
-            "collections.get('missing', 0) == 0",
-            allowed_names=["collections", "env"],
-        )
-        context = {"collections": {}, "env": {}}
-        assert parser.evaluate(context) is True
+    def test_dict_context_get_with_default_rejected(self) -> None:
+        """`.get(key, default)` rejected on dict-context names too — no fabrication."""
+        with pytest.raises(ExpressionSecurityError, match="fabricate"):
+            ExpressionParser(
+                "collections.get('missing', 0) == 0",
+                allowed_names=["collections", "env"],
+            )
 
     def test_single_allowed_name_uses_namespace_mode(self) -> None:
         """Single custom allowed_name must still use namespace mode, not single-name mode.
@@ -1687,3 +1630,51 @@ class TestExpressionParserDictContext:
         """Empty allowed_names list is rejected."""
         with pytest.raises(ValueError, match="must not be empty"):
             ExpressionParser("True", allowed_names=[])
+
+
+class TestExpressionParserBoundaryGuards:
+    """Regression tests for boundary validation holes in ExpressionParser."""
+
+    def test_reject_bare_allowed_name(self) -> None:
+        """Allowed namespaces must be accessed through subscripts or .get()."""
+        with pytest.raises(ExpressionSecurityError, match="Bare allowed name: 'row'"):
+            ExpressionParser("row")
+
+    def test_reject_allowed_name_tautology(self) -> None:
+        """Whole-context comparisons like row == row must be rejected."""
+        with pytest.raises(ExpressionSecurityError, match="Bare allowed name: 'row'"):
+            ExpressionParser("row == row")
+
+    def test_reject_custom_allowed_name_tautology(self) -> None:
+        """Custom namespaces cannot be used as standalone comparison values."""
+        with pytest.raises(ExpressionSecurityError, match="Bare allowed name: 'env'"):
+            ExpressionParser(
+                "env == env",
+                allowed_names=["collections", "dependency_runs", "env"],
+            )
+
+    def test_reject_safe_builtin_on_bare_namespace(self) -> None:
+        """Safe builtins cannot consume a whole namespace object."""
+        with pytest.raises(ExpressionSecurityError, match="Bare allowed name: 'row'"):
+            ExpressionParser("len(row) > 0")
+
+    def test_reject_bare_safe_builtin_name(self) -> None:
+        """Builtin identifiers are only valid as call targets."""
+        with pytest.raises(ExpressionSecurityError, match="Bare builtin name: 'len'"):
+            ExpressionParser("len")
+
+    def test_reject_non_finite_float_literal(self) -> None:
+        """Float literals that parse to infinity must fail validation."""
+        with pytest.raises(ExpressionSecurityError, match="Non-finite float literal"):
+            ExpressionParser("1e309")
+
+    def test_reject_negative_non_finite_float_literal(self) -> None:
+        """Unary minus on an infinite literal must still fail validation."""
+        with pytest.raises(ExpressionSecurityError, match="Non-finite float literal"):
+            ExpressionParser("-1e309")
+
+    def test_reject_overflowing_binary_result(self) -> None:
+        """Arithmetic overflow must not return inf from expression evaluation."""
+        parser = ExpressionParser("1e308 * 10")
+        with pytest.raises(ExpressionEvaluationError, match="non-finite float"):
+            parser.evaluate({})

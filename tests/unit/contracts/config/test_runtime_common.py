@@ -13,6 +13,7 @@ This consolidates duplicate tests from individual Runtime*Config test files.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -145,7 +146,7 @@ class TestRuntimeConfigNoOrphanFields:
 
         # Get Settings fields (with their runtime names via mapping)
         settings_fields = set(settings_cls.model_fields.keys())
-        field_mappings = FIELD_MAPPINGS.get(settings_name, {})
+        field_mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get(settings_name, {})
         runtime_from_settings = {field_mappings.get(f, f) for f in settings_fields}
 
         # Get internal-only fields if applicable
@@ -179,7 +180,7 @@ class TestRuntimeConfigNoOrphanFields:
 
         # Get Settings fields (with their runtime names via mapping)
         settings_fields = set(settings_cls.model_fields.keys())
-        field_mappings = FIELD_MAPPINGS.get(settings_name, {})
+        field_mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get(settings_name, {})
         runtime_from_settings = {field_mappings.get(f, f) for f in settings_fields}
 
         # All settings fields must exist in runtime

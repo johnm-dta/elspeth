@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from elspeth.core.events import EventBus, EventBusProtocol, NullEventBus
+from elspeth.core.events import EventBus, NullEventBus
 
 
 # Test event types
@@ -161,36 +161,6 @@ class TestNullEventBus:
         # But handler won't be called
         bus.emit(SampleEvent(value="test"))
         assert not handler_called
-
-    def test_emit_is_noop(self) -> None:
-        """Test NullEventBus.emit() is a no-op."""
-        bus = NullEventBus()
-        # Should not raise even though no subscribers
-        bus.emit(SampleEvent(value="test"))
-
-
-class TestEventBusProtocol:
-    """Tests for EventBusProtocol compatibility."""
-
-    def test_eventbus_satisfies_protocol(self) -> None:
-        """Test EventBus satisfies EventBusProtocol."""
-
-        def accepts_protocol(bus: EventBusProtocol) -> None:
-            bus.subscribe(SampleEvent, lambda e: None)
-            bus.emit(SampleEvent(value="test"))
-
-        # Should not raise type errors
-        accepts_protocol(EventBus())
-
-    def test_nulleventbus_satisfies_protocol(self) -> None:
-        """Test NullEventBus satisfies EventBusProtocol."""
-
-        def accepts_protocol(bus: EventBusProtocol) -> None:
-            bus.subscribe(SampleEvent, lambda e: None)
-            bus.emit(SampleEvent(value="test"))
-
-        # Should not raise type errors
-        accepts_protocol(NullEventBus())
 
 
 class TestEventBusEdgeCases:

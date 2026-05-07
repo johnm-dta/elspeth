@@ -431,7 +431,7 @@ The routing trilogy (ADR-004, ADR-005) replaced implicit pipeline wiring with ex
 - [ ] Old plugin names (`azure_llm`, `openrouter_llm`, etc.) raise `ValueError` with migration guidance
 - [ ] `SingleQueryStrategy` and `MultiQueryStrategy` produce correct output
 - [ ] Langfuse tracing works with unified transform
-- [ ] Batch LLM plugins (`azure_batch_llm`, `openrouter_batch_llm`) unchanged and functional
+- [x] Batch LLM plugins (`azure_batch_llm`, `openrouter_batch_llm`) — retired per ADR-020 (2026-05-06); checklist item retained as historical record.
 
 ### 13.2 Frozen Audit Records (T1)
 

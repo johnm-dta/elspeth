@@ -967,6 +967,60 @@ class TestExecutionGraphAccessors:
         assert "gate" in str(exc_info.value)
         assert "sink" in str(exc_info.value)
 
+    def test_validate_edge_schemas_raises_edge_contract_error_with_structured_fields(self) -> None:
+        """Tier 1.5 final hardening — _validate_edge_compatibility raises
+        the EdgeContractError subclass carrying CompatibilityResult, so
+        downstream layers (composer runtime preflight error formatting in
+        web/execution/validation.py) can build LLM-actionable suggestions
+        from structured fields rather than re-parsing prose."""
+        from elspeth.contracts import NodeType, PluginSchema
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.dag.models import EdgeContractError, GraphValidationError
+
+        class ProducerOutput(PluginSchema):
+            content: str
+            fetch_status: int  # producer emits as int
+
+        class ConsumerInput(PluginSchema):
+            content: str
+            fetch_status: str  # consumer requires as str — type mismatch
+
+        graph = ExecutionGraph()
+        graph.add_node(
+            "fetch_node",
+            node_type=NodeType.SOURCE,
+            plugin_name="web_scrape",
+            output_schema=ProducerOutput,
+        )
+        graph.add_node(
+            "consume_node",
+            node_type=NodeType.SINK,
+            plugin_name="csv",
+            input_schema=ConsumerInput,
+        )
+        graph.add_edge("fetch_node", "consume_node", label="continue")
+
+        with pytest.raises(EdgeContractError) as exc_info:
+            graph.validate_edge_compatibility()
+
+        exc = exc_info.value
+        # Subclass relationship — existing GraphValidationError catchers
+        # keep working without modification.
+        assert isinstance(exc, GraphValidationError)
+        # Structured fields populated with the actual node IDs and schema
+        # names from the failing edge.
+        assert exc.from_node_id == "fetch_node"
+        assert exc.to_node_id == "consume_node"
+        assert exc.producer_schema_name == "ProducerOutput"
+        assert exc.consumer_schema_name == "ConsumerInput"
+        # CompatibilityResult preserved end-to-end so the formatter can
+        # walk per-field detail.
+        assert exc.compatibility_result.compatible is False
+        type_mismatch_fields = [name for name, _, _ in exc.compatibility_result.type_mismatches]
+        assert "fetch_status" in type_mismatch_fields
+        # component_id semantics preserved (consumer is "responsible").
+        assert exc.component_id == "consume_node"
+
     def test_validate_edge_schemas_validates_all_fork_destinations(self) -> None:
         """Fork gates validate all destination edges against effective schema."""
         from elspeth.contracts import NodeType, PluginSchema, RoutingMode
@@ -2383,7 +2437,7 @@ class TestExecutionGraphRouteMapping:
                 _gate_settings(
                     GateSettings,
                     name="router",
-                    condition="row.get('valid', False)",
+                    condition="row.get('valid') is not None",
                     routes={"true": "clean", "false": "quarantine"},
                 ),
             ],

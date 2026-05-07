@@ -180,6 +180,10 @@ class HTTPCallRequest:
     * **Standard** (``resolved_ip`` is None): includes json/params by method.
     * **SSRF-safe** (``resolved_ip`` set, no hop): includes resolved_ip.
     * **Redirect hop** (``hop_number`` set): includes hop tracking fields.
+      Successful hops include ``resolved_ip``; blocked pre-validation hops
+      record ``redirect_from`` without fabricating a resolved IP.
+    * **Audit-only metadata** (``audit_metadata`` set): includes request-linked
+      provenance that was not sent over the wire.
     """
 
     method: str
@@ -187,16 +191,15 @@ class HTTPCallRequest:
     headers: Mapping[str, str]
     json: Mapping[str, Any] | None = None
     params: Mapping[str, Any] | None = None
+    audit_metadata: Mapping[str, Any] | None = None
     resolved_ip: str | None = None
     hop_number: int | None = None
     redirect_from: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.headers, MappingProxyType):
-            object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
-        freeze_fields(self, "json", "params")
-        if self.hop_number is not None and self.resolved_ip is None:
-            msg = "hop_number requires resolved_ip (redirect hops are always SSRF-safe)"
+        freeze_fields(self, "headers", "json", "params", "audit_metadata")
+        if self.hop_number is not None and self.resolved_ip is None and self.redirect_from is None:
+            msg = "hop_number without resolved_ip requires redirect_from for blocked redirect attempts"
             raise ValueError(msg)
         if self.redirect_from is not None and self.hop_number is None:
             msg = "redirect_from requires hop_number"
@@ -205,9 +208,11 @@ class HTTPCallRequest:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.
 
-        Standard path (``resolved_ip`` is None) includes json/params by
-        method.  SSRF/redirect path skips json/params and includes
-        resolved_ip and hop tracking fields.
+        SSRF fields (resolved_ip, hop_number, redirect_from) are additive —
+        they never suppress other fields.  json/params are serialized for
+        all request shapes using hash-stability rules: POST always emits
+        json (even None), GET always emits params (even None), other
+        methods emit when non-None.
         """
         d: dict[str, Any] = {"method": self.method, "url": self.url}
         if self.resolved_ip is not None:
@@ -217,12 +222,15 @@ class HTTPCallRequest:
         if self.redirect_from is not None:
             d["redirect_from"] = self.redirect_from
         d["headers"] = dict(self.headers)
-        # Standard path only: include method-specific body/params
-        if self.resolved_ip is None:
-            if self.method == "POST":
-                d["json"] = deep_thaw(self.json) if self.json is not None else None
-            elif self.method == "GET":
-                d["params"] = deep_thaw(self.params) if self.params is not None else None
+        # POST always emits json (even None) and GET always emits params
+        # (even None) for hash stability with existing audit records.
+        # All other methods emit json/params when non-None — no silent drops.
+        if self.json is not None or self.method == "POST":
+            d["json"] = deep_thaw(self.json) if self.json is not None else None
+        if self.params is not None or self.method == "GET":
+            d["params"] = deep_thaw(self.params) if self.params is not None else None
+        if self.audit_metadata is not None:
+            d["audit_metadata"] = deep_thaw(self.audit_metadata)
         return d
 
 
@@ -237,19 +245,20 @@ class HTTPCallResponse:
     status_code: int
     headers: Mapping[str, str]
     body_size: int | None = None
-    body: Mapping[str, Any] | str | None = None
+    body: Mapping[str, Any] | tuple[Any, ...] | str | None = None
     redirect_count: int = 0
 
     def __post_init__(self) -> None:
         require_int(self.status_code, "status_code", min_value=100)
         require_int(self.body_size, "body_size", optional=True, min_value=0)
         require_int(self.redirect_count, "redirect_count", min_value=0)
-        if not isinstance(self.headers, MappingProxyType):
-            object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
-        if self.body is not None and isinstance(self.body, Mapping):
-            frozen = deep_freeze(self.body)
-            if frozen is not self.body:
-                object.__setattr__(self, "body", frozen)
+        if self.body is not None and self.body_size is None:
+            raise ValueError(
+                "HTTPCallResponse.body requires body_size — without it, "
+                "to_dict() silently drops body from the audit record. "
+                "Set body_size=len(content) or omit body for redirect hops."
+            )
+        freeze_fields(self, "headers", "body")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.
@@ -263,7 +272,7 @@ class HTTPCallResponse:
         }
         if self.body_size is not None:
             d["body_size"] = self.body_size
-            if isinstance(self.body, (MappingProxyType, dict)):
+            if isinstance(self.body, (MappingProxyType, dict, tuple)):
                 d["body"] = deep_thaw(self.body)
             else:
                 d["body"] = self.body

@@ -1,0 +1,6 @@
+product,price,quantity,in_stock
+Widget A,19.99,5,true
+Widget B,24.50,3,yes
+Gadget X,149.00,2,1
+Gadget Y,89.99,10,false
+Tool Z,34.95,7,no

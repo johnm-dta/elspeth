@@ -15,18 +15,108 @@ Example usage:
 """
 
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
 from elspeth.contracts.schema import SchemaConfig
 
+OutputCollisionPolicy = Literal["fail_if_exists", "auto_increment", "append_or_create"]
+
 
 class PluginConfigError(Exception):
-    """Raised when plugin configuration is invalid."""
+    """Raised when plugin configuration is invalid.
 
-    pass
+    Attributes:
+        cause: The underlying validation message without the class-name prefix.
+               Callers should read this instead of parsing str(exc).
+               None only when the raise site omits the keyword argument (legacy
+               or non-from_dict paths such as plugin __init__ guards).
+        plugin_class: The config class name (e.g. ``'CSVSourceConfig'``), or
+                      None when raised outside ``from_dict()``. Callers can use
+                      the suffix to infer component type without regex-parsing.
+        plugin_name: The runtime plugin name (e.g. ``'csv'``), as it appears
+                     in pipeline YAML. Set by ``from_dict()`` when provided by
+                     the caller. None when the caller doesn't know the name
+                     (direct ``from_dict()`` calls without context) or when
+                     raised outside ``from_dict()``.
+        component_type: The pipeline component type (``'source'``, ``'sink'``,
+                        ``'transform'``), or None when raised outside
+                        ``from_dict()`` or when the type is unknown.
+                        Set from the config class hierarchy's
+                        ``_plugin_component_type`` attribute.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: str | None = None,
+        plugin_class: str | None = None,
+        plugin_name: str | None = None,
+        component_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.cause: str | None = cause
+        self.plugin_class: str | None = plugin_class
+        self.plugin_name: str | None = plugin_name
+        self.component_type: str | None = component_type
+
+
+def _format_validation_error_location(loc: tuple[Any, ...]) -> str:
+    """Render a Pydantic error location as a stable user-facing field path."""
+    if not loc:
+        return "config"
+
+    parts: list[str] = []
+    for item in loc:
+        match item:
+            case int() as index:
+                if parts:
+                    parts[-1] = f"{parts[-1]}[{index}]"
+                else:
+                    parts.append(f"[{index}]")
+            case _:
+                parts.append(str(item))
+    return ".".join(parts)
+
+
+def _format_validation_error_cause(exc: ValidationError) -> str:
+    """Build a class-name-free validation summary from structured Pydantic data."""
+    lines: list[str] = []
+    for error in exc.errors():
+        location = _format_validation_error_location(tuple(error["loc"]))
+        message = error["msg"]
+        lines.append(f"{location}: {message}")
+    return "\n".join(lines)
+
+
+def _validate_schema_config(value: Any, *, require_dict: bool) -> SchemaConfig | None:
+    """Validate and parse schema config from dict or pass through SchemaConfig instance.
+
+    This validator enables Pydantic to accept schema dicts with string field specs
+    like "line: str" that need parsing via SchemaConfig.from_dict().
+
+    Args:
+        value: The schema config value to validate.
+        require_dict: If True, value must be a dict (rejects None and other types).
+            Used when 'schema' key was explicitly provided in the input.
+    """
+    if value is None:
+        if require_dict:
+            raise ValueError(
+                f"'schema' must be a dict, got {type(value).__name__}. "
+                f"Use 'schema: {{mode: observed}}' or provide explicit field definitions."
+            )
+        return None
+    if isinstance(value, SchemaConfig):
+        return value
+    if isinstance(value, dict):
+        return SchemaConfig.from_dict(value)
+    raise ValueError(
+        f"'schema' must be a dict, got {type(value).__name__}. Use 'schema: {{mode: observed}}' or provide explicit field definitions."
+    )
 
 
 class PluginConfig(BaseModel):
@@ -37,18 +127,59 @@ class PluginConfig(BaseModel):
 
     Schema is optional in the base class. Subclasses that process data
     (DataPluginConfig) require schema to be specified.
+
+    The schema field is exposed as "schema" in JSON Schema (for LLM tools and YAML)
+    but stored internally as "schema_config" to avoid shadowing Python's built-in.
     """
 
-    model_config = {"extra": "forbid", "frozen": True}  # Reject unknown fields, immutable after construction
+    _plugin_component_type: ClassVar[str | None] = None
 
-    schema_config: SchemaConfig | None = None
+    model_config = {
+        "extra": "forbid",
+        "frozen": True,
+        "populate_by_name": True,  # Allow both "schema" (alias) and "schema_config" (field name)
+    }
+
+    schema_config: SchemaConfig | None = Field(
+        default=None,
+        alias="schema",
+        description="Schema configuration for data validation.",
+    )
+
+    @field_validator("schema_config", mode="before")
+    @classmethod
+    def _parse_schema_config(cls, value: Any) -> SchemaConfig | None:
+        """Parse schema dict to SchemaConfig, handling string field specs.
+
+        Accepts:
+        - SchemaConfig instance (passthrough)
+        - dict (parsed via SchemaConfig.from_dict())
+        - None (allowed for PluginConfig, rejected by DataPluginConfig override)
+
+        Raises ValueError for other types (str, list, int, etc.)
+
+        Error messages use 'schema' to match the user-facing alias.
+        """
+        return _validate_schema_config(value, require_dict=False)
 
     @classmethod
-    def from_dict(cls, config: dict[str, Any]) -> Self:
+    def from_dict(
+        cls,
+        config: object,
+        *,
+        plugin_name: str | None = None,
+    ) -> Self:
         """Create config from dict with clear error on validation failure.
 
         Args:
-            config: Dictionary of configuration values.
+            config: Configuration value — expected to be a dict but typed as
+                ``object`` because callers may pass unsanitized YAML output.
+                Non-dict values are rejected with PluginConfigError.
+                Accepts "schema" key (preferred, matches YAML format) or
+                "schema_config" for backwards compatibility.
+            plugin_name: Runtime plugin name (e.g. ``'csv'``). Threaded into
+                PluginConfigError so consumers get both the internal class name
+                and the user-facing plugin name without string parsing.
 
         Returns:
             Validated configuration instance.
@@ -56,25 +187,51 @@ class PluginConfig(BaseModel):
         Raises:
             PluginConfigError: If configuration is invalid.
         """
-        if not isinstance(config, dict):
-            raise PluginConfigError(f"Invalid configuration for {cls.__name__}: config must be a dict, got {type(config).__name__}.")
+        _err_fields: dict[str, Any] = {
+            "cause": "",
+            "plugin_class": cls.__name__,
+            "plugin_name": plugin_name,
+            "component_type": cls._plugin_component_type,
+        }
 
-        try:
-            config_copy = dict(config)
-            if "schema" in config_copy:
-                schema_dict = config_copy.pop("schema")
-                # Type guard: schema must be a dict (not None, string, list, etc.)
-                if not isinstance(schema_dict, dict):
-                    raise ValueError(
-                        f"'schema' must be a dict, got {type(schema_dict).__name__}. "
+        if not isinstance(config, dict):
+            _err_fields["cause"] = f"config must be a dict, got {type(config).__name__}."
+            raise PluginConfigError(
+                f"Invalid configuration for {cls.__name__}: {_err_fields['cause']}",
+                **_err_fields,
+            )
+
+        # Pre-validate: reject explicit non-dict schema values.
+        # Pydantic can't distinguish "key absent" from "key explicitly None",
+        # so we check here before passing to model_validate.
+        for key in ("schema", "schema_config"):
+            if key in config:
+                value = config[key]
+                if not isinstance(value, (dict, SchemaConfig)):
+                    _err_fields["cause"] = (
+                        f"'schema' must be a dict, got {type(value).__name__}. "
                         f"Use 'schema: {{mode: observed}}' or provide explicit field definitions."
                     )
-                config_copy["schema_config"] = SchemaConfig.from_dict(schema_dict)
-            return cls.model_validate(config_copy)
+                    raise PluginConfigError(
+                        f"Invalid configuration for {cls.__name__}: {_err_fields['cause']}",
+                        **_err_fields,
+                    )
+
+        try:
+            # model_validate handles the schema alias and field_validator parses dicts
+            return cls.model_validate(config)
         except ValidationError as e:
-            raise PluginConfigError(f"Invalid configuration for {cls.__name__}: {e}") from e
+            _err_fields["cause"] = _format_validation_error_cause(e)
+            raise PluginConfigError(
+                f"Invalid configuration for {cls.__name__}: {_err_fields['cause']}",
+                **_err_fields,
+            ) from e
         except ValueError as e:
-            raise PluginConfigError(f"Invalid configuration for {cls.__name__}: {e}") from e
+            _err_fields["cause"] = str(e)
+            raise PluginConfigError(
+                f"Invalid configuration for {cls.__name__}: {e}",
+                **_err_fields,
+            ) from e
 
 
 class DataPluginConfig(PluginConfig):
@@ -90,12 +247,37 @@ class DataPluginConfig(PluginConfig):
         This class overrides schema_config from Optional to required.
         Pydantic validates this at construction time, and mypy sees the
         narrowed type - no cast() needed in plugin implementations.
+
+    Component Type Enforcement:
+        All subclasses must set ``_plugin_component_type`` to ``'source'``,
+        ``'sink'``, or ``'transform'`` — either directly or by inheriting
+        from an intermediate base (SourceDataConfig, SinkPathConfig,
+        TransformDataConfig). Intermediate bases that intentionally leave
+        the type unset must declare ``_component_type_exempt = True`` in
+        their own class body; this exemption does not propagate to children.
     """
+
+    _component_type_exempt: ClassVar[bool] = True
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "_component_type_exempt" in cls.__dict__:
+            return
+        if cls._plugin_component_type is None:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from DataPluginConfig but does not "
+                f"set _plugin_component_type. Set it to 'source', 'sink', or "
+                f"'transform' (directly or via an intermediate base like "
+                f"SourceDataConfig, SinkPathConfig, or TransformDataConfig)."
+            )
 
     # Override parent's Optional field with required field.
     # This provides both runtime validation (Pydantic) and static typing (mypy).
+    # Alias matches parent - required for Pydantic to properly override.
+    # The parent's model_validator handles parsing; this just enforces required.
     schema_config: SchemaConfig = Field(
         ...,
+        alias="schema",
         description=(
             "Schema configuration for data validation. "
             "Use 'schema: {mode: observed}' to infer types from data, or "
@@ -112,6 +294,8 @@ class PathConfig(DataPluginConfig):
 
     Provides path validation and resolution relative to a base directory.
     """
+
+    _component_type_exempt: ClassVar[bool] = True
 
     path: str
 
@@ -149,6 +333,8 @@ class SourceDataConfig(PathConfig):
     (SourceSettings in core/config.py), not here. The bridge in
     cli_helpers.py injects on_success after plugin construction.
     """
+
+    _plugin_component_type: ClassVar[str | None] = "source"
 
     on_validation_failure: str = Field(
         ...,  # Required - no default
@@ -203,6 +389,14 @@ def validate_headers_value(v: str | dict[str, str] | None) -> str | dict[str, st
     if v is None:
         return v
     if isinstance(v, dict):
+        from elspeth.core.identifiers import validate_field_names
+
+        if not v:
+            raise ValueError("headers custom mapping must not be empty — use 'normalized' or 'original' for non-custom modes")
+        validate_field_names(list(v.keys()), "headers custom mapping keys")
+        for source_name, target_name in v.items():
+            if not target_name.strip():
+                raise ValueError(f"headers custom mapping value for {source_name!r} must not be empty or whitespace-only")
         targets = list(v.values())
         duplicates = [t for t in targets if targets.count(t) > 1]
         if duplicates:
@@ -229,9 +423,20 @@ class SinkPathConfig(PathConfig):
             - dict: Custom mapping from normalized to output names
     """
 
+    _plugin_component_type: ClassVar[str | None] = "sink"
+
     headers: str | dict[str, str] | None = Field(
         default=None,
         description=("Header output mode: 'normalized', 'original', or {field: header} mapping"),
+    )
+    collision_policy: OutputCollisionPolicy | None = Field(
+        default=None,
+        description=(
+            "Optional local output collision policy. "
+            "'fail_if_exists' refuses an existing write target; "
+            "'auto_increment' picks a free sibling path; "
+            "'append_or_create' is valid with append mode."
+        ),
     )
 
     @field_validator("headers")
@@ -278,6 +483,8 @@ class TransformDataConfig(DataPluginConfig):
         fields your template references, then declare them explicitly.
     """
 
+    _plugin_component_type: ClassVar[str | None] = "transform"
+
     required_input_fields: list[str] | None = Field(
         default=None,
         description=(
@@ -322,3 +529,16 @@ class TransformDataConfig(DataPluginConfig):
             raise ValueError(f"Duplicate field names in required_input_fields: {', '.join(duplicates)}")
 
         return result
+
+    @property
+    def declared_input_fields(self) -> frozenset[str]:
+        """Normalized runtime view of ``required_input_fields``.
+
+        ``required_input_fields`` stays list-shaped in config models so JSON
+        schema and YAML remain natural. Runtime declaration contracts need an
+        immutable, order-insensitive set surface, so transforms normalize the
+        value through this property at construction time.
+        """
+        if self.required_input_fields is None:
+            return frozenset()
+        return frozenset(self.required_input_fields)

@@ -224,5 +224,56 @@ class TestToolDefImmutability:
             tool.schema_properties["injected"] = "evil"  # type: ignore[index]
 
         # Caller's original dict must be decoupled
-        original["injected"] = "evil"
+        original["injected"] = "evil"  # type: ignore[assignment]
         assert "injected" not in tool.schema_properties
+
+
+class TestSchemaAndValidatorConsistency:
+    """JSON Schema must agree with _validate_tool_args on nullability.
+
+    Bug fix for elspeth-0ff83f68dd: optional_str and optional_dict fields
+    were published with non-null JSON Schema types, so MCP clients that
+    serialize omitted optionals as null were rejected by the framework
+    before ELSPETH's validator could handle them.
+    """
+
+    def test_optional_str_fields_are_nullable_in_schema(self) -> None:
+        """Every optional_str field must have type ["string", "null"] in the JSON Schema."""
+        from elspeth.mcp.server import _TOOLS
+
+        for tool_name, tool_def in _TOOLS.items():
+            for field_name in tool_def.args.optional_str:
+                schema_prop = tool_def.schema_properties.get(field_name)
+                assert schema_prop is not None, f"{tool_name}: optional_str '{field_name}' missing from schema_properties"
+                schema_type = schema_prop["type"]
+                assert schema_type == ["string", "null"], (
+                    f"{tool_name}: optional_str '{field_name}' has schema type {schema_type!r}, "
+                    f"expected ['string', 'null'] — validator accepts null but schema rejects it"
+                )
+
+    def test_optional_dict_fields_are_nullable_in_schema(self) -> None:
+        """Every optional_dict field must have type ["object", "null"] in the JSON Schema."""
+        from elspeth.mcp.server import _TOOLS
+
+        for tool_name, tool_def in _TOOLS.items():
+            for field_name in tool_def.args.optional_dict:
+                schema_prop = tool_def.schema_properties.get(field_name)
+                assert schema_prop is not None, f"{tool_name}: optional_dict '{field_name}' missing from schema_properties"
+                schema_type = schema_prop["type"]
+                assert schema_type == ["object", "null"], (
+                    f"{tool_name}: optional_dict '{field_name}' has schema type {schema_type!r}, "
+                    f"expected ['object', 'null'] — validator accepts null but schema rejects it"
+                )
+
+    def test_required_str_fields_are_not_nullable(self) -> None:
+        """Required string fields must NOT be nullable — they must always be present."""
+        from elspeth.mcp.server import _TOOLS
+
+        for tool_name, tool_def in _TOOLS.items():
+            for field_name in tool_def.args.required_str:
+                schema_prop = tool_def.schema_properties.get(field_name)
+                assert schema_prop is not None, f"{tool_name}: required_str '{field_name}' missing from schema_properties"
+                schema_type = schema_prop["type"]
+                assert schema_type == "string", (
+                    f"{tool_name}: required_str '{field_name}' should be non-nullable 'string', got {schema_type!r}"
+                )

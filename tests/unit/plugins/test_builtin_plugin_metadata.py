@@ -30,6 +30,14 @@ class TestBuiltinSourceMetadata:
         assert isinstance(JSONSource.plugin_version, str)
         assert JSONSource.plugin_version != "0.0.0", "JSONSource has placeholder version"
 
+    def test_text_source_has_plugin_version(self) -> None:
+        """TextSource must have non-default plugin_version."""
+        from elspeth.plugins.sources.text_source import TextSource
+
+        assert hasattr(TextSource, "plugin_version")
+        assert isinstance(TextSource.plugin_version, str)
+        assert TextSource.plugin_version != "0.0.0", "TextSource has placeholder version"
+
     def test_null_source_has_plugin_version(self) -> None:
         """NullSource must have non-default plugin_version."""
         from elspeth.plugins.sources.null_source import NullSource

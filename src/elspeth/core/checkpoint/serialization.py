@@ -32,6 +32,8 @@ import math
 from datetime import UTC, datetime
 from typing import Any
 
+from elspeth.contracts.errors import AuditIntegrityError
+
 # Reserved key used for type envelopes. User dicts containing this key
 # are escaped via _escape_reserved_keys() before encoding.
 _ENVELOPE_TYPE_KEY = "__elspeth_type__"
@@ -70,6 +72,9 @@ class CheckpointEncoder(json.JSONEncoder):
                 _ENVELOPE_VALUE_KEY: obj.isoformat(),
             }
 
+        # Tuples are handled in _escape_reserved_keys() pre-processing,
+        # not here — json.dumps converts tuples to arrays before calling default().
+
         # Let default encoder handle or raise TypeError
         return super().default(obj)
 
@@ -94,7 +99,7 @@ def _reject_nan_infinity(obj: Any) -> Any:
     elif isinstance(obj, dict):
         for v in obj.values():
             _reject_nan_infinity(v)
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         for v in obj:
             _reject_nan_infinity(v)
     return obj
@@ -115,6 +120,14 @@ def _escape_reserved_keys(obj: Any) -> Any:
     if isinstance(obj, datetime):
         # Datetimes are handled by CheckpointEncoder, pass through
         return obj
+    if isinstance(obj, tuple):
+        # Convert tuple to envelope dict BEFORE json.dumps sees it.
+        # json.dumps treats tuples as arrays (never calls default()),
+        # so we must create the envelope here during pre-processing.
+        return {
+            _ENVELOPE_TYPE_KEY: "tuple",
+            _ENVELOPE_VALUE_KEY: [_escape_reserved_keys(v) for v in obj],
+        }
     if isinstance(obj, dict):
         # First recurse into values
         escaped = {k: _escape_reserved_keys(v) for k, v in obj.items()}
@@ -180,11 +193,30 @@ def _restore_types(obj: Any) -> Any:
             envelope_value = obj[_ENVELOPE_VALUE_KEY]
 
             if envelope_type == "datetime" and isinstance(envelope_value, str):
-                return datetime.fromisoformat(envelope_value)
+                dt = datetime.fromisoformat(envelope_value)
+                if dt.tzinfo is None:
+                    raise AuditIntegrityError(
+                        f"Corrupted checkpoint: datetime envelope contains naive datetime "
+                        f"{envelope_value!r} — timezone-aware datetimes are required"
+                    )
+                return dt
 
             if envelope_type == "escaped_dict" and isinstance(envelope_value, dict):
                 # Unwrap the escaped dict and recurse into its values
                 return {k: _restore_types(v) for k, v in envelope_value.items()}
+
+            if envelope_type == "tuple" and isinstance(envelope_value, list):
+                return tuple(_restore_types(v) for v in envelope_value)
+
+            # Envelope shape detected — all known types handled above.
+            _KNOWN_ENVELOPE_TYPES = {"datetime", "escaped_dict", "tuple"}
+            if envelope_type in _KNOWN_ENVELOPE_TYPES:
+                # Known type but value failed isinstance check above — wrong Python type
+                raise AuditIntegrityError(
+                    f"Checkpoint envelope type {envelope_type!r} has invalid value type "
+                    f"{type(envelope_value).__name__!r} — data may be corrupted"
+                )
+            raise AuditIntegrityError(f"Unknown checkpoint envelope type {envelope_type!r} — data may be corrupted or tampered")
 
         # Recurse into dict values
         return {k: _restore_types(v) for k, v in obj.items()}

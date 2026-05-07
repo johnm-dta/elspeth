@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from elspeth.contracts import ArtifactDescriptor
+from tests.fixtures.base_classes import inject_write_failure
 
 # Schema configs for tests
 # CSV and Database sinks require fixed columns (strict mode)
@@ -116,7 +117,7 @@ class TestSinkProtocolCompliance:
     def test_has_required_instance_attributes(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """All sinks must have input_schema, idempotent, supports_resume attributes after instantiation."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
 
         # Direct attribute access - crash on missing (our code, our bug)
         _ = sink.input_schema  # Verify attribute exists
@@ -133,7 +134,7 @@ class TestSinkProtocolCompliance:
     def test_write_empty_batch_returns_descriptor(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """write() with empty list should return ArtifactDescriptor without error."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
         mock_ctx = _create_mock_context()
 
         # Call write with empty list (should not crash)
@@ -155,7 +156,7 @@ class TestSinkProtocolCompliance:
     def test_write_with_data_returns_descriptor_with_valid_hash(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """write() with actual data should return ArtifactDescriptor with valid hash."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
         mock_ctx = _create_mock_context()
 
         # Write actual data
@@ -184,7 +185,7 @@ class TestSinkProtocolCompliance:
     def test_flush_method_callable(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """All sinks must have callable flush() method."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
 
         # Direct method call - crash on missing (our code, our bug)
         sink.flush()  # Should not raise
@@ -196,7 +197,7 @@ class TestSinkProtocolCompliance:
     def test_close_method_callable_and_idempotent(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """All sinks must have callable close() method that is idempotent."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
 
         # Direct method call - crash on missing (our code, our bug)
         sink.close()  # First close
@@ -206,7 +207,7 @@ class TestSinkProtocolCompliance:
     def test_lifecycle_hooks_exist(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """All sinks must have on_start() and on_complete() lifecycle hooks."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
 
         # Create mock context
         mock_ctx = _create_mock_context()
@@ -222,7 +223,7 @@ class TestSinkProtocolCompliance:
     def test_resume_methods_exist(self, class_path: str, config_factory: Any, expected_name: str) -> None:
         """All sinks must have configure_for_resume() and validate_output_target() methods."""
         sink_class = _import_sink_class(class_path)
-        sink = sink_class(config_factory())
+        sink = inject_write_failure(sink_class(config_factory()))
 
         # Direct attribute access - crash on missing (our code, our bug)
         supports_resume = sink.supports_resume
@@ -250,7 +251,7 @@ class TestCSVSinkWriteBehavior:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         path = _create_temp_path(".csv")
-        sink = CSVSink({"path": str(path), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(path), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}], mock_ctx)
@@ -274,7 +275,7 @@ class TestCSVSinkWriteBehavior:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         path = _create_temp_path(".csv")
-        sink = CSVSink({"path": str(path), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(path), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}], mock_ctx)
@@ -299,7 +300,7 @@ class TestCSVSinkWriteBehavior:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         path = _create_temp_path(".csv")
-        sink = CSVSink({"path": str(path), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(path), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Test"}], mock_ctx)
@@ -318,7 +319,7 @@ class TestCSVSinkWriteBehavior:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         path = _create_temp_path(".csv")
-        sink = CSVSink({"path": str(path), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(path), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Test"}], mock_ctx)
@@ -337,7 +338,7 @@ class TestJSONSinkWriteBehavior:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         path = _create_temp_path(".json")
-        sink = JSONSink({"path": str(path), "schema": DYNAMIC_SCHEMA, "format": "json"})
+        sink = inject_write_failure(JSONSink({"path": str(path), "schema": DYNAMIC_SCHEMA, "format": "json"}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}], mock_ctx)
@@ -360,7 +361,7 @@ class TestJSONSinkWriteBehavior:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         path = _create_temp_path(".jsonl")
-        sink = JSONSink({"path": str(path), "schema": DYNAMIC_SCHEMA, "format": "jsonl"})
+        sink = inject_write_failure(JSONSink({"path": str(path), "schema": DYNAMIC_SCHEMA, "format": "jsonl"}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}], mock_ctx)
@@ -382,7 +383,7 @@ class TestJSONSinkWriteBehavior:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         path = _create_temp_path(".jsonl")
-        sink = JSONSink({"path": str(path), "schema": DYNAMIC_SCHEMA, "format": "jsonl"})
+        sink = inject_write_failure(JSONSink({"path": str(path), "schema": DYNAMIC_SCHEMA, "format": "jsonl"}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}], mock_ctx)
@@ -409,7 +410,7 @@ class TestDatabaseSinkWriteBehavior:
 
         # Use a unique in-memory database
         db_url = "sqlite:///:memory:"
-        sink = DatabaseSink({"url": db_url, "table": "test_table", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "test_table", "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}], mock_ctx)
@@ -438,7 +439,7 @@ class TestDatabaseSinkWriteBehavior:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         db_url = "sqlite:///:memory:"
-        sink = DatabaseSink({"url": db_url, "table": "test_table", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "test_table", "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Alice"}], mock_ctx)
@@ -460,7 +461,7 @@ class TestDatabaseSinkWriteBehavior:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         db_url = "sqlite:///:memory:"
-        sink = DatabaseSink({"url": db_url, "table": "test_table", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "test_table", "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         sink.write([{"id": 1, "name": "Test"}], mock_ctx)
@@ -484,8 +485,8 @@ class TestSinkContentHashConsistency:
         path1 = _create_temp_path(".csv")
         path2 = _create_temp_path(".csv")
 
-        sink1 = CSVSink({"path": str(path1), "schema": STRICT_SCHEMA})
-        sink2 = CSVSink({"path": str(path2), "schema": STRICT_SCHEMA})
+        sink1 = inject_write_failure(CSVSink({"path": str(path1), "schema": STRICT_SCHEMA}))
+        sink2 = inject_write_failure(CSVSink({"path": str(path2), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         test_data = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
@@ -509,8 +510,8 @@ class TestSinkContentHashConsistency:
         path1 = _create_temp_path(".csv")
         path2 = _create_temp_path(".csv")
 
-        sink1 = CSVSink({"path": str(path1), "schema": STRICT_SCHEMA})
-        sink2 = CSVSink({"path": str(path2), "schema": STRICT_SCHEMA})
+        sink1 = inject_write_failure(CSVSink({"path": str(path1), "schema": STRICT_SCHEMA}))
+        sink2 = inject_write_failure(CSVSink({"path": str(path2), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         result1 = sink1.write([{"id": 1, "name": "Alice"}], mock_ctx)
@@ -532,8 +533,8 @@ class TestSinkContentHashConsistency:
         path1 = _create_temp_path(".csv")
         path2 = _create_temp_path(".csv")
 
-        sink1 = CSVSink({"path": str(path1), "schema": STRICT_SCHEMA})
-        sink2 = CSVSink({"path": str(path2), "schema": STRICT_SCHEMA})
+        sink1 = inject_write_failure(CSVSink({"path": str(path1), "schema": STRICT_SCHEMA}))
+        sink2 = inject_write_failure(CSVSink({"path": str(path2), "schema": STRICT_SCHEMA}))
         mock_ctx = _create_mock_context()
 
         result1 = sink1.write([], mock_ctx)

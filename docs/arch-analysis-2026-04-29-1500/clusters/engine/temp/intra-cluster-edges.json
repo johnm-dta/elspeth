@@ -1,0 +1,21 @@
+{
+  "cluster": "engine",
+  "cluster_scope_paths": [
+    "engine/"
+  ],
+  "derived_from": "temp/l3-import-graph.json",
+  "inbound_from_other_clusters": [],
+  "intra_cluster_edges": [],
+  "nodes": [],
+  "note": "engine/ is L2; the source oracle filters L3-only. Empty intra/inbound/outbound sets are EXPECTED and constitute evidence that engine/ has no L3 graph footprint. L2 internal coupling and cross-cluster L2/L1/L0 edges must be derived from the AST inside the cluster catalog (per \u0394 L2-3), not from this artefact.",
+  "outbound_to_other_clusters": [],
+  "schema_version": "1.0",
+  "stats": {
+    "inbound_edge_count": 0,
+    "intra_edge_count": 0,
+    "intra_node_count": 0,
+    "outbound_edge_count": 0,
+    "sccs_touching_cluster": 0
+  },
+  "strongly_connected_components_touching_cluster": []
+}

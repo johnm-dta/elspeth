@@ -194,8 +194,9 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.infrastructure.config_base import PluginConfigError
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        # DataPluginConfig requires schema_config - Pydantic enforces this natively
-        with pytest.raises(PluginConfigError, match=r"schema_config[\s\S]*Field required"):
+        # DataPluginConfig requires schema - Pydantic enforces this natively
+        # Error message uses alias "schema" not field name "schema_config"
+        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
             CSVSource({"path": "/tmp/test.csv", "on_validation_failure": QUARANTINE_SINK})
 
     def test_missing_on_validation_failure_raises_error(self) -> None:
@@ -383,6 +384,94 @@ class TestCSVSourceQuarantineYielding:
 
         assert not results[2].is_quarantined
         assert results[2].row == {"id": "3", "name": "carol"}
+
+    def test_unterminated_quoted_field_quarantines_and_stops_processing(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Malformed quoted input should quarantine instead of merging later rows.
+
+        Regression test for elspeth-8df72d9e80: default csv.reader leniency can
+        merge later physical rows into an unterminated quoted field unless the
+        parser is created in strict mode.
+        """
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "unterminated_quote.csv"
+        csv_file.write_text('id,name\n1,"alice\n2,bob\n3,carol\n')
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 1
+        quarantined = results[0]
+        assert quarantined.is_quarantined is True
+        assert quarantined.quarantine_error is not None
+        assert "CSV parse error" in quarantined.quarantine_error
+        assert quarantined.row["__line_number__"] == 4
+
+    def test_csv_error_in_data_rows_stops_processing(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """csv.Error in the main row loop stops processing — no silent continuation.
+
+        Regression test for elspeth-b4f43cb5c3: csv.Error can leave the parser
+        in a corrupted state where subsequent next() calls skip, merge, or
+        misattribute rows. The skip_rows path already stops on csv.Error; the
+        main row loop must do the same.
+        """
+        from unittest.mock import patch
+
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("id,name\n1,alice\n2,bob\n3,carol\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        # Inject csv.Error on the 3rd next() call (after header + first data row)
+        original_csv_reader = csv.reader
+
+        def patched_reader(*args, **kwargs):
+            real_reader = original_csv_reader(*args, **kwargs)
+            calls = {"count": 0}
+            original_next = real_reader.__next__
+
+            class ErrorInjectingReader:
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    calls["count"] += 1
+                    if calls["count"] == 3:  # 1=header, 2=alice, 3=bob (error here)
+                        raise csv.Error("injected: unmatched quote corrupted parser")
+                    return original_next()
+
+                @property
+                def line_num(self):
+                    return real_reader.line_num
+
+            return ErrorInjectingReader()
+
+        with patch("elspeth.plugins.sources.csv_source.csv.reader", side_effect=patched_reader):
+            results = list(source.load(ctx))
+
+        # Should get: 1 valid row (alice) + 1 quarantined row (bob's csv.Error)
+        # carol should NOT appear — processing stops after csv.Error
+        assert len(results) == 2
+        assert not results[0].is_quarantined
+        assert results[0].row["name"] == "alice"
+        assert results[1].is_quarantined is True
+        assert results[1].quarantine_error is not None
+        assert "corrupted parser" in results[1].quarantine_error.lower()
 
     def test_skip_rows_line_numbers_are_accurate(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Line numbers in error messages should be accurate when skip_rows > 0.
@@ -602,6 +691,51 @@ class TestCSVSourceQuarantineYielding:
 
         assert not results[2].is_quarantined
         assert results[2].row == {"id": "3", "name": "carol"}
+
+    def test_leading_blank_lines_are_skipped_before_header_discovery(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Leading blank lines should not become a zero-column header."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "leading_blank.csv"
+        csv_file.write_text("\nid,name\n1,alice\n\n2,bob\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 2
+        assert [row.row for row in results] == [
+            {"id": "1", "name": "alice"},
+            {"id": "2", "name": "bob"},
+        ]
+        assert all(result.is_quarantined is False for result in results)
+
+    def test_skipped_blank_lines_do_not_record_validation_errors(self, tmp_path: Path) -> None:
+        """Intentionally skipped blank lines should not inflate validation_errors."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "blank_lines.csv"
+        csv_file.write_text("id,name\n1,alice\n\n2,bob\n\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+        ctx = make_context(node_id="source")
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 2
+        assert ctx.landscape.record_validation_error.call_count == 0
 
     def test_malformed_header_csv_error_quarantined_not_crash(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Header parse csv.Error is quarantined (Tier-3 boundary), not raised."""
@@ -911,9 +1045,18 @@ class TestCSVSourceSkipRowsAudit:
         """Create a plugin context with real landscape and source node records."""
         return make_source_context(plugin_name="csv")
 
-    def test_skip_rows_exceeds_file_records_validation_error(self, tmp_path: Path, ctx: PluginContext) -> None:
+    def test_skip_rows_exceeds_file_records_validation_error(self, tmp_path: Path) -> None:
         """skip_rows > available rows records validation error, not silent empty."""
         from elspeth.plugins.sources.csv_source import CSVSource
+        from tests.fixtures.landscape import make_recorder_with_run
+
+        setup = make_recorder_with_run(source_plugin_name="csv")
+        ctx = PluginContext(
+            run_id=setup.run_id,
+            node_id=setup.source_node_id,
+            config={},
+            landscape=setup.factory.plugin_audit_writer(),
+        )
 
         csv_file = tmp_path / "small.csv"
         csv_file.write_text("id,name\n1,alice\n")  # 2 rows total
@@ -932,9 +1075,8 @@ class TestCSVSourceSkipRowsAudit:
         # No data rows yielded (file exhausted during skip)
         assert len(results) == 0
 
-        # Validation error recorded in landscape DB
-        assert ctx.landscape is not None
-        errors = ctx.landscape.get_validation_errors_for_run(ctx.run_id)
+        # Validation error recorded in landscape DB via factory's data_flow repo
+        errors = setup.factory.data_flow.get_validation_errors_for_run(ctx.run_id)
         assert len(errors) >= 1
         assert "skip_rows" in errors[0].error or "exhausted" in errors[0].error
 

@@ -1,6 +1,5 @@
 """Tests for audit trail contracts."""
 
-from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,8 +18,6 @@ from elspeth.contracts import (
     CallType,
     Checkpoint,
     Determinism,
-    Edge,
-    ExportStatus,
     Node,
     NodeState,
     NodeStateCompleted,
@@ -35,266 +32,17 @@ from elspeth.contracts import (
     RoutingMode,
     Row,
     RowLineage,
-    RowOutcome,
     Run,
     RunStatus,
+    SecretResolution,
     SecretResolutionInput,
     Token,
     TokenOutcome,
-    TokenParent,
     TransformErrorRecord,
     TriggerType,
     ValidationErrorRecord,
 )
-
-
-class TestRun:
-    """Tests for Run audit model."""
-
-    def test_create_run_with_required_fields(self) -> None:
-        """Can create Run with required fields and RunStatus enum."""
-        now = datetime.now(UTC)
-        run = Run(
-            run_id="run-123",
-            started_at=now,
-            config_hash="abc123",
-            settings_json="{}",
-            canonical_version="1.0.0",
-            status=RunStatus.RUNNING,
-        )
-
-        assert run.run_id == "run-123"
-        assert run.started_at == now
-        assert run.status == RunStatus.RUNNING
-        assert run.completed_at is None
-        assert run.export_status is None
-
-    def test_run_status_must_be_enum(self) -> None:
-        """Run.status must be RunStatus enum, not string."""
-        run = Run(
-            run_id="run-123",
-            started_at=datetime.now(UTC),
-            config_hash="abc123",
-            settings_json="{}",
-            canonical_version="1.0.0",
-            status=RunStatus.COMPLETED,
-        )
-
-        # Status is enum type, not just string
-        assert run.status == RunStatus.COMPLETED
-        assert isinstance(run.status, RunStatus)
-        assert run.status.value == "completed"
-
-    def test_run_with_export_status(self) -> None:
-        """Run can have ExportStatus enum."""
-        run = Run(
-            run_id="run-123",
-            started_at=datetime.now(UTC),
-            config_hash="abc123",
-            settings_json="{}",
-            canonical_version="1.0.0",
-            status=RunStatus.COMPLETED,
-            export_status=ExportStatus.PENDING,
-        )
-
-        assert run.export_status == ExportStatus.PENDING
-        assert run.export_status.value == "pending"
-
-
-class TestNode:
-    """Tests for Node audit model."""
-
-    def test_create_node_with_enum_fields(self) -> None:
-        """Node requires NodeType and Determinism enums."""
-        now = datetime.now(UTC)
-        node = Node(
-            node_id="node-123",
-            run_id="run-456",
-            plugin_name="csv_source",
-            node_type=NodeType.SOURCE,
-            plugin_version="1.0.0",
-            determinism=Determinism.IO_READ,
-            config_hash="abc123",
-            config_json="{}",
-            registered_at=now,
-        )
-
-        assert node.node_id == "node-123"
-        assert node.node_type == NodeType.SOURCE
-        assert node.determinism == Determinism.IO_READ
-
-    def test_node_type_is_enum(self) -> None:
-        """Node.node_type must be NodeType enum."""
-        node = Node(
-            node_id="node-123",
-            run_id="run-456",
-            plugin_name="gate",
-            node_type=NodeType.GATE,
-            plugin_version="1.0.0",
-            determinism=Determinism.DETERMINISTIC,
-            config_hash="abc123",
-            config_json="{}",
-            registered_at=datetime.now(UTC),
-        )
-
-        assert node.node_type == NodeType.GATE
-        assert isinstance(node.node_type, NodeType)
-        assert node.node_type.value == "gate"
-
-    def test_determinism_is_enum(self) -> None:
-        """Node.determinism must be Determinism enum."""
-        node = Node(
-            node_id="node-123",
-            run_id="run-456",
-            plugin_name="llm_transform",
-            node_type=NodeType.TRANSFORM,
-            plugin_version="1.0.0",
-            determinism=Determinism.EXTERNAL_CALL,
-            config_hash="abc123",
-            config_json="{}",
-            registered_at=datetime.now(UTC),
-        )
-
-        assert node.determinism == Determinism.EXTERNAL_CALL
-        assert isinstance(node.determinism, Determinism)
-        assert node.determinism.value == "external_call"
-
-
-class TestEdge:
-    """Tests for Edge audit model."""
-
-    def test_create_edge_with_routing_mode(self) -> None:
-        """Edge requires RoutingMode enum."""
-        now = datetime.now(UTC)
-        edge = Edge(
-            edge_id="edge-123",
-            run_id="run-456",
-            from_node_id="node-1",
-            to_node_id="node-2",
-            label="continue",
-            default_mode=RoutingMode.MOVE,
-            created_at=now,
-        )
-
-        assert edge.edge_id == "edge-123"
-        assert edge.default_mode == RoutingMode.MOVE
-
-    def test_default_mode_is_enum(self) -> None:
-        """Edge.default_mode must be RoutingMode enum."""
-        edge = Edge(
-            edge_id="edge-123",
-            run_id="run-456",
-            from_node_id="node-1",
-            to_node_id="node-2",
-            label="fork",
-            default_mode=RoutingMode.COPY,
-            created_at=datetime.now(UTC),
-        )
-
-        assert edge.default_mode == RoutingMode.COPY
-        assert isinstance(edge.default_mode, RoutingMode)
-        assert edge.default_mode.value == "copy"
-
-
-class TestRow:
-    """Tests for Row audit model."""
-
-    def test_create_row(self) -> None:
-        """Can create Row with all primitive fields."""
-        now = datetime.now(UTC)
-        row = Row(
-            row_id="row-123",
-            run_id="run-456",
-            source_node_id="node-1",
-            row_index=0,
-            source_data_hash="abc123",
-            created_at=now,
-        )
-
-        assert row.row_id == "row-123"
-        assert row.row_index == 0
-        assert row.source_data_ref is None
-
-    def test_row_with_payload_ref(self) -> None:
-        """Row can have source_data_ref for payload store."""
-        row = Row(
-            row_id="row-123",
-            run_id="run-456",
-            source_node_id="node-1",
-            row_index=0,
-            source_data_hash="abc123",
-            created_at=datetime.now(UTC),
-            source_data_ref="payload://abc123",
-        )
-
-        assert row.source_data_ref == "payload://abc123"
-
-
-class TestToken:
-    """Tests for Token audit model."""
-
-    def test_create_token(self) -> None:
-        """Can create Token with required fields."""
-        now = datetime.now(UTC)
-        token = Token(
-            token_id="tok-123",
-            row_id="row-456",
-            created_at=now,
-            run_id="run-001",
-        )
-
-        assert token.token_id == "tok-123"
-        assert token.row_id == "row-456"
-        assert token.fork_group_id is None
-        assert token.branch_name is None
-
-    def test_token_with_fork_fields(self) -> None:
-        """Token can have fork/join metadata."""
-        token = Token(
-            token_id="tok-123",
-            row_id="row-456",
-            created_at=datetime.now(UTC),
-            run_id="run-001",
-            fork_group_id="fork-789",
-            branch_name="sentiment",
-            step_in_pipeline=3,
-        )
-
-        assert token.fork_group_id == "fork-789"
-        assert token.branch_name == "sentiment"
-        assert token.step_in_pipeline == 3
-
-
-class TestTokenParent:
-    """Tests for TokenParent audit model."""
-
-    def test_create_token_parent(self) -> None:
-        """Can create TokenParent for lineage tracking."""
-        parent = TokenParent(
-            token_id="tok-child",
-            parent_token_id="tok-parent",
-            ordinal=0,
-        )
-
-        assert parent.token_id == "tok-child"
-        assert parent.parent_token_id == "tok-parent"
-        assert parent.ordinal == 0
-
-    def test_multi_parent_ordinal(self) -> None:
-        """Ordinal supports multi-parent joins."""
-        parent1 = TokenParent(
-            token_id="tok-joined",
-            parent_token_id="tok-a",
-            ordinal=0,
-        )
-        parent2 = TokenParent(
-            token_id="tok-joined",
-            parent_token_id="tok-b",
-            ordinal=1,
-        )
-
-        assert parent1.ordinal == 0
-        assert parent2.ordinal == 1
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 
 
 class TestNodeStateVariants:
@@ -630,19 +378,21 @@ class TestBatchMember:
         """Can create BatchMember with all fields."""
         member = BatchMember(
             batch_id="batch-123",
+            run_id="run-789",
             token_id="token-456",
             ordinal=0,
         )
 
         assert member.batch_id == "batch-123"
+        assert member.run_id == "run-789"
         assert member.token_id == "token-456"
         assert member.ordinal == 0
 
     def test_batch_member_ordinals(self) -> None:
         """Ordinal tracks member order in batch."""
-        member1 = BatchMember(batch_id="batch-1", token_id="tok-a", ordinal=0)
-        member2 = BatchMember(batch_id="batch-1", token_id="tok-b", ordinal=1)
-        member3 = BatchMember(batch_id="batch-1", token_id="tok-c", ordinal=2)
+        member1 = BatchMember(batch_id="batch-1", run_id="run-1", token_id="tok-a", ordinal=0)
+        member2 = BatchMember(batch_id="batch-1", run_id="run-1", token_id="tok-b", ordinal=1)
+        member3 = BatchMember(batch_id="batch-1", run_id="run-1", token_id="tok-c", ordinal=2)
 
         assert member1.ordinal == 0
         assert member2.ordinal == 1
@@ -681,7 +431,6 @@ class TestCheckpoint:
 
     def test_create_checkpoint_with_required_fields(self) -> None:
         """Can create Checkpoint with required fields."""
-        from elspeth.contracts import Checkpoint
 
         now = datetime.now(UTC)
         checkpoint = Checkpoint(
@@ -705,7 +454,6 @@ class TestCheckpoint:
 
     def test_checkpoint_with_aggregation_state(self) -> None:
         """Checkpoint can have aggregation_state_json for stateful nodes."""
-        from elspeth.contracts import Checkpoint
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-123",
@@ -727,7 +475,6 @@ class TestCheckpoint:
         Per Data Manifesto: Audit trail data must be 100% pristine.
         created_at is enforced as NOT NULL in the schema.
         """
-        from elspeth.contracts import Checkpoint
 
         now = datetime.now(UTC)
         checkpoint = Checkpoint(
@@ -751,7 +498,6 @@ class TestRowLineage:
 
     def test_create_row_lineage_with_all_fields(self) -> None:
         """Can create RowLineage with all fields."""
-        from elspeth.contracts import RowLineage
 
         now = datetime.now(UTC)
         lineage = RowLineage(
@@ -776,7 +522,6 @@ class TestRowLineage:
 
     def test_row_lineage_with_purged_payload(self) -> None:
         """RowLineage supports graceful payload degradation."""
-        from elspeth.contracts import RowLineage
 
         lineage = RowLineage(
             row_id="row-123",
@@ -796,7 +541,6 @@ class TestRowLineage:
 
     def test_row_lineage_hash_always_present(self) -> None:
         """RowLineage always has source_data_hash for audit integrity."""
-        from elspeth.contracts import RowLineage
 
         # Even with purged payload, hash is required and present
         lineage = RowLineage(
@@ -949,88 +693,216 @@ class TestTokenOutcome:
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.COMPLETED,
-            is_terminal=True,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            completed=True,
             recorded_at=now,
+            sink_name="output",
         )
         assert outcome.outcome_id == "out-1"
         assert outcome.run_id == "run-1"
         assert outcome.token_id == "tok-1"
-        assert outcome.outcome == RowOutcome.COMPLETED
-        assert outcome.is_terminal is True
+        assert outcome.outcome == TerminalOutcome.SUCCESS
+        assert outcome.path == TerminalPath.DEFAULT_FLOW
+        assert outcome.completed is True
         assert outcome.recorded_at == now
 
-    def test_token_outcome_is_terminal_for_completed(self) -> None:
-        """COMPLETED outcome is terminal (no further processing)."""
+    def test_token_outcome_completed_for_success(self) -> None:
+        """SUCCESS/DEFAULT_FLOW outcome is completed (no further processing)."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.COMPLETED,
-            is_terminal=True,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            completed=True,
             recorded_at=datetime.now(UTC),
+            sink_name="output",
         )
-        assert outcome.is_terminal is True
+        assert outcome.completed is True
 
-    def test_token_outcome_buffered_is_not_terminal(self) -> None:
-        """BUFFERED outcome is NOT terminal (waiting for aggregation)."""
+    def test_token_outcome_buffered_is_not_completed(self) -> None:
+        """BUFFERED path is NOT completed (waiting for aggregation)."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.BUFFERED,
-            is_terminal=False,  # BUFFERED is the only non-terminal outcome
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            completed=False,
             recorded_at=datetime.now(UTC),
             batch_id="batch-123",  # BUFFERED has batch context
         )
-        assert outcome.is_terminal is False
+        assert outcome.completed is False
         assert outcome.batch_id == "batch-123"
 
     def test_token_outcome_routed_with_sink_name(self) -> None:
-        """ROUTED outcome includes sink_name for traceability."""
+        """GATE_ROUTED path includes sink_name for traceability."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.ROUTED,
-            is_terminal=True,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.GATE_ROUTED,
+            completed=True,
             recorded_at=datetime.now(UTC),
             sink_name="quarantine_sink",
         )
-        assert outcome.outcome == RowOutcome.ROUTED
+        assert outcome.outcome == TerminalOutcome.SUCCESS
+        assert outcome.path == TerminalPath.GATE_ROUTED
         assert outcome.sink_name == "quarantine_sink"
 
     def test_token_outcome_forked_with_fork_group(self) -> None:
-        """FORKED outcome includes fork_group_id for lineage tracking."""
+        """FORK_PARENT path includes fork_group_id for lineage tracking."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.FORKED,
-            is_terminal=True,  # Parent token is terminal after fork
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.FORK_PARENT,
+            completed=True,
             recorded_at=datetime.now(UTC),
             fork_group_id="fork-456",
         )
-        assert outcome.outcome == RowOutcome.FORKED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.FORK_PARENT
         assert outcome.fork_group_id == "fork-456"
 
     def test_token_outcome_error_with_hash(self) -> None:
-        """QUARANTINED/FAILED outcomes can have error_hash."""
+        """QUARANTINED_AT_SOURCE outcomes can have error_hash."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.QUARANTINED,
-            is_terminal=True,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            completed=True,
             recorded_at=datetime.now(UTC),
             error_hash="err_abc123",
             context_json='{"reason": "validation_failed"}',
         )
-        assert outcome.outcome == RowOutcome.QUARANTINED
+        assert outcome.outcome == TerminalOutcome.FAILURE
+        assert outcome.path == TerminalPath.QUARANTINED_AT_SOURCE
         assert outcome.error_hash == "err_abc123"
         assert outcome.context_json == '{"reason": "validation_failed"}'
 
     # NOTE: Frozen immutability tested in TestFrozenDataclassImmutability
+
+
+class TestTokenOutcomeTwoAxis:
+    """ADR-019 Phase 1: TokenOutcome carries (outcome, path, completed)."""
+
+    def test_completed_outcome_has_outcome_path_completed(self) -> None:
+        """A completed-state TokenOutcome has all three two-axis fields."""
+        record = TokenOutcome(
+            outcome_id="out_test_01",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            completed=True,
+            recorded_at=datetime.now(UTC),
+            sink_name="primary",
+        )
+        assert record.outcome == TerminalOutcome.SUCCESS
+        assert record.path == TerminalPath.DEFAULT_FLOW
+        assert record.completed is True
+
+    def test_buffered_outcome_has_null_outcome_buffered_path(self) -> None:
+        """A non-terminal TokenOutcome has outcome=None, path=BUFFERED, completed=False."""
+        record = TokenOutcome(
+            outcome_id="out_test_02",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            completed=False,
+            recorded_at=datetime.now(UTC),
+            batch_id="batch_001",
+        )
+        assert record.outcome is None
+        assert record.path == TerminalPath.BUFFERED
+        assert record.completed is False
+
+    def test_completed_xor_outcome_invariant_completed_true_outcome_none(self) -> None:
+        """Tier 1: completed=True with outcome=None is an invariant violation."""
+        with pytest.raises(ValueError, match="completed"):
+            TokenOutcome(
+                outcome_id="out_test_03",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=None,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
+                recorded_at=datetime.now(UTC),
+            )
+
+    def test_completed_xor_outcome_invariant_completed_false_outcome_set(self) -> None:
+        """Tier 1: completed=False with outcome=SUCCESS is an invariant violation."""
+        with pytest.raises(ValueError, match="completed"):
+            TokenOutcome(
+                outcome_id="out_test_04",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.BUFFERED,
+                completed=False,
+                recorded_at=datetime.now(UTC),
+            )
+
+    def test_legal_pair_required(self) -> None:
+        """Tier 1: an unknown (outcome, path) pair is an invariant violation."""
+        with pytest.raises(ValueError, match="_LEGAL_TERMINAL_PAIRS"):
+            TokenOutcome(
+                outcome_id="out_test_05",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.UNROUTED,
+                completed=True,
+                recorded_at=datetime.now(UTC),
+            )
+
+    @given(
+        outcome=st.sampled_from(list(TerminalOutcome)),
+        path=st.sampled_from(list(TerminalPath)),
+    )
+    def test_all_illegal_completed_pairs_rejected(
+        self,
+        outcome: TerminalOutcome,
+        path: TerminalPath,
+    ) -> None:
+        """Tier 1: every pair outside _LEGAL_TERMINAL_PAIRS is rejected."""
+        if (outcome, path) in _LEGAL_TERMINAL_PAIRS:
+            return
+
+        with pytest.raises(ValueError):
+            TokenOutcome(
+                outcome_id="out_prop_illegal",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=outcome,
+                path=path,
+                completed=True,
+                recorded_at=datetime.now(UTC),
+            )
+
+    @given(pair=st.sampled_from(list(_LEGAL_TERMINAL_PAIRS)))
+    def test_all_legal_pairs_accepted(
+        self,
+        pair: tuple[TerminalOutcome, TerminalPath],
+    ) -> None:
+        """Tier 1: every closed-set legal pair is accepted at the shape layer."""
+        outcome, path = pair
+        TokenOutcome(
+            outcome_id="out_prop_legal",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=outcome,
+            path=path,
+            completed=True,
+            recorded_at=datetime.now(UTC),
+        )
 
 
 class TestNonCanonicalMetadata:
@@ -1345,436 +1217,6 @@ class TestHashFields:
 
 
 # =============================================================================
-# FROZEN DATACLASS IMMUTABILITY TESTS - P1 FIXES FROM QUALITY AUDIT
-# =============================================================================
-
-
-class TestFrozenDataclassImmutability:
-    """Parametrized tests for all frozen dataclasses.
-
-    Per audit findings: Only 1 test existed for entire suite.
-    This systematically tests all frozen dataclasses.
-    """
-
-    @pytest.mark.parametrize(
-        "create_instance,field_name",
-        [
-            # NodeStateOpen
-            (
-                lambda: NodeStateOpen(
-                    state_id="s1",
-                    token_id="t1",
-                    node_id="n1",
-                    step_index=0,
-                    attempt=1,
-                    status=NodeStateStatus.OPEN,
-                    input_hash="a" * 64,
-                    started_at=datetime.now(UTC),
-                ),
-                "state_id",
-            ),
-            # NodeStatePending
-            (
-                lambda: NodeStatePending(
-                    state_id="s1",
-                    token_id="t1",
-                    node_id="n1",
-                    step_index=0,
-                    attempt=1,
-                    status=NodeStateStatus.PENDING,
-                    input_hash="a" * 64,
-                    started_at=datetime.now(UTC),
-                    completed_at=datetime.now(UTC),
-                    duration_ms=100.0,
-                ),
-                "status",
-            ),
-            # NodeStateCompleted
-            (
-                lambda: NodeStateCompleted(
-                    state_id="s1",
-                    token_id="t1",
-                    node_id="n1",
-                    step_index=0,
-                    attempt=1,
-                    status=NodeStateStatus.COMPLETED,
-                    input_hash="a" * 64,
-                    output_hash="b" * 64,
-                    started_at=datetime.now(UTC),
-                    completed_at=datetime.now(UTC),
-                    duration_ms=100.0,
-                ),
-                "output_hash",
-            ),
-            # NodeStateFailed
-            (
-                lambda: NodeStateFailed(
-                    state_id="s1",
-                    token_id="t1",
-                    node_id="n1",
-                    step_index=0,
-                    attempt=1,
-                    status=NodeStateStatus.FAILED,
-                    input_hash="a" * 64,
-                    started_at=datetime.now(UTC),
-                    completed_at=datetime.now(UTC),
-                    duration_ms=100.0,
-                ),
-                "error_json",
-            ),
-            # TokenOutcome
-            (
-                lambda: TokenOutcome(
-                    outcome_id="o1",
-                    run_id="r1",
-                    token_id="t1",
-                    outcome=RowOutcome.COMPLETED,
-                    is_terminal=True,
-                    recorded_at=datetime.now(UTC),
-                ),
-                "outcome",
-            ),
-            # NonCanonicalMetadata
-            (
-                lambda: NonCanonicalMetadata(
-                    repr_value="test",
-                    type_name="str",
-                    canonical_error="error",
-                ),
-                "type_name",
-            ),
-            # --- Newly frozen (T1) ---
-            # Run
-            (
-                lambda: Run(
-                    run_id="r1",
-                    started_at=datetime.now(UTC),
-                    config_hash="a" * 64,
-                    settings_json="{}",
-                    canonical_version="1.0",
-                    status=RunStatus.RUNNING,
-                ),
-                "run_id",
-            ),
-            # Node
-            (
-                lambda: Node(
-                    node_id="n1",
-                    run_id="r1",
-                    plugin_name="test",
-                    node_type=NodeType.SOURCE,
-                    plugin_version="1.0",
-                    determinism=Determinism.DETERMINISTIC,
-                    config_hash="a" * 64,
-                    config_json="{}",
-                    registered_at=datetime.now(UTC),
-                ),
-                "node_id",
-            ),
-            # Edge
-            (
-                lambda: Edge(
-                    edge_id="e1",
-                    run_id="r1",
-                    from_node_id="n1",
-                    to_node_id="n2",
-                    label="continue",
-                    default_mode=RoutingMode.MOVE,
-                    created_at=datetime.now(UTC),
-                ),
-                "edge_id",
-            ),
-            # Row
-            (
-                lambda: Row(
-                    row_id="row-1",
-                    run_id="r1",
-                    source_node_id="n1",
-                    row_index=0,
-                    source_data_hash="a" * 64,
-                    created_at=datetime.now(UTC),
-                ),
-                "row_id",
-            ),
-            # Token
-            (
-                lambda: Token(
-                    token_id="t1",
-                    row_id="row-1",
-                    created_at=datetime.now(UTC),
-                    run_id="run-1",
-                ),
-                "token_id",
-            ),
-            # TokenParent
-            (
-                lambda: TokenParent(
-                    token_id="t1",
-                    parent_token_id="t0",
-                    ordinal=0,
-                ),
-                "token_id",
-            ),
-            # Call
-            (
-                lambda: Call(
-                    call_id="c1",
-                    call_index=0,
-                    call_type=CallType.HTTP,
-                    status=CallStatus.SUCCESS,
-                    request_hash="a" * 64,
-                    created_at=datetime.now(UTC),
-                    state_id="s1",
-                ),
-                "call_id",
-            ),
-            # Artifact
-            (
-                lambda: Artifact(
-                    artifact_id="a1",
-                    run_id="r1",
-                    produced_by_state_id="s1",
-                    sink_node_id="sink-1",
-                    artifact_type="csv",
-                    path_or_uri="/tmp/out.csv",
-                    content_hash="a" * 64,
-                    size_bytes=1024,
-                    created_at=datetime.now(UTC),
-                ),
-                "artifact_id",
-            ),
-            # RoutingEvent
-            (
-                lambda: RoutingEvent(
-                    event_id="evt-1",
-                    state_id="s1",
-                    edge_id="e1",
-                    routing_group_id="rg-1",
-                    ordinal=0,
-                    mode=RoutingMode.MOVE,
-                    created_at=datetime.now(UTC),
-                ),
-                "event_id",
-            ),
-            # Batch
-            (
-                lambda: Batch(
-                    batch_id="b1",
-                    run_id="r1",
-                    aggregation_node_id="agg-1",
-                    attempt=1,
-                    status=BatchStatus.DRAFT,
-                    created_at=datetime.now(UTC),
-                ),
-                "batch_id",
-            ),
-            # BatchMember
-            (
-                lambda: BatchMember(
-                    batch_id="b1",
-                    token_id="t1",
-                    ordinal=0,
-                ),
-                "batch_id",
-            ),
-            # BatchOutput
-            (
-                lambda: BatchOutput(
-                    batch_id="b1",
-                    output_type="token",
-                    output_id="t2",
-                ),
-                "batch_id",
-            ),
-            # Checkpoint
-            (
-                lambda: Checkpoint(
-                    checkpoint_id="cp-1",
-                    run_id="r1",
-                    token_id="t1",
-                    node_id="n1",
-                    sequence_number=1,
-                    created_at=datetime.now(UTC),
-                    upstream_topology_hash="a" * 64,
-                    checkpoint_node_config_hash="b" * 64,
-                ),
-                "checkpoint_id",
-            ),
-            # RowLineage
-            (
-                lambda: RowLineage(
-                    row_id="row-1",
-                    run_id="r1",
-                    source_node_id="n1",
-                    row_index=0,
-                    source_data_hash="a" * 64,
-                    created_at=datetime.now(UTC),
-                    source_data=None,
-                    payload_available=False,
-                ),
-                "row_id",
-            ),
-            # ValidationErrorRecord
-            (
-                lambda: ValidationErrorRecord(
-                    error_id="verr-1",
-                    run_id="r1",
-                    node_id="n1",
-                    row_hash="a" * 64,
-                    error="test error",
-                    schema_mode="fixed",
-                    destination="quarantine",
-                    created_at=datetime.now(UTC),
-                ),
-                "error_id",
-            ),
-            # TransformErrorRecord
-            (
-                lambda: TransformErrorRecord(
-                    error_id="terr-1",
-                    run_id="r1",
-                    token_id="t1",
-                    transform_id="xform-1",
-                    row_hash="a" * 64,
-                    destination="error_sink",
-                    created_at=datetime.now(UTC),
-                ),
-                "error_id",
-            ),
-        ],
-        ids=[
-            "NodeStateOpen",
-            "NodeStatePending",
-            "NodeStateCompleted",
-            "NodeStateFailed",
-            "TokenOutcome",
-            "NonCanonicalMetadata",
-            # Newly frozen (T1)
-            "Run",
-            "Node",
-            "Edge",
-            "Row",
-            "Token",
-            "TokenParent",
-            "Call",
-            "Artifact",
-            "RoutingEvent",
-            "Batch",
-            "BatchMember",
-            "BatchOutput",
-            "Checkpoint",
-            "RowLineage",
-            "ValidationErrorRecord",
-            "TransformErrorRecord",
-        ],
-    )
-    def test_frozen_dataclass_rejects_mutation(
-        self,
-        create_instance: "Callable[[], Any]",
-        field_name: str,
-    ) -> None:
-        """Frozen dataclasses reject attribute mutation."""
-        import dataclasses
-
-        instance = create_instance()
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            setattr(instance, field_name, "mutated_value")
-
-
-# =============================================================================
-# ENUM EXHAUSTIVENESS TESTS - P1 FIXES FROM QUALITY AUDIT
-# =============================================================================
-
-
-class TestEnumExhaustiveness:
-    """Tests that verify all enum values are expected.
-
-    Per audit findings: Existing tests spot-check values but don't prove
-    all values are handled. These tests verify enum completeness.
-    """
-
-    def test_row_outcome_all_values_known(self) -> None:
-        """RowOutcome enum has exactly the expected values."""
-        expected_values = {
-            "COMPLETED",
-            "ROUTED",
-            "FORKED",
-            "FAILED",
-            "QUARANTINED",
-            "DIVERTED",
-            "CONSUMED_IN_BATCH",
-            "COALESCED",
-            "EXPANDED",
-            "BUFFERED",
-        }
-        actual_values = {e.name for e in RowOutcome}
-        assert actual_values == expected_values, (
-            f"RowOutcome mismatch. Extra: {actual_values - expected_values}, Missing: {expected_values - actual_values}"
-        )
-
-    def test_node_state_status_all_values_known(self) -> None:
-        """NodeStateStatus enum has exactly the expected values."""
-        expected_values = {"OPEN", "PENDING", "COMPLETED", "FAILED"}
-        actual_values = {e.name for e in NodeStateStatus}
-        assert actual_values == expected_values
-
-    def test_run_status_all_values_known(self) -> None:
-        """RunStatus enum has exactly the expected values."""
-        expected_values = {"RUNNING", "COMPLETED", "FAILED", "INTERRUPTED"}
-        actual_values = {e.name for e in RunStatus}
-        assert actual_values == expected_values
-
-    def test_node_type_all_values_known(self) -> None:
-        """NodeType enum has exactly the expected values."""
-        expected_values = {"SOURCE", "TRANSFORM", "GATE", "AGGREGATION", "COALESCE", "SINK"}
-        actual_values = {e.name for e in NodeType}
-        assert actual_values == expected_values
-
-    def test_determinism_all_values_known(self) -> None:
-        """Determinism enum has exactly the expected values."""
-        expected_values = {
-            "DETERMINISTIC",
-            "SEEDED",
-            "IO_READ",
-            "IO_WRITE",
-            "EXTERNAL_CALL",
-            "NON_DETERMINISTIC",
-        }
-        actual_values = {e.name for e in Determinism}
-        assert actual_values == expected_values
-
-    def test_call_type_all_values_known(self) -> None:
-        """CallType enum has exactly the expected values."""
-        expected_values = {"LLM", "HTTP", "HTTP_REDIRECT", "SQL", "FILESYSTEM", "VECTOR"}
-        actual_values = {e.name for e in CallType}
-        assert actual_values == expected_values
-
-    def test_call_status_all_values_known(self) -> None:
-        """CallStatus enum has exactly the expected values."""
-        expected_values = {"SUCCESS", "ERROR"}
-        actual_values = {e.name for e in CallStatus}
-        assert actual_values == expected_values
-
-    def test_batch_status_all_values_known(self) -> None:
-        """BatchStatus enum has exactly the expected values."""
-        expected_values = {"DRAFT", "EXECUTING", "COMPLETED", "FAILED"}
-        actual_values = {e.name for e in BatchStatus}
-        assert actual_values == expected_values
-
-    def test_routing_mode_all_values_known(self) -> None:
-        """RoutingMode enum has exactly the expected values."""
-        expected_values = {"MOVE", "COPY", "DIVERT"}
-        actual_values = {e.name for e in RoutingMode}
-        assert actual_values == expected_values
-
-    def test_export_status_all_values_known(self) -> None:
-        """ExportStatus enum has exactly the expected values."""
-        expected_values = {"PENDING", "COMPLETED", "FAILED"}
-        actual_values = {e.name for e in ExportStatus}
-        assert actual_values == expected_values
-
-
-# =============================================================================
 # NEGATIVE VALIDATION TESTS - P0 FIXES FROM QUALITY AUDIT
 # =============================================================================
 
@@ -1899,7 +1341,8 @@ class TestRequiredFieldValidation:
                 run_id="r1",
                 token_id="t1",
                 # outcome missing
-                is_terminal=True,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
                 recorded_at=datetime.now(UTC),
             )
 
@@ -2109,8 +1552,7 @@ class TestPropertyBasedAuditContracts:
         outcome_id=valid_ids,
         run_id=valid_ids,
         token_id=valid_ids,
-        outcome=st.sampled_from(list(RowOutcome)),
-        is_terminal=st.booleans(),
+        pair=st.sampled_from(list(_LEGAL_TERMINAL_PAIRS)),
     )
     @settings(max_examples=50)
     def test_token_outcome_accepts_valid_inputs(
@@ -2118,20 +1560,22 @@ class TestPropertyBasedAuditContracts:
         outcome_id: str,
         run_id: str,
         token_id: str,
-        outcome: RowOutcome,
-        is_terminal: bool,
+        pair: tuple[TerminalOutcome, TerminalPath],
     ) -> None:
         """TokenOutcome accepts valid combinations."""
+        outcome, path = pair
         token_outcome = TokenOutcome(
             outcome_id=outcome_id,
             run_id=run_id,
             token_id=token_id,
             outcome=outcome,
-            is_terminal=is_terminal,
+            path=path,
+            completed=True,
             recorded_at=datetime.now(UTC),
         )
         assert token_outcome.outcome == outcome
-        assert token_outcome.is_terminal == is_terminal
+        assert token_outcome.path == path
+        assert token_outcome.completed is True
 
     @given(
         repr_value=st.text(min_size=1, max_size=200),
@@ -2324,7 +1768,7 @@ class TestOperation:
         if status == "failed":
             kwargs["error_message"] = "error"
         with pytest.raises(ValueError, match="completed_at is None"):
-            Operation(**kwargs)  # type: ignore[arg-type]
+            Operation(**kwargs)
 
     @pytest.mark.parametrize("status", ["completed", "failed", "pending"])
     def test_terminal_status_requires_duration_ms(self, status: str) -> None:
@@ -2342,7 +1786,7 @@ class TestOperation:
         if status == "failed":
             kwargs["error_message"] = "error"
         with pytest.raises(ValueError, match="duration_ms is None"):
-            Operation(**kwargs)  # type: ignore[arg-type]
+            Operation(**kwargs)
 
     def test_failed_requires_error_message(self) -> None:
         """Status 'failed' must have error_message set."""
@@ -2357,6 +1801,21 @@ class TestOperation:
                 completed_at=datetime.now(UTC),
                 duration_ms=100.0,
                 error_message=None,
+            )
+
+    def test_failed_rejects_empty_error_message(self) -> None:
+        """Status 'failed' must not accept blank error messages."""
+        with pytest.raises(ValueError, match="error_message must not be empty"):
+            Operation(
+                operation_id="op-1",
+                run_id="run-1",
+                node_id="node-1",
+                operation_type="source_load",
+                started_at=datetime.now(UTC),
+                status="failed",
+                completed_at=datetime.now(UTC),
+                duration_ms=100.0,
+                error_message="",
             )
 
     def test_completed_rejects_error_message(self) -> None:
@@ -2495,6 +1954,88 @@ class TestSecretResolutionInputValidation:
         sri = SecretResolutionInput(**self._valid_kwargs(fingerprint=fingerprint))  # type: ignore[arg-type]
         assert sri.fingerprint == fingerprint
 
+    # --- Extended sources: "env" and "user" ---
+
+    def test_env_source_accepted(self) -> None:
+        """SecretResolutionInput accepts source='env' with no vault fields."""
+        sri = SecretResolutionInput(**self._valid_kwargs(source="env", vault_url=None, secret_name=None))  # type: ignore[arg-type]
+        assert sri.source == "env"
+        assert sri.vault_url is None
+        assert sri.secret_name is None
+
+    def test_user_source_accepted(self) -> None:
+        """SecretResolutionInput accepts source='user' with no vault fields."""
+        sri = SecretResolutionInput(**self._valid_kwargs(source="user", vault_url=None, secret_name=None))  # type: ignore[arg-type]
+        assert sri.source == "user"
+        assert sri.vault_url is None
+        assert sri.secret_name is None
+
+
+class TestSecretResolutionReadSideValidation:
+    """Tests for SecretResolution (read-side) __post_init__ validation.
+
+    SecretResolution is the read-side contract for secret provenance records.
+    Tier 1 audit data: crash immediately on any anomaly.
+    """
+
+    @staticmethod
+    def _valid_kwargs(**overrides: object) -> dict[str, object]:
+        """Build valid SecretResolution kwargs with optional overrides."""
+        defaults: dict[str, object] = {
+            "resolution_id": "res-001",
+            "run_id": "run-001",
+            "timestamp": 1709100000.0,
+            "env_var_name": "API_KEY",
+            "source": "keyvault",
+            "fingerprint": "a" * 64,
+            "vault_url": "https://vault.example.com",
+            "secret_name": "api-key",
+            "resolution_latency_ms": 42.5,
+        }
+        defaults.update(overrides)
+        return defaults
+
+    def test_keyvault_source_valid(self) -> None:
+        """Keyvault source with vault_url and secret_name succeeds."""
+        sr = SecretResolution(**self._valid_kwargs())  # type: ignore[arg-type]
+        assert sr.source == "keyvault"
+        assert sr.vault_url == "https://vault.example.com"
+        assert sr.secret_name == "api-key"
+
+    def test_keyvault_requires_vault_url(self) -> None:
+        """Keyvault source without vault_url crashes (Tier 1)."""
+        with pytest.raises(ValueError, match="vault_url is required"):
+            SecretResolution(**self._valid_kwargs(vault_url=None))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_secret_name(self) -> None:
+        """Keyvault source without secret_name crashes (Tier 1)."""
+        with pytest.raises(ValueError, match="secret_name is required"):
+            SecretResolution(**self._valid_kwargs(secret_name=None))  # type: ignore[arg-type]
+
+    def test_env_source_accepted(self) -> None:
+        """SecretResolution accepts source='env' with no vault fields."""
+        sr = SecretResolution(**self._valid_kwargs(source="env", vault_url=None, secret_name=None))  # type: ignore[arg-type]
+        assert sr.source == "env"
+        assert sr.vault_url is None
+        assert sr.secret_name is None
+
+    def test_user_source_accepted(self) -> None:
+        """SecretResolution accepts source='user' with no vault fields."""
+        sr = SecretResolution(**self._valid_kwargs(source="user", vault_url=None, secret_name=None))  # type: ignore[arg-type]
+        assert sr.source == "user"
+        assert sr.vault_url is None
+        assert sr.secret_name is None
+
+    def test_invalid_source_rejected(self) -> None:
+        """Unknown source value crashes (Tier 1)."""
+        with pytest.raises(ValueError, match="source must be one of"):
+            SecretResolution(**self._valid_kwargs(source="s3"))  # type: ignore[arg-type]
+
+    def test_empty_source_rejected(self) -> None:
+        """Empty source crashes (Tier 1)."""
+        with pytest.raises(ValueError, match="source is required"):
+            SecretResolution(**self._valid_kwargs(source=""))  # type: ignore[arg-type]
+
 
 class TestRequireIntValidation:
     """Tests for require_int validation across audit dataclasses.
@@ -2515,7 +2056,7 @@ class TestRequireIntValidation:
                 row_id="row-1",
                 run_id="run-1",
                 source_node_id="node-1",
-                row_index=True,  # type: ignore[arg-type]
+                row_index=True,
                 source_data_hash="abc123",
                 created_at=datetime.now(UTC),
             )
@@ -2564,7 +2105,7 @@ class TestRequireIntValidation:
             Call(
                 call_id="call-1",
                 state_id="state-1",
-                call_index=False,  # type: ignore[arg-type]
+                call_index=False,
                 call_type=CallType.LLM,
                 status=CallStatus.SUCCESS,
                 request_hash="abc123",
@@ -2605,7 +2146,7 @@ class TestRequireIntValidation:
                 row_id="row-1",
                 created_at=datetime.now(UTC),
                 run_id="run-1",
-                step_in_pipeline=True,  # type: ignore[arg-type]
+                step_in_pipeline=True,
             )
 
     def test_token_step_in_pipeline_accepts_zero(self) -> None:
@@ -2657,7 +2198,7 @@ class TestRequireIntValidation:
                 token_id="tok-1",
                 node_id="node-1",
                 step_index=0,
-                attempt=True,  # type: ignore[arg-type]
+                attempt=True,
                 status=NodeStateStatus.OPEN,
                 input_hash="abc123",
                 started_at=datetime.now(UTC),

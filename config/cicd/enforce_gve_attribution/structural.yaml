@@ -1,0 +1,20 @@
+# Structural GraphValidationError raise sites where no single node is at fault.
+# These are graph-topology errors (cycles, wrong source/sink count, namespace
+# collisions) — component_id=None is the correct attribution.
+
+per_file_rules:
+  # ── graph.py: ExecutionGraph.validate() ──
+  - pattern: "core/dag/graph.py"
+    rules: ["GA1"]
+    reason: >
+      Structural: cycle detection (2 sites), source count, sink count,
+      unreachable nodes, topo sort, connection/sink namespace overlap,
+      and dangling connections — no single node at fault.
+    max_hits: 9
+
+  # ── builder.py: build_execution_graph() ──
+  - pattern: "core/dag/builder.py"
+    rules: ["GA1"]
+    reason: >
+      Structural: pipeline cycle detection (2 sites) — no single node at fault.
+    max_hits: 2

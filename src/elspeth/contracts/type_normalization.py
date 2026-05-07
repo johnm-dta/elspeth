@@ -3,7 +3,9 @@
 Converts numpy/pandas types to Python primitives for consistent
 contract storage and validation.
 
-Per CLAUDE.md: Uses isinstance() checks (not string matching on __name__).
+Fast path: Uses type() with frozenset membership for standard Python types (performance).
+Slow path: Uses isinstance() checks for numpy/pandas type hierarchies.
+Avoids string matching on __name__ per CLAUDE.md.
 """
 
 from __future__ import annotations
@@ -106,3 +108,69 @@ def normalize_type_for_contract(value: Any) -> type:
             f"Use 'any' type declaration for fields with complex/dynamic types."
         )
     return final_type
+
+
+def classify_runtime_type(value: Any) -> type:
+    """Classify a value's type for runtime validation comparison.
+
+    Unlike normalize_type_for_contract(), this function NEVER raises.
+    It normalizes numpy/pandas wrappers to Python primitives (so that
+    numpy.int64(42) compares equal to int), but returns type(value) for
+    anything it doesn't recognize — letting the caller produce a
+    TypeMismatchViolation instead of crashing the pipeline.
+
+    This is the correct function for SchemaContract.validate(), where
+    values come from Tier 3 external data and exotic types should be
+    quarantined, not crash the run.
+
+    Args:
+        value: Any Python value from a pipeline row
+
+    Returns:
+        Python primitive type for known types, or type(value) for unknowns.
+        Never raises.
+    """
+    if value is None:
+        return type(None)
+
+    # Fast path: standard Python types (including float — no NaN rejection
+    # at validation time, that's a contract-inference concern)
+    fast_type = type(value)
+    if fast_type in ALLOWED_CONTRACT_TYPES:
+        return fast_type
+
+    # Lazy imports to maintain contracts as a leaf module
+    try:
+        import numpy as np
+        import pandas as pd
+    except ImportError:
+        return fast_type
+
+    # Missing-value sentinels
+    if value is pd.NA or value is pd.NaT:
+        return type(None)
+
+    # Non-finite floats: return float (the type is correct even if the
+    # value is problematic — validation compares types, not values)
+    if isinstance(value, (float, np.floating)) and (math.isnan(value) or math.isinf(value)):
+        return float
+
+    # Normalize numpy/pandas types to primitives
+    if isinstance(value, np.integer):
+        return int
+    if isinstance(value, np.floating):
+        return float
+    if isinstance(value, np.bool_):
+        return bool
+    if isinstance(value, pd.Timestamp):
+        return datetime
+    if isinstance(value, np.datetime64):
+        if np.isnat(value):
+            return type(None)
+        return datetime
+    if isinstance(value, np.str_):
+        return str
+
+    # Unknown type — return as-is for comparison. The caller will see
+    # actual_type != expected_type and produce a TypeMismatchViolation.
+    return fast_type

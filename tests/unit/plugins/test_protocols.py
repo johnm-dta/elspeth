@@ -6,9 +6,9 @@ from typing import Any, ClassVar
 
 from elspeth.contracts import PipelineRow, SourceRow
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.testing import make_pipeline_row
+from elspeth.testing import make_contract, make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
 class TestSourceProtocol:
@@ -17,7 +17,7 @@ class TestSourceProtocol:
     def test_source_protocol_definition(self) -> None:
         from elspeth.contracts import SourceProtocol
 
-        # Should be a Protocol (runtime_checkable protocols have this attribute)
+        # Should be a Protocol (all Protocols have this attribute)
         assert hasattr(SourceProtocol, "__protocol_attrs__")
 
     def test_source_implementation(self) -> None:
@@ -37,13 +37,14 @@ class TestSourceProtocol:
             plugin_version = "1.0.0"
             _on_validation_failure = "discard"
             on_success = "output"
+            declared_guaranteed_fields: frozenset[str] = frozenset()
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
 
             def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
                 for i in range(3):
-                    yield SourceRow.valid({"value": i})
+                    yield SourceRow.valid({"value": i}, contract=make_contract({"value": i}))
 
             def close(self) -> None:
                 pass
@@ -62,15 +63,12 @@ class TestSourceProtocol:
 
         source = MySource({"path": "test.csv"})
 
-        # IMPORTANT: Verify protocol conformance at runtime.
-        # This is why we use @runtime_checkable. Assign to a variable to
-        # prevent mypy from narrowing `source` to Never (which would make
-        # all subsequent code unreachable).
-        _conforms = isinstance(source, SourceProtocol)
-        assert _conforms, "Source must conform to SourceProtocol"
+        # Protocol conformance is verified by mypy, not isinstance() —
+        # SourceProtocol is not @runtime_checkable.
+        _source: SourceProtocol = source  # type: ignore[assignment]
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         source_rows = list(source.load(ctx))
         assert len(source_rows) == 3
@@ -93,6 +91,11 @@ class TestSourceProtocol:
 
         assert "plugin_version" in SourceProtocol.__protocol_attrs__  # type: ignore[attr-defined]
 
+    def test_source_has_declared_guaranteed_fields_attribute(self) -> None:
+        from elspeth.contracts import SourceProtocol
+
+        assert "declared_guaranteed_fields" in SourceProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
     def test_source_implementation_with_metadata(self) -> None:
         from collections.abc import Iterator
         from typing import Any
@@ -111,12 +114,13 @@ class TestSourceProtocol:
             plugin_version = "1.0.0"
             _on_validation_failure = "discard"
             on_success = "output"
+            declared_guaranteed_fields: frozenset[str] = frozenset()
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
 
             def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
-                yield SourceRow.valid({"value": 1})
+                yield SourceRow.valid({"value": 1}, contract=make_contract({"value": 1}))
 
             def close(self) -> None:
                 pass
@@ -134,8 +138,9 @@ class TestSourceProtocol:
                 return None  # No schema contract
 
         source = MetadataSource({})
-        assert isinstance(source, SourceProtocol)  # type: ignore[unreachable]
-        assert source.determinism == Determinism.IO_READ  # type: ignore[unreachable]
+        # Protocol conformance verified by mypy, not isinstance().
+        _source: SourceProtocol = source  # type: ignore[assignment]
+        assert source.determinism == Determinism.IO_READ
         assert source.plugin_version == "1.0.0"
 
 
@@ -163,13 +168,17 @@ class TestTransformProtocol:
             node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
+            source_file_hash: str | None = None
             is_batch_aware = False  # Batch support (structural aggregation)
+            supports_row_mode_when_batch_aware = False  # Batch-aware transforms only
             creates_tokens = False  # Deaggregation (multi-row output)
+            passes_through_input = False  # ADR-007: pass-through contract flag
+            can_drop_rows = False  # ADR-012: empty-emission governance flag
+            declared_input_fields: frozenset[str] = frozenset()
             declared_output_fields: frozenset[str] = frozenset()  # Collision detection
             _output_schema_config: SchemaConfig | None = None  # Set by BaseTransform
             on_error: str | None = None  # Error routing (WP-11.99b)
             on_success: str | None = None  # Success routing
-            validate_input: bool = False  # Centralized in executor
             _on_start_called: bool = False  # Lifecycle guard (managed by BaseTransform)
 
             def __init__(self, config: dict[str, Any]) -> None:
@@ -187,6 +196,9 @@ class TestTransformProtocol:
                     success_reason={"action": "test"},
                 )
 
+            def effective_static_contract(self) -> frozenset[str]:
+                return frozenset()
+
             def close(self) -> None:
                 pass
 
@@ -196,14 +208,22 @@ class TestTransformProtocol:
             def on_complete(self, ctx: PluginContext) -> None:
                 pass
 
+            @classmethod
+            def get_config_model(cls, config: dict[str, Any] | None = None) -> None:
+                return None
+
+            @classmethod
+            def get_config_schema(cls) -> dict[str, Any]:
+                return {}
+
         transform = DoubleTransform({})
 
         # IMPORTANT: Verify protocol conformance at runtime (see test_source_protocol_conformance).
         _conforms = isinstance(transform, TransformProtocol)
         assert _conforms, "Must conform to TransformProtocol"
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         result = transform.process(make_pipeline_row({"value": 21}), ctx)
         assert result.status == "success"
@@ -235,8 +255,8 @@ class TestTransformBatchSupport:
                 return TransformResult.success(make_pipeline_row({"processed": row["value"]}), success_reason={"action": "test"})
 
         transform = SingleTransform({})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
         result = transform.process(make_pipeline_row({"value": 1}), ctx)
         assert result.row is not None
         assert result.row.to_dict() == {"processed": 1}
@@ -270,8 +290,8 @@ class TestTransformBatchSupport:
                 return TransformResult.success(make_pipeline_row({"value": row["value"]}), success_reason={"action": "test"})
 
         transform = BatchTransform({})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         # Batch mode
         result = transform.process([make_pipeline_row({"value": 1}), make_pipeline_row({"value": 2}), make_pipeline_row({"value": 3})], ctx)
@@ -428,7 +448,6 @@ class TestSinkProtocol:
             determinism = Determinism.IO_WRITE
             plugin_version = "1.0.0"
             supports_resume = False  # Required by SinkProtocol
-            validate_input: bool = False  # Centralized in executor
             declared_required_fields: frozenset[str] = frozenset()  # Centralized in executor
             _on_write_failure: str | None = "discard"
 
@@ -476,12 +495,11 @@ class TestSinkProtocol:
                 return False
 
         sink = BatchMemorySink({})
-        # Verify protocol conformance at runtime (see test_source_protocol_conformance).
-        _conforms = isinstance(sink, SinkProtocol)
-        assert _conforms, "Must conform to SinkProtocol"
+        # Protocol conformance verified by mypy, not isinstance().
+        _sink: SinkProtocol = sink  # type: ignore[assignment]
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
         result = sink.write([{"value": 1}, {"value": 2}], ctx)
 
         assert isinstance(result.artifact, ArtifactDescriptor)
@@ -509,7 +527,6 @@ class TestSinkProtocol:
             determinism = Determinism.IO_WRITE
             plugin_version = "1.0.0"
             supports_resume = False  # Required by SinkProtocol
-            validate_input: bool = False  # Centralized in executor
             declared_required_fields: frozenset[str] = frozenset()  # Centralized in executor
             _on_write_failure: str | None = "discard"
             rows: ClassVar[list[dict[str, Any]]] = []
@@ -559,12 +576,11 @@ class TestSinkProtocol:
 
         sink = MemorySink({})
 
-        # IMPORTANT: Verify protocol conformance at runtime (see test_source_protocol_conformance).
-        _conforms = isinstance(sink, SinkProtocol)
-        assert _conforms, "Must conform to SinkProtocol"
+        # Protocol conformance verified by mypy, not isinstance().
+        _sink: SinkProtocol = sink  # type: ignore[assignment]
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         # Batch write
         result = sink.write([{"value": 1}, {"value": 2}], ctx)

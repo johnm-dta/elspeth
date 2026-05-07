@@ -12,7 +12,7 @@ from __future__ import annotations
 from hypothesis import given
 from hypothesis import strategies as st
 
-from elspeth.plugins.transforms.field_collision import detect_field_collisions
+from elspeth.contracts.field_collision import detect_field_collisions
 
 # --- Field name strategy ---
 # Realistic field names: lowercase alphanumeric with underscores (e.g., "llm_response_usage")

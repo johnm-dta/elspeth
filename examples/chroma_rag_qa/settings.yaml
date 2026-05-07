@@ -45,7 +45,7 @@ transforms:
   options:
     provider: openrouter
     api_key: ${OPENROUTER_API_KEY}
-    model: openai/gpt-4o-mini
+    model: openai/gpt-4.1-mini
     temperature: 0.2
     template: >
       You are a knowledgeable science assistant. Answer the question using

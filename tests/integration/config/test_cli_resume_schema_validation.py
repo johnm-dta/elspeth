@@ -16,6 +16,7 @@ from pathlib import Path
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.database_sink import DatabaseSink
 from elspeth.plugins.sinks.json_sink import JSONSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_operation_context
 
 
@@ -32,11 +33,13 @@ class TestCSVSinkResumeSchemaValidation:
             writer.writeheader()
 
         # Create sink with different schema
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         # Simulate CLI resume flow: configure_for_resume() then validate
@@ -58,11 +61,13 @@ class TestCSVSinkResumeSchemaValidation:
             writer = csv.DictWriter(f, fieldnames=["id", "name"])
             writer.writeheader()
 
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -88,12 +93,14 @@ class TestDatabaseSinkResumeSchemaValidation:
         metadata.create_all(engine)
         engine.dispose()
 
-        sink = DatabaseSink(
-            {
-                "url": url,
-                "table": "output_data",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": url,
+                    "table": "output_data",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -117,12 +124,14 @@ class TestDatabaseSinkResumeSchemaValidation:
         metadata.create_all(engine)
         engine.dispose()
 
-        sink = DatabaseSink(
-            {
-                "url": url,
-                "table": "output_data",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": url,
+                    "table": "output_data",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -145,12 +154,14 @@ class TestDatabaseSinkResumeSchemaValidation:
         metadata.create_all(engine)
         engine.dispose()
 
-        sink = DatabaseSink(
-            {
-                "url": url,
-                "table": "output_data",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": url,
+                    "table": "output_data",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -186,12 +197,14 @@ class TestJSONLSinkResumeSchemaValidation:
         with open(jsonl_path, "w") as f:
             f.write(json.dumps({"wrong": 1, "fields": 2}) + "\n")
 
-        sink = JSONSink(
-            {
-                "path": str(jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "format": "jsonl",
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -208,12 +221,14 @@ class TestJSONLSinkResumeSchemaValidation:
         with open(jsonl_path, "w") as f:
             f.write(json.dumps({"id": 1, "name": "test"}) + "\n")
 
-        sink = JSONSink(
-            {
-                "path": str(jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "format": "jsonl",
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -234,12 +249,14 @@ class TestResumeSchemaValidationOrder:
             writer = csv.DictWriter(f, fieldnames=["id", "name"])
             writer.writeheader()
 
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "mode": "write",  # Original mode
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "mode": "write",  # Original mode
+                }
+            )
         )
 
         # Before configure_for_resume
@@ -262,11 +279,13 @@ class TestResumeSchemaValidationOrder:
             writer = csv.DictWriter(f, fieldnames=["id", "extra"])
             writer.writeheader()
 
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -294,12 +313,14 @@ class TestResumeWithOriginalHeaders:
             writer.writeheader()
             writer.writerow({"User ID": "u1", "Amount (USD)": "100.0"})
 
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -328,12 +349,14 @@ class TestResumeWithOriginalHeaders:
             writer = csv.DictWriter(f, fieldnames=["User ID", "Amount (USD)"])
             writer.writeheader()
 
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -348,13 +371,15 @@ class TestResumeWithOriginalHeaders:
         with open(jsonl_path, "w") as f:
             f.write(json.dumps({"User ID": "u1", "Amount (USD)": 100.0}) + "\n")
 
-        sink = JSONSink(
-            {
-                "path": str(jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "format": "jsonl",
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "format": "jsonl",
+                    "headers": "original",
+                }
+            )
         )
 
         sink.configure_for_resume()
@@ -376,11 +401,13 @@ class TestResumeWithOriginalHeaders:
             writer = csv.DictWriter(f, fieldnames=["user_id", "amount_usd"])
             writer.writeheader()
 
-        sink = CSVSink(
-            {
-                "path": str(csv_path),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(csv_path),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                }
+            )
         )
 
         sink.configure_for_resume()

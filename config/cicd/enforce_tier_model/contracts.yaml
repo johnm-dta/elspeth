@@ -9,37 +9,37 @@ per_file_rules:
   - R5
   reason: Type discrimination for schema field parsing and union detection
   expires: null
-  max_hits: 10
+  max_hits: 17
 - pattern: contracts/contract_records.py
   rules:
   - R5
-  reason: Violation type dispatch requires isinstance() for polymorphic serialization of ContractViolation subclasses
+  reason: Violation type dispatch requires isinstance() for polymorphic serialization of ContractViolation subclasses, plus Tier 1 structural validation of JSON shape and boolean fields in from_json() and to_schema_contract()
   expires: null
-  max_hits: 3
+  max_hits: 12
 - pattern: contracts/type_normalization.py
   rules:
   - R5
-  reason: Type normalization requires isinstance() for polymorphic serialization of numeric types
+  reason: Type normalization requires isinstance() for polymorphic serialization of numeric types — includes both strict (normalize_type_for_contract) and non-throwing (classify_runtime_type) variants
   expires: null
-  max_hits: 7
+  max_hits: 14
+- pattern: contracts/identity.py
+  rules:
+  - R5
+  reason: Tier 1 __post_init__ type guards — validates row_id, token_id, and optional lineage fields are str
+  expires: null
+  max_hits: 3
 - pattern: contracts/aggregation_checkpoint.py
   rules:
   - R5
   reason: Deep-freeze guards, from_dict validation, and Tier 1 __post_init__ type guards
   expires: null
-  max_hits: 4
+  max_hits: 7
 - pattern: contracts/audit.py
   rules:
   - R5
   reason: Deep-freeze guards and enum validation at construction
   expires: null
   max_hits: 5
-- pattern: contracts/batch_checkpoint.py
-  rules:
-  - R5
-  reason: Deep-freeze guards, Tier 1 from_dict type validation, and template error tuple validation
-  expires: null
-  max_hits: 9
 - pattern: contracts/checkpoint.py
   rules:
   - R5
@@ -55,9 +55,9 @@ per_file_rules:
 - pattern: contracts/coalesce_checkpoint.py
   rules:
   - R5
-  reason: Deep-freeze guards and from_dict deserialization validation
+  reason: Deep-freeze guards, from_dict deserialization, and branch-key/lost-branch validation
   expires: null
-  max_hits: 13
+  max_hits: 17
 - pattern: contracts/config/runtime.py
   rules:
   - R5
@@ -85,9 +85,9 @@ per_file_rules:
 - pattern: contracts/hashing.py
   rules:
   - R5
-  reason: Float type detection for NaN/Infinity rejection in canonical hashing; frozen container type dispatch for MappingProxyType/tuple/frozenset normalization
+  reason: Float type detection for NaN/Infinity rejection in canonical hashing; frozen container type dispatch for MappingProxyType/tuple/frozenset normalization; recursive type dispatch in _stable_repr for deterministic hashing of unordered containers
   expires: null
-  max_hits: 4
+  max_hits: 9
 - pattern: contracts/header_modes.py
   rules:
   - R5
@@ -103,61 +103,69 @@ per_file_rules:
 - pattern: contracts/results.py
   rules:
   - R5
-  reason: SanitizedUrl type validation at Tier 3 boundary
+  reason: Strict PipelineRow output guards for transform result construction, SanitizedUrl type validation at Tier 3 boundary, and strict isinstance(error, FailureInfo) guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit attributability)
   expires: null
-  max_hits: 2
+  max_hits: 4
+- pattern: contracts/diversion.py
+  rules:
+  - R5
+  reason: Offensive __post_init__ type guards — validates artifact is ArtifactDescriptor, diversions is tuple, elements are RowDiversion
+  expires: null
+  max_hits: 3
 - pattern: contracts/routing.py
   rules:
   - R5
-  reason: RoutingMode enum validation at construction
-  expires: null
-  max_hits: 1
-- pattern: contracts/token_usage.py
-  rules:
-  - R5
-  reason: Tier 3 LLM API response dict validation in from_dict
+  reason: Enum validation (RoutingKind, RoutingMode, RouteDestinationKind) at construction
   expires: null
   max_hits: 5
+- pattern: contracts/token_usage.py
+  rules:
+  - R1
+  - R5
+  reason: |
+    Tier 3 LLM API response dict validation in from_dict and __post_init__.
+    Every dict.get() and isinstance() inside this file is the canonical
+    Tier-3 boundary for token-usage data. Provider responses may be
+    absent, malformed, or carry varying nesting shapes (OpenAI nested
+    prompt_tokens_details vs Anthropic flat sibling fields per
+    elspeth-4e79436719 §Bug C). All absence cases coerce to None,
+    never zero — the audit row records what the provider actually said.
+  expires: null
+  max_hits: 22
 - pattern: contracts/transform_contract.py
   rules:
   - R5
   reason: Type annotation introspection for Union detection
   expires: null
   max_hits: 1
+- pattern: contracts/secret_scrub.py
+  rules:
+  - R5
+  reason: Secret-scrubbing dispatch — _scrub_value recurses over arbitrary Mapping[str, Any] payloads (Tier 3) and uses isinstance to distinguish Mapping, str, sequence, and set/frozenset types for correct redaction routing
+  expires: null
+  max_hits: 4
+- pattern: contracts/runtime_val_manifest.py
+  rules:
+  - R2
+  - R5
+  - R6
+  reason: "ADR-010 §Decision 3 M3 + H2 N1 runtime-VAL manifest hashing. Six cohesive introspection patterns, each intrinsic to the data shape: (1) _normalize_code_constant x6 isinstance dispatches over CodeType/tuple/list/frozenset/bytes/scalar — CPython co_consts is a genuinely heterogeneous tuple and dispatch is the only way to normalize it; (2) _callable_implementation_hash x1 isinstance + x6 getattr on __code__/__defaults__/__kwdefaults__/__annotations__/__module__/__qualname__ — C-implemented callables legitimately lack these, the None-default branch feeds the repr-fallback hash; (3) _strip_docstrings x1 getattr + x4 isinstance over ast.Expr/ast.Constant/str — AST node dispatch has no Protocol alternative; (4) _unwrap_callable x3 isinstance(staticmethod/classmethod/property) — descriptor unwrapping over distinct CPython runtime types; (5) _payload_schema_hash x1 isinstance(type) + x3 getattr(__annotations__/__required_keys__/__optional_keys__) and x1 getattr(payload_schema) in _declaration_contract_implementation_hash + x1 getattr(__module__) in _iter_relevant_method_hashes — TypedDict introspection API differs by declaration style; (6) delegated-helper dependency hashing inspects function code/globals/module metadata to include helper drift without recursively hashing unrelated globals. Plus 1x except (OSError, TypeError) in _class_source_hash for inspect.getsource() on builtin/dynamically-generated classes; it raises FrameworkBugError rather than emitting a nullable source_hash, so source-unavailable classes cannot enter the resume-trust manifest. Total: 35. Direct attribute access would crash on legitimate inputs (builtins, C functions, functional-syntax TypedDicts, non-global co_names, and dependency cycles). Ceiling pinned to 35 — adding a 36th site requires explicit review, not silent absorption."
+  expires: null
+  max_hits: 35
 allow_hits:
-- key: contracts/url.py:R6:SanitizedDatabaseUrl:from_raw_url:fp=20b25721d9adf860
+- key: contracts/url.py:R6:SanitizedDatabaseUrl:from_raw_url:fp=a8a9139e2ff09e37
   owner: architecture
   reason: except ValueError on get_fingerprint_key() — explicit branch for dev mode (no key) vs production (fail_if_no_key)
   safety: Raises SecretFingerprintError when fail_if_no_key=True; only silently continues in dev mode
   expires: null
-- key: contracts/url.py:R6:SanitizedWebhookUrl:from_raw_url:fp=21ce92115665de50
+- key: contracts/url.py:R6:SanitizedWebhookUrl:from_raw_url:fp=ec8dd835c4c43c96
   owner: architecture
   reason: except ValueError on get_fingerprint_key() — explicit branch for dev mode (no key) vs production (fail_if_no_key)
   safety: Raises SecretFingerprintError when fail_if_no_key=True; only silently continues in dev mode
-  expires: null
-- key: contracts/contract_propagation.py:R6:propagate_contract:fp=8b818d57d7a1b90a
-  owner: bugfix
-  reason: TypeError from normalize_type_for_contract for ALL unsupported types — maps to object (was dict/list only)
-  safety: Preserves field in contract as 'any' type; no data loss or silent skip
-  expires: '2026-05-14'
-- key: contracts/contract_propagation.py:R6:narrow_contract_to_output:fp=17d3f4491f707761
-  owner: bugfix
-  reason: TypeError from normalize_type_for_contract for ALL unsupported types during narrowing — maps to object
-  safety: Preserves field in narrowed contract as 'any' type; no data loss
-  expires: '2026-05-14'
-- key: contracts/plugin_context.py:TC:_module_:fp=2281c9d4d4f9c832
-  owner: architecture
-  reason: TYPE_CHECKING import of LandscapeRecorder — PluginContext type annotations need L1 recorder type
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
   expires: null
 - key: contracts/plugin_context.py:TC:_module_:fp=5dfc642462528293
   owner: architecture
   reason: TYPE_CHECKING import of RateLimitRegistry — PluginContext type annotations need L1 rate limiter type
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
-- key: contracts/contexts.py:TC:_module_:fp=fe23a281512d9222
-  owner: architecture
-  reason: TYPE_CHECKING import of LandscapeRecorder — context protocols declare landscape property type
   safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
   expires: null
 - key: contracts/contexts.py:TC:_module_:fp=b29b41656c78b873
@@ -170,12 +178,12 @@ allow_hits:
   reason: TYPE_CHECKING import of Settings models — Runtime*Config.from_settings() type annotations
   safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
   expires: null
-- key: contracts/data.py:R1:validate_row:fp=33db0becd17f99fa
-  owner: architecture
-  reason: Optional field access at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: contracts/contract_builder.py:R6:ContractBuilder:process_first_row:fp=542d3ab0951d6c56
+- key: contracts/data.py:R6:_get_allow_inf_nan:fp=a073efa3e28410f3
+  owner: bugfix
+  reason: vars(item) raises TypeError on non-object Pydantic metadata (plain strings, ints); skipping is correct since only object metadata can carry allow_inf_nan
+  safety: Only catches TypeError from vars(); attribute access on the result uses direct dict lookup, not hasattr
+  expires: '2026-05-15'
+- key: contracts/contract_builder.py:R6:ContractBuilder:process_first_row:fp=4d3f0bdcf6fdd56f
   owner: bugfix
   reason: TypeError from normalize_type_for_contract for unsupported types (dict, list, Decimal) — maps to object
   safety: Preserves field in contract as 'any' type; no data loss or silent skip
@@ -188,22 +196,14 @@ allow_hits:
   owner: bugfix
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
   safety: Falls back to str(a) for display purposes only; used in error message, not logic
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=4149689a27621dfc
+- key: contracts/declaration_contracts.py:R5:BoundaryInputs:__post_init__:fp=db78bae36c2f61ba
   owner: architecture
-  reason: Tier 3 boundary — .get() on serialized LLM response dict to extract optional usage data
-  safety: Missing key returns None; no fabrication
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=c88f374a39d117c6
+  reason: Row-attributed source/sink boundary DTO — row_data must be a mapping before deep_freeze so declaration-contract adopters never receive arbitrary sequence/scalar payloads
+  safety: Non-mapping values raise TypeError immediately; no coercion or fallback is attempted
+- key: contracts/run_result.py:R5:RunResult:__post_init__:fp=fac5bfd1b22037fa
   owner: architecture
-  reason: Tier 3 boundary — ValueError/TypeError from stable_hash on non-canonical data falls back to repr_hash
-  safety: Warning logged; row_id still generated via repr_hash for audit trail continuity
-- key: contracts/token_usage.py:R1:TokenUsage:from_dict:fp=22da73e68c808d7f
-  owner: architecture
-  reason: Tier 3 boundary — from_dict() uses .get() on external LLM API response dicts where keys may be absent
-  safety: Missing keys produce None (unknown); no fabrication
-- key: contracts/token_usage.py:R1:TokenUsage:from_dict:fp=f302312f3d30b520
-  owner: architecture
-  reason: Tier 3 boundary — from_dict() uses .get() on external LLM API response dicts where keys may be absent
-  safety: Missing keys produce None (unknown); no fabrication
+  reason: Offensive guard — validates status is RunStatus enum at contract construction
+  safety: TypeError raised immediately; prevents str from leaking through to consumers
 - key: contracts/schema_contract_factory.py:R1:create_contract_from_config:fp=caa0070eb7edad8e
   owner: feature
   reason: Intentional identity fallback - fields without resolution mapping use normalized name as original name
@@ -212,12 +212,115 @@ allow_hits:
   owner: architecture
   reason: os.environ.get() is the correct API for checking env var existence — followed by explicit ValueError raise
   safety: Raises ValueError immediately if env var not set — not a silent fallback
-- key: contracts/contract_propagation.py:R6:narrow_contract_to_output:fp=c44a2a3ac4d47e65
-  owner: bugfix
-  reason: TypeError from normalize_type_for_contract for ALL unsupported types during narrowing — maps to object
-  safety: Preserves field in narrowed contract as 'any' type; no data loss
-  expires: '2026-05-14'
-- key: contracts/contract_propagation.py:R1:merge_contract_with_output:fp=368e4bbac0c4fcec
+- key: contracts/schema_contract.py:R5:PipelineRow:to_dict:fp=19c383f767c4ed8c
+  owner: architecture
+  reason: Tier 1 offensive guard — deep_thaw must return dict; isinstance check crashes on corruption
+  safety: Raises TypeError immediately if invariant violated
+- key: contracts/schema_contract.py:R5:PipelineRow:to_checkpoint_format:fp=13c2f8a3bfbe5f2a
+  owner: architecture
+  reason: Tier 1 offensive guard — deep_thaw must return dict; isinstance check crashes on corruption
+  safety: Raises TypeError immediately if invariant violated
+- key: contracts/contract_propagation.py:R1:merge_contract_with_output:fp=b77bb8f4e1cd3d1d
   owner: architecture
   reason: Optional lookup for original name - new fields from transforms may not have input mapping
   safety: Fallback to output field's original_name is correct behavior for transform-added fields
+- key: contracts/tier_registry.py:R5:tier_1_error:fp=360d94dd51a67c28
+  owner: architecture
+  reason: Decorator API boundary — isinstance(reason, str) validates the caller-supplied reason kwarg; enforces non-empty string contract before the value is stored in the registry
+  safety: Raises ValueError immediately on empty/non-string reason; no silent coercion or data loss
+  expires: null
+- key: contracts/tier_registry.py:R5:tier_1_error:fp=b6d17d7d22d3b69b
+  owner: architecture
+  reason: Decorator API boundary (ADR-010 M8, issue elspeth-3af772b9e3) — isinstance(caller_module, str) validates the caller-supplied caller_module kwarg; the value feeds the module-prefix allowlist in _register_with_module_prefix, so empty-string or non-string values must crash before reaching allowlist spoofing
+  safety: Raises ValueError immediately on empty/non-string caller_module; the scanner rule TDE2 also rejects non-literal values statically
+  expires: null
+- key: contracts/tier_registry.py:R5:_register_with_module_prefix:fp=ce98be6cf59df4d5
+  owner: architecture
+  reason: Decorator API boundary — isinstance(cls, type) and issubclass(cls, BaseException) validates that the decorated object is a BaseException subclass; this is an offensive invariant check, not defensive coercion
+  safety: Raises TypeError immediately on non-exception class; no silent fallback
+  expires: null
+- key: contracts/tier_registry.py:R5:_register_with_module_prefix:fp=18d4ee87363f8490
+  owner: architecture
+  reason: Decorator API boundary — isinstance(class_module, str) validates the registered exception class exposes a concrete owning module string before the allowlist checks enforce Tier-1 ownership
+  safety: Raises TypeError immediately on invalid module metadata and PermissionError on disallowed module ownership; no silent fallback
+  expires: null
+- key: contracts/declaration_contracts.py:R5:_normalise_row_tuple:fp=6cd7a87f9b40bc62
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization helper for emitted row bundles; list inputs are normalized to deep-frozen tuples and non-list/non-tuple values crash immediately."
+  safety: TypeError raised immediately on any non-list/non-tuple input; tuple members are deep-frozen before storage
+  expires: null
+- key: contracts/declaration_contracts.py:R5:_normalise_row_tuple:fp=2be5b2edada71a02
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization helper for emitted row bundles; tuple inputs are accepted as the already-normalized immutable shape."
+  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
+  expires: null
+- key: contracts/declaration_contracts.py:R5:BatchFlushInputs:__post_init__:fp=a2e0caa17576e635
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for BatchFlushInputs.buffered_tokens — isinstance dispatch mirrors RuntimeCheckOutputs pattern; non-list/non-tuple raises TypeError (offensive guard per CLAUDE.md §Offensive Programming)."
+  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
+  expires: null
+- key: contracts/declaration_contracts.py:R5:BatchFlushInputs:__post_init__:fp=4ec415cce6bbe35e
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for BatchFlushInputs.buffered_tokens — isinstance dispatch mirrors RuntimeCheckOutputs pattern; non-list/non-tuple raises TypeError (offensive guard per CLAUDE.md §Offensive Programming)."
+  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
+  expires: null
+- key: contracts/declaration_contracts.py:R5:ExampleBundle:__post_init__:fp=ea9262fbccfdb527
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for ExampleBundle.args — list inputs are normalized to deep-frozen tuples and any non-list/non-tuple input must crash immediately."
+  safety: TypeError raised immediately on any non-list/non-tuple input; tuple members are deep-frozen before storage
+  expires: null
+- key: contracts/declaration_contracts.py:R5:ExampleBundle:__post_init__:fp=4f2d78378d9ca2ea
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for ExampleBundle.args — the tuple-only branch is an offensive invariant check, not a silent fallback."
+  safety: TypeError raised immediately when args is not list or tuple; no coercion beyond the explicit list->tuple normalization
+  expires: null
+- key: contracts/declaration_contracts.py:R2:_collect_contract_sites:fp=8d6e48bba4566067
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) getattr(candidate, _DISPATCH_SITE_MARKER_ATTR, None) probes for the @implements_dispatch_site decorator marker on contract methods. The default-None is semantic: 'this method did not declare a dispatch site'. Using direct attribute access (bare .x access) would crash on every non-decorated method walked (applies_to, negative_example, __init_subclass__, etc.), defeating the discovery pass. This is the canonical marker-discovery pattern the @implements_dispatch_site decorator contract specifies."
+  safety: Invalid marker values (site_name not in _DISPATCH_SITE_VALUES) raise FrameworkBugError immediately — no silent fallthrough
+  expires: null
+- key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=e770539007d53958
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) nominal ABC gate — register_declaration_contract uses isinstance(contract, DeclarationContract) to enforce ADR-010 §Alternative 3 nominal-typing posture (rejects structural Protocol matching). This is a Tier-1 trust boundary check at the registry's entry point; a non-DeclarationContract passed here is a framework bug that MUST crash loudly before the registry freezes. TypeError raised with a self-diagnosing message."
+  safety: TypeError raised immediately naming ADR-010 §Alternative 3 rationale
+  expires: null
+- key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=28b565efc229de07
+  owner: architecture
+  reason: "ADR-010 H2 (2026-04-20) payload_schema type gate — register_declaration_contract uses isinstance(payload_schema, type) to reject non-type payload_schema values (must be a TypedDict class, not an instance or string). Tier-1 trust boundary at registry entry; caller-supplied bad shape is a framework bug that crashes before the registry freezes. Predates H2 (C2 closure); H2 preserves the same pattern."
+  safety: TypeError raised immediately with diagnostic message
+  expires: null
+- key: contracts/contract_propagation.py:R6:_infer_new_field_contract:fp=7af526cf8ac3b4be
+  owner: bugfix
+  reason: >-
+    TypeError from normalize_type_for_contract for unsupported transform-created
+    field values is intentionally mapped to object by the shared inference helper.
+  safety: >-
+    The field remains present in the propagated contract as object/any; non-finite
+    values still raise ValueError and no row data is dropped or coerced.
+  expires: null
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=ded2e01b10149753
+  owner: composer-audit
+  reason: >-
+    Tier 3 boundary - response_snapshot.get('usage') reads optional usage metadata from an external LLM
+    response snapshot.
+  safety: >-
+    Missing usage preserves None; TokenUsage.from_dict validates present mappings before telemetry emission.
+  expires: null
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=482af02b41f7c916
+  owner: composer-audit
+  reason: >-
+    Telemetry transport failures must not corrupt the primary Landscape call recording after it has already
+    succeeded.
+  safety: >-
+    Only OSError, ConnectionError, and TimeoutError are caught; the warning carries class metadata and call
+    recording still returns.
+  expires: null
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=55506bc73df2d0c0
+  owner: composer-audit
+  reason: >-
+    Tier 3 boundary - stable_hash can reject non-canonical external row data such as NaN or non-serializable
+    values.
+  safety: >-
+    Narrow ValueError/TypeError catch falls back to repr_hash, logs no row content, and still records a
+    validation-error token.
+  expires: null

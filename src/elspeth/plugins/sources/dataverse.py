@@ -13,18 +13,16 @@ import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Self
+from typing import Any, ClassVar, Self
 
-import structlog
 from pydantic import Field, ValidationError, field_validator, model_validator
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
-from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.contexts import LifecycleContext, SourceContext
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
-from elspeth.contracts.events import ExternalCallCompleted
-from elspeth.core.canonical import stable_hash
+from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseAuthConfig,
@@ -41,11 +39,6 @@ from elspeth.plugins.sources.field_normalization import (
     resolve_field_names,
 )
 
-if TYPE_CHECKING:
-    from elspeth.contracts.contract_builder import ContractBuilder
-
-logger = structlog.get_logger(__name__)
-
 # OData annotation prefixes to strip from row data
 _ODATA_ANNOTATION_PATTERN = re.compile(r"^@odata\.|@Microsoft\.Dynamics\.CRM\.")
 _FORMATTED_VALUE_SUFFIX = "@OData.Community.Display.V1.FormattedValue"
@@ -57,6 +50,8 @@ class DataverseSourceConfig(DataPluginConfig):
     Extends DataPluginConfig which requires schema configuration.
     Unlike file-based sources, does not extend PathConfig (no local file path).
     """
+
+    _plugin_component_type: ClassVar[str | None] = "source"
 
     environment_url: str = Field(
         ...,
@@ -189,11 +184,14 @@ class DataverseSource(BaseSource):
     """
 
     name = "dataverse"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:809dab6944940c9c"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
+    config_model = DataverseSourceConfig
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = DataverseSourceConfig.from_dict(config)
+        cfg = DataverseSourceConfig.from_dict(config, plugin_name=self.name)
 
         # Store config
         self._environment_url = cfg.environment_url
@@ -212,6 +210,7 @@ class DataverseSource(BaseSource):
 
         # Store schema config
         self._schema_config = cfg.schema_config
+        self._initialize_declared_guaranteed_fields(self._schema_config)
 
         # CRITICAL: allow_coercion=True for sources (external data boundary)
         self._schema_class: type[PluginSchema] = create_schema_from_config(
@@ -222,9 +221,6 @@ class DataverseSource(BaseSource):
         self.output_schema = self._schema_class
 
         # Contract setup — Dataverse responses are JSON (no CSV header resolution needed)
-        from elspeth.contracts.contract_builder import ContractBuilder
-        from elspeth.contracts.schema_contract_factory import create_contract_from_config
-
         initial_contract = create_contract_from_config(self._schema_config)
         if initial_contract.locked:
             self.set_schema_contract(initial_contract)
@@ -237,33 +233,14 @@ class DataverseSource(BaseSource):
 
         # Lazy-constructed client (needs lifecycle context)
         self._client: DataverseClient | None = None
-        self._telemetry_emit: Any = None
-        self._run_id: str | None = None
 
     def on_start(self, ctx: LifecycleContext) -> None:
         """Construct credential and DataverseClient.
 
         Called before load() — acquires resources from lifecycle context.
         """
-        self._run_id = ctx.run_id
-        self._telemetry_emit = ctx.telemetry_emit
-
         # Construct credential (azure-identity) — validates early
-        from azure.identity import ClientSecretCredential, ManagedIdentityCredential
-
-        credential: ClientSecretCredential | ManagedIdentityCredential
-        if self._auth_config.method == "service_principal":
-            # Pydantic validator guarantees these are non-None for service_principal
-            assert self._auth_config.tenant_id is not None
-            assert self._auth_config.client_id is not None
-            assert self._auth_config.client_secret is not None
-            credential = ClientSecretCredential(
-                tenant_id=self._auth_config.tenant_id,
-                client_id=self._auth_config.client_id,
-                client_secret=self._auth_config.client_secret,
-            )
-        else:
-            credential = ManagedIdentityCredential()
+        credential = self._auth_config.create_credential()
 
         # Obtain rate limiter (with null guard per spec)
         limiter = ctx.rate_limit_registry.get_limiter("dataverse_source") if ctx.rate_limit_registry is not None else None
@@ -277,50 +254,58 @@ class DataverseSource(BaseSource):
             additional_domains=self._additional_domains,
         )
 
-        # Validate entity exists via metadata query (structured mode only).
-        # Catches typos in entity names at pipeline startup rather than on
-        # first page fetch. FetchXML mode skips this — the entity name is
-        # embedded in the XML and validated by Dataverse on first query.
-        if self._entity is not None:
-            self._validate_entity_exists()
-
-    def _validate_entity_exists(self) -> None:
+    def _validate_entity_exists(self, ctx: SourceContext) -> None:
         """Validate that the configured entity exists in Dataverse metadata.
 
         Issues a lightweight metadata request to check entity availability.
         Failures are non-fatal — the entity may exist but the metadata
-        endpoint may be restricted. Logs a warning and continues.
+        endpoint may be restricted. Records the probe through the audited
+        source call path before continuing or raising.
         """
-        assert self._client is not None
-        assert self._entity is not None, "called only in structured query mode"
+        if self._client is None:
+            raise RuntimeError("on_start() must be called before _validate_entity_exists() — this is a bug")
+        if self._entity is None:
+            raise RuntimeError("_validate_entity_exists() called outside structured query mode — this is a bug")
         encoded_entity = urllib.parse.quote(self._entity, safe="")
         metadata_url = (
             f"{self._environment_url.rstrip('/')}/api/data/{self._api_version}"
             f"/EntityDefinitions(LogicalName='{encoded_entity}')?$select=LogicalName"
         )
         try:
-            self._client.get_page(metadata_url)
+            page = self._client.get_page(metadata_url)
         except DataverseClientError as e:
             if e.status_code == 404:
-                raise DataverseClientError(
+                not_found = DataverseClientError(
                     f"Entity '{self._entity}' not found in Dataverse. Check the entity logical name in your pipeline config.",
                     retryable=False,
                     status_code=404,
-                ) from e
-            if e.status_code == 403:
-                # 403 is non-fatal — entity may exist but metadata access
-                # is restricted. Log and continue.
-                logger.warning(
-                    "entity_metadata_check_forbidden",
-                    entity=self._entity,
-                    error=str(e),
-                    status_code=403,
+                    latency_ms=e.latency_ms,
+                    error_category=e.error_category,
+                    request_url=e.request_url,
+                    request_headers=e.request_headers,
                 )
-            else:
-                # 5xx, network errors, etc. — re-raise. Silently continuing
-                # after a server error means the pipeline proceeds with
-                # potentially invalid entity config.
-                raise
+                self._record_page_call(
+                    ctx,
+                    url=not_found.request_url or metadata_url,
+                    error=not_found,
+                    error_reason=not_found.error_category,
+                )
+                raise not_found from e
+            self._record_page_call(
+                ctx,
+                url=e.request_url or metadata_url,
+                error=e,
+                error_reason=e.error_category,
+            )
+            if e.status_code == 403:
+                return
+            if e.status_code == 401 and e.retryable:
+                self._client.reconstruct_credential(self._auth_config)
+            # 5xx, network errors, etc. — re-raise. Silently continuing
+            # after a server error means the pipeline proceeds with
+            # potentially invalid entity config.
+            raise
+        self._record_page_call(ctx, url=page.request_url, page=page)
 
     def _build_query_url(self) -> str:
         """Build the initial OData query URL for structured queries.
@@ -329,7 +314,8 @@ class DataverseSource(BaseSource):
         values to prevent silent corruption from special characters.
         OData $-prefixed parameter names are kept literal (servers require them).
         """
-        assert self._entity is not None, "called only in structured query mode"
+        if self._entity is None:
+            raise RuntimeError("_build_query_url() called outside structured query mode — this is a bug")
         encoded_entity = urllib.parse.quote(self._entity, safe="")
         url = f"{self._environment_url.rstrip('/')}/api/data/{self._api_version}/{encoded_entity}"
 
@@ -424,59 +410,27 @@ class DataverseSource(BaseSource):
         # Schema validation (lines below) quarantines rows with unexpected fields.
         mapping = self._field_resolution.resolution_mapping
         result: dict[str, Any] = {}
+        has_unmapped_fields = False
         for k, v in row.items():
             normalized_name = mapping.get(k)
             if normalized_name is None:
                 # Field not in initial mapping — normalize individually
                 normalized_name = normalize_field_name(k)
+                has_unmapped_fields = True
             result[normalized_name] = v
+
+        # If this row had fields not in the initial mapping, rebuild
+        # field resolution from this row's complete key set. This ensures
+        # the resolution mapping used for contract inference covers all
+        # fields, not just those from the (possibly quarantined) first row.
+        if has_unmapped_fields:
+            self._field_resolution = resolve_field_names(
+                raw_headers=list(row.keys()),
+                field_mapping=self._field_mapping,
+                columns=None,
+            )
+
         return result
-
-    def _emit_telemetry(
-        self,
-        *,
-        ctx: SourceContext,
-        status: CallStatus,
-        latency_ms: float,
-        request_data: dict[str, Any],
-        response_data: dict[str, Any] | None = None,
-    ) -> None:
-        """Emit ExternalCallCompleted telemetry after successful audit recording.
-
-        Telemetry fires AFTER audit (primacy rule). Failures are logged,
-        not propagated — telemetry must never corrupt the audit trail.
-        """
-        if self._telemetry_emit is None:
-            return
-        try:
-            assert self._run_id is not None, "run_id is None during telemetry emission — on_start() must set _run_id before load()"
-            req_payload = RawCallPayload(request_data)
-            resp_payload = RawCallPayload(response_data) if response_data else None
-            self._telemetry_emit(
-                ExternalCallCompleted(
-                    timestamp=datetime.now(UTC),
-                    run_id=self._run_id,
-                    call_type=CallType.HTTP,
-                    provider="dataverse",
-                    status=status,
-                    latency_ms=latency_ms,
-                    operation_id=ctx.operation_id,
-                    request_hash=stable_hash(request_data),
-                    response_hash=stable_hash(response_data) if response_data else None,
-                    request_payload=req_payload,
-                    response_payload=resp_payload,
-                )
-            )
-        except (FrameworkBugError, AuditIntegrityError):
-            raise
-        except Exception as tel_err:
-            logger.warning(
-                "telemetry_emit_failed",
-                error=str(tel_err),
-                error_type=type(tel_err).__name__,
-                call_type="http",
-                exc_info=True,
-            )
 
     def _record_page_call(
         self,
@@ -487,9 +441,10 @@ class DataverseSource(BaseSource):
         error: DataverseClientError | None = None,
         error_reason: str | None = None,
     ) -> None:
-        """Record a page fetch in the audit trail, then emit telemetry.
+        """Record a page fetch in the audit trail.
 
-        Audit fires first (primacy), telemetry fires second (best-effort).
+        PluginContext.record_call() handles telemetry after the successful
+        audit write, preserving the shared audit-first contract.
 
         Args:
             ctx: Source context for record_call
@@ -507,6 +462,10 @@ class DataverseSource(BaseSource):
             response_data = {
                 "status_code": page.status_code,
                 "row_count": len(page.rows),
+                "headers": page.headers,
+                "next_link": page.next_link,
+                "paging_cookie": page.paging_cookie,
+                "more_records": page.more_records,
             }
             try:
                 ctx.record_call(
@@ -517,19 +476,14 @@ class DataverseSource(BaseSource):
                     latency_ms=page.latency_ms,
                     provider="dataverse",
                 )
+            except contract_errors.TIER_1_ERRORS:
+                raise
             except Exception as exc:
                 raise AuditIntegrityError(
                     f"Failed to record successful page fetch to audit trail "
                     f"(url={url!r}). "
                     f"Page fetch completed but audit record is missing."
                 ) from exc
-            self._emit_telemetry(
-                ctx=ctx,
-                status=CallStatus.SUCCESS,
-                latency_ms=page.latency_ms,
-                request_data=request_data,
-                response_data=response_data,
-            )
         elif error is not None:
             request_data = {"method": "GET", "url": url}
             error_data = {
@@ -538,21 +492,23 @@ class DataverseSource(BaseSource):
                 "status_code": error.status_code,
                 "reason": error_reason,
             }
-            ctx.record_call(
-                call_type=CallType.HTTP,
-                status=CallStatus.ERROR,
-                request_data=request_data,
-                error=error_data,
-                latency_ms=error.latency_ms,
-                provider="dataverse",
-            )
-            if error.latency_ms is not None:
-                self._emit_telemetry(
-                    ctx=ctx,
+            try:
+                ctx.record_call(
+                    call_type=CallType.HTTP,
                     status=CallStatus.ERROR,
-                    latency_ms=error.latency_ms,
                     request_data=request_data,
+                    error=error_data,
+                    latency_ms=error.latency_ms,
+                    provider="dataverse",
                 )
+            except contract_errors.TIER_1_ERRORS:
+                raise
+            except Exception as exc:
+                raise AuditIntegrityError(
+                    f"Failed to record error page fetch to audit trail "
+                    f"(url={url!r}, error={error!r}). "
+                    f"Error occurred but audit record is missing."
+                ) from exc
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         """Load rows from Dataverse via OData pagination.
@@ -568,11 +524,15 @@ class DataverseSource(BaseSource):
         quarantine_count = 0
 
         # Client must be constructed by on_start() before load()
-        assert self._client is not None, "on_start() must be called before load()"
+        if self._client is None:
+            raise RuntimeError("on_start() must be called before load() — this is a bug")
 
         # Track the last URL seen — used in the error path where we don't
         # have a page response but need the actual URL for audit accuracy.
         last_fetched_url: str = self._build_query_url() if self._entity else "(FetchXML)"
+
+        if self._entity is not None:
+            self._validate_entity_exists(ctx)
 
         try:
             if self._entity is not None:
@@ -581,7 +541,8 @@ class DataverseSource(BaseSource):
                 page_iterator = self._client.paginate_odata(url)
             else:
                 # FetchXML query
-                assert self._fetch_xml is not None, "config validator ensures entity or fetch_xml"
+                if self._fetch_xml is None:
+                    raise RuntimeError("config validator ensures entity or fetch_xml — neither is set, this is a bug")
                 # Extract entity name from FetchXML
                 root = ET.fromstring(self._fetch_xml)
                 entity_elem = root.find("entity")
@@ -679,25 +640,47 @@ class DataverseSource(BaseSource):
                         self.set_schema_contract(self._contract_builder.contract)
                         self._first_valid_row_processed = True
 
+                    # Validate against locked contract to catch type drift on
+                    # inferred fields. Pydantic extra="allow" accepts any type
+                    # for extras — the contract enforces inferred types here.
+                    contract = self._contract_builder.contract if self._contract_builder is not None else self.require_schema_contract()
+                    if contract.locked:
+                        violations = contract.validate(validated_row)
+                        if violations:
+                            error_msg = "; ".join(str(v) for v in violations)
+                            ctx.record_validation_error(
+                                row=validated_row,
+                                error=error_msg,
+                                schema_mode=self._schema_config.mode,
+                                destination=self._on_validation_failure,
+                            )
+                            if self._on_validation_failure != "discard":
+                                yield SourceRow.quarantined(
+                                    row=validated_row,
+                                    error=error_msg,
+                                    destination=self._on_validation_failure,
+                                )
+                            continue
+
                     rows_yielded += 1
-                    contract = self._contract_builder.contract if self._contract_builder is not None else self.get_schema_contract()
                     yield SourceRow.valid(validated_row, contract=contract)
 
         except DataverseClientError as e:
-            # Record the error in audit trail using the last URL we saw.
-            # For page 1 errors this is the initial query URL; for page N
-            # errors it's the last successfully-fetched page's URL (the
-            # closest available context for which page the client was
-            # attempting when it failed).
+            # Use the actual failing URL from the error when available
+            # (carried on DataverseClientError since the request metadata fix).
+            # Falls back to last_fetched_url for errors raised outside
+            # _execute_request (e.g. SSRF validation before the HTTP call).
+            error_url = e.request_url or last_fetched_url
             self._record_page_call(
                 ctx,
-                url=last_fetched_url,
+                url=error_url,
                 error=e,
                 error_reason=e.error_category,
             )
             # 401 with retryable=True: reconstruct credential before engine retry
             if e.status_code == 401 and e.retryable:
-                assert self._client is not None, "on_start() must be called before load()"
+                if self._client is None:
+                    raise RuntimeError("on_start() must be called before load() — this is a bug") from None
                 self._client.reconstruct_credential(self._auth_config)
             raise
 

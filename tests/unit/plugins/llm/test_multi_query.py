@@ -6,6 +6,7 @@ and multi-query transform instantiation via unified LLMTransform.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -234,8 +235,8 @@ class TestResolveQueriesDuplicateNames:
         with pytest.raises(ValueError, match="Duplicate query name"):
             resolve_queries(
                 [
-                    QuerySpec(name="scoring", input_fields={"x": "a"}),
-                    QuerySpec(name="scoring", input_fields={"x": "b"}),
+                    QuerySpec(name="scoring", input_fields=MappingProxyType({"x": "a"})),
+                    QuerySpec(name="scoring", input_fields=MappingProxyType({"x": "b"})),
                 ]
             )
 
@@ -271,3 +272,78 @@ class TestResolveQueriesDuplicateNames:
             }
         )
         assert len(specs) == 2
+
+
+class TestResolveQueriesReservedSuffixes:
+    """Regression: reserved suffix collision was warning-only.
+
+    Output field suffixes like 'usage', 'model', 'error' collide with
+    system-reserved LLM suffixes. The full output key '{name}_{suffix}'
+    would silently overwrite structured LLM metadata. Must raise ValueError,
+    not just log a warning.
+    """
+
+    def test_reserved_suffix_usage_raises_error(self) -> None:
+        """Suffix 'usage' collides with LLM usage metadata — must error."""
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        with pytest.raises(ValueError, match="reserved LLM suffix"):
+            resolve_queries(
+                {
+                    "query_a": {
+                        "input_fields": {"text": "col_a"},
+                        "output_fields": [
+                            {"suffix": "usage", "type": "string"},
+                        ],
+                    },
+                }
+            )
+
+    def test_reserved_suffix_model_raises_error(self) -> None:
+        """Suffix 'model' collides with LLM model metadata — must error."""
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        with pytest.raises(ValueError, match="reserved LLM suffix"):
+            resolve_queries(
+                {
+                    "query_a": {
+                        "input_fields": {"text": "col_a"},
+                        "output_fields": [
+                            {"suffix": "model", "type": "string"},
+                        ],
+                    },
+                }
+            )
+
+    def test_reserved_suffix_error_raises_error(self) -> None:
+        """Suffix 'error' collides with multi-query error handling — must error."""
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        with pytest.raises(ValueError, match="reserved LLM suffix"):
+            resolve_queries(
+                {
+                    "query_a": {
+                        "input_fields": {"text": "col_a"},
+                        "output_fields": [
+                            {"suffix": "error", "type": "string"},
+                        ],
+                    },
+                }
+            )
+
+    def test_non_reserved_suffix_accepted(self) -> None:
+        """Non-reserved suffixes must be accepted without error."""
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        specs = resolve_queries(
+            {
+                "query_a": {
+                    "input_fields": {"text": "col_a"},
+                    "output_fields": [
+                        {"suffix": "score", "type": "integer"},
+                        {"suffix": "rationale", "type": "string"},
+                    ],
+                },
+            }
+        )
+        assert len(specs) == 1

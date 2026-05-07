@@ -22,7 +22,8 @@ import pytest
 from elspeth.contracts import NodeStateFailed, NodeStateStatus, NodeType
 from elspeth.contracts.errors import CoalesceFailureReason, ExecutionError, TransformErrorReason
 from elspeth.core.canonical import canonical_json, stable_hash
-from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 # ---------------------------------------------------------------------------
@@ -39,20 +40,20 @@ def _serialize_error(
 
 
 # ---------------------------------------------------------------------------
-# Helper: set up Landscape DB + recorder with a run, node, row, and token
+# Helper: set up Landscape DB + factory with a run, node, row, and token
 # ---------------------------------------------------------------------------
 
 
 def _setup_with_token(
     *,
     run_id: str = "run-1",
-) -> tuple[LandscapeDB, LandscapeRecorder, str, str]:
+) -> tuple[LandscapeDB, RecorderFactory, str, str]:
     setup = make_recorder_with_run(run_id=run_id, source_node_id="source-0")
-    db, recorder, run_id = setup.db, setup.recorder, setup.run_id
-    register_test_node(recorder, run_id, "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
-    row = recorder.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
-    token = recorder.create_token("row-1", token_id="tok-1")
-    return db, recorder, row.row_id, token.token_id
+    db, factory, run_id = setup.db, setup.factory, setup.run_id
+    register_test_node(factory.data_flow, run_id, "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
+    row = factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    token = factory.data_flow.create_token("row-1", token_id="tok-1")
+    return db, factory, row.row_id, token.token_id
 
 
 # =============================================================================
@@ -296,7 +297,7 @@ class TestHashStability:
 
 
 # =============================================================================
-# Integration tests: full path through LandscapeRecorder.complete_node_state()
+# Integration tests: full path through ExecutionRepository.complete_node_state()
 # =============================================================================
 
 
@@ -304,9 +305,9 @@ class TestCompleteNodeStateWithExecutionError:
     """Exercise the full path: ExecutionError -> complete_node_state -> DB."""
 
     def test_execution_error_stored_in_db(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -315,7 +316,7 @@ class TestCompleteNodeStateWithExecutionError:
         )
 
         error = ExecutionError(exception="division by zero", exception_type="ZeroDivisionError")
-        result = recorder.complete_node_state(
+        result = factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=error,
@@ -332,9 +333,9 @@ class TestCompleteNodeStateWithExecutionError:
         assert "exception_type" not in parsed
 
     def test_execution_error_with_traceback_stored(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -348,7 +349,7 @@ class TestCompleteNodeStateWithExecutionError:
             traceback="File transform.py, line 10\n  raise KeyError('missing')",
             phase="flush",
         )
-        result = recorder.complete_node_state(
+        result = factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=error,
@@ -364,9 +365,9 @@ class TestCompleteNodeStateWithExecutionError:
 
     def test_execution_error_json_is_canonical(self):
         """The error_json must be canonical (deterministic) for audit integrity."""
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -375,14 +376,14 @@ class TestCompleteNodeStateWithExecutionError:
         )
 
         error = ExecutionError(exception="boom", exception_type="RuntimeError")
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=error,
             duration_ms=5.0,
         )
 
-        fetched = recorder.get_node_state(state.state_id)
+        fetched = factory.execution.get_node_state(state.state_id)
         assert isinstance(fetched, NodeStateFailed)
         # The stored JSON must match what canonical_json produces
         expected_json = canonical_json(error.to_dict())
@@ -393,9 +394,9 @@ class TestCompleteNodeStateWithCoalesceFailureReason:
     """Exercise the full path: CoalesceFailureReason -> complete_node_state -> DB."""
 
     def test_coalesce_failure_stored_in_db(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -409,7 +410,7 @@ class TestCompleteNodeStateWithCoalesceFailureReason:
             branches_arrived=["path_a"],
             merge_policy="all_or_fail",
         )
-        result = recorder.complete_node_state(
+        result = factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=reason,
@@ -426,9 +427,9 @@ class TestCompleteNodeStateWithCoalesceFailureReason:
         assert parsed["merge_policy"] == "all_or_fail"
 
     def test_coalesce_failure_with_optionals_stored(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -444,7 +445,7 @@ class TestCompleteNodeStateWithCoalesceFailureReason:
             timeout_ms=5000,
             select_branch="b",
         )
-        result = recorder.complete_node_state(
+        result = factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=reason,
@@ -457,9 +458,9 @@ class TestCompleteNodeStateWithCoalesceFailureReason:
         assert parsed["select_branch"] == "b"
 
     def test_coalesce_failure_json_is_canonical(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -474,14 +475,14 @@ class TestCompleteNodeStateWithCoalesceFailureReason:
             merge_policy="wait_all",
             timeout_ms=3000,
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=reason,
             duration_ms=3001.0,
         )
 
-        fetched = recorder.get_node_state(state.state_id)
+        fetched = factory.execution.get_node_state(state.state_id)
         assert isinstance(fetched, NodeStateFailed)
         expected_json = canonical_json(reason.to_dict())
         assert fetched.error_json == expected_json
@@ -491,9 +492,9 @@ class TestCompleteNodeStateWithTransformErrorReason:
     """Exercise the full path: TransformErrorReason -> complete_node_state -> DB."""
 
     def test_transform_error_reason_stored_in_db(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -506,7 +507,7 @@ class TestCompleteNodeStateWithTransformErrorReason:
             "error": "connection refused",
             "error_type": "network_error",
         }
-        result = recorder.complete_node_state(
+        result = factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=reason,
@@ -522,9 +523,9 @@ class TestCompleteNodeStateWithTransformErrorReason:
         assert parsed["error_type"] == "network_error"
 
     def test_transform_error_reason_with_llm_context(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -539,7 +540,7 @@ class TestCompleteNodeStateWithTransformErrorReason:
             "max_tokens": 1000,
             "completion_tokens": 1000,
         }
-        result = recorder.complete_node_state(
+        result = factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=reason,
@@ -552,9 +553,9 @@ class TestCompleteNodeStateWithTransformErrorReason:
         assert parsed["max_tokens"] == 1000
 
     def test_transform_error_reason_json_is_canonical(self):
-        _db, recorder, _row_id, token_id = _setup_with_token()
+        _db, factory, _row_id, token_id = _setup_with_token()
 
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token_id,
             node_id="source-0",
             run_id="run-1",
@@ -566,14 +567,14 @@ class TestCompleteNodeStateWithTransformErrorReason:
             "reason": "missing_field",
             "field": "customer_id",
         }
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state.state_id,
             NodeStateStatus.FAILED,
             error=reason,
             duration_ms=2.0,
         )
 
-        fetched = recorder.get_node_state(state.state_id)
+        fetched = factory.execution.get_node_state(state.state_id)
         assert isinstance(fetched, NodeStateFailed)
         expected_json = canonical_json(reason)
         assert fetched.error_json == expected_json
@@ -597,8 +598,8 @@ class TestCrossTypeConsistency:
             pytest.param(
                 CoalesceFailureReason(
                     failure_reason="quorum_not_met",
-                    expected_branches=["a", "b"],
-                    branches_arrived=["a"],
+                    expected_branches=("a", "b"),
+                    branches_arrived=("a",),
                     merge_policy="all_or_fail",
                 ),
                 id="coalesce_failure_reason",

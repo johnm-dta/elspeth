@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.checkpoint.serialization import checkpoint_dumps, checkpoint_loads
 
 
@@ -137,6 +138,52 @@ def test_checkpoint_roundtrip_nested_datetime_and_user_data() -> None:
     assert result["normal"] == "value"
 
 
+# ===========================================================================
+# Tuple round-trip tests
+# ===========================================================================
+
+
+def test_checkpoint_roundtrip_tuple() -> None:
+    """Tuples must survive checkpoint serialization round-trip.
+
+    Regression: JSON has no tuple type — tuples must be encoded via
+    the __elspeth_type__/tuple envelope and restored on loads.
+    """
+    data = {"key": (1, "x", True)}
+    result = checkpoint_loads(checkpoint_dumps(data))
+
+    assert result["key"] == (1, "x", True)
+    assert isinstance(result["key"], tuple)
+
+
+def test_checkpoint_roundtrip_nested_tuple() -> None:
+    """Tuples nested inside dicts and lists must survive round-trip."""
+    data = {"outer": [(1, 2), (3, 4)]}
+    result = checkpoint_loads(checkpoint_dumps(data))
+
+    assert result["outer"] == [(1, 2), (3, 4)]
+    assert isinstance(result["outer"][0], tuple)
+    assert isinstance(result["outer"][1], tuple)
+
+
+def test_checkpoint_roundtrip_tuple_with_datetime() -> None:
+    """Tuples containing datetime values must survive round-trip."""
+    dt = datetime(2024, 1, 1, tzinfo=UTC)
+    data = {"key": (dt, "value")}
+    result = checkpoint_loads(checkpoint_dumps(data))
+
+    assert isinstance(result["key"], tuple)
+    assert result["key"][0] == dt
+    assert isinstance(result["key"][0], datetime)
+    assert result["key"][1] == "value"
+
+
+def test_checkpoint_dumps_rejects_nan_in_tuple() -> None:
+    """Non-finite floats inside tuples must be rejected like any other container."""
+    with pytest.raises(ValueError, match="non-finite float"):
+        checkpoint_dumps({"k": (float("nan"),)})
+
+
 def test_checkpoint_new_envelope_used_in_dumps_output() -> None:
     """Verify the serialized form uses __elspeth_type__ not __datetime__."""
     import json
@@ -148,3 +195,51 @@ def test_checkpoint_new_envelope_used_in_dumps_output() -> None:
     assert "__elspeth_type__" in raw["ts"]
     assert raw["ts"]["__elspeth_type__"] == "datetime"
     assert "__elspeth_value__" in raw["ts"]
+
+
+# ── Envelope corruption guards ──────────────────────────────────────────────
+
+
+def test_unknown_envelope_type_raises() -> None:
+    """Unknown envelope types must crash — Tier 1 corruption guard."""
+    import json
+
+    tampered = json.dumps({"data": {"__elspeth_type__": "evil", "__elspeth_value__": "payload"}})
+    with pytest.raises(AuditIntegrityError, match="Unknown checkpoint envelope type 'evil'"):
+        checkpoint_loads(tampered)
+
+
+def test_known_envelope_wrong_value_type_datetime_raises() -> None:
+    """datetime envelope with non-string value must crash — type corruption."""
+    import json
+
+    corrupted = json.dumps({"data": {"__elspeth_type__": "datetime", "__elspeth_value__": 42}})
+    with pytest.raises(AuditIntegrityError, match="invalid value type"):
+        checkpoint_loads(corrupted)
+
+
+def test_known_envelope_wrong_value_type_tuple_raises() -> None:
+    """tuple envelope with non-list value must crash — type corruption."""
+    import json
+
+    corrupted = json.dumps({"data": {"__elspeth_type__": "tuple", "__elspeth_value__": "not a list"}})
+    with pytest.raises(AuditIntegrityError, match="invalid value type"):
+        checkpoint_loads(corrupted)
+
+
+def test_naive_datetime_in_envelope_raises() -> None:
+    """Regression: naive datetime strings in checkpoint envelopes must crash (Tier 1)."""
+    import json
+
+    corrupted = json.dumps({"ts": {"__elspeth_type__": "datetime", "__elspeth_value__": "2026-03-15T10:00:00"}})
+    with pytest.raises(AuditIntegrityError, match="naive datetime"):
+        checkpoint_loads(corrupted)
+
+
+def test_aware_datetime_in_envelope_accepted() -> None:
+    """Aware datetime strings must round-trip correctly."""
+    import json
+
+    data = json.dumps({"ts": {"__elspeth_type__": "datetime", "__elspeth_value__": "2026-03-15T10:00:00+00:00"}})
+    result = checkpoint_loads(data)
+    assert result["ts"].tzinfo is not None

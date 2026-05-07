@@ -8,6 +8,14 @@
         "sqlite:///./state/audit.db"
       ]
     },
+    "elspeth-composer": {
+      "type": "stdio",
+      "command": "/home/john/elspeth/.venv/bin/elspeth-composer",
+      "args": [
+        "--scratch-dir",
+        ".scratch"
+      ]
+    },
     "filigree": {
       "type": "stdio",
       "command": "/home/john/.local/bin/filigree-mcp",

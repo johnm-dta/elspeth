@@ -15,6 +15,7 @@ import pytest
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.database_sink import DatabaseSink
 from elspeth.plugins.sinks.json_sink import JSONSink
+from tests.fixtures.base_classes import inject_write_failure
 
 
 class TestCLIResumeCallsConfigureForResume:
@@ -23,12 +24,14 @@ class TestCLIResumeCallsConfigureForResume:
     def test_resume_calls_configure_for_resume_on_resumable_sinks(self):
         """Resume should call configure_for_resume on each sink."""
         # Create sink and verify configure_for_resume changes mode
-        sink = CSVSink(
-            {
-                "path": "/tmp/test.csv",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "mode": "write",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": "/tmp/test.csv",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "mode": "write",
+                }
+            )
         )
 
         assert sink._mode == "write"
@@ -41,12 +44,14 @@ class TestCLIResumeCallsConfigureForResume:
     def test_non_resumable_sink_detected(self):
         """Non-resumable sinks should be detectable before resume."""
         # JSON array format does not support resume
-        sink = JSONSink(
-            {
-                "path": "/tmp/test.json",
-                "schema": {"mode": "observed"},
-                "format": "json",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.json",
+                    "schema": {"mode": "observed"},
+                    "format": "json",
+                }
+            )
         )
 
         assert sink.supports_resume is False
@@ -56,12 +61,14 @@ class TestCLIResumeCallsConfigureForResume:
 
     def test_jsonl_sink_is_resumable(self):
         """JSONL format should support resume."""
-        sink = JSONSink(
-            {
-                "path": "/tmp/test.jsonl",
-                "schema": {"mode": "observed"},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.jsonl",
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                }
+            )
         )
 
         assert sink.supports_resume is True
@@ -76,26 +83,30 @@ class TestDatabaseSinkResumeCapability:
 
     def test_database_sink_supports_resume(self):
         """DatabaseSink should support resume (append to table)."""
-        sink = DatabaseSink(
-            {
-                "url": "sqlite:///:memory:",
-                "table": "test_output",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "if_exists": "replace",
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": "sqlite:///:memory:",
+                    "table": "test_output",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "if_exists": "replace",
+                }
+            )
         )
 
         assert sink.supports_resume is True
 
     def test_database_sink_configure_for_resume(self):
         """configure_for_resume should switch to append mode."""
-        sink = DatabaseSink(
-            {
-                "url": "sqlite:///:memory:",
-                "table": "test_output",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "if_exists": "replace",
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": "sqlite:///:memory:",
+                    "table": "test_output",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "if_exists": "replace",
+                }
+            )
         )
 
         assert sink._if_exists == "replace"
@@ -110,23 +121,27 @@ class TestCSVSinkResumeCapability:
 
     def test_csv_sink_supports_resume(self):
         """CSVSink should support resume."""
-        sink = CSVSink(
-            {
-                "path": "/tmp/test.csv",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": "/tmp/test.csv",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         assert sink.supports_resume is True
 
     def test_csv_sink_configure_for_resume(self):
         """configure_for_resume should switch mode to append."""
-        sink = CSVSink(
-            {
-                "path": "/tmp/test.csv",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "mode": "write",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": "/tmp/test.csv",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "mode": "write",
+                }
+            )
         )
 
         assert sink._mode == "write"
@@ -141,36 +156,42 @@ class TestJSONSinkResumeCapability:
 
     def test_jsonl_format_supports_resume(self):
         """JSONL format should support resume."""
-        sink = JSONSink(
-            {
-                "path": "/tmp/test.jsonl",
-                "schema": {"mode": "observed"},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.jsonl",
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                }
+            )
         )
 
         assert sink.supports_resume is True
 
     def test_json_array_format_does_not_support_resume(self):
         """JSON array format should NOT support resume."""
-        sink = JSONSink(
-            {
-                "path": "/tmp/test.json",
-                "schema": {"mode": "observed"},
-                "format": "json",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.json",
+                    "schema": {"mode": "observed"},
+                    "format": "json",
+                }
+            )
         )
 
         assert sink.supports_resume is False
 
     def test_json_array_configure_for_resume_raises(self):
         """configure_for_resume should raise for JSON array format."""
-        sink = JSONSink(
-            {
-                "path": "/tmp/test.json",
-                "schema": {"mode": "observed"},
-                "format": "json",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.json",
+                    "schema": {"mode": "observed"},
+                    "format": "json",
+                }
+            )
         )
 
         with pytest.raises(NotImplementedError) as exc_info:
@@ -180,13 +201,15 @@ class TestJSONSinkResumeCapability:
 
     def test_jsonl_configure_for_resume(self):
         """configure_for_resume should switch JSONL mode to append."""
-        sink = JSONSink(
-            {
-                "path": "/tmp/test.jsonl",
-                "schema": {"mode": "observed"},
-                "format": "jsonl",
-                "mode": "write",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.jsonl",
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                    "mode": "write",
+                }
+            )
         )
 
         assert sink._mode == "write"
@@ -198,19 +221,23 @@ class TestJSONSinkResumeCapability:
     def test_json_format_autodetected_from_extension(self):
         """Format should be autodetected from file extension."""
         # .json extension => JSON array format
-        json_sink = JSONSink(
-            {
-                "path": "/tmp/test.json",
-                "schema": {"mode": "observed"},
-            }
+        json_sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.json",
+                    "schema": {"mode": "observed"},
+                }
+            )
         )
         assert json_sink.supports_resume is False
 
         # .jsonl extension => JSONL format
-        jsonl_sink = JSONSink(
-            {
-                "path": "/tmp/test.jsonl",
-                "schema": {"mode": "observed"},
-            }
+        jsonl_sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": "/tmp/test.jsonl",
+                    "schema": {"mode": "observed"},
+                }
+            )
         )
         assert jsonl_sink.supports_resume is True

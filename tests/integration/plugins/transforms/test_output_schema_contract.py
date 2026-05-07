@@ -24,6 +24,14 @@ def _set_fingerprint_key(monkeypatch):
     monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-fingerprint-key")
 
 
+def _make_rag_transform(*, output_prefix: str = "sci", query_field: str = "q") -> RAGRetrievalTransform:
+    """Construct RAG with the base-install provider path, not optional extras."""
+    config = RAGRetrievalTransform.probe_config()
+    config["output_prefix"] = output_prefix
+    config["query_field"] = query_field
+    return RAGRetrievalTransform(config)
+
+
 class TestContractInvariantsAcrossAllTransforms:
     """Verify Invariant 2 (guaranteed_fields superset of declared_output_fields)
     holds for every field-adding transform with real instances."""
@@ -32,15 +40,7 @@ class TestContractInvariantsAcrossAllTransforms:
         "transform_factory",
         [
             pytest.param(
-                lambda: RAGRetrievalTransform(
-                    {
-                        "output_prefix": "sci",
-                        "query_field": "q",
-                        "provider": "chroma",
-                        "provider_config": {"collection": "test-col", "mode": "ephemeral"},
-                        "schema": {"mode": "observed"},
-                    }
-                ),
+                lambda: _make_rag_transform(),
                 id="rag",
             ),
             pytest.param(
@@ -54,7 +54,7 @@ class TestContractInvariantsAcrossAllTransforms:
                 id="batch_replicate",
             ),
             pytest.param(
-                lambda: FieldMapper({"mapping": {"a": "b"}, "schema": {"mode": "observed"}}),
+                lambda: FieldMapper({"mapping": {"a": "b"}, "strict": True, "schema": {"mode": "observed"}}),
                 id="field_mapper",
             ),
             pytest.param(
@@ -88,15 +88,7 @@ class TestContractInvariantsAcrossAllTransforms:
         "transform_factory",
         [
             pytest.param(
-                lambda: RAGRetrievalTransform(
-                    {
-                        "output_prefix": "sci",
-                        "query_field": "q",
-                        "provider": "chroma",
-                        "provider_config": {"collection": "test-col", "mode": "ephemeral"},
-                        "schema": {"mode": "observed"},
-                    }
-                ),
+                lambda: _make_rag_transform(),
                 id="rag",
             ),
             pytest.param(
@@ -104,7 +96,7 @@ class TestContractInvariantsAcrossAllTransforms:
                 id="json_explode",
             ),
             pytest.param(
-                lambda: FieldMapper({"mapping": {"a": "b"}, "schema": {"mode": "observed"}}),
+                lambda: FieldMapper({"mapping": {"a": "b"}, "strict": True, "schema": {"mode": "observed"}}),
                 id="field_mapper",
             ),
         ],
@@ -116,15 +108,7 @@ class TestContractInvariantsAcrossAllTransforms:
 
     def test_enforcement_fires_on_missing_contract(self):
         """A real transform with cleared _output_schema_config triggers FrameworkBugError."""
-        transform = RAGRetrievalTransform(
-            {
-                "output_prefix": "sci",
-                "query_field": "q",
-                "provider": "chroma",
-                "provider_config": {"collection": "test-col", "mode": "ephemeral"},
-                "schema": {"mode": "observed"},
-            }
-        )
+        transform = _make_rag_transform()
         transform._output_schema_config = None
 
         with pytest.raises(FrameworkBugError, match="declares output fields"):
@@ -132,15 +116,7 @@ class TestContractInvariantsAcrossAllTransforms:
 
     def test_rag_guaranteed_fields_exact(self):
         """RAG transform's guaranteed_fields contains exactly the 4 declared output fields."""
-        transform = RAGRetrievalTransform(
-            {
-                "output_prefix": "sci",
-                "query_field": "q",
-                "provider": "chroma",
-                "provider_config": {"collection": "test-col", "mode": "ephemeral"},
-                "schema": {"mode": "observed"},
-            }
-        )
+        transform = _make_rag_transform()
         assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset(
             {"sci__rag_context", "sci__rag_score", "sci__rag_count", "sci__rag_sources"}
         )

@@ -97,7 +97,7 @@ def extract_verdict(content: str) -> tuple[str, str]:
 
 def parse_findings(content: str) -> list[AuditFinding]:
     """Extract findings from audit content."""
-    findings = []
+    findings: list[AuditFinding] = []
 
     # Find the Findings section
     findings_section = re.search(r"## Findings\s*\n(.*?)(?=\n## |$)", content, re.DOTALL)
@@ -288,7 +288,7 @@ def slugify(text: str, max_len: int = 50) -> str:
     return slug[:max_len].rstrip("-")
 
 
-def main():
+def main() -> None:
     audit_dir = Path("docs/test_audit")
     output_dir = Path("docs/test_bugs/open")
 
@@ -308,18 +308,21 @@ def main():
         (output_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     # Process all audit files
-    stats = {"total": 0, "processed": 0, "by_verdict": {}, "by_category": {}}
+    total = 0
+    processed = 0
+    by_verdict: dict[str, int] = {}
+    by_category: dict[str, int] = {}
 
     for audit_path in sorted(audit_dir.glob("*.audit.md")):
-        stats["total"] += 1
+        total += 1
 
         audit = parse_audit_file(audit_path)
         if audit is None:
             continue
 
-        stats["processed"] += 1
-        stats["by_verdict"][audit.verdict] = stats["by_verdict"].get(audit.verdict, 0) + 1
-        stats["by_category"][audit.category] = stats["by_category"].get(audit.category, 0) + 1
+        processed += 1
+        by_verdict[audit.verdict] = by_verdict.get(audit.verdict, 0) + 1
+        by_category[audit.category] = by_category.get(audit.category, 0) + 1
 
         # Generate ticket
         ticket_content = generate_ticket(audit)
@@ -340,13 +343,13 @@ def main():
     print(f"\n{'=' * 60}")
     print("Test Bug Generation Summary")
     print(f"{'=' * 60}")
-    print(f"Total audit files: {stats['total']}")
-    print(f"Files with issues: {stats['processed']}")
+    print(f"Total audit files: {total}")
+    print(f"Files with issues: {processed}")
     print("\nBy verdict:")
-    for v, count in sorted(stats["by_verdict"].items(), key=lambda x: -x[1]):
+    for v, count in sorted(by_verdict.items(), key=lambda x: -x[1]):
         print(f"  {v}: {count}")
     print("\nBy category:")
-    for c, count in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
+    for c, count in sorted(by_category.items(), key=lambda x: -x[1]):
         print(f"  {c}: {count}")
 
 

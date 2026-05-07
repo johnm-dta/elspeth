@@ -11,14 +11,14 @@ with sink output configuration.
 
 from __future__ import annotations
 
-from enum import Enum, auto
+from enum import StrEnum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
 
 
-class HeaderMode(Enum):
+class HeaderMode(StrEnum):
     """Header output mode for sinks."""
 
     NORMALIZED = auto()  # Python identifiers: "amount_usd"
@@ -48,6 +48,12 @@ def parse_header_mode(
         return HeaderMode.NORMALIZED
 
     if isinstance(config, dict):
+        if not config:
+            raise ValueError(
+                "Empty dict is not valid for CUSTOM header mode. "
+                "All fields must be explicitly mapped — provide a complete "
+                "normalized_name → display_name mapping."
+            )
         return HeaderMode.CUSTOM
 
     if config == "normalized":
@@ -108,7 +114,8 @@ def resolve_headers(
                 result[name] = name
 
         elif mode == HeaderMode.CUSTOM:
-            assert custom_mapping is not None  # Guaranteed by precondition check above
+            if custom_mapping is None:
+                raise ValueError("CUSTOM header mode: custom_mapping is None despite precondition check. This is an internal logic error.")
             if name not in custom_mapping:
                 raise ValueError(
                     f"CUSTOM header mode has no mapping for field '{name}'. "

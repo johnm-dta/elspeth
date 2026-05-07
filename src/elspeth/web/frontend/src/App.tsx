@@ -1,0 +1,248 @@
+import { useEffect, useState, useCallback, useRef } from "react";
+import "./App.css";
+import * as api from "./api/client";
+import { AuthGuard } from "./components/common/AuthGuard";
+import { Layout } from "./components/common/Layout";
+import { CommandPalette } from "./components/common/CommandPalette";
+import { ConfirmDialog } from "./components/common/ConfirmDialog";
+import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
+import { SessionSidebar } from "./components/sessions/SessionSidebar";
+import { ChatPanel } from "./components/chat/ChatPanel";
+import { InspectorPanel } from "./components/inspector/InspectorPanel";
+import { SecretsPanel } from "./components/settings/SecretsPanel";
+import { initStoreSubscriptions } from "./stores/subscriptions";
+import { useSessionStore } from "./stores/sessionStore";
+import { useExecutionStore } from "./stores/executionStore";
+import { useHashRouter } from "./hooks/useHashRouter";
+import { SWITCH_TAB_EVENT } from "./components/common/CommandPalette";
+import type { SystemStatus } from "./types/index";
+
+// Health check interval in milliseconds (30 seconds)
+const HEALTH_CHECK_INTERVAL = 30_000;
+
+// Wire up cross-store subscriptions once at module load time.
+// This must run before any component renders so that version-change
+// auto-clear is active from the first render.
+initStoreSubscriptions();
+
+/**
+ * Top-level application component.
+ *
+ * Single composition root: AuthGuard gates the entire app behind authentication,
+ * then Layout renders the three-panel grid with SessionSidebar, ChatPanel, and
+ * InspectorPanel. No router in v1 -- the entire application is a single page.
+ */
+function App() {
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
+  const [showSecrets, setShowSecrets] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const healthCheckRef = useRef<number | null>(null);
+
+  // Sync URL hash ↔ session/tab state for deep linking & back/forward
+  useHashRouter();
+
+  const createSession = useSessionStore((s) => s.createSession);
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const compositionState = useSessionStore((s) => s.compositionState);
+  const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
+
+  const openSecrets = useCallback(() => setShowSecrets(true), []);
+  const closeSecrets = useCallback(() => setShowSecrets(false), []);
+  const closePalette = useCallback(() => setShowPalette(false), []);
+  const confirmFanoutExecution = useCallback(async () => {
+    const runId = await useExecutionStore.getState().confirmFanoutExecution();
+    if (runId) {
+      window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" }));
+    }
+  }, []);
+  const dismissFanoutGuard = useCallback(() => {
+    useExecutionStore.getState().dismissFanoutGuard();
+  }, []);
+
+  // Check backend health
+  const checkHealth = useCallback(async () => {
+    try {
+      const status = await api.fetchSystemStatus();
+      setSystemStatus(status);
+      setBackendAvailable(true);
+    } catch {
+      setSystemStatus(null);
+      setBackendAvailable(false);
+    }
+  }, []);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      // Ctrl+K / Cmd+K: Open command palette
+      if (e.key === "k" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setShowPalette(true);
+        return;
+      }
+
+      // Ctrl+N / Cmd+N: New session
+      if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        createSession();
+        return;
+      }
+
+      // Ctrl+/ / Cmd+/: Focus chat input
+      if (e.key === "/" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        const input = document.querySelector<HTMLTextAreaElement>(
+          "[data-chat-input]",
+        );
+        input?.focus();
+        return;
+      }
+
+      // Alt+1/2/3/4: Switch inspector tabs
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        const tabMap: Record<string, string> = {
+          "1": "spec",
+          "2": "graph",
+          "3": "yaml",
+          "4": "runs",
+        };
+        const tab = tabMap[e.key];
+        if (tab) {
+          e.preventDefault();
+          window.dispatchEvent(
+            new CustomEvent(SWITCH_TAB_EVENT, { detail: tab }),
+          );
+          return;
+        }
+      }
+
+      // Ctrl+Shift+V / Cmd+Shift+V: Validate pipeline
+      if (
+        e.key === "V" &&
+        e.shiftKey &&
+        (e.ctrlKey || e.metaKey) &&
+        activeSessionId &&
+        compositionState
+      ) {
+        e.preventDefault();
+        useExecutionStore.getState().validate(activeSessionId);
+        return;
+      }
+
+      // Ctrl+E / Cmd+E: Execute pipeline
+      if (e.key === "e" && (e.ctrlKey || e.metaKey) && activeSessionId) {
+        e.preventDefault();
+        const execStore = useExecutionStore.getState();
+        const canExec =
+          execStore.validationResult?.is_valid === true &&
+          !execStore.isExecuting &&
+          execStore.progress?.status !== "running";
+        if (canExec) {
+          execStore.execute(activeSessionId);
+        }
+        return;
+      }
+
+      // ?: Show keyboard shortcuts (only when not typing in an input)
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault();
+        setShowShortcuts(true);
+        return;
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [createSession, activeSessionId, compositionState]);
+
+  // Initial health check and periodic polling
+  useEffect(() => {
+    checkHealth();
+
+    // Set up periodic health checks
+    healthCheckRef.current = window.setInterval(checkHealth, HEALTH_CHECK_INTERVAL);
+
+    return () => {
+      if (healthCheckRef.current !== null) {
+        window.clearInterval(healthCheckRef.current);
+      }
+    };
+  }, [checkHealth]);
+
+  return (
+    <AuthGuard>
+      <div className="app-root">
+        <a href="#chat-main" className="skip-to-content">
+          Skip to main content
+        </a>
+        <h1 className="sr-only">ELSPETH Pipeline Composer</h1>
+
+        {/* Backend unavailable banner */}
+        {backendAvailable === false && (
+          <div role="alert" className="alert-banner">
+            <span>
+              <strong>Backend unavailable</strong> — Cannot connect to the
+              ELSPETH server. Check that the backend is running.
+            </span>
+            <button
+              onClick={checkHealth}
+              aria-label="Retry connection"
+              title="Retry connection"
+              className="alert-banner-action"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Composer unavailable banner (backend is up but LLM not configured) */}
+        {backendAvailable && systemStatus && !systemStatus.composer_available && (
+          <div role="alert" className="alert-banner">
+            <span>
+              Service unavailable:{" "}
+              {systemStatus.composer_reason ??
+                "The composer cannot reach a usable LLM right now."}
+            </span>
+            <button
+              onClick={openSecrets}
+              aria-label="Open secrets settings"
+              title="Configure API keys"
+              className="alert-banner-action"
+            >
+              ⚙ API Keys
+            </button>
+          </div>
+        )}
+        <div className="app-main" role="main">
+          <Layout
+            sidebar={<SessionSidebar />}
+            chat={<ChatPanel onOpenSecrets={openSecrets} />}
+            inspector={<InspectorPanel />}
+          />
+        </div>
+
+        {showSecrets && <SecretsPanel onClose={closeSecrets} />}
+        <CommandPalette isOpen={showPalette} onClose={closePalette} />
+        {showShortcuts && (
+          <ShortcutsHelp onClose={() => setShowShortcuts(false)} />
+        )}
+        {pendingFanoutGuard && (
+          <ConfirmDialog
+            title="Review LLM provider calls"
+            message={pendingFanoutGuard.summary}
+            confirmLabel="Execute"
+            cancelLabel="Cancel"
+            variant="danger"
+            onConfirm={confirmFanoutExecution}
+            onCancel={dismissFanoutGuard}
+          />
+        )}
+      </div>
+    </AuthGuard>
+  );
+}
+
+export default App;

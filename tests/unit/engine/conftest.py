@@ -7,7 +7,35 @@ from pydantic import ConfigDict
 
 from elspeth.contracts import PluginSchema
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
+from elspeth.core.config import CoalesceSettings
+from elspeth.engine.coalesce_executor import CoalesceExecutor
+
+
+class MockCoalesceExecutor(CoalesceExecutor):
+    """Test wrapper that auto-provides output_schema for union merge.
+
+    Production code computes output_schema via the DAG builder's merge_union_fields().
+    Tests bypass the DAG builder, so this wrapper provides an OBSERVED-mode schema
+    by default, matching the contract mode used by test fixtures.
+
+    This eliminates the need for the fallback path in CoalesceExecutor._execute_merge().
+    """
+
+    def register_coalesce(
+        self,
+        settings: CoalesceSettings,
+        node_id: NodeID,
+        branch_schemas: dict[str, tuple[str, ...]] | None = None,
+        output_schema: SchemaContract | None = None,
+    ) -> None:
+        if settings.on_success is None:
+            settings = settings.model_copy(update={"on_success": "default"})
+        if output_schema is None and settings.merge == "union":
+            output_schema = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        super().register_coalesce(settings, node_id, branch_schemas, output_schema)
+
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})

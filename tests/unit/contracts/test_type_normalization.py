@@ -228,6 +228,34 @@ class TestNormalizeTypeForContract:
             normalize_type_for_contract(CustomClass())
 
 
+class TestContractTypeMapConsistency:
+    """Verify CONTRACT_TYPE_MAP and ALLOWED_CONTRACT_TYPES stay in sync."""
+
+    def test_allowed_types_equals_map_values(self) -> None:
+        """ALLOWED_CONTRACT_TYPES must be exactly frozenset(CONTRACT_TYPE_MAP.values())."""
+        from elspeth.contracts.type_normalization import ALLOWED_CONTRACT_TYPES, CONTRACT_TYPE_MAP
+
+        assert frozenset(CONTRACT_TYPE_MAP.values()) == ALLOWED_CONTRACT_TYPES
+
+    def test_allowed_types_is_frozenset(self) -> None:
+        from elspeth.contracts.type_normalization import ALLOWED_CONTRACT_TYPES
+
+        assert type(ALLOWED_CONTRACT_TYPES) is frozenset
+
+    def test_map_contains_core_python_types(self) -> None:
+        """CONTRACT_TYPE_MAP must include at minimum the core serializable types."""
+        from elspeth.contracts.type_normalization import CONTRACT_TYPE_MAP
+
+        expected_keys = {"int", "str", "float", "bool", "NoneType", "datetime", "object"}
+        assert set(CONTRACT_TYPE_MAP.keys()) == expected_keys
+
+    def test_map_values_are_types(self) -> None:
+        from elspeth.contracts.type_normalization import CONTRACT_TYPE_MAP
+
+        for key, value in CONTRACT_TYPE_MAP.items():
+            assert isinstance(value, type), f"CONTRACT_TYPE_MAP[{key!r}] is {value!r}, not a type"
+
+
 class TestEdgeCases:
     """Edge cases for type normalization."""
 

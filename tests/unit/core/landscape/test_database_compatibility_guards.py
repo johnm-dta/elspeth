@@ -7,11 +7,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+
+ADR019_SCHEMA_EPOCH = 7
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -109,6 +111,223 @@ class TestSchemaCompatibilityGuards:
         assert f"Current epoch: {SQLITE_SCHEMA_EPOCH}" in msg
         instance.close()
 
+    def test_validate_schema_rejects_adr018_token_outcomes_shape(self, tmp_path: Path) -> None:
+        """ADR-018 token_outcomes stores must fail with ADR-019 remediation text."""
+        db_path = tmp_path / "adr018_audit.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA user_version = 6")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE token_outcomes (
+                        outcome_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        is_terminal INTEGER NOT NULL,
+                        recorded_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            LandscapeDB(f"sqlite:///{db_path}")
+
+        msg = str(exc_info.value)
+        assert "Landscape database schema is outdated." in msg
+        assert "schema epoch is incompatible" in msg
+        assert "token_outcomes.completed" in msg
+        assert "token_outcomes.path" in msg
+        assert "token_outcomes.is_terminal" in msg
+        assert "docs/operator/migrations/adr-019.md" in msg
+
+    def test_validate_schema_rejects_token_outcomes_outcome_not_nullable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ADR-019 requires nullable outcome for non-terminal BUFFERED rows."""
+        db_path = tmp_path / "outcome_not_nullable.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE token_outcomes (
+                        outcome_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        completed INTEGER NOT NULL,
+                        recorded_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"token_outcomes": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", (("token_outcomes", "completed"), ("token_outcomes", "path")))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_outcomes.outcome nullable" in msg
+        assert "docs/operator/migrations/adr-019.md" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_partial_manual_schema_with_stale_is_terminal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Adding completed/path manually is not enough if stale is_terminal remains."""
+        db_path = tmp_path / "stale_is_terminal.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE token_outcomes (
+                        outcome_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        outcome TEXT,
+                        path TEXT NOT NULL,
+                        completed INTEGER NOT NULL,
+                        is_terminal INTEGER NOT NULL,
+                        recorded_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"token_outcomes": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", (("token_outcomes", "completed"), ("token_outcomes", "path")))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_outcomes.is_terminal" in msg
+        assert "docs/operator/migrations/adr-019.md" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_stale_terminal_index_predicate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SQLite partial unique indexes must predicate on completed, not is_terminal."""
+        db_path = tmp_path / "stale_index_predicate.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE token_outcomes (
+                        outcome_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        outcome TEXT,
+                        path TEXT NOT NULL,
+                        completed INTEGER NOT NULL,
+                        is_terminal INTEGER NOT NULL,
+                        recorded_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(text("CREATE UNIQUE INDEX ix_token_outcomes_terminal_unique ON token_outcomes(token_id) WHERE is_terminal = 1"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"token_outcomes": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", (("token_outcomes", "completed"), ("token_outcomes", "path")))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "stale terminal index predicate" in msg
+        assert "is_terminal" in msg
+        assert "docs/operator/migrations/adr-019.md" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_adr018_postgres_shape(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-SQLite existing Landscape schemas get the same ADR-019 guard."""
+        import sqlalchemy
+
+        instance = _make_instance(f"sqlite:///{tmp_path / 'postgres_shape.db'}")
+        instance.connection_string = "postgresql://user@host/db"
+
+        mock_inspector = Mock()
+        mock_inspector.get_table_names.return_value = ["runs", "token_outcomes"]
+        mock_inspector.get_columns.side_effect = lambda table_name: {
+            "runs": [{"name": "run_id"}],
+            "token_outcomes": [
+                {"name": "outcome_id", "nullable": False},
+                {"name": "run_id", "nullable": False},
+                {"name": "token_id", "nullable": False},
+                {"name": "outcome", "nullable": False},
+                {"name": "is_terminal", "nullable": False},
+                {"name": "recorded_at", "nullable": False},
+            ],
+        }[table_name]
+        mock_inspector.get_foreign_keys.return_value = []
+        mock_inspector.get_check_constraints.return_value = []
+        mock_inspector.get_indexes.return_value = []
+
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        monkeypatch.setattr(
+            database_module,
+            "metadata",
+            SimpleNamespace(tables={"runs": object(), "token_outcomes": object()}),
+        )
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", (("token_outcomes", "completed"), ("token_outcomes", "path")))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_outcomes.completed" in msg
+        assert "token_outcomes.path" in msg
+        assert "token_outcomes.is_terminal" in msg
+        assert "token_outcomes.outcome nullable" in msg
+        assert "docs/operator/migrations/adr-019.md" in msg
+        instance.close()
+
     def test_validate_schema_reports_missing_tables_with_actionable_guidance(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Existing partial Landscape DBs must fail with clear remediation text."""
         db_path = tmp_path / "partial_landscape.db"
@@ -178,6 +397,165 @@ class TestSchemaCompatibilityGuards:
         assert "To fix this, either:" in msg
         instance.close()
 
+    def test_validate_schema_rejects_stale_single_column_foreign_keys_for_run_scoped_error_tables(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Run-scoped error tables must require exact composite FK shapes."""
+        import sqlalchemy
+
+        instance = _make_instance(f"sqlite:///{tmp_path / 'stale_fk_shapes.db'}")
+
+        mock_inspector = Mock()
+        mock_inspector.get_table_names.return_value = ["transform_errors", "tokens", "nodes"]
+        mock_inspector.get_columns.side_effect = lambda table_name: [
+            {"name": column_name}
+            for column_name in {
+                "transform_errors": ("run_id", "token_id", "transform_id"),
+                "tokens": ("token_id", "run_id"),
+                "nodes": ("node_id", "run_id"),
+            }[table_name]
+        ]
+        mock_inspector.get_foreign_keys.return_value = [
+            {
+                "constrained_columns": ["token_id"],
+                "referred_table": "tokens",
+                "referred_columns": ["token_id"],
+            },
+            {
+                "constrained_columns": ["transform_id"],
+                "referred_table": "nodes",
+                "referred_columns": ["node_id"],
+            },
+        ]
+
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        monkeypatch.setattr(
+            database_module,
+            "metadata",
+            SimpleNamespace(
+                tables={
+                    "transform_errors": object(),
+                    "tokens": object(),
+                    "nodes": object(),
+                }
+            ),
+        )
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "Missing composite foreign keys:" in msg
+        assert "transform_errors(token_id, run_id) → tokens(token_id, run_id)" in msg
+        assert "transform_errors(transform_id, run_id) → nodes(node_id, run_id)" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_missing_runtime_required_columns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Runtime write paths must not pass compatibility checks without their physical columns."""
+        db_path = tmp_path / "missing_runtime_required_columns.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE runs ("
+                    "run_id TEXT PRIMARY KEY, "
+                    "source_field_resolution_json TEXT, "
+                    "schema_contract_json TEXT, "
+                    "schema_contract_hash TEXT, "
+                    "runtime_val_manifest_json TEXT)"
+                )
+            )
+            conn.execute(text("CREATE TABLE checkpoints (checkpoint_id TEXT PRIMARY KEY, coalesce_state_json TEXT)"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(
+            database_module,
+            "metadata",
+            SimpleNamespace(tables={"runs": object(), "checkpoints": object()}),
+        )
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "Missing columns:" in msg
+        assert "runs.source_schema_json" in msg
+        assert "checkpoints.format_version" in msg
+        instance.close()
+
+    def test_missing_check_constraint_raises_compatibility_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Missing required check constraints must be listed in the error."""
+        db_path = tmp_path / "missing_check.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(
+            database_module,
+            "_REQUIRED_CHECK_CONSTRAINTS",
+            (("runs", "ck_nonexistent_constraint"),),
+        )
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "Missing check constraints:" in msg
+        assert "runs.ck_nonexistent_constraint" in msg
+        assert "To fix this, either:" in msg
+        instance.close()
+
+    def test_missing_index_raises_compatibility_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Missing required indexes must be listed in the error."""
+        db_path = tmp_path / "missing_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(
+            database_module,
+            "_REQUIRED_INDEXES",
+            (("runs", "ix_nonexistent_index"),),
+        )
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "Missing indexes:" in msg
+        assert "runs.ix_nonexistent_index" in msg
+        assert "To fix this, either:" in msg
+        instance.close()
+
+    def test_non_sqlite_require_existing_schema_rejects_empty_database(self, tmp_path: Path) -> None:
+        """Non-SQLite path must reject empty databases when _require_existing_schema is set."""
+        db_path = tmp_path / "empty_non_sqlite.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        # Do NOT call metadata.create_all — database has no Landscape tables
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        # Override connection_string to trigger the non-SQLite path
+        instance.connection_string = "postgresql://user@host/db"
+        instance._require_existing_schema = True
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "does not contain any Landscape tables" in msg
+        instance.close()
+
     def test_validate_schema_translates_sqlcipher_error_on_get_table_names(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """SQLCipher passphrase errors during get_table_names() must produce SchemaCompatibilityError.
 
@@ -207,6 +585,50 @@ class TestSchemaCompatibilityGuards:
 
 class TestJournalPathGuards:
     """Coverage for from_url journal path derivation failure modes."""
+
+    def test_from_url_creates_missing_tokens_run_id_index_for_existing_adr019_db(self, tmp_path: Path) -> None:
+        """The run-accounting performance index is additive, not a startup blocker."""
+        db_path = tmp_path / "missing_tokens_run_id_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
+            conn.exec_driver_sql(f"PRAGMA user_version = {ADR019_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        indexes = {idx["name"] for idx in inspect(engine).get_indexes("tokens")}
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "ix_tokens_run_id" in indexes
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_create_tables_false_allows_missing_tokens_run_id_index_without_mutation(self, tmp_path: Path) -> None:
+        """Read-only opens tolerate the additive index absence and do not mutate it."""
+        db_path = tmp_path / "readonly_missing_tokens_run_id_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
+            conn.exec_driver_sql(f"PRAGMA user_version = {ADR019_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        indexes = {idx["name"] for idx in inspect(engine).get_indexes("tokens")}
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "ix_tokens_run_id" not in indexes
+        assert epoch == ADR019_SCHEMA_EPOCH
 
     def test_from_url_stamps_schema_epoch_for_compatible_sqlite_db(self, tmp_path: Path) -> None:
         """Compatible SQLite databases should be stamped for future migrations."""
@@ -245,9 +667,9 @@ class TestJournalPathGuards:
         monkeypatch.setattr(database_module, "create_engine", mock_create_engine)
 
         with pytest.raises(ValueError, match="dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases"):
-            LandscapeDB.from_url("postgresql://user:pass@host/db", dump_to_jsonl=True)
+            LandscapeDB.from_url("postgresql://user@host/db", dump_to_jsonl=True)
 
-        mock_create_engine.assert_called_once_with("postgresql://user:pass@host/db", echo=False)
+        mock_create_engine.assert_called_once_with("postgresql://user@host/db", echo=False)
 
     def test_from_url_dump_to_jsonl_rejects_in_memory_sqlite_without_path(self) -> None:
         """In-memory SQLite has no file path, so automatic journal derivation must fail."""

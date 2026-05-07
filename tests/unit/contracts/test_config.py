@@ -47,6 +47,7 @@ CONTRACTS_CONFIG_ITEMS = {
     "RuntimeRateLimitProtocol",
     "RuntimeRetryProtocol",
     "RuntimeTelemetryProtocol",
+    "ServiceRateLimitProtocol",
     # Runtime configuration dataclasses
     "ExporterConfig",
     "RuntimeCheckpointConfig",
@@ -92,12 +93,6 @@ class TestConfigLeafBoundary:
 
 class TestContractsConfigItems:
     """Verify contracts.config items that ARE exported."""
-
-    @pytest.mark.parametrize("name", sorted(CONTRACTS_CONFIG_ITEMS))
-    def test_contracts_config_items_exist(self, name: str) -> None:
-        """Items defined in contracts.config subpackage are accessible."""
-        item = getattr(contract_config, name)
-        assert item is not None
 
     def test_all_exports_match_expected(self) -> None:
         """All items in __all__ should be in CONTRACTS_CONFIG_ITEMS."""

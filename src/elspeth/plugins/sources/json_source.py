@@ -18,9 +18,16 @@ from pydantic import ValidationError, field_validator, model_validator
 
 from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
+from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sources.field_normalization import (
+    FieldResolution,
+    normalize_field_name,
+    resolve_field_names,
+)
 
 
 def _reject_nonfinite_constant(value: str) -> None:
@@ -64,11 +71,13 @@ class JSONSourceConfig(SourceDataConfig):
     """Configuration for JSON source plugin.
 
     Inherits from SourceDataConfig, which requires schema and on_validation_failure.
+    Supports field_mapping for overriding normalized field names.
     """
 
     format: Literal["json", "jsonl"] | None = None
     data_key: str | None = None
     encoding: str = "utf-8"
+    field_mapping: dict[str, str] | None = None
 
     @field_validator("encoding")
     @classmethod
@@ -85,6 +94,27 @@ class JSONSourceConfig(SourceDataConfig):
             raise ValueError(
                 "data_key is not supported with format='jsonl' — JSONL reads line-by-line, data_key extracts from a JSON object root"
             )
+        # Also catch auto-detected JSONL format from .jsonl extension.
+        # When format is None, the plugin auto-detects from the path extension.
+        # Moved from JSONSource.__init__ so from_dict() catches it
+        # (pre-validation / engine-validation agreement).
+        if self.format is None and self.data_key is not None:
+            from pathlib import Path
+
+            if Path(self.path).suffix == ".jsonl":
+                raise ValueError(
+                    "data_key is not supported with JSONL format (auto-detected from .jsonl extension) "
+                    "— JSONL reads line-by-line, data_key extracts from a JSON object root"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_field_mapping(self) -> "JSONSourceConfig":
+        """Validate field_mapping values are valid identifiers."""
+        from elspeth.core.identifiers import validate_field_names
+
+        if self.field_mapping is not None and self.field_mapping:
+            validate_field_names(list(self.field_mapping.values()), "field_mapping values")
         return self
 
 
@@ -106,12 +136,14 @@ class JSONSource(BaseSource):
 
     name = "json"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:ac27ba8d557f48a7"
+    config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = JSONSourceConfig.from_dict(config)
+        cfg = JSONSourceConfig.from_dict(config, plugin_name=self.name)
 
         self._path = cfg.resolved_path()
         self._encoding = cfg.encoding
@@ -123,9 +155,20 @@ class JSONSource(BaseSource):
             fmt = "jsonl" if self._path.suffix == ".jsonl" else "json"
         self._format = fmt
 
+        # data_key + auto-detected JSONL is now caught by
+        # JSONSourceConfig._reject_data_key_with_jsonl model_validator —
+        # from_dict() above already enforced it.
+
         # Store schema config for audit trail
         # SourceDataConfig (via DataPluginConfig) ensures schema_config is not None
         self._schema_config = cfg.schema_config
+        self._initialize_declared_guaranteed_fields(self._schema_config)
+
+        # Store normalization config for use when first row is seen
+        self._field_mapping = cfg.field_mapping
+
+        # Field resolution computed when first row is seen — includes version for audit
+        self._field_resolution: FieldResolution | None = None
 
         # Store quarantine routing destination
         self._on_validation_failure = cfg.on_validation_failure
@@ -142,21 +185,14 @@ class JSONSource(BaseSource):
         # Set output_schema for protocol compliance
         self.output_schema = self._schema_class
 
-        # Create schema contract for PipelineRow support
-        # JSON sources don't need field normalization (no headers to normalize)
-        from elspeth.contracts.contract_builder import ContractBuilder
-        from elspeth.contracts.schema_contract_factory import create_contract_from_config
-
+        # Contract creation: FIXED schemas can be set immediately (fast path),
+        # FLEXIBLE/OBSERVED defer until first row when field_resolution is known.
         initial_contract = create_contract_from_config(self._schema_config)
-
-        # For FIXED schemas, contract is locked immediately.
-        # For FLEXIBLE/OBSERVED schemas, ContractBuilder locks after first valid row.
         if initial_contract.locked:
             self.set_schema_contract(initial_contract)
-            self._contract_builder = None
+            self._contract_builder: ContractBuilder | None = None
         else:
-            self._contract_builder = ContractBuilder(initial_contract)
-            # Contract will be set after processing first valid row in load()
+            self._contract_builder = None
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         """Load rows from JSON file.
@@ -357,37 +393,121 @@ class JSONSource(BaseSource):
         for row in data:
             yield from self._validate_and_yield(row, ctx)
 
-    def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext) -> Iterator[SourceRow]:
+    def _normalize_row_keys(self, row: Any) -> dict[str, Any]:
+        """Normalize JSON keys to valid Python identifiers.
+
+        On the first row, builds field resolution via resolve_field_names()
+        and creates the contract. Subsequent rows apply the existing mapping,
+        normalizing any new keys individually (like Dataverse does).
+
+        Args:
+            row: Row data with raw JSON keys
+
+        Returns:
+            Row data with normalized keys
+        """
+        try:
+            row_items = list(row.items())
+        except AttributeError:
+            raise ValueError(f"Expected JSON object, got {type(row).__name__}") from None
+
+        raw_keys = [key for key, _ in row_items]
+
+        if self._field_resolution is None:
+            # First row — build field resolution from its keys
+            self._field_resolution = resolve_field_names(
+                raw_headers=raw_keys,
+                field_mapping=self._field_mapping,
+                columns=None,
+            )
+
+            # Create contract builder only if no contract is set yet (FIXED
+            # schemas set the contract in __init__ and skip the builder).
+            if self._contract_builder is None and self.get_schema_contract() is None:
+                initial_contract = create_contract_from_config(
+                    self._schema_config,
+                    field_resolution=self._field_resolution.resolution_mapping,
+                )
+                self._contract_builder = ContractBuilder(initial_contract)
+
+        # Apply resolution mapping.
+        # Tier 3: JSON objects may have fields not in the first row
+        # (sparse records, optional attributes). Normalize new fields using the
+        # same algorithm rather than passing them through raw — inconsistent
+        # normalization would break downstream template references.
+        mapping = self._field_resolution.resolution_mapping
+        normalized: dict[str, Any] = {}
+        has_unmapped_fields = False
+        for key, value in row_items:
+            if key in mapping:
+                normalized[mapping[key]] = value
+            else:
+                # New key not seen in first row — normalize individually
+                normalized[normalize_field_name(key)] = value
+                has_unmapped_fields = True
+
+        # If this row had fields not in the initial mapping, rebuild
+        # field resolution from this row's complete key set. This ensures
+        # the resolution mapping used for contract inference covers all
+        # fields, not just those from the (possibly quarantined) first row.
+        if has_unmapped_fields:
+            self._field_resolution = resolve_field_names(
+                raw_headers=list(row.keys()),
+                field_mapping=self._field_mapping,
+                columns=None,
+            )
+
+        return normalized
+
+    def _validate_and_yield(self, row: Any, ctx: SourceContext) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
+        Field names are normalized to valid Python identifiers before validation.
         For FLEXIBLE/OBSERVED schemas, the first valid row triggers type inference and
         locks the contract. Subsequent rows validate against the locked contract.
 
         Args:
-            row: Row data to validate
+            row: Row data to validate. May be a non-dict JSON value from the
+                 external source boundary.
             ctx: Plugin context for recording validation errors
 
         Yields:
             SourceRow.valid() if valid, SourceRow.quarantined() if invalid
         """
+        # Normalize JSON keys at the source boundary (Tier 3 → Tier 2)
+        try:
+            normalized_row = self._normalize_row_keys(row)
+        except ValueError as exc:
+            quarantined = self._record_validation_failure(
+                ctx=ctx,
+                row=row,
+                error_msg=str(exc),
+            )
+            if quarantined is not None:
+                yield quarantined
+            return
+
         try:
             # Validate and potentially coerce row data
-            validated = self._schema_class.model_validate(row)
+            validated = self._schema_class.model_validate(normalized_row)
             validated_row = validated.to_row()
 
             # For FLEXIBLE/OBSERVED schemas, process first valid row to lock contract
             if self._contract_builder is not None and not self._first_valid_row_processed:
-                # JSON sources don't normalize field names, so identity mapping
-                field_resolution = {k: k for k in validated_row}
-                self._contract_builder.process_first_row(validated_row, field_resolution)
+                # _field_resolution is guaranteed set by _normalize_row_keys above
+                assert self._field_resolution is not None
+                self._contract_builder.process_first_row(
+                    validated_row,
+                    self._field_resolution.resolution_mapping,
+                )
                 self.set_schema_contract(self._contract_builder.contract)
                 self._first_valid_row_processed = True
 
             # Validate against locked contract to catch type drift on inferred fields.
             # Pydantic's extra="allow" accepts any type for extras — the contract
             # knows the inferred types from the first row and enforces them here.
-            contract = self.get_schema_contract()
-            if contract is not None and contract.locked:
+            contract = self.require_schema_contract()
+            if contract.locked:
                 violations = contract.validate(validated_row)
                 if violations:
                     error_msg = "; ".join(str(v) for v in violations)
@@ -407,23 +527,13 @@ class JSONSource(BaseSource):
 
             yield SourceRow.valid(validated_row, contract=contract)
         except ValidationError as e:
-            # Record validation failure in audit trail
-            # This is a trust boundary: external data may be invalid
-            ctx.record_validation_error(
-                row=row,
-                error=str(e),
-                schema_mode=self._schema_config.mode,
-                destination=self._on_validation_failure,
+            quarantined = self._record_validation_failure(
+                ctx=ctx,
+                row=normalized_row,
+                error_msg=str(e),
             )
-
-            # Yield quarantined row for routing to configured sink
-            # If "discard", don't yield - row is intentionally dropped
-            if self._on_validation_failure != "discard":
-                yield SourceRow.quarantined(
-                    row=row,
-                    error=str(e),
-                    destination=self._on_validation_failure,
-                )
+            if quarantined is not None:
+                yield quarantined
 
     def _record_parse_error(
         self,
@@ -445,6 +555,47 @@ class JSONSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+        )
+
+    def _record_validation_failure(
+        self,
+        ctx: SourceContext,
+        row: Any,
+        error_msg: str,
+    ) -> SourceRow | None:
+        """Record a row-level validation failure unless discard mode."""
+        row_payload = row
+        ctx.record_validation_error(
+            row=row_payload,
+            error=error_msg,
+            schema_mode=self._schema_config.mode,
+            destination=self._on_validation_failure,
+        )
+        if self._on_validation_failure == "discard":
+            return None
+        return SourceRow.quarantined(
+            row=row_payload,
+            error=error_msg,
+            destination=self._on_validation_failure,
+        )
+
+    def get_field_resolution(self) -> tuple[Mapping[str, str], str | None] | None:
+        """Return field resolution mapping for audit trail.
+
+        Returns the mapping from original JSON keys to final field names,
+        computed when the first row is seen during load().
+
+        Returns:
+            Tuple of (resolution_mapping, normalization_version) if field resolution
+            was computed, or None if load() hasn't been called yet or no rows
+            were processed.
+        """
+        if self._field_resolution is None:
+            return None
+
+        return (
+            self._field_resolution.resolution_mapping,
+            self._field_resolution.normalization_version,
         )
 
     def close(self) -> None:

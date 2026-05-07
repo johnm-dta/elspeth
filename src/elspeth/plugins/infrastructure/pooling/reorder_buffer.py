@@ -13,20 +13,7 @@ from threading import Lock
 from typing import Any
 
 from elspeth.contracts.engine import BufferEntry
-
-
-# Sentinel to distinguish "not yet completed" from a legitimate None result.
-# Using a dedicated class so it cannot be confused with any valid T value.
-class _Sentinel:
-    """Internal sentinel for unfilled buffer slots."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<_UNFILLED>"
-
-
-_UNFILLED = _Sentinel()
+from elspeth.contracts.reorder_primitives import UNFILLED
 
 
 @dataclass
@@ -38,7 +25,7 @@ class _InternalEntry[T]:
     complete_index: int | None = None
     complete_timestamp: float | None = None
     # Use sentinel default so None is a valid result value
-    result: Any = field(default=_UNFILLED)
+    result: Any = field(default=UNFILLED)
     is_complete: bool = False
 
 
@@ -166,5 +153,11 @@ class ReorderBuffer[T]:
                 )
                 del self._entries[self._next_emit]
                 self._next_emit += 1
+
+            # Reset counters when fully drained so a reused buffer starts fresh
+            if not self._entries:
+                self._next_submit = 0
+                self._next_emit = 0
+                self._complete_counter = 0
 
             return ready

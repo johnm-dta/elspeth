@@ -37,6 +37,14 @@ class ChromaConnectionConfig(BaseModel):
         default=None,
         description="Path to ChromaDB data directory (persistent mode only)",
     )
+
+    @field_validator("persist_directory")
+    @classmethod
+    def reject_path_traversal(cls, v: str | None) -> str | None:
+        if v is not None and ".." in v.split("/"):
+            raise ValueError(f"persist_directory must not contain '..' path components, got {v!r}")
+        return v
+
     host: str | None = Field(
         default=None,
         description="ChromaDB server hostname (client mode only)",

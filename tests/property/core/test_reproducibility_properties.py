@@ -31,7 +31,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from sqlalchemy import select
 
-from elspeth.contracts.enums import Determinism, NodeType, RunStatus
+from elspeth.contracts.enums import CallStatus, CallType, Determinism, NodeStateStatus, NodeType, RunStatus
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.reproducibility import (
@@ -39,7 +39,14 @@ from elspeth.core.landscape.reproducibility import (
     compute_grade,
     update_grade_after_purge,
 )
-from elspeth.core.landscape.schema import nodes_table, runs_table
+from elspeth.core.landscape.schema import (
+    calls_table,
+    node_states_table,
+    nodes_table,
+    rows_table,
+    runs_table,
+    tokens_table,
+)
 from tests.fixtures.landscape import make_landscape_db
 
 # =============================================================================
@@ -138,6 +145,92 @@ def _get_run_grade(db: LandscapeDB, run_id: str) -> ReproducibilityGrade:
     assert row is not None
     assert row[0] is not None
     return ReproducibilityGrade(row[0])
+
+
+def _insert_purged_call(
+    db: LandscapeDB,
+    run_id: str,
+    node_id: str,
+    determinism: Determinism,
+) -> None:
+    """Insert a node + row + token + node_state + call chain with a purged response.
+
+    Creates the minimal set of records needed to trigger update_grade_after_purge
+    degradation: a call belonging to a nondeterministic node where response_hash
+    is set (payload once existed) but response_ref is NULL (payload has been purged).
+
+    Args:
+        db: LandscapeDB instance
+        run_id: Run ID to insert records for
+        node_id: Unique node ID to use
+        determinism: Determinism value for the node (should be non-reproducible)
+    """
+    now = _REFERENCE_TIME
+    row_id = f"row-{node_id}"
+    token_id = f"tok-{node_id}"
+    state_id = f"st-{node_id}"
+    call_id = f"call-{node_id}"
+
+    with db.connection() as conn:
+        conn.execute(
+            nodes_table.insert().values(
+                node_id=node_id,
+                run_id=run_id,
+                plugin_name="test_plugin",
+                node_type=NodeType.TRANSFORM.value,
+                plugin_version="1.0",
+                determinism=determinism.value,
+                config_hash=stable_hash({"node_id": node_id}),
+                config_json="{}",
+                registered_at=now,
+            )
+        )
+        conn.execute(
+            rows_table.insert().values(
+                row_id=row_id,
+                run_id=run_id,
+                source_node_id=node_id,
+                row_index=0,
+                source_data_hash="src_hash",
+                created_at=now,
+            )
+        )
+        conn.execute(
+            tokens_table.insert().values(
+                token_id=token_id,
+                row_id=row_id,
+                run_id=run_id,
+                created_at=now,
+            )
+        )
+        conn.execute(
+            node_states_table.insert().values(
+                state_id=state_id,
+                token_id=token_id,
+                run_id=run_id,
+                node_id=node_id,
+                step_index=0,
+                attempt=0,
+                status=NodeStateStatus.COMPLETED.value,
+                input_hash="in_hash",
+                output_hash="out_hash",
+                started_at=now,
+            )
+        )
+        conn.execute(
+            calls_table.insert().values(
+                call_id=call_id,
+                state_id=state_id,
+                operation_id=None,
+                call_index=0,
+                call_type=CallType.HTTP.value,
+                status=CallStatus.SUCCESS.value,
+                request_hash="req_hash",
+                response_hash="resp_hash",  # Proof the payload once existed
+                response_ref=None,  # NULL = payload has been purged
+                created_at=now,
+            )
+        )
 
 
 # =============================================================================
@@ -291,14 +384,21 @@ class TestGradeDegradationProperties:
     @given(grade=all_grades)
     @settings(max_examples=20)
     def test_degradation_rule_applies(self, grade: ReproducibilityGrade) -> None:
-        """Property: Degradation rule applied via update_grade_after_purge()."""
+        """Property: Degradation rule applied via update_grade_after_purge().
+
+        With no calls recorded, REPLAY_REPRODUCIBLE is unchanged — there are no
+        replay-critical payloads to purge, so the condition for downgrade is never met.
+        FULL_REPRODUCIBLE and ATTRIBUTABLE_ONLY are always unchanged.
+        """
         with make_landscape_db() as db:
             run_id = _create_run(db)
             _set_run_grade(db, run_id, grade)
             update_grade_after_purge(db, run_id)
 
-            expected = ReproducibilityGrade.ATTRIBUTABLE_ONLY if grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE else grade
-            assert _get_run_grade(db, run_id) == expected
+            # update_grade_after_purge only downgrades REPLAY_REPRODUCIBLE when
+            # replay-critical payloads (nondeterministic node responses) have been purged.
+            # With no calls in the DB, nothing is purged, so all grades are unchanged.
+            assert _get_run_grade(db, run_id) == grade
 
     @given(grade=all_grades)
     @settings(max_examples=20)
@@ -372,10 +472,16 @@ class TestClassificationDegradationInteractionProperties:
         """Property: Non-reproducible determinism degrades to ATTRIBUTABLE after purge.
 
         Without recorded responses, we can only prove what happened via hashes.
+        Degradation requires evidence of purged replay-critical payloads: a call
+        belonging to a nondeterministic node where response_hash is set but
+        response_ref is NULL.
         """
         with make_landscape_db() as db:
             run_id = _create_run(db)
-            _insert_nodes(db, run_id, [det])
+            # Insert the nondeterministic node and a purged call record so
+            # update_grade_after_purge has evidence that replay-critical payloads
+            # have been purged (response_hash set, response_ref NULL).
+            _insert_purged_call(db, run_id, node_id="nd-node-0", determinism=det)
 
             grade = compute_grade(db, run_id)
             _set_run_grade(db, run_id, grade)

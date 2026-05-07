@@ -1,0 +1,38 @@
+title: "ELSPETH Architecture Pack"
+subtitle: "Auditable Sense / Decide / Act Pipeline Framework"
+author: "Foundryside Architecture Team"
+date: "29 April 2026"
+version: "1.0.0"
+status: "INITIAL ISSUE"
+
+# Template variables
+running-title: "ELSPETH Architecture Pack"
+doc-id: "ELS-AP"
+document-category: "Architecture Description"
+document-type: "Evidence-anchored architecture pack"
+classification: "INTERNAL"
+
+# Codebase HEAD at the time the analysis was run.  Surfaced on the
+# title page's document-control table so the PDF is self-evidently
+# tied to a specific revision of the source tree.
+commit: "5a5e05d7"
+
+scope-blurb: >-
+  This pack is the readable, evidence-anchored architecture description of
+  ELSPETH — an auditable Sense/Decide/Act pipeline framework written in
+  ~122,500 LOC of Python.  It comprises a narrative track (executive
+  summary, system context, architecture overview, container and component
+  views, cross-cutting concerns, quality assessment, improvement roadmap,
+  known gaps), a subsystem reference, and appendices documenting glossary,
+  methodology, and provenance.  The peer audit-grade analysis pack is the
+  source of truth; this document is its presentation layer.
+
+# Organization branding (appears on cover page)
+org-name: "Foundryside"
+org-tagline: "Audit-Grade Engineering"
+
+# Revision history (newest first)
+revisions:
+  - version: "1.0.0"
+    date: "29 April 2026"
+    changes: "Initial issue from arch-pack-2026-04-29-1500 at HEAD 5a5e05d7"

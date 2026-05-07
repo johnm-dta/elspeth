@@ -318,7 +318,7 @@ class TestAuditedClientRateLimiting:
 
             # Create audited client WITH limiter
             client = AuditedLLMClient(
-                recorder=mock_recorder,
+                execution=mock_recorder,
                 state_id="test-state-001",
                 run_id="test-run-001",
                 telemetry_emit=lambda event: None,
@@ -390,7 +390,7 @@ class TestAuditedClientRateLimiting:
             with patch("httpx.Client") as mock_client_class:
                 # Create audited client WITH limiter (inside patch so __init__ gets the mock)
                 client = AuditedHTTPClient(
-                    recorder=mock_recorder,
+                    execution=mock_recorder,
                     state_id="test-state-001",
                     run_id="test-run-001",
                     telemetry_emit=lambda event: None,
@@ -429,7 +429,7 @@ class TestAuditedClientRateLimiting:
 
         # Create audited client WITHOUT limiter (limiter=None is default)
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_recorder,
             state_id="test-state-001",
             run_id="test-run-001",
             telemetry_emit=lambda event: None,

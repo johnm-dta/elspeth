@@ -56,14 +56,14 @@ class TestAuditedLLMClientTelemetryContract:
     ExternalCallCompleted with call_type=LLM on every call.
     """
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder."""
-        recorder = MagicMock()
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository."""
+        execution = MagicMock()
         recorded_call = MagicMock()
         recorded_call.request_hash = "req_hash_123"
         recorded_call.response_hash = "resp_hash_456"
-        recorder.record_call.return_value = recorded_call
-        return recorder
+        execution.record_call.return_value = recorded_call
+        return execution
 
     def _create_mock_openai_client(
         self,
@@ -96,7 +96,7 @@ class TestAuditedLLMClientTelemetryContract:
         """AuditedLLMClient emits ExternalCallCompleted on successful call."""
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         emitted_events: list[ExternalCallCompleted] = []
@@ -105,7 +105,7 @@ class TestAuditedLLMClientTelemetryContract:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="azure",
@@ -145,7 +145,7 @@ class TestAuditedLLMClientTelemetryContract:
         """AuditedLLMClient emits ExternalCallCompleted on failed call."""
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient, LLMClientError
 
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = MagicMock()
         openai_client.chat.completions.create.side_effect = Exception("API error")
 
@@ -155,7 +155,7 @@ class TestAuditedLLMClientTelemetryContract:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",
@@ -192,20 +192,20 @@ class TestAuditedHTTPClientTelemetryContract:
     ExternalCallCompleted with call_type=HTTP on every call.
     """
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder."""
-        recorder = MagicMock()
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository."""
+        execution = MagicMock()
         recorded_call = MagicMock()
         recorded_call.request_hash = "req_hash_123"
         recorded_call.response_hash = "resp_hash_456"
-        recorder.record_call.return_value = recorded_call
-        return recorder
+        execution.record_call.return_value = recorded_call
+        return execution
 
     def test_http_client_emits_external_call_completed_on_success(self) -> None:
         """AuditedHTTPClient emits ExternalCallCompleted on successful POST."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -221,7 +221,7 @@ class TestAuditedHTTPClientTelemetryContract:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -254,7 +254,7 @@ class TestAuditedHTTPClientTelemetryContract:
 
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -263,7 +263,7 @@ class TestAuditedHTTPClientTelemetryContract:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -289,7 +289,7 @@ class TestAuditedHTTPClientTelemetryContract:
         """AuditedHTTPClient emits ExternalCallCompleted on GET request."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -305,7 +305,7 @@ class TestAuditedHTTPClientTelemetryContract:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -455,8 +455,8 @@ class TestPluginTelemetryThroughAuditedClients:
         """
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        recorder = MagicMock()
-        recorder.record_call.return_value = MagicMock(
+        execution = MagicMock()
+        execution.record_call.return_value = MagicMock(
             request_hash="hash1",
             response_hash="hash2",
         )
@@ -478,7 +478,7 @@ class TestPluginTelemetryThroughAuditedClients:
         mock_openai.chat.completions.create.return_value = mock_response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=telemetry_emit,
@@ -506,8 +506,8 @@ class TestPluginTelemetryThroughAuditedClients:
         """
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        recorder = MagicMock()
-        recorder.record_call.return_value = MagicMock(
+        execution = MagicMock()
+        execution.record_call.return_value = MagicMock(
             request_hash="hash1",
             response_hash="hash2",
         )
@@ -527,7 +527,7 @@ class TestPluginTelemetryThroughAuditedClients:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state-1",
                 run_id="run-1",
                 telemetry_emit=telemetry_emit,
@@ -565,13 +565,13 @@ class TestTelemetryEmissionOrderContract:
 
         call_order: list[str] = []
 
-        recorder = MagicMock()
+        execution = MagicMock()
 
         def mock_record_call(**kwargs):
             call_order.append("landscape")
             return MagicMock(request_hash="hash1", response_hash="hash2")
 
-        recorder.record_call.side_effect = mock_record_call
+        execution.record_call.side_effect = mock_record_call
 
         def telemetry_emit(event: Any) -> None:
             call_order.append("telemetry")
@@ -586,7 +586,7 @@ class TestTelemetryEmissionOrderContract:
         mock_openai.chat.completions.create.return_value = mock_response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=telemetry_emit,
@@ -608,13 +608,13 @@ class TestTelemetryEmissionOrderContract:
 
         call_order: list[str] = []
 
-        recorder = MagicMock()
+        execution = MagicMock()
 
         def mock_record_call(**kwargs):
             call_order.append("landscape")
             return MagicMock(request_hash="hash1", response_hash="hash2")
 
-        recorder.record_call.side_effect = mock_record_call
+        execution.record_call.side_effect = mock_record_call
 
         def telemetry_emit(event: Any) -> None:
             call_order.append("telemetry")
@@ -628,7 +628,7 @@ class TestTelemetryEmissionOrderContract:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state-1",
                 run_id="run-1",
                 telemetry_emit=telemetry_emit,
@@ -650,8 +650,8 @@ class TestTelemetryEmissionOrderContract:
         """
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        recorder = MagicMock()
-        recorder.record_call.side_effect = Exception("Database error")
+        execution = MagicMock()
+        execution.record_call.side_effect = Exception("Database error")
 
         emitted_events: list[Any] = []
 
@@ -668,7 +668,7 @@ class TestTelemetryEmissionOrderContract:
         mock_openai.chat.completions.create.return_value = mock_response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=telemetry_emit,
@@ -705,8 +705,8 @@ class TestTelemetryFailureIsolationContract:
         """AuditedLLMClient isolates telemetry failure from call result."""
         from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
 
-        recorder = MagicMock()
-        recorder.record_call.return_value = MagicMock(
+        execution = MagicMock()
+        execution.record_call.return_value = MagicMock(
             request_hash="hash1",
             response_hash="hash2",
         )
@@ -724,7 +724,7 @@ class TestTelemetryFailureIsolationContract:
         mock_openai.chat.completions.create.return_value = mock_response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=failing_telemetry_emit,
@@ -741,18 +741,18 @@ class TestTelemetryFailureIsolationContract:
         assert response.content == "Hello!"
 
         # CONTRACT: Only ONE audit record should exist
-        assert recorder.record_call.call_count == 1
+        assert execution.record_call.call_count == 1
 
         # CONTRACT: Audit record should show SUCCESS
-        call_kwargs = recorder.record_call.call_args.kwargs
+        call_kwargs = execution.record_call.call_args.kwargs
         assert call_kwargs["status"] == CallStatus.SUCCESS
 
     def test_http_client_isolates_telemetry_failure(self) -> None:
         """AuditedHTTPClient isolates telemetry failure from call result."""
         from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
-        recorder = MagicMock()
-        recorder.record_call.return_value = MagicMock(
+        execution = MagicMock()
+        execution.record_call.return_value = MagicMock(
             request_hash="hash1",
             response_hash="hash2",
         )
@@ -769,7 +769,7 @@ class TestTelemetryFailureIsolationContract:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state-1",
                 run_id="run-1",
                 telemetry_emit=failing_telemetry_emit,
@@ -784,8 +784,8 @@ class TestTelemetryFailureIsolationContract:
         assert response.status_code == 200
 
         # CONTRACT: Only ONE audit record should exist
-        assert recorder.record_call.call_count == 1
+        assert execution.record_call.call_count == 1
 
         # CONTRACT: Audit record should show SUCCESS
-        call_kwargs = recorder.record_call.call_args.kwargs
+        call_kwargs = execution.record_call.call_args.kwargs
         assert call_kwargs["status"] == CallStatus.SUCCESS

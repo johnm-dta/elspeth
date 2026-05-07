@@ -22,9 +22,11 @@ from elspeth.contracts.errors import (
     MissingFieldViolation,
     TypeMismatchViolation,
 )
+from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.type_normalization import (
     ALLOWED_CONTRACT_TYPES,
     CONTRACT_TYPE_MAP,
+    classify_runtime_type,
     normalize_type_for_contract,
 )
 
@@ -101,7 +103,14 @@ class SchemaContract:
             raise ValueError(f"Duplicate normalized_name in fields: {set(duplicates)}")
 
         by_norm: dict[str, FieldContract] = {fc.normalized_name: fc for fc in self.fields}
-        by_orig: dict[str, str] = {fc.original_name: fc.normalized_name for fc in self.fields}
+        by_orig: dict[str, str] = {}
+        for fc in self.fields:
+            if fc.original_name in by_orig:
+                raise ValueError(
+                    f"Duplicate original_name in fields: '{fc.original_name}' maps to "
+                    f"both '{by_orig[fc.original_name]}' and '{fc.normalized_name}'"
+                )
+            by_orig[fc.original_name] = fc.normalized_name
         object.__setattr__(self, "_by_normalized", types.MappingProxyType(by_norm))
         object.__setattr__(self, "_by_original", types.MappingProxyType(by_orig))
 
@@ -168,6 +177,11 @@ class SchemaContract:
         if normalized_name in self._by_normalized:
             return self._by_normalized[normalized_name]
         return None
+
+    @property
+    def required_field_names(self) -> frozenset[str]:
+        """Normalized names of all fields with required=True."""
+        return frozenset(fc.normalized_name for fc in self.fields if fc.required)
 
     def with_locked(self) -> SchemaContract:
         """Return new contract with locked=True.
@@ -268,9 +282,11 @@ class SchemaContract:
                 if value is None and (not fc.required or fc.nullable):
                     continue
 
-                # Normalize runtime type for comparison
-                # (handles numpy.int64 matching int, etc.)
-                actual_type = normalize_type_for_contract(value)
+                # Classify runtime type for comparison (non-throwing).
+                # Uses classify_runtime_type instead of normalize_type_for_contract
+                # so that unsupported types produce TypeMismatchViolation instead
+                # of crashing the pipeline (Tier 3 data should be quarantined).
+                actual_type = classify_runtime_type(value)
                 # type(None) matches None values (for explicitly declared type(None) fields)
                 if actual_type != fc.python_type:
                     violations.append(
@@ -429,7 +445,7 @@ class SchemaContract:
 
         Rules:
         1. Mode: Most restrictive wins (FIXED > FLEXIBLE > OBSERVED)
-        2. Fields present in both: Types must match (error if not)
+        2. Fields present in both: Types must match; required only if both require (AND)
         3. Fields in only one: Included but marked non-required
         4. Locked: True if either is locked
 
@@ -469,18 +485,26 @@ class SchemaContract:
                         type_a=self_fc.python_type.__name__,
                         type_b=other_fc.python_type.__name__,
                     )
-                # Use the one that's required if either is
+                # Required only if BOTH branches require it (AND semantics).
+                # NOTE: This is only correct for best_effort/quorum coalesces.
+                # For require_all coalesces, OR semantics should apply (field is
+                # required if required in ANY branch, since all branches arrive).
+                # However, this fallback path is never reached in production —
+                # the precomputed schema from merge_union_fields() is used instead.
+                # See D2 investigation for details.
                 # Use declared source if either is declared
                 merged_fields[name] = FieldContract(
                     normalized_name=name,
                     original_name=self_fc.original_name,
                     python_type=self_fc.python_type,
-                    required=self_fc.required or other_fc.required,
+                    required=self_fc.required and other_fc.required,
                     source="declared" if self_fc.source == "declared" or other_fc.source == "declared" else "inferred",
                     nullable=self_fc.nullable or other_fc.nullable,
                 )
             elif in_self:
-                # Only in self - include but mark non-required
+                # Only in self - include but mark non-required and nullable.
+                # The source branch may not arrive (e.g., timeout under best_effort),
+                # so the merged row would have None for this field. (D3 fix)
                 fc = self._by_normalized[name]
                 merged_fields[name] = FieldContract(
                     normalized_name=fc.normalized_name,
@@ -488,10 +512,11 @@ class SchemaContract:
                     python_type=fc.python_type,
                     required=False,  # Can't require field from only one path
                     source=fc.source,
-                    nullable=fc.nullable,
+                    nullable=True,  # Branch may not arrive — field may be None
                 )
             else:
-                # Only in other (in_other must be True since name came from union)
+                # Only in other (in_other must be True since name came from union).
+                # Same reasoning: source branch may not arrive. (D3 fix)
                 fc = other._by_normalized[name]
                 merged_fields[name] = FieldContract(
                     normalized_name=fc.normalized_name,
@@ -499,7 +524,7 @@ class SchemaContract:
                     python_type=fc.python_type,
                     required=False,  # Can't require field from only one path
                     source=fc.source,
-                    nullable=fc.nullable,
+                    nullable=True,  # Branch may not arrive — field may be None
                 )
 
         return SchemaContract(
@@ -543,9 +568,9 @@ class PipelineRow:
                 f"PipelineRow requires exactly dict, got {type(data).__name__}. "
                 f"Non-dict input suggests data corruption on a Tier 1 restore path."
             )
-        # Store as immutable view to prevent mutation after audit recording
-        # Per CLAUDE.md Tier 1: audit data must not be modified
-        self._data = types.MappingProxyType(data.copy())
+        # Deep-freeze to prevent mutation of nested containers after audit recording.
+        # Per CLAUDE.md Tier 1: audit data must not be modified.
+        self._data = deep_freeze(data)
         self._contract = contract
 
     def __setitem__(self, key: str, value: Any) -> None:
@@ -635,9 +660,12 @@ class PipelineRow:
         """Export raw data (normalized keys) for serialization.
 
         Returns:
-            Copy of internal data dict
+            Mutable deep copy of internal data dict
         """
-        return dict(self._data)
+        thawed = deep_thaw(self._data)
+        if not isinstance(thawed, dict):
+            raise TypeError(f"deep_thaw(PipelineRow._data) must return dict, got {type(thawed).__name__}")
+        return thawed
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get field value with optional default (Jinja2 compatibility).
@@ -682,15 +710,15 @@ class PipelineRow:
         return self._contract
 
     def __copy__(self) -> PipelineRow:
-        """Support shallow copy - creates new PipelineRow with same data dict.
+        """Support shallow copy - creates new PipelineRow with same data.
 
         SchemaContract is immutable (frozen=True), so sharing reference is safe.
-        MappingProxyType doesn't support direct copy/pickle, so we create new one.
+        Data is deep-frozen, so thaw→re-freeze produces an independent copy.
 
         Returns:
-            New PipelineRow with same contract and data copy
+            New PipelineRow with same contract and independent data copy
         """
-        return PipelineRow(dict(self._data), self._contract)
+        return PipelineRow(self.to_dict(), self._contract)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> PipelineRow:
         """Support deep copy - creates new PipelineRow with deep copied data.
@@ -699,7 +727,7 @@ class PipelineRow:
         without hitting MappingProxyType pickle issues.
 
         SchemaContract is immutable (frozen=True), so sharing reference is safe.
-        Only the data dict needs deep copying.
+        to_dict() deep-thaws, then PipelineRow.__init__ deep-freezes again.
 
         Args:
             memo: Memoization dict for deepcopy
@@ -707,12 +735,7 @@ class PipelineRow:
         Returns:
             New PipelineRow with same contract and deep copied data
         """
-        import copy
-
-        # Deep copy the data dict (contains nested structures)
-        copied_data = copy.deepcopy(dict(self._data), memo)
-        # Contract is immutable - share reference (safe for frozen dataclass)
-        return PipelineRow(copied_data, self._contract)
+        return PipelineRow(self.to_dict(), self._contract)
 
     def to_checkpoint_format(self) -> dict[str, Any]:
         """Serialize for checkpoint storage.
@@ -723,8 +746,11 @@ class PipelineRow:
         Returns:
             Checkpoint-serializable dict
         """
+        thawed = deep_thaw(self._data)
+        if not isinstance(thawed, dict):
+            raise TypeError(f"deep_thaw(PipelineRow._data) must return dict, got {type(thawed).__name__}")
         return {
-            "data": dict(self._data),  # Convert MappingProxyType to dict for serialization
+            "data": thawed,
             "contract_version": self._contract.version_hash(),
         }
 

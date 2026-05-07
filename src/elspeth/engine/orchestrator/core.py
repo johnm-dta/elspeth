@@ -26,6 +26,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
+from itertools import chain
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -39,16 +40,15 @@ if TYPE_CHECKING:
     from elspeth.core.events import EventBusProtocol
     from elspeth.telemetry import TelemetryManager
 
+import elspeth.contracts.errors as contract_errors
+import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import (
-    BatchCheckpointState,
-    BatchPendingError,
     ExportStatus,
     NodeType,
     PendingOutcome,
     PipelineRow,
     RouteDestination,
-    RowOutcome,
     RunStatus,
     SchemaContract,
     SecretResolutionInput,
@@ -60,24 +60,42 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.config import RuntimeRetryConfig
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode
+from elspeth.contracts.declaration_contracts import (
+    EXPECTED_CONTRACT_SITES,
+    contract_sites,
+    declaration_registry_is_frozen,
+    freeze_declaration_registry,
+    registered_declaration_contracts,
+)
+from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     ExecutionError,
+    FrameworkBugError,
     GracefulShutdownError,
     OrchestrationInvariantError,
     SourceQuarantineReason,
+    TelemetryExporterError,
 )
 from elspeth.contracts.events import (
+    FieldResolutionApplied,
     PhaseAction,
+    PhaseChanged,
     PhaseCompleted,
     PhaseError,
     PhaseStarted,
     PipelinePhase,
+    RowCreated,
     RunCompletionStatus,
+    RunFinished,
+    RunStarted,
     RunSummary,
 )
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.run_result import derive_terminal_run_status
+from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
+from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.tier_registry import freeze_tier_registry
 from elspeth.contracts.types import (
     AggregationName,
     BranchName,
@@ -86,17 +104,21 @@ from elspeth.contracts.types import (
     NodeID,
     SinkName,
 )
-from elspeth.core.canonical import sanitize_for_canonical, stable_hash
+from elspeth.core.canonical import canonical_json, sanitize_for_canonical, stable_hash
 from elspeth.core.config import AggregationSettings
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.operations import track_operation
+from elspeth.engine._best_effort import best_effort
+from elspeth.engine.executors.sink import DiversionCounts
 
 # Import module functions from orchestrator submodules
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     flush_remaining_aggregation_buffers,
     handle_incomplete_batches,
+    rebind_checkpoint_batch_ids,
 )
 from elspeth.engine.orchestrator.export import (
     export_landscape,
@@ -106,6 +128,7 @@ from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
     flush_coalesce_pending,
     handle_coalesce_timeouts,
+    reconcile_sink_write_diversions,
 )
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
@@ -143,6 +166,139 @@ if TYPE_CHECKING:
     from elspeth.engine.coalesce_executor import CoalesceExecutor
 
 slog = structlog.get_logger(__name__)
+
+
+class _RunFailedWithPartialResultError(Exception):
+    """Internal wrapper used to move partial counters to outer failure handlers."""
+
+    def __init__(self, original_error: Exception, partial_result: RunResult) -> None:
+        super().__init__(str(original_error))
+        self.original_error = original_error
+        self.partial_result = partial_result
+        self.original_traceback = original_error.__traceback__
+
+
+def prepare_for_run() -> None:
+    """Assert framework invariants and freeze both registries at bootstrap.
+
+    This is the canonical bootstrap entry point (ADR-010 §Decision 3). It must
+    be called AFTER all plugin modules have been imported (so module-level
+    side-effects like ``register_declaration_contract`` have fired) and BEFORE
+    any DAG node begins execution.
+
+    The normal import chain guarantees this ordering in production:
+    - ``orchestrator/core.py`` imports
+      ``engine.executors.declaration_contract_bootstrap`` at module level.
+    - ``declaration_contract_bootstrap.py`` imports every production contract
+      module with a module-level ``register_declaration_contract(...)`` call.
+    - Each imported contract module registers its contract as a module-level
+      side-effect.
+
+    If the declaration registry is empty at this point, the import chain is
+    broken — this is an import-order bug, not a runtime configuration error.
+    Crashing here prevents the framework from running silently without any
+    runtime VAL checks active (the exact failure mode ADR-010 was designed to
+    prevent).
+
+    Raises:
+        RuntimeError: every registered ``(contract_name, dispatch_site)``
+            pair does not exactly equal the pairs in
+            ``EXPECTED_CONTRACT_SITES`` (N1 per-site manifest extension,
+            ADR-010 §Semantics amendment 2026-04-20). The message names
+            every missing and every extra contract or site so the failure
+            is self-diagnosing. Indicates one of: an import-order bug
+            (contract module not imported), manifest drift (contract
+            registered without a manifest entry), or site drift
+            (contract's ``@implements_dispatch_site`` markers disagree
+            with the manifest).
+    """
+    # Short-circuit if the registry is already frozen — bootstrap already ran.
+    # Idempotency is required because Orchestrator.run() can be called multiple
+    # times in a single process (e.g. test suites). The manifest-equality
+    # assertion only needs to fire ONCE, on the first call; subsequent calls
+    # trust that the previous freeze was performed after a successful
+    # assertion.
+    #
+    # The ``_clear_registry_for_tests()`` helper resets ``_FROZEN = False``, so
+    # test isolation that clears and repopulates the registry will still trigger
+    # the assertion on the next call.
+    if declaration_registry_is_frozen():
+        return
+
+    # ADR-010 §Decision 3 manifest gate, extended by §H2 landing scope N1:
+    # Assert SET EQUALITY between every registered (contract_name,
+    # dispatch_site) pair and every pair in ``EXPECTED_CONTRACT_SITES``
+    # BEFORE freezing. The original C2 closure checked contract-name
+    # equality; N1 tightens this to per-(name, site) equality so a
+    # contract registering for the wrong site (or silently no-opping at a
+    # site it claims to cover) is detected at bootstrap, not masked until
+    # first row.
+    #
+    # Every plugin behaviour recorded as "compliant" (no violation raised)
+    # must be evidence of every applicable contract's method having been
+    # invoked — under audit-complete semantics (ADR-010 §Semantics) absence of violation
+    # means "checked and passed," which is only true if the dispatcher
+    # actually dispatched to the contract for its claimed sites. The N1
+    # manifest closes the (name, site) drift vector the C2 set-of-names
+    # manifest missed.
+    contracts = registered_declaration_contracts()
+    registered_sites: dict[str, frozenset[str]] = {c.name: frozenset(contract_sites(c)) for c in contracts}
+    expected_sites: dict[str, frozenset[str]] = {name: frozenset(sites) for name, sites in EXPECTED_CONTRACT_SITES.items()}
+    if registered_sites != expected_sites:
+        # Compose a self-diagnosing message naming every drifted (name, site)
+        # pair. Five mutually exclusive drift classes are surfaced:
+        #   * name missing (manifest claims, nothing registered)
+        #   * name extra (registered, manifest absent)
+        #   * per-name: sites missing (contract registered with fewer sites
+        #     than manifest declares)
+        #   * per-name: sites extra (contract registered with more sites
+        #     than manifest declares)
+        #   * per-name: site-set mismatch (disjoint)
+        expected_names = frozenset(expected_sites.keys())
+        registered_names = frozenset(registered_sites.keys())
+        missing_names = expected_names - registered_names
+        extra_names = registered_names - expected_names
+        site_drift_lines: list[str] = []
+        for name in sorted(expected_names & registered_names):
+            expected_for_name = expected_sites[name]
+            registered_for_name = registered_sites[name]
+            if expected_for_name == registered_for_name:
+                continue
+            missing_sites = expected_for_name - registered_for_name
+            extra_sites = registered_for_name - expected_for_name
+            site_drift_lines.append(
+                f"  {name!r}: expected_sites={sorted(expected_for_name)!r}, "
+                f"registered_sites={sorted(registered_for_name)!r}, "
+                f"missing={sorted(missing_sites)!r}, extra={sorted(extra_sites)!r}"
+            )
+        raise RuntimeError(
+            "Declaration contract registry mismatch at orchestrator bootstrap "
+            "(ADR-010 §Decision 3 manifest gate + §H2 landing scope N1).\n"
+            f"  Expected (manifest):  {sorted((n, sorted(s)) for n, s in expected_sites.items())!r}\n"
+            f"  Registered:           {sorted((n, sorted(s)) for n, s in registered_sites.items())!r}\n"
+            f"  Missing names (not registered but in manifest): {sorted(missing_names)!r}\n"
+            f"  Extra names  (registered but not in manifest): {sorted(extra_names)!r}\n"
+            "  Per-name site drift:\n" + ("\n".join(site_drift_lines) if site_drift_lines else "    (none)") + "\n"
+            "\n"
+            "If a name is missing: the contract's module-level "
+            "register_declaration_contract(...) call did not fire. Check for "
+            "a conditional import that skipped it, or an import-order bug "
+            "where the module was not imported before prepare_for_run().\n"
+            "If a name is extra: a contract was registered without being "
+            "added to EXPECTED_CONTRACT_SITES. Update the manifest in the "
+            "same commit as the registration.\n"
+            "If per-name sites drift: the contract's "
+            "@implements_dispatch_site(...) markers disagree with "
+            "EXPECTED_CONTRACT_SITES. Either fix the markers or update the "
+            "manifest (and run scripts/cicd/enforce_contract_manifest.py to "
+            "confirm MC3a/b/c are clean).\n"
+            "\n"
+            "A silent runtime VAL disable is exactly the failure mode ADR-010 "
+            "was designed to prevent — extended to per-site coverage under "
+            "the §Semantics amendment (2026-04-20)."
+        )
+    freeze_declaration_registry()
+    freeze_tier_registry()
 
 
 class Orchestrator:
@@ -220,6 +376,27 @@ class Orchestrator:
         if self._telemetry is not None:
             self._telemetry.flush()
 
+    def _emit_phase_error(
+        self,
+        phase: PipelinePhase,
+        error: BaseException,
+        target: str | None = None,
+    ) -> None:
+        """Best-effort PhaseError emission that never masks the original exception.
+
+        Called from except blocks before re-raise. If PhaseError construction
+        or EventBus.emit() fails (e.g., handler bug), the original exception
+        must take precedence — observable telemetry is secondary to preserving
+        the actual error.
+        """
+        with best_effort(
+            "PhaseError emission",
+            phase=phase.value,
+            original_error=type(error).__name__,
+            target=target,
+        ):
+            self._events.emit(PhaseError(phase=phase, error=error, target=target))
+
     def _safe_flush_telemetry(self) -> None:
         """Flush telemetry in a finally block, preserving any pending exception.
 
@@ -228,8 +405,6 @@ class Orchestrator:
         must not mask run errors.
         """
         import sys
-
-        from elspeth.telemetry.errors import TelemetryExporterError
 
         logger = slog
         pending_exc = sys.exc_info()[0]
@@ -245,10 +420,138 @@ class Orchestrator:
             if pending_exc is None:
                 raise
 
+    def _derive_resume_terminal_status_from_audit(
+        self, factory: RecorderFactory, run_id: str
+    ) -> tuple[RunStatus, int, int, int, int, int, int]:
+        """Phase 2.2 (elspeth-0de989c56d) — recover the truthful terminal
+        status of a run from the Landscape audit DB when the resume found
+        no unprocessed rows.
+
+        The "all-rows-already-processed" resume branch fires when a prior
+        run was interrupted *after* all source rows had reached terminal
+        states.  At that point the resume's local counters are 0 (nothing
+        was reprocessed), but the audit DB carries the truth in
+        ``token_outcomes``.  Pre-Phase-2.2 the engine wrote
+        ``RunStatus.COMPLETED`` here unconditionally, masking runs that
+        actually failed.  This helper aggregates ``token_outcomes`` and
+        applies the presence-indicator predicate so the persisted status
+        reflects what really happened.
+
+        Returns:
+            ``(terminal_status, rows_processed, rows_succeeded, rows_failed,
+            rows_routed_success, rows_routed_failure, rows_quarantined)`` —
+            the second through seventh elements feed the local RunResult so
+            its row counts match the chosen status (otherwise the
+            biconditional in
+            :class:`elspeth.contracts.run_result.RunResult` would crash).
+        """
+        outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
+        rows_succeeded = 0
+        rows_failed = 0
+        rows_quarantined = 0
+        rows_coalesce_failed = 0
+        rows_processed = 0
+        rows_routed_success = 0
+        rows_routed_failure = 0
+        for outcome_record in outcomes:
+            if not outcome_record.completed:
+                continue
+            pair = (outcome_record.outcome, outcome_record.path)
+            match pair:
+                case (
+                    (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+                    | (TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
+                    | (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)
+                    | (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED)
+                ):
+                    rows_succeeded += 1
+                    rows_processed += 1
+                case (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
+                    rows_routed_success += 1
+                    rows_succeeded += 1
+                    rows_processed += 1
+                case (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
+                    rows_failed += 1
+                    rows_routed_failure += 1
+                    rows_processed += 1
+                case (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
+                    rows_failed += 1
+                    rows_processed += 1
+                case (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
+                    rows_quarantined += 1
+                    rows_failed += 1
+                    rows_processed += 1
+                case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
+                    rows_failed += 1
+                    rows_processed += 1
+                case (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
+                    rows_processed += 1
+                case (
+                    (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)
+                    | (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)
+                    | (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)
+                ):
+                    # Parent-token / aggregation accounting outcomes do not
+                    # contribute to the success/failure tally — the child
+                    # tokens (FORKED/EXPANDED) and the batch-result token
+                    # (CONSUMED_IN_BATCH) carry the row-level counters via
+                    # their own terminal outcomes.
+                    pass
+                case _:
+                    raise AssertionError(
+                        f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
+                        "Add a case here; see ADR-019 mapping table and the live accumulator."
+                    )
+        terminal_status = derive_terminal_run_status(
+            rows_processed=rows_processed,
+            rows_succeeded=rows_succeeded,
+            rows_failed=rows_failed,
+            rows_routed_success=rows_routed_success,
+            rows_routed_failure=rows_routed_failure,
+            rows_quarantined=rows_quarantined,
+            rows_coalesce_failed=rows_coalesce_failed,
+        )
+        return (
+            terminal_status,
+            rows_processed,
+            rows_succeeded,
+            rows_failed,
+            rows_routed_success,
+            rows_routed_failure,
+            rows_quarantined,
+        )
+
+    def _cli_completion_for(self, status: RunStatus) -> tuple[RunCompletionStatus, int]:
+        """Phase 2.2 (elspeth-0de989c56d) — map terminal RunStatus to the
+        CLI ``RunCompletionStatus`` + exit code.
+
+        ``COMPLETED`` and ``EMPTY`` both map to ``COMPLETED`` / exit 0:
+        a run that ingested zero rows is operationally a clean exit at the
+        CLI surface (the Web layer carries the structural distinction).
+        ``COMPLETED_WITH_FAILURES`` reuses the existing ``PARTIAL``
+        ceremony — same exit-code-1 semantics as the post-run export-failure
+        path that already emits ``PARTIAL``.
+        """
+        match status:
+            case RunStatus.COMPLETED | RunStatus.EMPTY:
+                return RunCompletionStatus.COMPLETED, 0
+            case RunStatus.COMPLETED_WITH_FAILURES:
+                return RunCompletionStatus.PARTIAL, 1
+            case RunStatus.FAILED:
+                return RunCompletionStatus.FAILED, 2
+            case RunStatus.INTERRUPTED:
+                return RunCompletionStatus.INTERRUPTED, 3
+            case _:
+                raise OrchestrationInvariantError(
+                    f"Cannot map RunStatus {status!r} to RunCompletionStatus — "
+                    f"this is a terminal-status-only mapping; RUNNING and other "
+                    f"non-terminal values must not reach this site."
+                )
+
     def _emit_interrupted_ceremony(
         self,
         run_id: str,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         shutdown_exc: GracefulShutdownError,
         start_time: float,
     ) -> None:
@@ -257,10 +560,9 @@ class Orchestrator:
         Shared between run() and resume() — the interrupted ceremony is identical
         in both paths: finalize as INTERRUPTED, emit RunFinished, emit RunSummary.
         """
-        from elspeth.telemetry import RunFinished
 
         total_duration = time.perf_counter() - start_time
-        recorder.finalize_run(run_id, status=RunStatus.INTERRUPTED)
+        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.INTERRUPTED)
 
         self._emit_telemetry(
             RunFinished(
@@ -282,7 +584,8 @@ class Orchestrator:
                 quarantined=shutdown_exc.rows_quarantined,
                 duration_seconds=total_duration,
                 exit_code=3,
-                routed=shutdown_exc.rows_routed,
+                routed_success=shutdown_exc.rows_routed_success,
+                routed_failure=shutdown_exc.rows_routed_failure,
                 routed_destinations=tuple(shutdown_exc.routed_destinations.items()),
             )
         )
@@ -290,26 +593,43 @@ class Orchestrator:
     def _emit_failed_ceremony(
         self,
         run_id: str,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         start_time: float,
+        result: RunResult | None = None,
     ) -> None:
         """Emit telemetry and EventBus events for a failed run.
 
         Finalizes the run as FAILED, emits RunFinished telemetry and RunSummary
-        with zero metrics. Shared between run() (when run_completed=False) and
-        resume().
+        with the best available metrics. Shared between run() (when
+        run_completed=False) and resume().
         """
-        from elspeth.telemetry import RunFinished
 
+        failed_result = result or RunResult(
+            run_id=run_id,
+            status=RunStatus.FAILED,
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_forked=0,
+            rows_coalesced=0,
+            rows_coalesce_failed=0,
+            rows_expanded=0,
+            rows_buffered=0,
+            rows_diverted=0,
+            routed_destinations={},
+        )
         total_duration = time.perf_counter() - start_time
-        recorder.finalize_run(run_id, status=RunStatus.FAILED)
+        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.FAILED)
 
         self._emit_telemetry(
             RunFinished(
                 timestamp=datetime.now(UTC),
                 run_id=run_id,
                 status=RunStatus.FAILED,
-                row_count=0,
+                row_count=failed_result.rows_processed,
                 duration_ms=total_duration * 1000,
             )
         )
@@ -318,14 +638,15 @@ class Orchestrator:
             RunSummary(
                 run_id=run_id,
                 status=RunCompletionStatus.FAILED,
-                total_rows=0,
-                succeeded=0,
-                failed=0,
-                quarantined=0,
+                total_rows=failed_result.rows_processed,
+                succeeded=failed_result.rows_succeeded,
+                failed=failed_result.rows_failed,
+                quarantined=failed_result.rows_quarantined,
                 duration_seconds=total_duration,
                 exit_code=2,  # exit_code: 0=success, 1=partial, 2=total failure
-                routed=0,
-                routed_destinations=(),
+                routed_success=failed_result.rows_routed_success,
+                routed_failure=failed_result.rows_routed_failure,
+                routed_destinations=tuple(failed_result.routed_destinations.items()),
             )
         )
 
@@ -460,10 +781,10 @@ class Orchestrator:
             checkpoint_agg_state = aggregation_state
         elif coalesce_state is not None and coalesce_state.pending:
             pending_entry = coalesce_state.pending[-1]
+            node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
             if pending_entry.branches:
                 last_branch = list(pending_entry.branches.values())[-1]
                 token_id = last_branch.token_id
-                node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
         else:
             for sink_name, token_outcome_pairs in loop_ctx.pending_tokens.items():
                 if not token_outcome_pairs:
@@ -474,7 +795,8 @@ class Orchestrator:
 
         if token_id is None and loop_ctx.last_token_id is not None:
             token_id = loop_ctx.last_token_id
-            node_id = str(source_id)
+            if node_id is None:
+                node_id = str(source_id)
 
         if token_id is None or node_id is None:
             slog.warning(
@@ -512,24 +834,25 @@ class Orchestrator:
 
     def _write_pending_to_sinks(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         ctx: PluginContext,
+        counters: ExecutionCounters,
         pending_tokens: PendingTokenMap,
         sink_id_map: dict[SinkName, NodeID],
         edge_map: Mapping[tuple[NodeID, str], str],
         sink_step: int,
         *,
         on_token_written_factory: Callable[[str], Callable[[TokenInfo], None]] | None = None,
-    ) -> int:
+    ) -> DiversionCounts:
         """Write pending tokens to sinks using SinkExecutor.
 
         Extracted from _execute_run() and _process_resumed_rows() to eliminate
         duplication of the sink write orchestration pattern.
 
         Args:
-            recorder: LandscapeRecorder for audit trail
+            factory: RecorderFactory for audit trail
             run_id: Current run ID
             config: Pipeline configuration
             ctx: Plugin context
@@ -542,11 +865,11 @@ class Orchestrator:
         """
         from itertools import groupby
 
-        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.executors.sink import DiversionCounts, SinkExecutor
 
-        sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
+        sink_executor = SinkExecutor(factory.execution, factory.data_flow, self._span_factory, run_id)
         step = sink_step
-        total_diversions = 0
+        total_diversions = DiversionCounts()
 
         for sink_name, token_outcome_pairs in pending_tokens.items():
             if not token_outcome_pairs:
@@ -589,11 +912,12 @@ class Orchestrator:
             # Group tokens by pending_outcome for separate write() calls
             # (sink_executor.write() takes a single PendingOutcome for all tokens in a batch)
             # PendingOutcome carries error_hash for QUARANTINED tokens
-            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str]:
+            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str]:
                 pending = pair[1]
                 if pending is None:
-                    return (True, "", "")  # None sorts first
-                return (False, pending.outcome.value, pending.error_hash or "")
+                    return (True, "", "", "")  # None sorts first
+                outcome_value = pending.outcome.value if pending.outcome is not None else ""
+                return (False, outcome_value, pending.path.value, pending.error_hash or "")
 
             sorted_pairs = sorted(token_outcome_pairs, key=pending_sort_key)
 
@@ -602,9 +926,11 @@ class Orchestrator:
             if on_token_written_factory is not None:
                 on_token_written = on_token_written_factory(sink_node_id)
 
-            for pending_outcome, group in groupby(sorted_pairs, key=lambda x: x[1]):
-                group_tokens = [token for token, _ in group]
-                _, diversion_count = sink_executor.write(
+            for _group_key, group in groupby(sorted_pairs, key=pending_sort_key):
+                group_pairs = list(group)
+                pending_outcome = group_pairs[0][1]
+                group_tokens = [token for token, _pending in group_pairs]
+                _, diversion_counts = sink_executor.write(
                     sink=sink,
                     tokens=group_tokens,
                     ctx=ctx,
@@ -616,7 +942,16 @@ class Orchestrator:
                     failsink_edge_id=failsink_edge_id,
                     on_token_written=on_token_written,
                 )
-                total_diversions += diversion_count
+                reconcile_sink_write_diversions(
+                    counters=counters,
+                    sink_name=sink_name,
+                    pending_outcome=pending_outcome,
+                    diversion_count=diversion_counts.total,
+                )
+                total_diversions = DiversionCounts(
+                    failsink_mode=total_diversions.failsink_mode + diversion_counts.failsink_mode,
+                    discard_mode=total_diversions.discard_mode + diversion_counts.discard_mode,
+                )
 
         return total_diversions
 
@@ -661,13 +996,10 @@ class Orchestrator:
         cleanup_errors: list[str] = []
 
         def record_cleanup_error(hook: str, plugin_name: str, error: Exception) -> None:
-            from elspeth.contracts import FrameworkBugError
-            from elspeth.contracts.errors import AuditIntegrityError
-
             # FrameworkBugError and AuditIntegrityError indicate system-level
             # corruption or bugs — Tier 1 violations that must crash immediately.
             # These must NOT be downgraded to cleanup warnings.
-            if isinstance(error, (FrameworkBugError, AuditIntegrityError)):
+            if isinstance(error, contract_errors.TIER_1_ERRORS):
                 raise
 
             logger.warning(
@@ -680,44 +1012,42 @@ class Orchestrator:
             )
             cleanup_errors.append(f"{hook}({plugin_name}): {type(error).__name__}: {error}")
 
-        # Call on_complete for all plugins (even on error)
-        # Base classes provide no-op implementations, so no hasattr needed
+        def run_hook(hook_label: str, plugin_name: str, fn: Callable[[], None]) -> None:
+            # Single broad-catch surface for plugin cleanup. Per the policy
+            # documented above, plugin cleanup MUST attempt every hook even when
+            # one fails — broad catch is required by contract. Tier-1 errors are
+            # re-raised inside record_cleanup_error; everything else is collected
+            # and folded into the RuntimeError raised after all hooks finish.
+            try:
+                fn()
+            except Exception as exc:
+                record_cleanup_error(hook_label, plugin_name, exc)
+
+        # Call on_complete for all plugins (even on error).
+        # Base classes provide no-op implementations, so no hasattr needed.
+        # functools.partial preserves the bound-method type for mypy and avoids
+        # the loop-variable closure trap that lambdas would otherwise need
+        # default-argument workarounds for.
+        from functools import partial
+
         for transform in config.transforms:
-            try:
-                transform.on_complete(ctx)
-            except Exception as e:
-                record_cleanup_error("transform.on_complete", transform.name, e)
+            run_hook("transform.on_complete", transform.name, partial(transform.on_complete, ctx))
         for sink in config.sinks.values():
-            try:
-                sink.on_complete(ctx)
-            except Exception as e:
-                record_cleanup_error("sink.on_complete", sink.name, e)
+            run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
         if include_source:
-            try:
-                config.source.on_complete(ctx)
-            except Exception as e:
-                record_cleanup_error("source.on_complete", config.source.name, e)
+            run_hook("source.on_complete", config.source.name, partial(config.source.on_complete, ctx))
 
         # Close source (if included) and all sinks
         if include_source:
-            try:
-                config.source.close()
-            except Exception as e:
-                record_cleanup_error("source.close", config.source.name, e)
+            run_hook("source.close", config.source.name, config.source.close)
 
         # Close all transforms (release resources - file handles, connections, etc.)
         for transform in config.transforms:
-            try:
-                transform.close()
-            except Exception as e:
-                record_cleanup_error("transform.close", transform.name, e)
+            run_hook("transform.close", transform.name, transform.close)
 
         # Close all sinks
         for sink in config.sinks.values():
-            try:
-                sink.close()
-            except Exception as e:
-                record_cleanup_error("sink.close", sink.name, e)
+            run_hook("sink.close", sink.name, sink.close)
 
         if cleanup_errors:
             error_summary = "; ".join(cleanup_errors)
@@ -819,7 +1149,7 @@ class Orchestrator:
         graph: ExecutionGraph,
         config: PipelineConfig,
         settings: ElspethSettings | None,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
         edge_map: dict[tuple[NodeID, str], str],
@@ -874,20 +1204,48 @@ class Orchestrator:
             # payload_store intentionally omitted: CoalesceExecutor's TokenManager only
             # calls coalesce_tokens(), which does not persist payloads (payloads are
             # recorded by the RowProcessor's TokenManager during initial token creation).
-            token_manager = TokenManager(recorder, step_resolver=step_resolver)
+            token_manager = TokenManager(factory.data_flow, step_resolver=step_resolver)
             coalesce_executor = CoalesceExecutor(
-                recorder=recorder,
+                execution=factory.execution,
                 span_factory=self._span_factory,
                 token_manager=token_manager,
                 run_id=run_id,
                 step_resolver=step_resolver,
                 clock=self._clock,
                 max_completed_keys=self._coalesce_completed_keys_limit,
+                data_flow=factory.data_flow,
             )
 
             for coalesce_settings_entry in settings.coalesce:
                 coalesce_node_id = coalesce_id_map[CoalesceName(coalesce_settings_entry.name)]
-                coalesce_executor.register_coalesce(coalesce_settings_entry, coalesce_node_id)
+                # Extract guaranteed fields from branch schemas for lost-branch audit trail.
+                # Returns dict[branch_name, SchemaConfig]; we extract guaranteed fields.
+                branch_schema_configs = graph.get_coalesce_branch_schemas(CoalesceName(coalesce_settings_entry.name))
+                branch_schemas: dict[str, tuple[str, ...]] | None = None
+                if branch_schema_configs:
+                    branch_schemas = {
+                        branch_name: tuple(sorted(schema.get_effective_guaranteed_fields()))
+                        for branch_name, schema in branch_schema_configs.items()
+                    }
+
+                # Retrieve pre-computed output schema from DAG builder (P2 fix).
+                # This ensures runtime contracts match build-time schema computation,
+                # preserving nullable semantics from the P1 fix.
+                coalesce_node_info = graph.get_node_info(coalesce_node_id)
+                if coalesce_node_info.output_schema_config is None:
+                    raise FrameworkBugError(
+                        f"Coalesce node '{coalesce_node_id}' has no output_schema_config. "
+                        f"The DAG builder must populate output_schema_config for all coalesce "
+                        f"nodes via _assign_schema(). This indicates a builder bug."
+                    )
+                output_schema = create_contract_from_config(coalesce_node_info.output_schema_config)
+
+                coalesce_executor.register_coalesce(
+                    coalesce_settings_entry,
+                    coalesce_node_id,
+                    branch_schemas=branch_schemas,
+                    output_schema=output_schema,
+                )
             if restored_coalesce_state is not None:
                 coalesce_executor.restore_from_checkpoint(restored_coalesce_state)
 
@@ -907,11 +1265,13 @@ class Orchestrator:
         typed_aggregation_settings: dict[NodeID, AggregationSettings] = {NodeID(k): v for k, v in config.aggregation_settings.items()}
 
         processor = RowProcessor(
-            recorder=recorder,
+            execution=factory.execution,
+            data_flow=factory.data_flow,
             span_factory=self._span_factory,
             run_id=run_id,
             source_node_id=source_id,
             source_on_success=config.source.on_success,
+            source_plugin=config.source,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
             traversal=traversal,
@@ -976,21 +1336,23 @@ class Orchestrator:
         config: PipelineConfig,
         payload_store: PayloadStore,
         secret_resolutions: list[SecretResolutionInput] | None,
-    ) -> tuple[LandscapeRecorder, Any]:
-        """Execute the DATABASE phase: create recorder, begin run, record secrets.
+        *,
+        run_id: str | None = None,
+    ) -> tuple[RecorderFactory, Any]:
+        """Execute the DATABASE phase: create factory, begin run, record secrets.
 
         Args:
             config: Pipeline configuration.
             payload_store: PayloadStore for audit compliance.
             secret_resolutions: Optional secret resolution records.
+            run_id: Optional caller-supplied run ID for audit correlation.
 
         Returns:
-            Tuple of (recorder, run) where run has run_id and config_hash attributes.
+            Tuple of (factory, run) where run has run_id and config_hash attributes.
 
         Raises:
             Exception: Re-raises any database connection or initialization failure.
         """
-        from elspeth.telemetry import RunStarted
 
         phase_start = time.perf_counter()
         try:
@@ -1005,18 +1367,19 @@ class Orchestrator:
             # This enables proper contract propagation when resuming from stored payloads
             source_contract = config.source.get_schema_contract()
 
-            recorder = LandscapeRecorder(self._db, payload_store=payload_store)
-            run = recorder.begin_run(
+            factory = RecorderFactory(self._db, payload_store=payload_store)
+            run = factory.run_lifecycle.begin_run(
                 config=config.config,
                 canonical_version=self._canonical_version,
                 source_schema_json=source_schema_json,
                 schema_contract=source_contract,
+                run_id=run_id,
             )
 
             # Record secret resolutions in audit trail (deferred from pre-run loading)
             # Resolutions already contain pre-computed fingerprints (no plaintext values)
             if secret_resolutions:
-                recorder.record_secret_resolutions(
+                factory.run_lifecycle.record_secret_resolutions(
                     run_id=run.run_id,
                     resolutions=secret_resolutions,
                 )
@@ -1033,33 +1396,32 @@ class Orchestrator:
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.DATABASE, duration_seconds=time.perf_counter() - phase_start))
         except Exception as e:
-            self._events.emit(PhaseError(phase=PipelinePhase.DATABASE, error=e))
+            self._emit_phase_error(PipelinePhase.DATABASE, e)
             raise  # CRITICAL: Always re-raise - database connection failure is fatal
 
-        return recorder, run
+        return factory, run
 
     def _execute_export_phase(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         settings: ElspethSettings,
-        config: PipelineConfig,
+        sink_factory: Callable[[str], SinkProtocol],
     ) -> None:
         """Execute the EXPORT phase: export Landscape data to configured sink.
 
         Args:
-            recorder: LandscapeRecorder for status tracking.
+            factory: RecorderFactory for status tracking.
             run_id: Run identifier.
             settings: Full settings (export config accessed from settings.landscape.export).
-            config: Pipeline configuration (sinks needed for export).
+            sink_factory: Creates a fresh sink instance by name for export.
 
         Raises:
             Exception: Re-raises any export failure (run is still "completed" in Landscape).
         """
-        from elspeth.telemetry import PhaseChanged
 
         export_config = settings.landscape.export
-        recorder.set_export_status(
+        factory.run_lifecycle.set_export_status(
             run_id,
             status=ExportStatus.PENDING,
             export_format=export_config.format,
@@ -1080,18 +1442,22 @@ class Orchestrator:
                 )
             )
 
-            # Call module function directly (no wrapper method)
-            export_landscape(self._db, run_id, settings, config.sinks)
+            export_landscape(self._db, run_id, settings, sink_factory)
 
-            recorder.set_export_status(run_id, status=ExportStatus.COMPLETED)
+            factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
             self._events.emit(PhaseCompleted(phase=PipelinePhase.EXPORT, duration_seconds=time.perf_counter() - phase_start))
         except Exception as export_error:
-            self._events.emit(PhaseError(phase=PipelinePhase.EXPORT, error=export_error, target=export_config.sink))
-            recorder.set_export_status(
-                run_id,
-                status=ExportStatus.FAILED,
-                error=str(export_error),
-            )
+            self._emit_phase_error(PipelinePhase.EXPORT, export_error, target=export_config.sink)
+            with best_effort(
+                "Export status FAILED recording",
+                run_id=run_id,
+                original_error=type(export_error).__name__,
+            ):
+                factory.run_lifecycle.set_export_status(
+                    run_id,
+                    status=ExportStatus.FAILED,
+                    error=str(export_error),
+                )
             # Re-raise so caller knows export failed
             # (run is still "completed" in Landscape)
             raise
@@ -1101,12 +1467,13 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph | None = None,
         settings: ElspethSettings | None = None,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None = None,
         *,
         payload_store: PayloadStore,
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
+        sink_factory: Callable[[str], SinkProtocol] | None = None,
+        run_id: str | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -1114,10 +1481,6 @@ class Orchestrator:
             config: Pipeline configuration with plugins
             graph: Pre-validated execution graph (required)
             settings: Full settings (for post-run hooks like export)
-            batch_checkpoints: Typed batch transform checkpoints to restore
-                (from previous BatchPendingError). Maps node_id ->
-                BatchCheckpointState. Used when retrying a run after a batch
-                transform raised BatchPendingError.
             payload_store: PayloadStore for persisting source row payloads.
             secret_resolutions: Optional secret resolution records from
                 load_secrets_from_config(). Recorded in audit trail after run creation.
@@ -1126,6 +1489,11 @@ class Orchestrator:
                 trail after run creation.
             shutdown_event: Optional pre-created shutdown event for testing.
                 Skips signal handler installation when provided.
+            sink_factory: Creates a fresh sink instance by name. Required when
+                landscape export is enabled (the pipeline's sinks are already
+                closed by the time export runs).
+            run_id: Optional caller-supplied Landscape run ID. When omitted,
+                Landscape generates a run ID.
 
         Raises:
             OrchestrationInvariantError: If graph or payload_store is not provided
@@ -1135,24 +1503,31 @@ class Orchestrator:
         if payload_store is None:
             raise OrchestrationInvariantError("PayloadStore is required for audit compliance.")
 
+        # ADR-010 §Decision 3: assert registry non-empty and freeze both
+        # registries before any row is processed. prepare_for_run() is
+        # idempotent when the registry is already frozen (short-circuits on
+        # repeat calls from multi-run test suites). The non-empty assertion
+        # only fires on the first call per process lifetime; subsequent calls
+        # trust the earlier freeze was performed after a passing assertion.
+        prepare_for_run()
+
         # Schema validation now happens in ExecutionGraph.validate() during graph construction
         self._reset_checkpoint_sequence()
 
-        # DATABASE phase - create recorder and begin run
-        recorder, run = self._initialize_database_phase(
+        # DATABASE phase - create factory and begin run
+        factory, run = self._initialize_database_phase(
             config,
             payload_store,
             secret_resolutions,
+            run_id=run_id,
         )
 
         # Record pre-flight results (deferred from bootstrap_and_run)
         if preflight_results is not None:
-            recorder.record_preflight_results(
+            factory.run_lifecycle.record_preflight_results(
                 run_id=run.run_id,
                 preflight=preflight_results,
             )
-
-        from elspeth.telemetry import RunFinished
 
         run_completed = False
         run_start_time = time.perf_counter()
@@ -1162,19 +1537,32 @@ class Orchestrator:
             shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else self._shutdown_handler_context()
             with self._span_factory.run_span(run.run_id), shutdown_ctx as active_event:
                 result = self._execute_run(
-                    recorder,
+                    factory,
                     run.run_id,
                     config,
                     graph,
                     settings,
-                    batch_checkpoints,
                     payload_store=payload_store,
                     shutdown_event=active_event,
                 )
 
+            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value
+            # terminal status from the row-count shape so an operator
+            # reading /api/runs/{rid} can distinguish "ran cleanly" from
+            # "ran but no row succeeded" without opening output files.
+            terminal_status = derive_terminal_run_status(
+                rows_processed=result.rows_processed,
+                rows_succeeded=result.rows_succeeded,
+                rows_failed=result.rows_failed,
+                rows_routed_success=result.rows_routed_success,
+                rows_routed_failure=result.rows_routed_failure,
+                rows_quarantined=result.rows_quarantined,
+                rows_coalesce_failed=result.rows_coalesce_failed,
+            )
+
             # Complete run with reproducibility grade computation
-            recorder.finalize_run(run.run_id, status=RunStatus.COMPLETED)
-            result = replace(result, status=RunStatus.COMPLETED)
+            factory.run_lifecycle.finalize_run(run.run_id, status=terminal_status)
+            result = replace(result, status=terminal_status)
             run_completed = True
 
             # Emit telemetry AFTER Landscape finalize succeeds
@@ -1183,7 +1571,7 @@ class Orchestrator:
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run.run_id,
-                    status=RunStatus.COMPLETED,
+                    status=terminal_status,
                     row_count=result.rows_processed,
                     duration_ms=run_duration_ms,
                 )
@@ -1195,67 +1583,114 @@ class Orchestrator:
 
             # EXPORT phase - post-run landscape export (if enabled)
             if settings is not None and settings.landscape.export.enabled:
-                self._execute_export_phase(recorder, run.run_id, settings, config)
+                if sink_factory is None:
+                    raise ValueError(
+                        "Export is enabled but no sink_factory was provided to orchestrator.run(). "
+                        "The caller must supply a sink_factory so the export phase can create "
+                        "a fresh sink instance (the pipeline's sinks are already closed)."
+                    )
+                self._execute_export_phase(factory, run.run_id, settings, sink_factory)
 
-            # Emit RunSummary event with final metrics
+            # Emit RunSummary event with final metrics.  Map the new
+            # terminal status onto the CLI exit-code taxonomy via
+            # ``_cli_completion_for`` so the operator-facing CLI summary
+            # remains coherent with /api/runs/{rid}.
+            cli_status, exit_code = self._cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - run_start_time
             self._events.emit(
                 RunSummary(
                     run_id=run.run_id,
-                    status=RunCompletionStatus.COMPLETED,
+                    status=cli_status,
                     total_rows=result.rows_processed,
                     succeeded=result.rows_succeeded,
                     failed=result.rows_failed,
                     quarantined=result.rows_quarantined,
                     duration_seconds=total_duration,
-                    exit_code=0,
-                    routed=result.rows_routed,
+                    exit_code=exit_code,
+                    routed_success=result.rows_routed_success,
+                    routed_failure=result.rows_routed_failure,
                     routed_destinations=tuple(result.routed_destinations.items()),
                 )
             )
 
             return result
 
-        except BatchPendingError:
-            # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-            # A batch transform has submitted work that isn't complete yet.
-            # DO NOT mark run as failed - it's pending, not failed.
-            # DO NOT emit RunSummary - run isn't done yet.
-            # Re-raise for caller to schedule retry based on check_after_seconds.
-            raise
         except GracefulShutdownError as shutdown_exc:
-            self._emit_interrupted_ceremony(run.run_id, recorder, shutdown_exc, run_start_time)
+            with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
+                self._emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
             raise  # Propagate to CLI
-        except Exception:
-            # Emit RunSummary with failure status
-            if run_completed:
-                # Export failed after successful run — emit PARTIAL status.
-                # RunFinished was already emitted before the export attempt,
-                # so only emit the EventBus RunSummary here.
-                total_duration = time.perf_counter() - run_start_time
-                self._events.emit(
-                    RunSummary(
-                        run_id=run.run_id,
-                        status=RunCompletionStatus.PARTIAL,
-                        total_rows=result.rows_processed,
-                        succeeded=result.rows_succeeded,
-                        failed=result.rows_failed,
-                        quarantined=result.rows_quarantined,
-                        duration_seconds=total_duration,
-                        exit_code=1,
-                        routed=result.rows_routed,
-                        routed_destinations=tuple(result.routed_destinations.items()),
+        except _RunFailedWithPartialResultError as failed_exc:
+            with best_effort(
+                "Failed/partial-result ceremony on run failure",
+                run_id=run.run_id,
+                run_completed=run_completed,
+            ):
+                if run_completed:
+                    # Export failed after successful run — emit PARTIAL status.
+                    # RunFinished was already emitted before the export attempt,
+                    # so only emit the EventBus RunSummary here.
+                    total_duration = time.perf_counter() - run_start_time
+                    self._events.emit(
+                        RunSummary(
+                            run_id=run.run_id,
+                            status=RunCompletionStatus.PARTIAL,
+                            total_rows=result.rows_processed,
+                            succeeded=result.rows_succeeded,
+                            failed=result.rows_failed,
+                            quarantined=result.rows_quarantined,
+                            duration_seconds=total_duration,
+                            exit_code=1,
+                            routed_success=result.rows_routed_success,
+                            routed_failure=result.rows_routed_failure,
+                            routed_destinations=tuple(result.routed_destinations.items()),
+                        )
                     )
-                )
-            else:
-                self._emit_failed_ceremony(run.run_id, recorder, run_start_time)
+                else:
+                    self._emit_failed_ceremony(
+                        run.run_id,
+                        factory,
+                        run_start_time,
+                        failed_exc.partial_result,
+                    )
+            raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
+        except Exception:
+            # Outer broad-except: any unhandled exception type is a run failure
+            # requiring a RunSummary. The inner ceremony is best-effort and must
+            # not mask the original; the outer catch re-raises after.
+            with best_effort(
+                "Generic failure ceremony on run failure",
+                run_id=run.run_id,
+                run_completed=run_completed,
+            ):
+                if run_completed:
+                    # Export failed after successful run — emit PARTIAL status.
+                    # RunFinished was already emitted before the export attempt,
+                    # so only emit the EventBus RunSummary here.
+                    total_duration = time.perf_counter() - run_start_time
+                    self._events.emit(
+                        RunSummary(
+                            run_id=run.run_id,
+                            status=RunCompletionStatus.PARTIAL,
+                            total_rows=result.rows_processed,
+                            succeeded=result.rows_succeeded,
+                            failed=result.rows_failed,
+                            quarantined=result.rows_quarantined,
+                            duration_seconds=total_duration,
+                            exit_code=1,
+                            routed_success=result.rows_routed_success,
+                            routed_failure=result.rows_routed_failure,
+                            routed_destinations=tuple(result.routed_destinations.items()),
+                        )
+                    )
+                else:
+                    self._emit_failed_ceremony(run.run_id, factory, run_start_time)
             raise  # CRITICAL: Always re-raise - observability doesn't suppress errors
         finally:
             self._safe_flush_telemetry()
 
     def _register_nodes_with_landscape(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
@@ -1269,10 +1704,10 @@ class Orchestrator:
 
         Iterates the topological execution order, resolves plugin metadata
         (version, determinism), schema config, and output contract for each node,
-        then calls recorder.register_node().
+        then calls factory.data_flow.register_node().
 
         Args:
-            recorder: LandscapeRecorder for audit trail.
+            factory: RecorderFactory for audit trail.
             run_id: Run identifier.
             config: Pipeline configuration (for source contract).
             graph: Execution graph (for node info lookup).
@@ -1283,7 +1718,6 @@ class Orchestrator:
             coalesce_node_ids: Set of coalesce node IDs (structural, no plugin).
         """
         from elspeth.contracts import Determinism
-        from elspeth.contracts.schema import SchemaConfig
 
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)
@@ -1295,11 +1729,13 @@ class Orchestrator:
                 # Use engine version to track which version of ExpressionParser was used
                 plugin_version = f"engine:{ENGINE_VERSION}"
                 determinism = Determinism.DETERMINISTIC
+                source_file_hash = None  # Engine-internal nodes have no source file
             elif node_id in coalesce_node_ids:
                 # Coalesce nodes merge tokens from parallel paths - deterministic operation
                 # Use engine version to track which version of the coalesce logic was used
                 plugin_version = f"engine:{ENGINE_VERSION}"
                 determinism = Determinism.DETERMINISTIC
+                source_file_hash = None  # Engine-internal nodes have no source file
             else:
                 # Direct access - if node_id is in execution_order (from graph.topological_order()),
                 # it MUST be in node_to_plugin (built from the same graph's source, transforms, sinks).
@@ -1310,15 +1746,17 @@ class Orchestrator:
                 # all base classes provide defaults. Direct access is safe.
                 plugin_version = plugin.plugin_version
                 determinism = plugin.determinism
+                source_file_hash = plugin.source_file_hash
 
-            # Get schema_config — prefer computed output_schema_config
-            # (includes guaranteed_fields, audit_fields from LLM transforms)
-            # over raw config["schema"] which may omit computed contract fields.
-            if node_info.output_schema_config is not None:
-                schema_config = node_info.output_schema_config
-            else:
-                schema_dict = node_info.config["schema"]
-                schema_config = SchemaConfig.from_dict(schema_dict)
+            # Schema config is always available via output_schema_config —
+            # populated at construction time for all node types.
+            schema_config = node_info.output_schema_config
+            if schema_config is None:
+                raise FrameworkBugError(
+                    f"Node '{node_id}' has no output_schema_config. "
+                    "All nodes in execution order must have schema config "
+                    "populated by the builder."
+                )
 
             # Get output_contract for source nodes
             # Sources have get_schema_contract() method that returns their output contract
@@ -1326,7 +1764,7 @@ class Orchestrator:
             if node_id == source_id:
                 output_contract = config.source.get_schema_contract()
 
-            recorder.register_node(
+            factory.data_flow.register_node(
                 run_id=run_id,
                 node_id=node_id,
                 plugin_name=node_info.plugin_name,
@@ -1336,11 +1774,12 @@ class Orchestrator:
                 determinism=determinism,
                 schema_config=schema_config,
                 output_contract=output_contract,
+                source_file_hash=source_file_hash,
             )
 
     def _register_graph_nodes_and_edges(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
@@ -1354,7 +1793,7 @@ class Orchestrator:
         4. Validate route destinations, error sinks, quarantine destinations
 
         Args:
-            recorder: LandscapeRecorder for audit trail
+            factory: RecorderFactory for audit trail
             run_id: Run identifier
             config: Pipeline configuration
             graph: Execution graph
@@ -1362,7 +1801,6 @@ class Orchestrator:
         Returns:
             GraphArtifacts with edge_map, source_id, and all ID mappings
         """
-        from elspeth.telemetry import PhaseChanged
 
         # Get execution order from graph
         execution_order = graph.topological_order()
@@ -1413,7 +1851,7 @@ class Orchestrator:
 
             # Register nodes with Landscape using graph's node IDs and actual plugin metadata
             self._register_nodes_with_landscape(
-                recorder,
+                factory,
                 run_id,
                 config,
                 graph,
@@ -1429,7 +1867,7 @@ class Orchestrator:
             edge_map: dict[tuple[NodeID, str], str] = {}
 
             for edge_info in graph.get_edges():
-                edge = recorder.register_edge(
+                edge = factory.data_flow.register_edge(
                     run_id=run_id,
                     from_node_id=edge_info.from_node,
                     to_node_id=edge_info.to_node,
@@ -1442,6 +1880,22 @@ class Orchestrator:
             # Get route resolution map - maps (gate_node, label) -> "continue" | sink_name
             route_resolution_map = graph.get_route_resolution_map()
 
+            # NOTE — value-source compliance is enforced at the entry-point
+            # boundary, NOT here. The walker
+            # (``engine/orchestrator/preflight.validate_value_source_compliance``)
+            # runs inside ``cli_helpers.instantiate_plugins_from_config`` and
+            # the composer/web-execution validate paths
+            # (``web/execution/validation.validate_pipeline``,
+            # ``web/execution/service._run_pipeline``). Every legitimate caller
+            # that builds a ``PipelineConfig`` passes through one of those
+            # surfaces, so by the time we reach ``Orchestrator.run`` the bundle
+            # has already been gated. If you add a new entry point that
+            # constructs a ``PipelineConfig`` directly (test harness,
+            # programmatic API, etc.), call ``validate_value_source_compliance``
+            # at that boundary too — the orchestrator does NOT re-validate
+            # value-source declarations per run, and a bypassing entry point
+            # would silently skip the check otherwise.
+            #
             # Validate all route destinations BEFORE processing any rows
             # This catches config errors early instead of after partial processing
             # Note: config gates also add to route_resolution_map, validated the same way
@@ -1481,7 +1935,7 @@ class Orchestrator:
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.GRAPH, duration_seconds=time.perf_counter() - phase_start))
         except Exception as e:
-            self._events.emit(PhaseError(phase=PipelinePhase.GRAPH, error=e))
+            self._emit_phase_error(PipelinePhase.GRAPH, e)
             raise  # CRITICAL: Always re-raise - graph validation failure is fatal
 
         return GraphArtifacts(
@@ -1495,18 +1949,18 @@ class Orchestrator:
 
     def _initialize_run_context(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
         settings: ElspethSettings | None,
         artifacts: GraphArtifacts,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None,
         payload_store: PayloadStore,
         *,
         include_source_on_start: bool = True,
         restored_aggregation_state: Mapping[str, AggregationCheckpointState] | None = None,
         restored_coalesce_state: CoalesceCheckpointState | None = None,
+        shutdown_event: threading.Event | None = None,
     ) -> RunContext:
         """Initialize run context: assign node IDs, create PluginContext, call on_start, build processor.
 
@@ -1538,16 +1992,16 @@ class Orchestrator:
             sink_id_map=sink_id_map,
         )
 
-        # Create context with the LandscapeRecorder
-        # Restore batch checkpoints if provided (from previous BatchPendingError)
+        # Create context with the PluginAuditWriter
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),
+            payload_store=factory.payload_store,
             rate_limit_registry=self._rate_limit_registry,
             concurrency_config=self._concurrency_config,
-            _batch_checkpoints=batch_checkpoints or {},
             telemetry_emit=self._emit_telemetry,
+            shutdown_event=shutdown_event,
         )
 
         # Set node_id on context for source validation error attribution
@@ -1555,27 +2009,19 @@ class Orchestrator:
         # (e.g., malformed CSV rows) can be attributed to the source node
         ctx.node_id = source_id
 
-        # Call on_start for all plugins BEFORE processing.
-        # Order: source -> transforms (pipeline order) -> sinks.
-        # Base classes provide no-op implementations, so no hasattr needed.
-        # NOTE: on_start is called OUTSIDE the try/finally that calls
-        # _cleanup_plugins. If on_start raises, on_complete/close are NOT called.
-        if include_source_on_start:
-            config.source.on_start(ctx)
-        for transform in config.transforms:
-            transform.on_start(ctx)
-        for sink in config.sinks.values():
-            sink.on_start(ctx)
-
-        # Wrap _build_processor so that if it fails after successful on_start,
-        # plugin cleanup still runs (prevents resource leaks: DB connections,
-        # file handles, thread pools).
         try:
+            if include_source_on_start:
+                config.source.on_start(ctx)
+            for transform in config.transforms:
+                transform.on_start(ctx)
+            for sink in config.sinks.values():
+                sink.on_start(ctx)
+
             processor, coalesce_node_map, coalesce_executor = self._build_processor(
                 graph=graph,
                 config=config,
                 settings=settings,
-                recorder=recorder,
+                factory=factory,
                 run_id=run_id,
                 source_id=source_id,
                 edge_map=edge_map,
@@ -1614,7 +2060,7 @@ class Orchestrator:
 
     def _setup_resume_context(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
@@ -1638,7 +2084,7 @@ class Orchestrator:
         # Build edge_map from database (load real edge IDs registered in original run)
         # CRITICAL: Must use real edge_ids for FK integrity when recording routing events
         # Convert keys from (str, str) to (NodeID, str) to match RowProcessor's type
-        raw_edge_map = recorder.get_edge_map(run_id)
+        raw_edge_map = factory.data_flow.get_edge_map(run_id)
         edge_map: dict[tuple[NodeID, str], str] = {(NodeID(k[0]), k[1]): v for k, v in raw_edge_map.items()}
 
         # Get route resolution map for validation
@@ -1690,7 +2136,7 @@ class Orchestrator:
 
     def _flush_and_write_sinks(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         loop_ctx: LoopContext,
         sink_id_map: Mapping[SinkName, NodeID],
@@ -1712,18 +2158,22 @@ class Orchestrator:
         """
         counters = loop_ctx.counters
 
-        total_diversions = self._write_pending_to_sinks(
-            recorder=recorder,
+        diversion_counts = self._write_pending_to_sinks(
+            factory=factory,
             run_id=run_id,
             config=loop_ctx.config,
             ctx=loop_ctx.ctx,
+            counters=loop_ctx.counters,
             pending_tokens=loop_ctx.pending_tokens,
             sink_id_map=dict(sink_id_map),
             edge_map=edge_map,
             sink_step=loop_ctx.processor.resolve_sink_step(),
             on_token_written_factory=on_token_written_factory,
         )
-        loop_ctx.counters.rows_diverted += total_diversions
+        # ADR-019: failsink-mode diversions are TRANSIENT structural evidence;
+        # discard-mode diversions are FAILURE predicate inputs as well.
+        loop_ctx.counters.rows_diverted += diversion_counts.total
+        loop_ctx.counters.rows_failed += diversion_counts.discard_mode
 
         # If shutdown interrupted the loop, raise after all pending work is flushed.
         # At this point: sink writes are done, and any buffered aggregation/coalesce
@@ -1742,13 +2192,14 @@ class Orchestrator:
                 rows_succeeded=counters.rows_succeeded,
                 rows_failed=counters.rows_failed,
                 rows_quarantined=counters.rows_quarantined,
-                rows_routed=counters.rows_routed,
+                rows_routed_success=counters.rows_routed_success,
+                rows_routed_failure=counters.rows_routed_failure,
                 routed_destinations=dict(counters.routed_destinations),
             )
 
     def _handle_quarantine_row(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
         source_item: SourceRow,
@@ -1771,7 +2222,6 @@ class Orchestrator:
         7. Compute error_hash
         8. Append to pending_tokens with PendingOutcome
         """
-        from elspeth.telemetry import RowCreated
 
         config = loop_ctx.config
         counters = loop_ctx.counters
@@ -1800,8 +2250,11 @@ class Orchestrator:
                 f"source._on_validation_failure='{config.source._on_validation_failure}'."
             )
 
-        # Destination validated - increment counter and proceed with routing.
+        # Destination validated. Source quarantine is a FAILURE lifecycle with
+        # a quarantine reporting subset, so bump both counters.
         counters.rows_quarantined += 1
+        counters.rows_failed += 1
+        validation_error_id = loop_ctx.ctx.pop_pending_quarantine_validation_error_id(source_item.row)
         # Sanitize quarantine data at Tier-3 boundary: replace non-finite
         # floats (NaN, Infinity) with None so downstream canonical JSON
         # and stable_hash operations succeed. The quarantine_error records
@@ -1816,13 +2269,14 @@ class Orchestrator:
             source_node_id=source_id,
             row_index=row_index,
             source_row=source_item,
+            validation_error_id=validation_error_id,
         )
 
         # Record source node_state (step_index=0) for quarantine audit lineage.
         # Status is FAILED because the source validation rejected this row.
         quarantine_data = source_item.row if isinstance(source_item.row, dict) else {"_raw": source_item.row}
         quarantine_error_msg = source_item.quarantine_error or "unknown_validation_error"
-        source_state = recorder.begin_node_state(
+        source_state = factory.execution.begin_node_state(
             token_id=quarantine_token.token_id,
             node_id=source_id,
             run_id=run_id,
@@ -1830,7 +2284,7 @@ class Orchestrator:
             input_data=quarantine_data,
             quarantined=True,
         )
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=source_state.state_id,
             status=NodeStateStatus.FAILED,
             duration_ms=0,
@@ -1854,7 +2308,7 @@ class Orchestrator:
                 f"on_validation_failure should have created a DIVERT edge "
                 f"in from_plugin_instances()."
             ) from exc
-        recorder.record_routing_event(
+        factory.execution.record_routing_event(
             state_id=source_state.state_id,
             edge_id=quarantine_edge_id,
             mode=RoutingMode.DIVERT,
@@ -1892,11 +2346,20 @@ class Orchestrator:
         quarantine_error_hash = hashlib.sha256(quarantine_error_msg.encode()).hexdigest()[:16]
 
         # Pass PendingOutcome with error_hash - outcome recorded after sink durability
-        pending_tokens[quarantine_sink].append((quarantine_token, PendingOutcome(RowOutcome.QUARANTINED, quarantine_error_hash)))
+        pending_tokens[quarantine_sink].append(
+            (
+                quarantine_token,
+                PendingOutcome(
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.QUARANTINED_AT_SOURCE,
+                    error_hash=quarantine_error_hash,
+                ),
+            )
+        )
 
     def _record_field_resolution(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
     ) -> bool:
@@ -1909,14 +2372,12 @@ class Orchestrator:
         Returns:
             True if field resolution was recorded, False otherwise.
         """
-        from elspeth.telemetry import FieldResolutionApplied
-
         field_resolution = config.source.get_field_resolution()
         if field_resolution is None:
             return False
 
         resolution_mapping, normalization_version = field_resolution
-        recorder.record_source_field_resolution(
+        factory.run_lifecycle.record_source_field_resolution(
             run_id=run_id,
             resolution_mapping=resolution_mapping,
             normalization_version=normalization_version,
@@ -1936,7 +2397,7 @@ class Orchestrator:
 
     def _record_schema_contract(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
         config: PipelineConfig,
@@ -1956,9 +2417,9 @@ class Orchestrator:
             return False
 
         # Update run-level contract
-        recorder.update_run_contract(run_id, schema_contract)
+        factory.run_lifecycle.update_run_contract(run_id, schema_contract)
         # Update source node's output_contract (was NULL at registration)
-        recorder.update_node_output_contract(run_id, source_id, schema_contract)
+        factory.data_flow.update_node_output_contract(run_id, source_id, schema_contract)
         # Make contract available to transforms via context
         ctx.contract = schema_contract
         return True
@@ -2012,10 +2473,20 @@ class Orchestrator:
             self._events.emit(
                 ProgressEvent(
                     rows_processed=counters.rows_processed,
-                    # Include routed rows in success count - they reached their destination
-                    rows_succeeded=counters.rows_succeeded + counters.rows_routed,
+                    # elspeth-5069612f3c — rows_routed split. Each terminal
+                    # bucket is emitted on its own field so downstream
+                    # consumers (web ProgressData → SSE → frontend, CLI
+                    # progress formatter) can mirror the terminal-state
+                    # taxonomy. The pre-split fold (rows_succeeded +=
+                    # rows_routed_success) silently conflated MOVE-routed
+                    # rows into rows_succeeded and dropped DIVERT entirely,
+                    # leaving the in-flight signal incompatible with the
+                    # terminal Pydantic schemas (CompletedData, etc.).
+                    rows_succeeded=counters.rows_succeeded,
                     rows_failed=counters.rows_failed,
                     rows_quarantined=counters.rows_quarantined,
+                    rows_routed_success=counters.rows_routed_success,
+                    rows_routed_failure=counters.rows_routed_failure,
                     elapsed_seconds=elapsed,
                 )
             )
@@ -2025,7 +2496,7 @@ class Orchestrator:
     def _finalize_source_iteration(
         self,
         loop_ctx: LoopContext,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
         source_operation_id: str,
@@ -2082,13 +2553,24 @@ class Orchestrator:
                 )
                 counters.accumulate_flush_result(flush_result)
 
+                # TERMINAL GUARANTEE: After end-of-source flush, all aggregation
+                # buffers must be empty. Any remaining tokens would be silently
+                # lost — never reaching a terminal state in the audit trail.
+                for agg_node_id_str in config.aggregation_settings:
+                    remaining = processor.get_aggregation_buffer_count(NodeID(agg_node_id_str))
+                    if remaining > 0:
+                        raise OrchestrationInvariantError(
+                            f"Aggregation buffer for node '{agg_node_id_str}' still has "
+                            f"{remaining} tokens after end-of-source flush. "
+                            f"These tokens would never reach a terminal state."
+                        )
+
             # Flush pending coalesce operations only when the source is actually exhausted.
             if coalesce_executor is not None:
                 flush_coalesce_pending(
                     coalesce_executor=coalesce_executor,
                     coalesce_node_map=coalesce_node_map,
                     processor=processor,
-                    config_sinks=config.sinks,
                     ctx=ctx,
                     counters=counters,
                     pending_tokens=pending_tokens,
@@ -2097,13 +2579,13 @@ class Orchestrator:
         # Record field resolution for empty sources (header-only files).
         # For sources with rows, this was recorded inside the loop on first iteration.
         if not field_resolution_recorded:
-            self._record_field_resolution(recorder, run_id, config)
+            self._record_field_resolution(factory, run_id, config)
 
         # Record schema contract for runs with no valid source rows.
         # In-loop recording happens on first VALID row. For all-invalid
         # or empty inputs, that branch never executes.
         if not schema_contract_recorded:
-            self._record_schema_contract(recorder, run_id, source_id, config, ctx)
+            self._record_schema_contract(factory, run_id, source_id, config, ctx)
 
     def _load_source_with_events(
         self,
@@ -2116,7 +2598,6 @@ class Orchestrator:
         SOURCE phase is complete when this method returns. Errors during load()
         (file not found, auth failure) are emitted as PhaseError before re-raising.
         """
-        from elspeth.telemetry import PhaseChanged
 
         phase_start = time.perf_counter()
         self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=config.source.name))
@@ -2131,18 +2612,23 @@ class Orchestrator:
 
         try:
             with self._span_factory.source_span(config.source.name):
-                source_iterator = config.source.load(ctx)
+                source_iterator = iter(config.source.load(ctx))
+                try:
+                    first_row = next(source_iterator)
+                except StopIteration:
+                    self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
+                    return iter(())
         except Exception as e:
-            self._events.emit(PhaseError(phase=PipelinePhase.SOURCE, error=e, target=config.source.name))
+            self._emit_phase_error(PipelinePhase.SOURCE, e, target=config.source.name)
             raise
 
         self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
-        return source_iterator
+        return chain((first_row,), source_iterator)
 
     def _run_main_processing_loop(
         self,
         loop_ctx: LoopContext,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
         edge_map: Mapping[tuple[NodeID, str], str],
@@ -2158,7 +2644,6 @@ class Orchestrator:
         Final progress emission and PhaseCompleted(PROCESS) are emitted by the
         caller AFTER sink writes, using the timing state in LoopResult.
         """
-        from elspeth.telemetry import PhaseChanged
 
         # Destructure loop_ctx for local access
         config = loop_ctx.config
@@ -2175,7 +2660,7 @@ class Orchestrator:
 
         # source_load operation covers the entire source consumption lifecycle
         with track_operation(
-            recorder=recorder,
+            recorder=factory.execution,
             run_id=run_id,
             node_id=source_id,
             operation_type="source_load",
@@ -2197,7 +2682,7 @@ class Orchestrator:
             # schema contract after first VALID row. If begin_run already stored
             # a contract (FIXED mode), skip re-recording.
             field_resolution_recorded = False
-            schema_contract_recorded = recorder.get_run_contract(run_id) is not None
+            schema_contract_recorded = factory.run_lifecycle.get_run_contract(run_id) is not None
 
             # PROCESS phase
             phase_start = time.perf_counter()
@@ -2219,12 +2704,12 @@ class Orchestrator:
                     # Record field resolution on first iteration (generators execute body on first next())
                     if not field_resolution_recorded:
                         field_resolution_recorded = True
-                        self._record_field_resolution(recorder, run_id, config)
+                        self._record_field_resolution(factory, run_id, config)
 
                     # Quarantine path — route directly to sink, skip normal processing
                     if source_item.is_quarantined:
                         self._handle_quarantine_row(
-                            recorder,
+                            factory,
                             run_id,
                             source_id,
                             source_item,
@@ -2251,7 +2736,7 @@ class Orchestrator:
                         continue
 
                     # Record schema contract on first VALID row (quarantined rows don't populate contract)
-                    if not schema_contract_recorded and self._record_schema_contract(recorder, run_id, source_id, config, ctx):
+                    if not schema_contract_recorded and self._record_schema_contract(factory, run_id, source_id, config, ctx):
                         schema_contract_recorded = True
 
                     # Clear operation_id — source item is fetched, transforms set their own state_id
@@ -2275,7 +2760,7 @@ class Orchestrator:
                     )
                     if results:
                         loop_ctx.last_token_id = results[-1].token.token_id
-                    accumulate_row_outcomes(results, counters, config.sinks, pending_tokens)
+                    accumulate_row_outcomes(results, counters, pending_tokens)
 
                     # Check coalesce timeouts after each row
                     if coalesce_executor is not None:
@@ -2283,7 +2768,6 @@ class Orchestrator:
                             coalesce_executor=coalesce_executor,
                             coalesce_node_map=coalesce_node_map,
                             processor=processor,
-                            config_sinks=config.sinks,
                             ctx=ctx,
                             counters=counters,
                             pending_tokens=pending_tokens,
@@ -2310,7 +2794,7 @@ class Orchestrator:
                 # Post-loop: restore operation_id, flush aggregation/coalesce, record deferred state
                 self._finalize_source_iteration(
                     loop_ctx,
-                    recorder,
+                    factory,
                     run_id,
                     source_id,
                     source_operation_id,
@@ -2319,10 +2803,8 @@ class Orchestrator:
                     interrupted_by_shutdown=interrupted_by_shutdown,
                 )
 
-            except BatchPendingError:
-                raise  # Control-flow signal, not an error
             except Exception as e:
-                self._events.emit(PhaseError(phase=PipelinePhase.PROCESS, error=e, target=config.source.name))
+                self._emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
                 raise
 
         return LoopResult(
@@ -2407,7 +2889,7 @@ class Orchestrator:
                 loop_ctx.last_token_id = results[-1].token.token_id
 
             # Handle all results from this row
-            accumulate_row_outcomes(results, counters, config.sinks, pending_tokens)
+            accumulate_row_outcomes(results, counters, pending_tokens)
 
             # ─────────────────────────────────────────────────────────────────
             # Check for timed-out coalesces after processing each row
@@ -2418,7 +2900,6 @@ class Orchestrator:
                     coalesce_executor=coalesce_executor,
                     coalesce_node_map=coalesce_node_map,
                     processor=processor,
-                    config_sinks=config.sinks,
                     ctx=ctx,
                     counters=counters,
                     pending_tokens=pending_tokens,
@@ -2446,13 +2927,22 @@ class Orchestrator:
                 )
                 counters.accumulate_flush_result(flush_result)
 
+                # TERMINAL GUARANTEE: same assertion as _post_source_iteration_work.
+                for agg_node_id_str in config.aggregation_settings:
+                    remaining = processor.get_aggregation_buffer_count(NodeID(agg_node_id_str))
+                    if remaining > 0:
+                        raise OrchestrationInvariantError(
+                            f"Aggregation buffer for node '{agg_node_id_str}' still has "
+                            f"{remaining} tokens after end-of-source flush. "
+                            f"These tokens would never reach a terminal state."
+                        )
+
             # Flush pending coalesce operations only when resume processing exhausted all rows.
             if coalesce_executor is not None:
                 flush_coalesce_pending(
                     coalesce_executor=coalesce_executor,
                     coalesce_node_map=coalesce_node_map,
                     processor=processor,
-                    config_sinks=config.sinks,
                     ctx=ctx,
                     counters=counters,
                     pending_tokens=pending_tokens,
@@ -2462,12 +2952,11 @@ class Orchestrator:
 
     def _execute_run(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
         settings: ElspethSettings | None = None,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None = None,
         *,
         payload_store: PayloadStore,
         shutdown_event: threading.Event | None = None,
@@ -2481,18 +2970,18 @@ class Orchestrator:
         self._current_graph = graph
 
         # 1. Register graph nodes and edges
-        artifacts = self._register_graph_nodes_and_edges(recorder, run_id, config, graph)
+        artifacts = self._register_graph_nodes_and_edges(factory, run_id, config, graph)
 
         # 2. Initialize context + processor
         run_ctx = self._initialize_run_context(
-            recorder,
+            factory,
             run_id,
             config,
             graph,
             settings,
             artifacts,
-            batch_checkpoints,
             payload_store,
+            shutdown_event=shutdown_event,
         )
 
         loop_ctx = LoopContext(
@@ -2510,7 +2999,7 @@ class Orchestrator:
             # 3. Source + Process phase
             loop_result = self._run_main_processing_loop(
                 loop_ctx,
-                recorder,
+                factory,
                 run_id,
                 artifacts.source_id,
                 artifacts.edge_map,
@@ -2520,7 +3009,7 @@ class Orchestrator:
             # 4. Sink writes — outside source_load track_operation context.
             # Each sink write has its own track_operation (sink_write) in SinkExecutor.
             self._flush_and_write_sinks(
-                recorder,
+                factory,
                 run_id,
                 loop_ctx,
                 artifacts.sink_id_map,
@@ -2529,6 +3018,20 @@ class Orchestrator:
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=artifacts.source_id,
             )
+
+            # ADR-019 Phase 4: deferred cross-table invariant sweep.
+            #
+            # AUDIT-TRAIL DURABILITY CONTRACT:
+            # 1. The run is still RUNNING here; successful terminal finalization
+            #    has not executed.
+            # 2. If this raises AuditIntegrityError, the exception propagates to
+            #    the public run() failure ceremony, which finalizes the run as
+            #    FAILED and re-raises the original exception.
+            # 3. The offending token_outcomes/batch rows are evidence and are
+            #    not deleted by the sweep.
+            # 4. GracefulShutdownError skips this naturally because sink flush
+            #    raises before this post-sink call site.
+            factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
 
             # 5. Final progress + PROCESS phase completion — AFTER sink writes
             # so these events reflect concrete, durable results. On shutdown,
@@ -2543,14 +3046,28 @@ class Orchestrator:
                 self._events.emit(
                     ProgressEvent(
                         rows_processed=loop_ctx.counters.rows_processed,
-                        rows_succeeded=loop_ctx.counters.rows_succeeded + loop_ctx.counters.rows_routed,
+                        # elspeth-5069612f3c — rows_routed split. See the
+                        # earlier emitter in this file for the full rationale;
+                        # this final-progress emission must match so the last
+                        # streaming snapshot before terminal events agrees
+                        # with the forthcoming CompletedData payload.
+                        rows_succeeded=loop_ctx.counters.rows_succeeded,
                         rows_failed=loop_ctx.counters.rows_failed,
                         rows_quarantined=loop_ctx.counters.rows_quarantined,
+                        rows_routed_success=loop_ctx.counters.rows_routed_success,
+                        rows_routed_failure=loop_ctx.counters.rows_routed_failure,
                         elapsed_seconds=elapsed,
                     )
                 )
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.PROCESS, duration_seconds=current_time - loop_result.phase_start))
+        except GracefulShutdownError:
+            raise
+        except Exception as exc:
+            raise _RunFailedWithPartialResultError(
+                original_error=exc,
+                partial_result=loop_ctx.counters.to_run_result(run_id, status=RunStatus.FAILED),
+            ) from exc
 
         finally:
             self._cleanup_plugins(config, run_ctx.ctx, include_source=True)
@@ -2565,7 +3082,7 @@ class Orchestrator:
     ) -> ResumeState:
         """Reconstruct state needed to process resumed rows.
 
-        Creates a fresh recorder, handles incomplete batches, restores aggregation state,
+        Creates a fresh factory, handles incomplete batches, restores aggregation state,
         deserializes the source schema for type fidelity, validates the schema contract,
         and retrieves unprocessed rows from the payload store.
 
@@ -2582,20 +3099,21 @@ class Orchestrator:
         """
         run_id = resume_point.checkpoint.run_id
 
-        # Create fresh recorder (stateless, like run())
+        # Create fresh factory (stateless, like run())
         # Pass payload_store for external call payload persistence
-        recorder = LandscapeRecorder(self._db, payload_store=payload_store)
+        factory = RecorderFactory(self._db, payload_store=payload_store)
 
         # 1. Handle incomplete batches - call module function directly
-        handle_incomplete_batches(recorder, run_id)
+        batch_id_mapping = handle_incomplete_batches(factory.execution, run_id)
 
         # 2. Update run status to running
-        recorder.update_run_status(run_id, RunStatus.RUNNING)
+        factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
 
-        # 3. Build restored aggregation state map
+        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches
         restored_state: dict[str, AggregationCheckpointState] = {}
         if resume_point.aggregation_state is not None:
-            restored_state[resume_point.node_id] = resume_point.aggregation_state
+            rebound_state = rebind_checkpoint_batch_ids(resume_point.aggregation_state, batch_id_mapping)
+            restored_state[resume_point.node_id] = rebound_state
         restored_coalesce_state = resume_point.coalesce_state
 
         # 4. Get unprocessed row data from payload store
@@ -2610,7 +3128,7 @@ class Orchestrator:
         # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
         # Resume must use the ORIGINAL run's schema, not the current source's schema
         # This enables proper type coercion (datetime/Decimal) from JSON payload strings
-        source_schema_json = recorder.get_source_schema(run_id)
+        source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
 
         # Deserialize schema and recreate Pydantic model class with full type fidelity
         # Call module function directly (no wrapper method)
@@ -2620,7 +3138,7 @@ class Orchestrator:
         # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
         # During resume, we need to wrap plain dicts in PipelineRow with contract
         # This ensures type fidelity and maintains the same data structures as main run
-        schema_contract = recorder.get_run_contract(run_id)
+        schema_contract = factory.run_lifecycle.get_run_contract(run_id)
         if schema_contract is None:
             # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
             # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
@@ -2637,10 +3155,26 @@ class Orchestrator:
                 f"The audit trail must be complete and trustworthy."
             )
 
+        # Resume replays persisted PipelineRow payloads through NullSource rather
+        # than re-opening the original source plugin, so source-boundary evidence
+        # is inherited from the original run. That is only sound if the current
+        # declaration-contract and Tier-1 registries still exactly match the
+        # manifest captured at original run start.
+        recorded_runtime_val_manifest = factory.run_lifecycle.get_runtime_val_manifest(run_id)
+        current_runtime_val_manifest = canonical_json(build_runtime_val_manifest())
+        if current_runtime_val_manifest != recorded_runtime_val_manifest:
+            raise OrchestrationInvariantError(
+                f"Cannot resume run '{run_id}': runtime VAL manifest drift detected. "
+                "The current contract registry no longer matches the registry "
+                "captured in the original run header, so inherited source-boundary "
+                "evidence is no longer trustworthy. Resume requires identical "
+                "declaration-contract and Tier-1 registries."
+            )
+
         unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
 
         return ResumeState(
-            recorder=recorder,
+            factory=factory,
             run_id=run_id,
             restored_aggregation_state=restored_state,
             restored_coalesce_state=restored_coalesce_state,
@@ -2660,7 +3194,7 @@ class Orchestrator:
     ) -> RunResult:
         """Resume a failed run from a checkpoint.
 
-        STATELESS: Like run(), creates fresh recorder and processor internally.
+        STATELESS: Like run(), creates fresh factory and processor internally.
         This mirrors the reality that recovery happens in a new process.
 
         Args:
@@ -2679,45 +3213,99 @@ class Orchestrator:
         if payload_store is None:
             raise OrchestrationInvariantError("payload_store is required for resume - row data must be retrieved from stored payloads")
 
+        # ADR-010 §Decision 3: freeze both registries at bootstrap, mirroring
+        # run(). Recovery happens in a new process — the module import chain
+        # registers PassThroughDeclarationContract, but without this call the
+        # registries are never frozen, leaving a window where
+        # register_declaration_contract() could succeed post-bootstrap on the
+        # resume path.
+        prepare_for_run()
+
         self._rebase_checkpoint_sequence(resume_point.sequence_number)
         state = self._reconstruct_resume_state(resume_point, payload_store)
         run_id = state.run_id
-        recorder = state.recorder
+        factory = state.factory
         restored_state = state.restored_aggregation_state
         restored_coalesce_state = state.restored_coalesce_state
         schema_contract = state.schema_contract
         unprocessed_rows = state.unprocessed_rows
-
-        if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
-            # All rows were processed - complete the run
-            recorder.finalize_run(run_id, status=RunStatus.COMPLETED)
-
-            # Delete checkpoints on successful completion
-            self._delete_checkpoints(run_id)
-
-            return RunResult(
-                run_id=run_id,
-                status=RunStatus.COMPLETED,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_routed=0,
-                routed_destinations={},
-            )
+        resume_start_time = time.perf_counter()
 
         # 5. Process unprocessed rows (with graceful shutdown support)
-        from elspeth.telemetry import RunFinished
-
-        resume_start_time = time.perf_counter()
 
         # When shutdown_event is provided (testing), skip signal handler
         # installation and use the caller's event directly.
         shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else self._shutdown_handler_context()
 
         try:
+            if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
+                factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
+
+                # All rows were processed - complete the run.
+                #
+                # Phase 2.2 (elspeth-0de989c56d): the resume's local counters
+                # are 0 here because nothing was reprocessed, but the audit DB
+                # carries the truth.  Aggregate token_outcomes to derive the
+                # correct four-value terminal status and feed it to both the
+                # Landscape finalize and the local RunResult.
+                (
+                    terminal_status,
+                    audit_rows_processed,
+                    audit_rows_succeeded,
+                    audit_rows_failed,
+                    audit_rows_routed_success,
+                    audit_rows_routed_failure,
+                    audit_rows_quarantined,
+                ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
+                factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+
+                # Emit RunFinished telemetry (matching the normal completion path)
+                self._emit_telemetry(
+                    RunFinished(
+                        timestamp=datetime.now(UTC),
+                        run_id=run_id,
+                        status=terminal_status,
+                        row_count=audit_rows_processed,
+                        duration_ms=0.0,
+                    )
+                )
+
+                # Emit RunSummary event
+                cli_status, exit_code = self._cli_completion_for(terminal_status)
+                self._events.emit(
+                    RunSummary(
+                        run_id=run_id,
+                        status=cli_status,
+                        total_rows=audit_rows_processed,
+                        succeeded=audit_rows_succeeded,
+                        failed=audit_rows_failed,
+                        quarantined=audit_rows_quarantined,
+                        duration_seconds=0.0,
+                        exit_code=exit_code,
+                        routed_success=audit_rows_routed_success,
+                        routed_failure=audit_rows_routed_failure,
+                        routed_destinations=(),
+                    )
+                )
+
+                # Delete checkpoints on successful completion
+                self._delete_checkpoints(run_id)
+
+                return RunResult(
+                    run_id=run_id,
+                    status=terminal_status,
+                    rows_processed=audit_rows_processed,
+                    rows_succeeded=audit_rows_succeeded,
+                    rows_failed=audit_rows_failed,
+                    rows_routed_success=audit_rows_routed_success,
+                    rows_routed_failure=audit_rows_routed_failure,
+                    rows_quarantined=audit_rows_quarantined,
+                    routed_destinations={},
+                )
+
             with shutdown_ctx as active_event:
                 result = self._process_resumed_rows(
-                    recorder=recorder,
+                    factory=factory,
                     run_id=run_id,
                     config=config,
                     graph=graph,
@@ -2735,8 +3323,21 @@ class Orchestrator:
             # BEFORE the finally block flushes telemetry to exporters.
             # Fix: elspeth-rapid-sg0q — previously this was after the finally block,
             # meaning RunFinished was emitted after telemetry flush (never exported).
-            recorder.finalize_run(run_id, status=RunStatus.COMPLETED)
-            result = replace(result, status=RunStatus.COMPLETED)
+            #
+            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value terminal
+            # status from the row-count shape returned by the resume's row
+            # processing.
+            terminal_status = derive_terminal_run_status(
+                rows_processed=result.rows_processed,
+                rows_succeeded=result.rows_succeeded,
+                rows_failed=result.rows_failed,
+                rows_routed_success=result.rows_routed_success,
+                rows_routed_failure=result.rows_routed_failure,
+                rows_quarantined=result.rows_quarantined,
+                rows_coalesce_failed=result.rows_coalesce_failed,
+            )
+            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+            result = replace(result, status=terminal_status)
 
             # 7. Emit RunFinished telemetry
             resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000
@@ -2744,25 +3345,27 @@ class Orchestrator:
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
-                    status=RunStatus.COMPLETED,
+                    status=terminal_status,
                     row_count=result.rows_processed,
                     duration_ms=resume_duration_ms,
                 )
             )
 
             # 8. Emit RunSummary event
+            cli_status, exit_code = self._cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - resume_start_time
             self._events.emit(
                 RunSummary(
                     run_id=run_id,
-                    status=RunCompletionStatus.COMPLETED,
+                    status=cli_status,
                     total_rows=result.rows_processed,
                     succeeded=result.rows_succeeded,
                     failed=result.rows_failed,
                     quarantined=result.rows_quarantined,
                     duration_seconds=total_duration,
-                    exit_code=0,
-                    routed=result.rows_routed,
+                    exit_code=exit_code,
+                    routed_success=result.rows_routed_success,
+                    routed_failure=result.rows_routed_failure,
                     routed_destinations=tuple(result.routed_destinations.items()),
                 )
             )
@@ -2772,19 +3375,31 @@ class Orchestrator:
 
             return result
         except GracefulShutdownError as shutdown_exc:
-            self._emit_interrupted_ceremony(run_id, recorder, shutdown_exc, resume_start_time)
+            with best_effort("Interrupted ceremony on resume graceful shutdown", run_id=run_id):
+                self._emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time)
             raise  # Propagate to CLI
+        except _RunFailedWithPartialResultError as failed_exc:
+            with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
+                self._emit_failed_ceremony(
+                    run_id,
+                    factory,
+                    resume_start_time,
+                    failed_exc.partial_result,
+                )
+            raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
         except Exception:
             # Finalize as FAILED to prevent the run from being stuck in RUNNING
-            # permanently (which blocks future resume attempts).
-            self._emit_failed_ceremony(run_id, recorder, resume_start_time)
+            # permanently (which blocks future resume attempts). The outer broad-except
+            # is justified — any unhandled exception during resume needs ceremony.
+            with best_effort("Generic failure ceremony on resume", run_id=run_id):
+                self._emit_failed_ceremony(run_id, factory, resume_start_time)
             raise
         finally:
             self._safe_flush_telemetry()
 
     def _process_resumed_rows(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
@@ -2819,21 +3434,21 @@ class Orchestrator:
         self._current_graph = graph
 
         # 1. Setup (loads graph artifacts from original run's DB records)
-        artifacts = self._setup_resume_context(recorder, run_id, config, graph)
+        artifacts = self._setup_resume_context(factory, run_id, config, graph)
 
         # 2. Initialize context + processor (source on_start skipped)
         run_ctx = self._initialize_run_context(
-            recorder,
+            factory,
             run_id,
             config,
             graph,
             settings,
             artifacts,
-            None,  # batch_checkpoints
             payload_store,
             include_source_on_start=False,
             restored_aggregation_state=restored_aggregation_state,
             restored_coalesce_state=restored_coalesce_state,
+            shutdown_event=shutdown_event,
         )
 
         # Restore contract from parameter (already retrieved by resume() caller)
@@ -2861,7 +3476,7 @@ class Orchestrator:
 
             # 4. Flush + write sinks with checkpoint advancement
             self._flush_and_write_sinks(
-                recorder,
+                factory,
                 run_id,
                 loop_ctx,
                 artifacts.sink_id_map,
@@ -2870,6 +3485,17 @@ class Orchestrator:
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=artifacts.source_id,
             )
+
+            # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b
+            # postconditions only after resume sink writes finish.
+            factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
+        except GracefulShutdownError:
+            raise
+        except Exception as exc:
+            raise _RunFailedWithPartialResultError(
+                original_error=exc,
+                partial_result=loop_ctx.counters.to_run_result(run_id, status=RunStatus.FAILED),
+            ) from exc
 
         finally:
             self._cleanup_plugins(config, run_ctx.ctx, include_source=False)

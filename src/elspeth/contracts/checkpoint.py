@@ -71,3 +71,15 @@ class ResumePoint:
             )
         if self.coalesce_state is not None and not isinstance(self.coalesce_state, CoalesceCheckpointState):
             raise TypeError(f"ResumePoint.coalesce_state must be CoalesceCheckpointState or None, got {type(self.coalesce_state).__name__}")
+        # Invariant: duplicated fields must match the embedded Checkpoint.
+        # These fields exist for convenience access but are derived data,
+        # not independent inputs. Mismatch = corrupted construction.
+        if self.token_id != self.checkpoint.token_id:
+            raise ValueError(f"ResumePoint.token_id ({self.token_id!r}) does not match checkpoint.token_id ({self.checkpoint.token_id!r})")
+        if self.node_id != self.checkpoint.node_id:
+            raise ValueError(f"ResumePoint.node_id ({self.node_id!r}) does not match checkpoint.node_id ({self.checkpoint.node_id!r})")
+        if self.sequence_number != self.checkpoint.sequence_number:
+            raise ValueError(
+                f"ResumePoint.sequence_number ({self.sequence_number}) does not match "
+                f"checkpoint.sequence_number ({self.checkpoint.sequence_number})"
+            )

@@ -12,7 +12,7 @@ class TestSinkSettingsOnWriteFailure:
     def test_on_write_failure_required(self) -> None:
         """SinkSettings must have on_write_failure — no default."""
         with pytest.raises(ValidationError, match="on_write_failure"):
-            SinkSettings(plugin="csv")
+            SinkSettings(plugin="csv")  # type: ignore[call-arg]
 
     def test_on_write_failure_discard(self) -> None:
         s = SinkSettings(plugin="csv", on_write_failure="discard")

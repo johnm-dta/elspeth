@@ -1,7 +1,7 @@
 """MCP server for ELSPETH Landscape audit database analysis.
 
 A lightweight read-only server that exposes tools for querying
-the audit trail. Uses the existing LandscapeDB and LandscapeRecorder
+the audit trail. Uses the existing LandscapeDB and RecorderFactory
 infrastructure.
 
 Usage:
@@ -52,6 +52,8 @@ class _ArgSpec:
     optional_str: tuple[str, ...] = ()  # defaults to None
     optional_str_defaults: tuple[tuple[str, str], ...] = ()  # (name, default)
     optional_int: tuple[tuple[str, int], ...] = ()  # (name, default)
+    optional_int_min: tuple[tuple[str, int], ...] = ()  # (name, minimum) — semantic bounds
+    optional_bool: tuple[tuple[str, bool], ...] = ()  # (name, default)
     optional_dict: tuple[str, ...] = ()  # defaults to None
 
 
@@ -78,6 +80,7 @@ _TOOLS: dict[str, _ToolDef] = {
         description="List pipeline runs with optional status filter",
         args=_ArgSpec(
             optional_int=(("limit", 50),),
+            optional_int_min=(("limit", 1),),
             optional_str=("status",),
         ),
         handler=lambda a, args: a.list_runs(
@@ -87,7 +90,7 @@ _TOOLS: dict[str, _ToolDef] = {
         schema_properties={
             "limit": {"type": "integer", "description": "Max runs to return (default 50)", "default": 50},
             "status": {
-                "type": "string",
+                "type": ["string", "null"],
                 "description": "Filter by status",
                 "enum": [s.value for s in RunStatus],
             },
@@ -122,6 +125,7 @@ _TOOLS: dict[str, _ToolDef] = {
         args=_ArgSpec(
             required_str=("run_id",),
             optional_int=(("limit", 100), ("offset", 0)),
+            optional_int_min=(("limit", 1), ("offset", 0)),
         ),
         handler=lambda a, args: a.list_rows(
             run_id=args["run_id"],
@@ -140,6 +144,7 @@ _TOOLS: dict[str, _ToolDef] = {
             required_str=("run_id",),
             optional_str=("row_id",),
             optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.list_tokens(
             run_id=args["run_id"],
@@ -148,8 +153,16 @@ _TOOLS: dict[str, _ToolDef] = {
         ),
         schema_properties={
             "run_id": {"type": "string", "description": "Run ID to query"},
-            "row_id": {"type": "string", "description": "Optional row ID to filter by"},
+            "row_id": {"type": ["string", "null"], "description": "Optional row ID to filter by"},
             "limit": {"type": "integer", "description": "Max tokens (default 100)", "default": 100},
+        },
+    ),
+    "get_token_children": _ToolDef(
+        description="Get child tokens created from a parent (forward lineage) — trace what a COALESCED token merged into",
+        args=_ArgSpec(required_str=("parent_token_id",)),
+        handler=lambda a, args: a.get_token_children(args["parent_token_id"]),
+        schema_properties={
+            "parent_token_id": {"type": "string", "description": "Token ID to find children for"},
         },
     ),
     "list_operations": _ToolDef(
@@ -158,6 +171,7 @@ _TOOLS: dict[str, _ToolDef] = {
             required_str=("run_id",),
             optional_str=("operation_type", "status"),
             optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.list_operations(
             run_id=args["run_id"],
@@ -168,12 +182,12 @@ _TOOLS: dict[str, _ToolDef] = {
         schema_properties={
             "run_id": {"type": "string", "description": "Run ID to query"},
             "operation_type": {
-                "type": "string",
+                "type": ["string", "null"],
                 "description": "Filter by type",
                 "enum": ["source_load", "sink_write"],
             },
             "status": {
-                "type": "string",
+                "type": ["string", "null"],
                 "description": "Filter by status",
                 "enum": ["open", "completed", "failed", "pending"],
             },
@@ -202,9 +216,9 @@ _TOOLS: dict[str, _ToolDef] = {
         ),
         schema_properties={
             "run_id": {"type": "string", "description": "Run ID"},
-            "token_id": {"type": "string", "description": "Token ID (preferred for DAGs with forks)"},
-            "row_id": {"type": "string", "description": "Row ID (alternative to token_id)"},
-            "sink": {"type": "string", "description": "Sink name to disambiguate multiple terminals"},
+            "token_id": {"type": ["string", "null"], "description": "Token ID (preferred for DAGs with forks)"},
+            "row_id": {"type": ["string", "null"], "description": "Row ID (alternative to token_id)"},
+            "sink": {"type": ["string", "null"], "description": "Sink name to disambiguate multiple terminals"},
         },
     ),
     "get_errors": _ToolDef(
@@ -213,6 +227,7 @@ _TOOLS: dict[str, _ToolDef] = {
             required_str=("run_id",),
             optional_str_defaults=(("error_type", "all"),),
             optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.get_errors(
             run_id=args["run_id"],
@@ -236,22 +251,46 @@ _TOOLS: dict[str, _ToolDef] = {
             required_str=("run_id",),
             optional_str=("node_id", "status"),
             optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
+            optional_bool=(("include_context", False),),
         ),
         handler=lambda a, args: a.get_node_states(
             run_id=args["run_id"],
             node_id=args["node_id"],
             status=args["status"],
             limit=args["limit"],
+            include_context=args["include_context"],
         ),
         schema_properties={
             "run_id": {"type": "string", "description": "Run ID to query"},
-            "node_id": {"type": "string", "description": "Optional node ID filter"},
+            "node_id": {"type": ["string", "null"], "description": "Optional node ID filter"},
             "status": {
-                "type": "string",
+                "type": ["string", "null"],
                 "description": "Optional status filter",
                 "enum": ["open", "pending", "completed", "failed"],
             },
             "limit": {"type": "integer", "description": "Max states (default 100)", "default": 100},
+            "include_context": {
+                "type": "boolean",
+                "description": "Include context_after, error, and success_reason JSON fields (large, expensive)",
+                "default": False,
+            },
+        },
+    ),
+    "list_collisions": _ToolDef(
+        description="List coalesce collision events — shows merge conflicts with winner/loser values",
+        args=_ArgSpec(
+            required_str=("run_id",),
+            optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
+        ),
+        handler=lambda a, args: a.list_collisions(
+            run_id=args["run_id"],
+            limit=args["limit"],
+        ),
+        schema_properties={
+            "run_id": {"type": "string", "description": "Run ID to query"},
+            "limit": {"type": "integer", "description": "Max collision records (default 100)", "default": 100},
         },
     ),
     "get_calls": _ToolDef(
@@ -274,7 +313,7 @@ _TOOLS: dict[str, _ToolDef] = {
         ),
         schema_properties={
             "sql": {"type": "string", "description": "SQL SELECT query"},
-            "params": {"type": "object", "description": "Optional query parameters"},
+            "params": {"type": ["object", "null"], "description": "Optional query parameters"},
         },
     ),
     "get_dag_structure": _ToolDef(
@@ -334,6 +373,7 @@ _TOOLS: dict[str, _ToolDef] = {
         args=_ArgSpec(
             required_str=("run_id",),
             optional_int=(("limit", 10),),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.get_failure_context(
             run_id=args["run_id"],
@@ -348,6 +388,7 @@ _TOOLS: dict[str, _ToolDef] = {
         description="\U0001f4ca Timeline: What happened recently? Shows runs in the last N minutes",
         args=_ArgSpec(
             optional_int=(("minutes", 60),),
+            optional_int_min=(("minutes", 1),),
         ),
         handler=lambda a, args: a.get_recent_activity(
             minutes=args["minutes"],
@@ -381,6 +422,7 @@ _TOOLS: dict[str, _ToolDef] = {
         args=_ArgSpec(
             required_str=("run_id",),
             optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.list_contract_violations(
             run_id=args["run_id"],
@@ -432,6 +474,7 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             raise TypeError(f"'{name}': '{fname}' must be string, got {type(val).__name__}")
         validated[fname] = val
 
+    int_mins = dict(spec.optional_int_min)
     for fname, int_default in spec.optional_int:
         val = arguments.get(fname, int_default)
         # JSON has no int/float distinction — accept both, convert to int
@@ -439,6 +482,14 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             val = int(val)
         if not isinstance(val, int) or isinstance(val, bool):
             raise TypeError(f"'{name}': '{fname}' must be integer, got {type(val).__name__}")
+        if fname in int_mins and val < int_mins[fname]:
+            raise ValueError(f"'{name}': '{fname}' must be >= {int_mins[fname]}, got {val}")
+        validated[fname] = val
+
+    for fname, bool_default in spec.optional_bool:
+        val = arguments.get(fname, bool_default)
+        if not isinstance(val, bool):
+            raise TypeError(f"'{name}': '{fname}' must be boolean, got {type(val).__name__}")
         validated[fname] = val
 
     for fname in spec.optional_dict:

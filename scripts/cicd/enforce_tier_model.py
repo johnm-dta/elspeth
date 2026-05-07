@@ -298,6 +298,7 @@ class TierModelVisitor(ast.NodeVisitor):
         self.findings: list[Finding] = []
         self.symbol_stack: list[str] = []
         self.path_stack: list[str] = []
+        self._decorator_lines: set[int] = set()  # Track lines that are decorators
 
     def _get_code_snippet(self, lineno: int) -> str:
         """Get the source line for a given line number."""
@@ -341,12 +342,18 @@ class TierModelVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Track function context."""
+        # Collect decorator lines — .get() calls here are not dict access
+        for decorator in node.decorator_list:
+            self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
         self.generic_visit(node)
         self.symbol_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         """Track async function context."""
+        # Collect decorator lines — .get() calls here are not dict access
+        for decorator in node.decorator_list:
+            self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
         self.generic_visit(node)
         self.symbol_stack.pop()
@@ -377,12 +384,42 @@ class TierModelVisitor(ast.NodeVisitor):
         # No raise, no return: likely swallow (even if logging).
         return True
 
+    def _is_likely_non_dict_get(self, node: ast.Call) -> bool:
+        """Return True if this .get() call is likely NOT a dict.get().
+
+        Heuristics (conservative — only skip when confident):
+        1. Decorator context: @router.get("/path") is a route decorator
+        2. URL-like first arg: client.get("https://...") is an HTTP method
+        3. ChromaDB keywords: collection.get(ids=[...]) is SDK retrieval
+
+        Note: f-string URLs (client.get(f"/api/{id}")) are NOT filtered
+        because we cannot statically determine their runtime value.
+        These must be allowlisted if they are legitimate HTTP calls.
+        """
+        # Heuristic 1: Decorator context
+        if node.lineno in self._decorator_lines:
+            return True
+
+        # Heuristic 2: URL-like first argument
+        if node.args:
+            first_arg = node.args[0]
+            if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                val = first_arg.value
+                if val.startswith(("/", "http://", "https://")):
+                    return True
+
+        # Heuristic 3: ChromaDB-specific keywords
+        # IMPORTANT: Only include keywords that are unambiguous to ChromaDB/vector DBs.
+        # Generic pagination keywords (limit, offset) are NOT included because they
+        # collide with SQLAlchemy, Django ORM, and other common patterns.
+        chromadb_keywords = {"ids", "include", "where"}
+        call_keywords = {kw.arg for kw in node.keywords if kw.arg is not None}
+        return bool(call_keywords & chromadb_keywords)
+
     def visit_Call(self, node: ast.Call) -> None:
         """Detect R1 (dict.get), R2 (getattr), R3 (hasattr), R5 (isinstance), R8/R9 defaults."""
         # R1: dict.get() - Call(func=Attribute(attr="get"))
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
-            # This catches any .get() call - we can't know types statically
-            # but dict.get() is the common bug-hiding case
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "get" and not self._is_likely_non_dict_get(node):
             self._add_finding(
                 "R1",
                 node,
@@ -558,8 +595,11 @@ def scan_directory(
     findings: list[Finding] = []
 
     for py_file in root.rglob("*.py"):
-        # Check exclusions
         relative = py_file.relative_to(root)
+        # Skip vendored/third-party directories
+        if any(part in _ALWAYS_EXCLUDED_DIRS for part in relative.parts):
+            continue
+        # Check user-specified exclusions
         skip = False
         for pattern in exclude_patterns:
             if relative.match(pattern) or str(relative).startswith(pattern.rstrip("*/")):
@@ -675,6 +715,10 @@ def scan_layer_imports_directory(
 
     for py_file in root.rglob("*.py"):
         relative = py_file.relative_to(root)
+        # Skip vendored/third-party directories
+        if any(part in _ALWAYS_EXCLUDED_DIRS for part in relative.parts):
+            continue
+        # Check user-specified exclusions
         skip = False
         for pattern in exclude_patterns:
             if relative.match(pattern) or str(relative).startswith(pattern.rstrip("*/")):
@@ -691,12 +735,495 @@ def scan_layer_imports_directory(
 
 
 # =============================================================================
+# Edge-Dump Mode (Phase 0 — L3↔L3 import-graph oracle, Δ2 dump-edges)
+#
+# Additive subcommand. Shares the path→layer table and AST-based import walking
+# of `check`, but emits the full intra-layer edge graph rather than a violations
+# list. Always exits 0 unless the tool itself errors. NEVER fails the build.
+# =============================================================================
+
+
+_LAYER_NAME_TO_INT: dict[str, int] = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+
+
+@dataclass(frozen=True)
+class _ImportSite:
+    """A single import statement that produces one edge contribution."""
+
+    src_file: str  # relative path under --root
+    line: int
+    target_module: str  # fully qualified target (e.g. "elspeth.plugins.transforms.llm")
+    type_checking: bool
+    conditional: bool
+    reexport: bool
+
+
+def _module_name_to_path(module_name: str, root: Path) -> Path | None:
+    """Resolve `elspeth.X.Y.Z` to a file path under root.
+
+    Tries submodule (`X/Y/Z.py`) first, then package (`X/Y/Z/__init__.py`).
+    Returns None for non-elspeth modules or modules that don't resolve.
+    """
+    if not module_name.startswith("elspeth"):
+        return None
+    parts = module_name.split(".")
+    if parts[0] != "elspeth":
+        return None
+    rel_parts = parts[1:]
+    if not rel_parts:
+        return None
+    candidate = root.joinpath(*rel_parts).with_suffix(".py")
+    if candidate.is_file():
+        return candidate
+    pkg_init = root.joinpath(*rel_parts, "__init__.py")
+    if pkg_init.is_file():
+        return pkg_init
+    return None
+
+
+def _resolve_import_target(
+    module_name: str,
+    imported_name: str | None,
+    root: Path,
+) -> Path | None:
+    """Resolve an import statement to a target file.
+
+    For ``from M import N``, try ``M.N`` (submodule) first, then ``M`` (package).
+    For ``import M``, resolve M directly.
+    """
+    if imported_name is not None:
+        sub = _module_name_to_path(f"{module_name}.{imported_name}", root)
+        if sub is not None:
+            return sub
+    return _module_name_to_path(module_name, root)
+
+
+def _resolve_relative_module(
+    relative_path: str,
+    level: int,
+    module_name: str | None,
+) -> str | None:
+    """Resolve a ``from .x import y`` (level≥1) to its absolute ``elspeth.<...>`` form.
+
+    ``relative_path`` is the importing file's path relative to --root.
+    Returns the absolute module name, or None if the relative reference is invalid.
+    """
+    if level == 0:
+        return module_name
+    pkg_parts = list(Path(relative_path).parent.parts)
+    # `from . import X` from a file inside `pkg/` means "X within pkg" — level=1, drop 0 parts.
+    # `from .. import X` means "X within parent of pkg" — level=2, drop 1 part. Etc.
+    drop = level - 1
+    if drop > len(pkg_parts):
+        return None
+    base_parts = pkg_parts[: len(pkg_parts) - drop] if drop > 0 else pkg_parts
+    suffix_parts: list[str] = []
+    if module_name:
+        suffix_parts.extend(module_name.split("."))
+    full_parts = ["elspeth", *base_parts, *suffix_parts]
+    return ".".join(full_parts)
+
+
+def _find_conditional_import_lines(tree: ast.Module) -> set[int]:
+    """Collect line numbers of imports inside non-TYPE_CHECKING ``if`` or ``try`` blocks.
+
+    Imports inside ``if TYPE_CHECKING:`` are NOT included here (they are tagged
+    via the dedicated TYPE_CHECKING line set).
+    """
+    cond_lines: set[int] = set()
+    for node in ast.walk(tree):
+        is_conditional = False
+        if isinstance(node, ast.If):
+            test = node.test
+            if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+                continue
+            is_conditional = True
+        elif isinstance(node, ast.Try):
+            is_conditional = True
+        if is_conditional:
+            for child in ast.walk(node):
+                if isinstance(child, (ast.Import, ast.ImportFrom)):
+                    cond_lines.add(child.lineno)
+    return cond_lines
+
+
+def _file_subsystem(relative_path: str) -> str:
+    """Collapse a file path to its parent-directory (Python-package) granularity.
+
+    ``plugins/transforms/llm/azure_batch.py`` → ``plugins/transforms/llm``.
+    ``plugins/__init__.py`` → ``plugins``.
+    Top-level files (``cli.py``) → ``.`` (root marker).
+    """
+    parent = str(Path(relative_path).parent)
+    return parent if parent != "." else "."
+
+
+def _file_loc(path: Path) -> int:
+    """Count lines in a Python file. Returns 0 on read error."""
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except (OSError, UnicodeDecodeError):
+        return 0
+
+
+def _gather_import_sites(
+    py_file: Path,
+    relative_path: str,
+    tree: ast.Module,
+    tc_lines: set[int],
+    cond_lines: set[int],
+) -> list[tuple[str | None, ast.Import | ast.ImportFrom, str, str | None]]:
+    """Walk a tree and emit (resolved_module_name, node, target_alias_name, raw_relative_module).
+
+    Returned list is consumed by the edge-builder.  ``resolved_module_name`` is
+    the fully-qualified target (after relative-import resolution). The node is
+    always either ``ast.Import`` or ``ast.ImportFrom`` (both carry ``lineno``).
+    """
+    out: list[tuple[str | None, ast.Import | ast.ImportFrom, str, str | None]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            resolved = _resolve_relative_module(relative_path, node.level, node.module)
+            for alias in node.names:
+                out.append((resolved, node, alias.name, node.module))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                out.append((alias.name, node, "", None))
+    return out
+
+
+def scan_dump_edges(
+    root: Path,
+    include_layers: frozenset[int],
+    collapse_to_subsystem: bool,
+    exclude_patterns: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[list[str]]]:
+    """Build the edge graph for ``dump-edges``.
+
+    Returns (nodes, edges, sccs).  All collections are sorted deterministically.
+    """
+    exclude_patterns = exclude_patterns or []
+
+    file_count: dict[str, int] = {}
+    file_loc: dict[str, int] = {}
+    node_layer: dict[str, int] = {}
+    raw_edges: list[tuple[str, str, _ImportSite]] = []
+
+    for py_file in sorted(root.rglob("*.py")):
+        relative = py_file.relative_to(root)
+        if any(part in _ALWAYS_EXCLUDED_DIRS for part in relative.parts):
+            continue
+        skip = False
+        for pattern in exclude_patterns:
+            if relative.match(pattern) or str(relative).startswith(pattern.rstrip("*/")):
+                skip = True
+                break
+        if skip:
+            continue
+
+        rel_str = str(relative)
+        try:
+            source = py_file.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(py_file))
+        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            print(f"Warning: could not parse {py_file}: {exc}", file=sys.stderr)
+            continue
+
+        src_layer = _get_file_layer(rel_str)
+        src_node_id = _file_subsystem(rel_str) if collapse_to_subsystem else rel_str
+
+        # Always update node stats so unknown-layer nodes can still be excluded
+        # in the final filter (consistent stats regardless of edge inclusion).
+        file_count[src_node_id] = file_count.get(src_node_id, 0) + 1
+        file_loc[src_node_id] = file_loc.get(src_node_id, 0) + len(source.splitlines())
+        node_layer.setdefault(src_node_id, src_layer)
+
+        if src_layer not in include_layers:
+            continue
+
+        tc_lines = _find_type_checking_lines(tree)
+        cond_lines = _find_conditional_import_lines(tree)
+        is_init = py_file.name == "__init__.py"
+
+        for resolved_module, node, alias_name, _raw_module in _gather_import_sites(py_file, rel_str, tree, tc_lines, cond_lines):
+            if resolved_module is None:
+                continue
+            if not resolved_module.startswith("elspeth"):
+                continue
+
+            target_path = _resolve_import_target(resolved_module, alias_name if alias_name else None, root)
+            if target_path is None:
+                continue
+
+            try:
+                target_rel = target_path.relative_to(root)
+            except ValueError:
+                continue
+            target_rel_str = str(target_rel)
+            target_layer = _get_file_layer(target_rel_str)
+            if target_layer not in include_layers:
+                continue
+
+            tgt_node_id = _file_subsystem(target_rel_str) if collapse_to_subsystem else target_rel_str
+            if collapse_to_subsystem and src_node_id == tgt_node_id:
+                continue  # Δ3 rule 6: drop intra-subsystem self-edges with collapse ON.
+
+            line = node.lineno
+            is_tc = line in tc_lines
+            is_cond = line in cond_lines
+            # Δ3 rule 9: re-export when source is __init__.py AND it's a relative import.
+            # Conservative: only relative imports inside __init__.py count; absolute imports
+            # in __init__.py are also re-exports if target is a sibling submodule, but the
+            # signal would be too noisy without __all__ tracking. Sticking to the relative-
+            # import heuristic that catches the common pattern from ADR-006 era.
+            is_reexport = bool(is_init and isinstance(node, ast.ImportFrom) and node.level > 0)
+
+            target_module_qualified = f"{resolved_module}.{alias_name}" if alias_name else resolved_module
+            raw_edges.append(
+                (
+                    src_node_id,
+                    tgt_node_id,
+                    _ImportSite(
+                        src_file=rel_str,
+                        line=line,
+                        target_module=target_module_qualified,
+                        type_checking=is_tc,
+                        conditional=is_cond,
+                        reexport=is_reexport,
+                    ),
+                )
+            )
+
+    # Aggregate by (src, tgt). Edge attributes use AND-aggregation: an aggregated
+    # edge is type_checking_only iff EVERY underlying site is TC (any non-TC site
+    # means the edge has runtime coupling). Same for conditional and reexport.
+    edge_buckets: dict[tuple[str, str], list[_ImportSite]] = {}
+    for src, tgt, site in raw_edges:
+        edge_buckets.setdefault((src, tgt), []).append(site)
+
+    edges_out: list[dict[str, Any]] = []
+    for (src, tgt), sites in sorted(edge_buckets.items()):
+        sites_sorted = sorted(sites, key=lambda s: (s.src_file, s.line, s.target_module))
+        edges_out.append(
+            {
+                "from": src,
+                "to": tgt,
+                "weight": len(sites),
+                "type_checking_only": all(s.type_checking for s in sites),
+                "conditional": all(s.conditional for s in sites),
+                "reexport": all(s.reexport for s in sites),
+                "sample_sites": [{"file": s.src_file, "line": s.line} for s in sites_sorted[:3]],
+            }
+        )
+
+    nodes_out: list[dict[str, Any]] = []
+    edge_endpoint_ids: set[str] = set()
+    for e in edges_out:
+        edge_endpoint_ids.add(e["from"])
+        edge_endpoint_ids.add(e["to"])
+
+    for nid in sorted(file_count.keys()):
+        layer = node_layer[nid]
+        # Include the node only if its layer is in the include set.
+        # Endpoint reachability ensures targets pulled in by edges are also included.
+        if layer not in include_layers and nid not in edge_endpoint_ids:
+            continue
+        nodes_out.append(
+            {
+                "id": nid,
+                "layer": LAYER_NAMES[layer],
+                "file_count": file_count[nid],
+                "loc": file_loc[nid],
+            }
+        )
+
+    # SCC detection — Δ5 mandate. Edge endpoints not previously in nodes_out (edges may
+    # cross into other layers if include_layers spans more than one) are added so the
+    # graph is closed. Non-trivial SCCs (size ≥ 2) reported.
+    try:
+        import networkx as nx
+    except ImportError:
+        # NetworkX is in the project dep stack (per CLAUDE.md), so this is a tooling
+        # break, not a normal failure. Surface it loudly and emit no SCCs.
+        print("Warning: networkx unavailable; SCC detection skipped.", file=sys.stderr)
+        return nodes_out, edges_out, []
+
+    graph: nx.DiGraph[str] = nx.DiGraph()
+    for n in nodes_out:
+        graph.add_node(n["id"])
+    for e in edges_out:
+        graph.add_edge(e["from"], e["to"])
+
+    sccs_raw = [sorted(scc) for scc in nx.strongly_connected_components(graph) if len(scc) >= 2]
+    sccs_raw.sort(key=lambda items: (len(items), items[0] if items else ""))
+
+    return nodes_out, edges_out, sccs_raw
+
+
+# =============================================================================
+# Edge-Dump Output Formatters (JSON / Mermaid / DOT)
+# =============================================================================
+
+
+_STABLE_PLACEHOLDER = "<stable>"
+
+
+def _tool_version_for_dump(use_stable_placeholder: bool) -> str:
+    """Return a tool-version identifier.
+
+    Uses a content hash of the enforcer file (cheaper and more deterministic than
+    a git rev-parse subprocess; effectively the same identifying property).
+    """
+    if use_stable_placeholder:
+        return _STABLE_PLACEHOLDER
+    try:
+        own_path = Path(__file__).resolve()
+        digest = hashlib.sha256(own_path.read_bytes()).hexdigest()[:12]
+        return f"sha256:{digest}"
+    except (OSError, NameError):
+        return "unknown"
+
+
+def _generated_at(use_stable_placeholder: bool) -> str:
+    if use_stable_placeholder:
+        return _STABLE_PLACEHOLDER
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def render_dump_edges_json(
+    *,
+    root: Path,
+    include_layers: frozenset[int],
+    collapse_to_subsystem: bool,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    sccs: list[list[str]],
+    use_stable_placeholder: bool,
+) -> str:
+    """Render the edge graph as deterministic JSON (Δ4 schema)."""
+    layer_names_sorted = sorted(LAYER_NAMES[layer] for layer in include_layers)
+    payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "generated_at": _generated_at(use_stable_placeholder),
+        "tool_version": _tool_version_for_dump(use_stable_placeholder),
+        "scope": {
+            "root": str(root).replace("\\", "/"),
+            "layers_included": layer_names_sorted,
+            "collapsed_to_subsystem": collapse_to_subsystem,
+        },
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "type_checking_edges": sum(1 for e in edges if e["type_checking_only"]),
+            "conditional_edges": sum(1 for e in edges if e["conditional"]),
+            "reexport_edges": sum(1 for e in edges if e["reexport"]),
+            "scc_count": len(sccs),
+            "largest_scc_size": max((len(s) for s in sccs), default=0),
+        },
+        "strongly_connected_components": sccs,
+    }
+    return json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+
+
+def _mermaid_safe(node_id: str) -> str:
+    """Sanitize a node id for Mermaid (no slashes, dots, etc.)."""
+    return node_id.replace("/", "_").replace(".", "_").replace("-", "_") or "_root_"
+
+
+def render_dump_edges_mermaid(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> str:
+    """Render the edge graph as a Mermaid flowchart with subsystem subgraphs."""
+    lines: list[str] = ["flowchart LR"]
+    # Group nodes by their first path segment (top-level subsystem) for subgraphs.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for n in nodes:
+        top = n["id"].split("/", 1)[0] if "/" in n["id"] else n["id"]
+        groups.setdefault(top, []).append(n)
+
+    for top in sorted(groups):
+        safe_top = _mermaid_safe(top)
+        lines.append(f"    subgraph {safe_top}[{top}]")
+        for n in sorted(groups[top], key=lambda x: x["id"]):
+            safe_id = _mermaid_safe(n["id"])
+            label = n["id"]
+            lines.append(f'        {safe_id}["{label}<br/><sub>{n["loc"]} LOC</sub>"]')
+        lines.append("    end")
+
+    for e in edges:
+        src = _mermaid_safe(e["from"])
+        tgt = _mermaid_safe(e["to"])
+        if e["type_checking_only"]:
+            arrow = "-.->|TC|"
+        elif e["conditional"]:
+            arrow = "-.->|cond|"
+        elif e["weight"] >= 10:
+            arrow = f"==>|{e['weight']}|"
+        else:
+            arrow = f"-->|{e['weight']}|" if e["weight"] > 1 else "-->"
+        lines.append(f"    {src} {arrow} {tgt}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _dot_safe(node_id: str) -> str:
+    return '"' + node_id.replace('"', '\\"') + '"'
+
+
+def render_dump_edges_dot(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> str:
+    """Render the edge graph as a Graphviz digraph."""
+    lines: list[str] = ["digraph l3_imports {", "    rankdir=LR;", "    node [shape=box, style=rounded];"]
+
+    # Cluster by top-level subsystem.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for n in nodes:
+        top = n["id"].split("/", 1)[0] if "/" in n["id"] else n["id"]
+        groups.setdefault(top, []).append(n)
+
+    for cluster_idx, top in enumerate(sorted(groups)):
+        lines.append(f'    subgraph "cluster_{cluster_idx}" {{')
+        lines.append(f"        label={_dot_safe(top)};")
+        lines.append("        style=dashed;")
+        for n in sorted(groups[top], key=lambda x: x["id"]):
+            label = f"{n['id']}\\n{n['loc']} LOC"
+            lines.append(f"        {_dot_safe(n['id'])} [label={_dot_safe(label)}];")
+        lines.append("    }")
+
+    for e in edges:
+        attrs: list[str] = []
+        if e["type_checking_only"]:
+            attrs.append('style="dashed"')
+            attrs.append('label="TC"')
+        elif e["conditional"]:
+            attrs.append('style="dotted"')
+            attrs.append('label="cond"')
+        else:
+            attrs.append(f'label="{e["weight"]}"')
+            if e["weight"] >= 10:
+                attrs.append("penwidth=3")
+        attr_str = ", ".join(attrs)
+        lines.append(f"    {_dot_safe(e['from'])} -> {_dot_safe(e['to'])} [{attr_str}];")
+
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+# =============================================================================
 # Allowlist Handling
 # =============================================================================
 
 
 _BANNED_RULES = frozenset(rule_id for rule_id, rule_def in RULES.items() if rule_def.get("banned"))
 _ALL_RULE_IDS = frozenset(RULES.keys())
+
+# Directories that are always excluded from scanning — vendored/third-party code
+# that happens to contain .py files but is not part of the ELSPETH codebase.
+_ALWAYS_EXCLUDED_DIRS = ("node_modules",)
 
 
 def _parse_allow_hits(data: dict[str, Any], source_file: str = "") -> list[AllowlistEntry]:
@@ -1025,10 +1552,137 @@ def main() -> int:
         help="Specific files to check (from pre-commit). If empty, scans --root directory.",
     )
 
+    # dump-edges subcommand (Phase 0 — L3↔L3 import-graph oracle)
+    dump_parser = subparsers.add_parser(
+        "dump-edges",
+        help="Emit a deterministic import-graph for analysis (does NOT fail on graph content)",
+    )
+    dump_parser.add_argument(
+        "--root",
+        type=Path,
+        required=True,
+        help="Root directory to scan",
+    )
+    dump_parser.add_argument(
+        "--format",
+        choices=["json", "mermaid", "dot"],
+        default="json",
+        help="Output format (default: json)",
+    )
+    dump_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output path (required for json/dot; mermaid may write to stdout when omitted)",
+    )
+    dump_parser.add_argument(
+        "--include-layer",
+        action="append",
+        default=None,
+        choices=["L0", "L1", "L2", "L3"],
+        help="Layer(s) to include in the graph; repeatable. Default: L3 only.",
+    )
+    dump_parser.add_argument(
+        "--collapse-to-subsystem",
+        dest="collapse_to_subsystem",
+        action="store_true",
+        default=True,
+        help="Aggregate edges to package (parent-directory) granularity (default: ON)",
+    )
+    dump_parser.add_argument(
+        "--no-collapse",
+        dest="collapse_to_subsystem",
+        action="store_false",
+        help="Disable subsystem collapse; emit file-level edges",
+    )
+    dump_parser.add_argument(
+        "--no-timestamp",
+        action="store_true",
+        default=False,
+        help="Replace generated_at and tool_version with stable placeholders for diff-friendly output",
+    )
+    dump_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Glob patterns to exclude (repeatable)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "check":
         return run_check(args)
+    if args.command == "dump-edges":
+        return run_dump_edges(args)
+
+    return 0
+
+
+def run_dump_edges(args: argparse.Namespace) -> int:
+    """Run the dump-edges command.
+
+    Always exits 0 unless the tool itself errors. Cycle detection is observational —
+    a stderr WARNING is printed when non-trivial SCCs are found, but the exit code
+    is unaffected (Δ5: not enforcement).
+    """
+    root = args.root.resolve()
+    if not root.is_dir():
+        print(f"Error: {root} is not a directory", file=sys.stderr)
+        return 1
+
+    # Resolve include-layer set (default: L3 only).
+    layer_strs = args.include_layer or ["L3"]
+    include_layers = frozenset(_LAYER_NAME_TO_INT[s] for s in layer_strs)
+
+    # JSON and DOT require --output; Mermaid may write to stdout.
+    if args.format in ("json", "dot") and args.output is None:
+        print(f"Error: --output is required for --format {args.format}", file=sys.stderr)
+        return 1
+
+    nodes, edges, sccs = scan_dump_edges(
+        root=root,
+        include_layers=include_layers,
+        collapse_to_subsystem=args.collapse_to_subsystem,
+        exclude_patterns=args.exclude,
+    )
+
+    if args.format == "json":
+        rendered = render_dump_edges_json(
+            root=args.root,  # the un-resolved value, so output is portable
+            include_layers=include_layers,
+            collapse_to_subsystem=args.collapse_to_subsystem,
+            nodes=nodes,
+            edges=edges,
+            sccs=sccs,
+            use_stable_placeholder=args.no_timestamp,
+        )
+    elif args.format == "mermaid":
+        rendered = render_dump_edges_mermaid(nodes, edges)
+    elif args.format == "dot":
+        rendered = render_dump_edges_dot(nodes, edges)
+    else:
+        # argparse's `choices` should make this unreachable.
+        print(f"Error: unknown format {args.format!r}", file=sys.stderr)
+        return 1
+
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+    else:
+        # Mermaid → stdout when --output omitted
+        print(rendered, end="")
+
+    if sccs:
+        print(
+            f"WARNING: {len(sccs)} non-trivial strongly-connected component(s) detected at "
+            f"{','.join(sorted(LAYER_NAMES[layer] for layer in include_layers))}.",
+            file=sys.stderr,
+        )
+        if args.output is not None:
+            print(
+                f"         See {args.output} stats.scc_count for details.",
+                file=sys.stderr,
+            )
 
     return 0
 

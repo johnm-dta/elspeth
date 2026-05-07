@@ -24,6 +24,7 @@ import ast
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 import yaml
 
@@ -333,18 +334,24 @@ def find_dict_violations(file_path: Path, whitelist: set[str], matched_entries: 
     violations = []
     relative_path = str(file_path)
 
+    # Build parent map once — O(nodes) instead of O(nodes²) for class lookup
+    parent_map: dict[int, ast.AST] = {}
+    for parent_node in ast.walk(tree):
+        for child_node in ast.iter_child_nodes(parent_node):
+            parent_map[id(child_node)] = parent_node
+
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             func_name = node.name
-            class_name = None
 
-            # Try to find enclosing class
-            for parent in ast.walk(tree):
-                if isinstance(parent, ast.ClassDef):
-                    for child in ast.walk(parent):
-                        if child is node:
-                            class_name = parent.name
-                            break
+            # Find enclosing class via parent map — O(depth) not O(nodes)
+            class_name = None
+            ancestor = parent_map.get(id(node))
+            while ancestor is not None:
+                if isinstance(ancestor, ast.ClassDef):
+                    class_name = ancestor.name
+                    break
+                ancestor = parent_map.get(id(ancestor))
 
             context = f"{class_name}.{func_name}" if class_name else func_name
 
@@ -440,32 +447,66 @@ def is_cross_boundary_usage(defining_file: Path, using_file: Path, src_dir: Path
     return defining_module != using_module
 
 
+@dataclass
+class ImportIndex:
+    """Pre-built index of all imports across the codebase.
+
+    Parses each file once and indexes imports by (module, name) for O(1) lookup.
+    This replaces the O(files x types) approach of re-parsing every file for
+    each type definition.
+    """
+
+    # Map from (module_prefix, imported_name) to list of files that import it
+    _by_import: dict[tuple[str, str], list[Path]] = field(default_factory=dict)
+    # Map from file to its top-level module (cached)
+    _file_modules: dict[Path, str] = field(default_factory=dict)
+
+    @classmethod
+    def build(cls, src_dir: Path) -> ImportIndex:
+        """Parse all Python files once and build the import index."""
+        index = cls()
+        for py_file in src_dir.rglob("*.py"):
+            try:
+                source = py_file.read_text()
+                tree = ast.parse(source)
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+
+            index._file_modules[py_file] = get_top_level_module(py_file, src_dir)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    for alias in node.names:
+                        key = (node.module, alias.name)
+                        index._by_import.setdefault(key, []).append(py_file)
+
+        return index
+
+    def find_cross_boundary_usages(self, src_dir: Path, type_name: str, defining_file: Path) -> list[Path]:
+        """Find files that import a type from a DIFFERENT top-level module."""
+        defining_module = defining_file.relative_to(src_dir).with_suffix("").as_posix().replace("/", ".")
+
+        usages = []
+        # Check all import entries where the imported name matches
+        for (module, name), importing_files in self._by_import.items():
+            if name != type_name:
+                continue
+            if defining_module not in module:
+                continue
+            for py_file in importing_files:
+                if py_file == defining_file:
+                    continue
+                if not is_cross_boundary_usage(defining_file, py_file, src_dir):
+                    continue
+                usages.append(py_file)
+
+        return usages
+
+
 def find_cross_boundary_usages(src_dir: Path, type_name: str, defining_file: Path) -> list[Path]:
-    """Find files that import a type from a DIFFERENT top-level module."""
-    usages = []
-    defining_module = defining_file.relative_to(src_dir).with_suffix("").as_posix().replace("/", ".")
-
-    for py_file in src_dir.rglob("*.py"):
-        if py_file == defining_file:
-            continue
-
-        # Only count as violation if crossing module boundary
-        if not is_cross_boundary_usage(defining_file, py_file, src_dir):
-            continue
-
-        try:
-            source = py_file.read_text()
-            tree = ast.parse(source)
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and defining_module in node.module:
-                for alias in node.names:
-                    if alias.name == type_name:
-                        usages.append(py_file)
-
-    return usages
+    """Legacy wrapper — builds index on every call. Use ImportIndex.build() for batch use."""
+    index = ImportIndex.build(src_dir)
+    return index.find_cross_boundary_usages(src_dir, type_name, defining_file)
 
 
 def validate_type_entry(entry: str, src_dir: Path) -> str | None:
@@ -943,7 +984,9 @@ def check_hardcode_documentation(runtime_path: Path) -> list[HardcodeViolation]:
             continue
 
         # Get the documented defaults for this subsystem
-        subsystem_defaults = INTERNAL_DEFAULTS.get(subsystem, {})
+        subsystem_defaults: dict[str, int | float | bool | str] | MappingProxyType[str, int | float | bool | str] = INTERNAL_DEFAULTS.get(
+            subsystem, {}
+        )
 
         # Check each hardcoded literal
         for runtime_field, literal_value in hardcodes:
@@ -1150,6 +1193,9 @@ def main() -> int:
     matched_dict_patterns: dict[str, bool] = dict.fromkeys(whitelist["dicts"], False)
     matched_type_patterns: set[str] = set()
 
+    # Build import index once (O(files) instead of O(files x types))
+    import_index = ImportIndex.build(src_dir)
+
     # Scan all Python files outside contracts/
     for py_file in src_dir.rglob("*.py"):
         if contracts_dir in py_file.parents or py_file.parent == contracts_dir:
@@ -1164,8 +1210,8 @@ def main() -> int:
                 matched_type_patterns.add(qualified_name)
                 continue
 
-            # Check if used across module boundaries
-            usages = find_cross_boundary_usages(src_dir, type_name, py_file)
+            # Check if used across module boundaries (O(1) lookup via index)
+            usages = import_index.find_cross_boundary_usages(src_dir, type_name, py_file)
             if usages:
                 violations.append(
                     Violation(

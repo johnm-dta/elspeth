@@ -6,7 +6,7 @@ Entry point for the elspeth CLI tool.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,13 +18,12 @@ from dynaconf.vendor.ruamel.yaml.parser import ParserError as YamlParserError
 from dynaconf.vendor.ruamel.yaml.scanner import ScannerError as YamlScannerError
 from pydantic import ValidationError
 
+import elspeth.contracts.errors as contract_errors
 from elspeth import __version__
 from elspeth.contracts import ExecutionResult, SecretResolutionInput
 from elspeth.contracts.errors import (
-    AuditIntegrityError,
     CommencementGateFailedError,
     DependencyFailedError,
-    FrameworkBugError,
     GracefulShutdownError,
 )
 from elspeth.contracts.types import AggregationName
@@ -40,33 +39,10 @@ if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
-    from elspeth.plugins.infrastructure.manager import PluginManager
-
 __all__ = [
     "app",
     "load_settings",  # Re-exported from config for convenience
 ]
-
-# Module-level singleton for plugin manager
-_plugin_manager_cache: PluginManager | None = None
-
-
-def _get_plugin_manager() -> PluginManager:
-    """Get initialized plugin manager (singleton).
-
-    Returns:
-        PluginManager with all built-in plugins registered
-    """
-    global _plugin_manager_cache
-
-    from elspeth.plugins.infrastructure.manager import PluginManager
-
-    if _plugin_manager_cache is None:
-        manager = PluginManager()
-        manager.register_builtin_plugins()
-        _plugin_manager_cache = manager
-    return _plugin_manager_cache
-
 
 app = typer.Typer(
     name="elspeth",
@@ -342,7 +318,13 @@ def _load_settings_with_secrets(
     raw_config = _load_raw_yaml(settings_path)
 
     # Extract and validate secrets config
-    secrets_dict = raw_config.get("secrets", {})
+    secrets_obj = raw_config.get("secrets", {})
+    if secrets_obj is None:
+        secrets_dict: dict[str, Any] = {}
+    else:
+        if not isinstance(secrets_obj, Mapping):
+            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
+        secrets_dict = dict(secrets_obj)
     secrets_config = SecretsConfig(**secrets_dict)
 
     # Phase 2: Load secrets from Key Vault if configured
@@ -354,6 +336,17 @@ def _load_settings_with_secrets(
     config = load_settings(settings_path)
 
     return config, secret_resolutions
+
+
+def _execution_sinks_for_graph(
+    config: ElspethSettings,
+    sinks: Mapping[str, SinkProtocol],
+) -> Mapping[str, SinkProtocol]:
+    """Return only sinks that participate in row-flow graph validation/execution."""
+    if config.landscape.export.enabled and config.landscape.export.sink:
+        export_sink_name = config.landscape.export.sink
+        return {name: sink for name, sink in sinks.items() if name != export_sink_name}
+    return sinks
 
 
 @app.command()
@@ -426,6 +419,8 @@ def run(
     # Instantiate plugins before graph construction
     try:
         plugins = instantiate_plugins_from_config(config)
+    except contract_errors.TIER_1_ERRORS:
+        raise  # Tier 1 errors must crash with full traceback, not Exit(1)
     except Exception as e:
         typer.echo(f"Error instantiating plugins: {e}", err=True)
         raise typer.Exit(1) from None
@@ -433,10 +428,7 @@ def run(
     # Build and validate graph from plugin instances
     # Exclude export sink from graph - it's used post-run, not during pipeline execution.
     # The export sink receives audit records after the run completes, not pipeline data.
-    execution_sinks = plugins.sinks
-    if config.landscape.export.enabled and config.landscape.export.sink:
-        export_sink_name = config.landscape.export.sink
-        execution_sinks = {k: v for k, v in plugins.sinks.items() if k != export_sink_name}
+    execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
 
     try:
         graph = ExecutionGraph.from_plugin_instances(
@@ -512,7 +504,7 @@ def run(
     except (DependencyFailedError, CommencementGateFailedError, ValueError) as e:
         typer.echo(f"Pre-flight check failed: {e}", err=True)
         raise typer.Exit(1) from None
-    except (FrameworkBugError, AuditIntegrityError) as e:
+    except contract_errors.TIER_1_ERRORS as e:
         import traceback
 
         typer.echo(f"\nFATAL — {type(e).__name__}: {e}", err=True)
@@ -555,7 +547,7 @@ def run(
             typer.echo(f"\nPipeline interrupted after {e.rows_processed} rows.")
             typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
         raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
-    except (FrameworkBugError, AuditIntegrityError) as e:
+    except contract_errors.TIER_1_ERRORS as e:
         # Tier 1 violations and framework bugs MUST be clearly distinguishable
         # from config errors. These indicate database corruption, tampering,
         # or bugs in ELSPETH itself — not operator mistakes.
@@ -601,7 +593,7 @@ def run(
         else:
             typer.echo(f"Error during pipeline execution: {e}", err=True)
             typer.echo(traceback.format_exc(), err=True)
-        raise typer.Exit(1) from None
+        raise typer.Exit(4) from e  # Exit 4: unknown errors during execution are likely framework bugs
 
     # Emit final execution summary in JSON mode for machine consumption
     if output_format == "json":
@@ -678,11 +670,11 @@ def explain(
     from elspeth.cli_helpers import resolve_database_url, resolve_run_id
     from elspeth.core.landscape import (
         LandscapeDB,
-        LandscapeRecorder,
         LineageTextFormatter,
         dataclass_to_dict,
     )
     from elspeth.core.landscape import explain as explain_lineage
+    from elspeth.core.landscape.factory import RecorderFactory
 
     if database is None:
         message = "--database is required for explain."
@@ -704,16 +696,16 @@ def explain(
         raise typer.Exit(1) from None
 
     # Resolve SQLCipher passphrase.
-    # When --database is provided, resolve_database_url returns config=None
-    # (the CLI path overrides settings-based URL). But we still need the
-    # settings for passphrase resolution (custom encryption_key_env).
-    # Load settings separately if --settings was provided but config is None.
+    # When --database is provided without --settings, config is None because
+    # the CLI path overrides settings-based URL. If --settings was provided,
+    # resolve_database_url() loads it for passphrase resolution.
+    # Keep the fallback for older callers that may still return config=None.
     from elspeth.cli_helpers import resolve_audit_passphrase
 
     landscape_settings = config.landscape if config else None
     if landscape_settings is None and settings_path is not None and settings_path.exists():
         try:
-            settings_for_passphrase = load_settings(settings_path)
+            settings_for_passphrase, _ = _load_settings_with_secrets(Path(settings_path).expanduser())
             landscape_settings = settings_for_passphrase.landscape
         except (FileNotFoundError, yaml.YAMLError, YamlParserError, YamlScannerError) as e:
             # User explicitly provided --settings (guarded by settings_path is not None
@@ -755,10 +747,10 @@ def explain(
         raise typer.Exit(1) from None
 
     try:
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Resolve 'latest' run_id
-        resolved_run_id = resolve_run_id(run_id, recorder)
+        resolved_run_id = resolve_run_id(run_id, factory)
         if resolved_run_id is None:
             if json_output:
                 typer.echo(json_module.dumps({"error": "No runs found in database"}))
@@ -778,7 +770,8 @@ def explain(
         if json_output or no_tui:
             try:
                 lineage_result = explain_lineage(
-                    recorder,
+                    factory.query,
+                    factory.data_flow,
                     run_id=resolved_run_id,
                     token_id=token,
                     row_id=row,
@@ -815,8 +808,6 @@ def explain(
         tui_app = ExplainApp(
             db=db,
             run_id=resolved_run_id,
-            token_id=token,
-            row_id=row,
         )
         tui_app.run()
 
@@ -841,7 +832,7 @@ def _orchestrator_context(
     *,
     db: LandscapeDB,
     formatter_prefix: str = "Run",
-    output_format: Literal["console", "json"] = "console",
+    output_format: Literal["console", "json", "none"] = "console",
     checkpoint_always: bool = False,
 ) -> Iterator[_OrchestratorContext]:
     """Shared orchestrator setup and teardown for run/resume CLI paths.
@@ -862,7 +853,7 @@ def _orchestrator_context(
         plugins: Pre-instantiated PluginBundle from instantiate_plugins_from_config()
         db: LandscapeDB connection (caller owns close lifecycle)
         formatter_prefix: Prefix for console formatters ("Run" or "Resume")
-        output_format: 'console' or 'json'
+        output_format: 'console', 'json', or 'none' for programmatic execution
         checkpoint_always: If True, always create CheckpointManager (resume needs it).
             If False, only create when checkpoint config is enabled (normal run).
 
@@ -876,7 +867,7 @@ def _orchestrator_context(
         RuntimeRateLimitConfig,
         RuntimeTelemetryConfig,
     )
-    from elspeth.core import EventBus
+    from elspeth.core import EventBus, EventBusProtocol, NullEventBus
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import AggregationSettings
     from elspeth.core.rate_limit import RateLimitRegistry
@@ -886,7 +877,7 @@ def _orchestrator_context(
 
     # Unpack pre-instantiated plugins
     source: SourceProtocol = plugins.source
-    sinks: dict[str, SinkProtocol] = dict(plugins.sinks)
+    sinks: Mapping[str, SinkProtocol] = plugins.sinks
 
     # Build transforms list: row_plugins + aggregations (with node_id)
     transforms: list[RowPlugin] = [wired.plugin for wired in plugins.transforms]
@@ -910,10 +901,14 @@ def _orchestrator_context(
         aggregation_settings=aggregation_settings,
     )
 
-    # EventBus + formatters
-    event_bus = EventBus()
-    formatters = create_json_formatters() if output_format == "json" else create_console_formatters(prefix=formatter_prefix)
-    subscribe_formatters(event_bus, formatters)
+    # EventBus + formatters. Programmatic dependency execution uses the
+    # explicit no-output mode so sub-pipelines cannot pollute parent CLI output.
+    if output_format == "none":
+        event_bus: EventBusProtocol = NullEventBus()
+    else:
+        event_bus = EventBus()
+        formatters = create_json_formatters() if output_format == "json" else create_console_formatters(prefix=formatter_prefix)
+        subscribe_formatters(event_bus, formatters)
 
     # Runtime configs
     rate_limit_config = RuntimeRateLimitConfig.from_settings(config.rate_limit)
@@ -1027,6 +1022,8 @@ def _execute_pipeline_with_instances(
             formatter_prefix="Run",
             output_format=output_format,
         ) as ctx:
+            from elspeth.cli_helpers import _make_sink_factory
+
             result = ctx.orchestrator.run(
                 ctx.pipeline_config,
                 graph=graph,
@@ -1034,6 +1031,7 @@ def _execute_pipeline_with_instances(
                 payload_store=payload_store,
                 secret_resolutions=secret_resolutions,
                 preflight_results=preflight_results,
+                sink_factory=_make_sink_factory(config),
             )
 
             return {
@@ -1181,6 +1179,8 @@ def validate(
             hint="Check plugin options match the plugin's requirements.",
         )
         raise typer.Exit(1) from None
+    except contract_errors.TIER_1_ERRORS:
+        raise  # Tier 1 errors must crash with full traceback, not Exit(1)
     except Exception as e:
         _format_validation_error(
             title="Plugin Instantiation Failed",
@@ -1190,12 +1190,13 @@ def validate(
         raise typer.Exit(1) from None
 
     # Build and validate graph from plugin instances
+    execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
     try:
         graph = ExecutionGraph.from_plugin_instances(
             source=plugins.source,
             source_settings=plugins.source_settings,
             transforms=plugins.transforms,
-            sinks=plugins.sinks,
+            sinks=execution_sinks,
             aggregations=plugins.aggregations,
             gates=list(config.gates),
             coalesce_settings=list(config.coalesce) if config.coalesce else None,
@@ -1253,8 +1254,9 @@ def _build_plugin_registry() -> dict[str, list[PluginInfo]]:
         Dict mapping plugin type to list of PluginInfo for each plugin.
     """
     from elspeth.plugins.infrastructure.discovery import get_plugin_description
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
-    manager = _get_plugin_manager()
+    manager = get_shared_plugin_manager()
 
     return {
         "source": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sources()],
@@ -1457,7 +1459,7 @@ def purge(
     # Initialize database and payload store
     # Note: purge is read-only for audit data, no JSONL journaling needed
     try:
-        db = LandscapeDB.from_url(db_url, passphrase=passphrase)
+        db = LandscapeDB.from_url(db_url, passphrase=passphrase, create_tables=False)
     except Exception as e:
         typer.echo(f"Error connecting to database: {e}", err=True)
         raise typer.Exit(1) from None
@@ -1748,6 +1750,8 @@ def resume(
 
         try:
             plugins = instantiate_plugins_from_config(settings_config)
+        except contract_errors.TIER_1_ERRORS:
+            raise  # Tier 1 errors must crash with full traceback, not Exit(1)
         except Exception as e:
             typer.echo(f"Error instantiating plugins: {e}", err=True)
             raise typer.Exit(1) from None
@@ -1755,6 +1759,8 @@ def resume(
         # Build both graphs from the same plugin instances
         try:
             validation_graph, execution_graph = _build_resume_graphs(settings_config, plugins)
+        except contract_errors.TIER_1_ERRORS:
+            raise  # Tier 1 errors must crash with full traceback, not Exit(1)
         except Exception as e:
             typer.echo(f"Error building validation graph: {e}", err=True)
             raise typer.Exit(1) from None
@@ -1867,10 +1873,10 @@ def resume(
             # For sinks with headers: original, provide field resolution
             # mapping BEFORE validation so they can correctly compare display names
             if sink.needs_resume_field_resolution:
-                from elspeth.core.landscape import LandscapeRecorder
+                from elspeth.core.landscape.factory import RecorderFactory
 
-                recorder = LandscapeRecorder(db)
-                field_resolution = recorder.get_source_field_resolution(run_id)
+                factory = RecorderFactory(db)
+                field_resolution = factory.run_lifecycle.get_source_field_resolution(run_id)
                 if field_resolution is not None:
                     sink.set_resume_field_resolution(field_resolution)
 
@@ -1939,7 +1945,7 @@ def resume(
                 typer.echo(f"\nResume interrupted after {e.rows_processed} rows.")
                 typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
             raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
-        except (FrameworkBugError, AuditIntegrityError) as e:
+        except contract_errors.TIER_1_ERRORS as e:
             # Tier 1 violations and framework bugs MUST be clearly distinguishable
             # from config errors — same pattern as the `run` command handler.
             import traceback
@@ -1982,7 +1988,7 @@ def resume(
             else:
                 typer.echo(f"Error during resume: {e}", err=True)
                 typer.echo(traceback.format_exc(), err=True)
-            raise typer.Exit(1) from None
+            raise typer.Exit(4) from e  # Exit 4: unknown errors during execution are likely framework bugs
 
         if output_format == "json":
             import json as json_module
@@ -2014,6 +2020,7 @@ def resume(
 
 @app.command()
 def health(
+    ctx: typer.Context,
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -2026,6 +2033,22 @@ def health(
         "-v",
         help="Include detailed check information.",
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Web server host to check. Defaults to ELSPETH_WEB__HOST or 127.0.0.1.",
+    ),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        "-p",
+        help="Web server port to check. Defaults to ELSPETH_WEB__PORT or 8451.",
+    ),
+    skip_web: bool = typer.Option(
+        True,
+        "--skip-web/--check-web",
+        help="Skip web interface check. Default: skip (batch containers). Use --check-web to probe.",
+    ),
 ) -> None:
     """Check system health for deployment verification.
 
@@ -2034,11 +2057,17 @@ def health(
 
     Examples:
 
-        # Basic health check
+        # Basic health check (batch/CLI containers — skips web by default)
         elspeth health
 
         # JSON output for automation
         elspeth health --json
+
+        # Check web server (for web containers)
+        elspeth health --check-web
+
+        # Check web server on custom port
+        elspeth health --check-web --port 9000
 
         # Verbose with details
         elspeth health --verbose
@@ -2046,6 +2075,17 @@ def health(
     import json as json_module
     import subprocess
     import sys
+
+    from click.core import ParameterSource
+
+    # Infer web checking from explicit host/port arguments.
+    # If user provides --host or --port, they likely want web checking.
+    # BUT: honor explicit --skip-web even when host/port are supplied, so
+    # wrappers can always pass host/port but conditionally suppress the check.
+    skip_web_source = ctx.get_parameter_source("skip_web")
+    skip_web_was_default = skip_web_source == ParameterSource.DEFAULT
+    if (host is not None or port is not None) and skip_web and skip_web_was_default:
+        skip_web = False
 
     # Health check results
     checks: dict[str, dict[str, str | bool]] = {}
@@ -2154,7 +2194,9 @@ def health(
 
     # Check 7: Plugins loaded
     try:
-        manager = _get_plugin_manager()
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        manager = get_shared_plugin_manager()
         source_count = len(manager.get_sources())
         transform_count = len(manager.get_transforms())
         sink_count = len(manager.get_sinks())
@@ -2168,6 +2210,69 @@ def health(
             "value": str(e),
         }
         overall_healthy = False
+
+    # Check 8: Web interface reachable
+    # Priority: CLI flags > env vars > defaults
+    # Note: env vars must be set externally (e.g., docker -e) — they are NOT
+    # automatically propagated from `elspeth web` which runs in a separate process.
+    if skip_web:
+        checks["web"] = {
+            "status": "skip",
+            "value": "skipped via --skip-web",
+        }
+    else:
+        import urllib.error
+        import urllib.request
+
+        web_host_resolved = host or os.environ.get("ELSPETH_WEB__HOST", "127.0.0.1")
+        # Wildcard bind addresses (0.0.0.0, ::) are listen-all addresses, not
+        # connectable destinations. Translate to loopback for probing.
+        _wildcard_to_loopback = {"0.0.0.0": "127.0.0.1", "::": "::1"}
+        probe_host = _wildcard_to_loopback.get(web_host_resolved, web_host_resolved)
+        # RFC 3986: IPv6 literals in URIs must be bracketed to distinguish
+        # port separator from address colons. "::1" → "[::1]".
+        host_for_url = f"[{probe_host}]" if ":" in probe_host else probe_host
+        try:
+            # Parse port inside try so malformed env var produces unhealthy check,
+            # not CLI crash. Health probes must distinguish "misconfigured" from "crashed".
+            web_port_resolved = port or int(os.environ.get("ELSPETH_WEB__PORT", "8451"))
+            web_url = f"http://{host_for_url}:{web_port_resolved}/api/health"
+
+            # Bypass HTTP_PROXY/HTTPS_PROXY only for loopback self-checks.
+            # Corporate environments set proxy env vars for outbound traffic,
+            # but routing localhost probes through a proxy causes false unhealthy
+            # reports. Remote probes must still honor proxy settings.
+            is_loopback = probe_host == "localhost" or probe_host == "::1" or probe_host.startswith("127.")
+            if is_loopback:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            else:
+                opener = urllib.request.build_opener()  # Default: honors proxy env vars
+            with opener.open(web_url, timeout=5) as response:
+                body = response.read().decode("utf-8")
+                data = json_module.loads(body)
+                if data.get("status") == "ok":
+                    checks["web"] = {
+                        "status": "ok",
+                        "value": f"{web_host_resolved}:{web_port_resolved}",
+                    }
+                else:
+                    checks["web"] = {
+                        "status": "error",
+                        "value": f"unexpected response: {data}",
+                    }
+                    overall_healthy = False
+        except urllib.error.URLError as e:
+            checks["web"] = {
+                "status": "error",
+                "value": f"connection failed: {e.reason}",
+            }
+            overall_healthy = False
+        except Exception as e:
+            checks["web"] = {
+                "status": "error",
+                "value": str(e),
+            }
+            overall_healthy = False
 
     # Determine overall status
     status = "healthy" if overall_healthy else "unhealthy"
@@ -2201,6 +2306,51 @@ def health(
     # Exit with appropriate code
     if not overall_healthy:
         raise typer.Exit(1)
+
+
+@app.command()
+def web(
+    port: int = typer.Option(8451, help="Port to listen on"),
+    host: str = typer.Option("127.0.0.1", help="Host to bind to"),
+    auth: str = typer.Option("local", help="Auth provider: local, oidc, entra"),
+    reload: bool = typer.Option(False, help="Enable auto-reload for development"),
+) -> None:
+    """Start the ELSPETH web application."""
+    try:
+        import uvicorn
+    except ImportError:
+        typer.echo(
+            "Error: Web UI requires the [webui] extra. Install with: uv pip install -e '.[webui]'",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+
+    # Fail-fast guard: non-local host with no explicit secret key is always wrong.
+    # Full validation happens in create_app(), but this catches the obvious case
+    # before uvicorn starts — deployments that set ELSPETH_WEB__SECRET_KEY pass.
+    _local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if host not in _local_hosts and "ELSPETH_WEB__SECRET_KEY" not in os.environ:
+        typer.echo(
+            "Error: Non-local host requires an explicit secret_key. "
+            "Set ELSPETH_WEB__SECRET_KEY or use --host 127.0.0.1 for local development.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Bridge CLI args to create_app() via environment variables.
+    # uvicorn's factory protocol calls create_app() with no arguments,
+    # so we set ELSPETH_WEB__* env vars that _settings_from_env() reads.
+    os.environ["ELSPETH_WEB__HOST"] = host
+    os.environ["ELSPETH_WEB__PORT"] = str(port)
+    os.environ["ELSPETH_WEB__AUTH_PROVIDER"] = auth
+
+    uvicorn.run(
+        "elspeth.web.app:create_app",
+        host=host,
+        port=port,
+        reload=reload,
+        factory=True,
+    )
 
 
 if __name__ == "__main__":

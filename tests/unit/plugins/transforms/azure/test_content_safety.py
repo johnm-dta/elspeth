@@ -335,6 +335,25 @@ class TestAzureContentSafetyTransform:
         with pytest.raises(NotImplementedError, match="accept"):
             transform.process(row, ctx)
 
+    def test_forward_probe_preserves_baseline(self) -> None:
+        """Invariant probe should validate safe content without dropping fields."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(AzureContentSafety.probe_config())
+
+        assert AzureContentSafety.passes_through_input is True
+
+        base_row = make_pipeline_row({"baseline": "kept"})
+        result = transform.execute_forward_invariant_probe(
+            transform.forward_invariant_probe_rows(base_row),
+            make_context(),
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline"] == "kept"
+        assert result.row["content_safety_probe_text"] == "safe content"
+
 
 class TestContentSafetyBatchProcessing:
     """Tests for Content Safety with BatchTransformMixin."""
@@ -591,6 +610,7 @@ class TestContentSafetyBatchProcessing:
             assert result.reason["field"] == "score"
             assert result.reason["actual_type"] == "int"
             assert result.retryable is False
+            assert mock_httpx_client.post.call_count == 0
         finally:
             transform.close()
 
@@ -1108,24 +1128,37 @@ class TestContentSafetyInternalProcessing:
             mock_client_class.return_value = mock_instance
             yield mock_instance
 
-    def test_process_single_with_state_raises_capacity_error_on_rate_limit(self, mock_httpx_client: MagicMock) -> None:
-        """Rate limit (429) triggers CapacityError for AIMD retry."""
+    def test_process_single_with_state_retries_rate_limit_with_configured_budget(self, mock_httpx_client: MagicMock) -> None:
+        """Rate limit errors retry locally before producing the row result."""
         import httpx
 
-        from elspeth.plugins.infrastructure.pooling import CapacityError
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
-        mock_httpx_client.post.side_effect = httpx.HTTPStatusError(
+        capacity_error = httpx.HTTPStatusError(
             "Rate limited",
             request=Mock(),
             response=Mock(status_code=429),
         )
+        mock_httpx_client.post.side_effect = [
+            capacity_error,
+            _create_mock_http_response(
+                {
+                    "categoriesAnalysis": [
+                        {"category": "Hate", "severity": 0},
+                        {"category": "Violence", "severity": 0},
+                        {"category": "Sexual", "severity": 0},
+                        {"category": "SelfHarm", "severity": 0},
+                    ]
+                }
+            ),
+        ]
 
         transform = AzureContentSafety(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
+                "max_capacity_retry_seconds": 1,
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
                 "schema": {"mode": "observed"},
             }
@@ -1137,10 +1170,10 @@ class TestContentSafetyInternalProcessing:
         row_data = {"content": "test", "id": 1}
         row = make_pipeline_row(row_data)
 
-        with pytest.raises(CapacityError) as exc_info:
-            transform._process_single_with_state(row, "test-state-id")
+        result = transform._process_single_with_state(row, "test-state-id")
 
-        assert exc_info.value.status_code == 429
+        assert result.status == "success"
+        assert mock_httpx_client.post.call_count == 2
 
     def test_process_single_with_state_returns_error_on_non_rate_limit_http_error(self, mock_httpx_client: MagicMock) -> None:
         """Non-429 HTTP errors return TransformResult.error (not retryable)."""
@@ -1750,3 +1783,137 @@ class TestContentSafetyRetryRaceCondition:
         assert original_state_id not in transform._http_clients
         # The mutated state_id should NOT have a client (it was never created)
         assert mutated_state_id not in transform._http_clients
+
+
+class TestEndpointURLValidation:
+    """Regression: Azure endpoint accepts any non-empty string.
+
+    The endpoint field must require HTTPS scheme, a hostname, and reject
+    embedded credentials. Without this, operators could misconfigure
+    endpoints with http:// (leaking API keys in plaintext) or embed
+    credentials in the URL.
+    """
+
+    def _make_config_dict(self, endpoint: str) -> dict[str, Any]:
+        return {
+            "endpoint": endpoint,
+            "api_key": "test-key",
+            "fields": ["content"],
+            "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+            "schema": {"mode": "observed"},
+        }
+
+    def test_valid_https_endpoint_accepted(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        cfg = AzureContentSafetyConfig.from_dict(self._make_config_dict("https://test.cognitiveservices.azure.com"))
+        assert cfg.endpoint == "https://test.cognitiveservices.azure.com"
+
+    def test_http_endpoint_rejected(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        with pytest.raises(PluginConfigError, match=r"(?i)https"):
+            AzureContentSafetyConfig.from_dict(self._make_config_dict("http://test.cognitiveservices.azure.com"))
+
+    def test_ftp_endpoint_rejected(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        with pytest.raises(PluginConfigError, match=r"(?i)https"):
+            AzureContentSafetyConfig.from_dict(self._make_config_dict("ftp://test.cognitiveservices.azure.com"))
+
+    def test_empty_endpoint_rejected(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        with pytest.raises(PluginConfigError, match=r"(?i)empty"):
+            AzureContentSafetyConfig.from_dict(self._make_config_dict(""))
+
+    def test_whitespace_only_endpoint_rejected(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        with pytest.raises(PluginConfigError, match=r"(?i)empty"):
+            AzureContentSafetyConfig.from_dict(self._make_config_dict("   "))
+
+    def test_no_hostname_rejected(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        with pytest.raises(PluginConfigError, match=r"(?i)hostname"):
+            AzureContentSafetyConfig.from_dict(self._make_config_dict("https://"))
+
+    def test_embedded_credentials_rejected(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        with pytest.raises(PluginConfigError, match=r"(?i)credentials"):
+            AzureContentSafetyConfig.from_dict(self._make_config_dict("https://user:pass@test.azure.com"))
+
+    def test_endpoint_with_path_accepted(self) -> None:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafetyConfig
+
+        cfg = AzureContentSafetyConfig.from_dict(self._make_config_dict("https://test.azure.com/safety/v1"))
+        assert cfg.endpoint == "https://test.azure.com/safety/v1"
+
+
+class TestDuplicateCategoryDetection:
+    """Regression: Content Safety duplicate categories silently overwritten.
+
+    If Azure returns duplicate categories in categoriesAnalysis, the second
+    entry would silently overwrite the first. A malformed response with
+    duplicate categories could downgrade a previously flagged severity.
+    """
+
+    @pytest.fixture(autouse=True)
+    def mock_httpx_client(self) -> Generator[MagicMock, None, None]:
+        with patch("httpx.Client") as mock_client_class:
+            mock_instance = MagicMock()
+            mock_client_class.return_value = mock_instance
+            yield mock_instance
+
+    def _make_transform(self) -> AzureContentSafety:
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+                "schema": {"mode": "observed"},
+            }
+        )
+        ctx = make_context()
+        transform.on_start(ctx)
+        return transform
+
+    def test_duplicate_category_raises_malformed_response(self, mock_httpx_client: MagicMock) -> None:
+        """Duplicate category in response must raise MalformedResponseError."""
+        mock_response = _create_mock_http_response(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 5},
+                    {"category": "Hate", "severity": 0},  # duplicate — would downgrade
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            }
+        )
+        mock_httpx_client.post.return_value = mock_response
+
+        transform = self._make_transform()
+        collector = CollectorOutputPort()
+        transform.connect_output(collector, max_pending=10)
+
+        try:
+            row = make_pipeline_row({"content": "test", "id": 1})
+            ctx = make_context()
+            transform.accept(row, ctx)
+            transform.flush_batch_processing(timeout=10.0)
+
+            assert len(collector.results) == 1
+            _, result, _ = collector.results[0]
+            assert isinstance(result, TransformResult)
+            assert result.status == "error"
+            assert isinstance(result.reason, dict)
+            assert result.reason["error_type"] == "malformed_response"
+            assert "duplicate" in result.reason["message"].lower()
+        finally:
+            transform.close()

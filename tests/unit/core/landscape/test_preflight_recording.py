@@ -12,25 +12,25 @@ from elspeth.core.dependency_config import (
     PreflightResult,
 )
 from elspeth.core.landscape import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import preflight_results_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 
 
 @pytest.fixture()
-def recorder(tmp_path):
-    """Create a recorder with a fresh in-memory database."""
+def factory(tmp_path):
+    """Create a factory with a fresh in-memory database."""
     db = LandscapeDB.from_url("sqlite:///:memory:")
     payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-    rec = LandscapeRecorder(db, payload_store=payload_store)
-    run = rec.begin_run(config={"test": True}, canonical_version="sha256-rfc8785-v1")
-    yield rec, run.run_id, db
+    fac = RecorderFactory(db, payload_store=payload_store)
+    run = fac.run_lifecycle.begin_run(config={"test": True}, canonical_version="sha256-rfc8785-v1")
+    yield fac, run.run_id, db
     db.close()
 
 
 class TestRecordPreflightResults:
-    def test_dependency_run_recorded_and_readable(self, recorder) -> None:
-        rec, run_id, db = recorder
+    def test_dependency_run_recorded_and_readable(self, factory) -> None:
+        fac, run_id, db = factory
         preflight = PreflightResult(
             dependency_runs=(
                 DependencyRunResult(
@@ -44,7 +44,7 @@ class TestRecordPreflightResults:
             gate_results=(),
         )
 
-        rec.record_preflight_results(run_id=run_id, preflight=preflight)
+        fac.run_lifecycle.record_preflight_results(run_id=run_id, preflight=preflight)
 
         # Read back from database
         with db.connection() as conn:
@@ -59,9 +59,9 @@ class TestRecordPreflightResults:
         assert data["settings_hash"] == "sha256:deadbeef"
         assert data["duration_ms"] == 1500
 
-    def test_gate_result_with_nested_snapshot_recorded(self, recorder) -> None:
+    def test_gate_result_with_nested_snapshot_recorded(self, factory) -> None:
         """Nested MappingProxyType in context_snapshot must serialize correctly (bug #1)."""
-        rec, run_id, db = recorder
+        fac, run_id, db = factory
         preflight = PreflightResult(
             dependency_runs=(),
             gate_results=(
@@ -77,7 +77,7 @@ class TestRecordPreflightResults:
             ),
         )
 
-        rec.record_preflight_results(run_id=run_id, preflight=preflight)
+        fac.run_lifecycle.record_preflight_results(run_id=run_id, preflight=preflight)
 
         with db.connection() as conn:
             rows = conn.execute(preflight_results_table.select().where(preflight_results_table.c.run_id == run_id)).fetchall()
@@ -92,31 +92,31 @@ class TestRecordPreflightResults:
         # Nested snapshot must round-trip correctly
         assert data["context_snapshot"]["collections"]["test"]["count"] == 42
 
-    def test_empty_preflight_is_noop(self, recorder) -> None:
-        rec, run_id, db = recorder
+    def test_empty_preflight_is_noop(self, factory) -> None:
+        fac, run_id, db = factory
         preflight = PreflightResult(dependency_runs=(), gate_results=())
 
-        rec.record_preflight_results(run_id=run_id, preflight=preflight)
+        fac.run_lifecycle.record_preflight_results(run_id=run_id, preflight=preflight)
 
         with db.connection() as conn:
             rows = conn.execute(preflight_results_table.select().where(preflight_results_table.c.run_id == run_id)).fetchall()
 
         assert len(rows) == 0
 
-    def test_result_json_is_canonical(self, recorder) -> None:
+    def test_result_json_is_canonical(self, factory) -> None:
         """result_json must use canonical JSON (RFC 8785), not standard json.dumps.
 
         Canonical JSON produces deterministic key ordering, which means the same
         data always produces the same hash. Standard json.dumps does not guarantee
         key order across Python versions.
         """
-        rec, run_id, db = recorder
+        fac, run_id, db = factory
         preflight = PreflightResult(
             dependency_runs=(DependencyRunResult(name="dep", run_id="r", settings_hash="h", duration_ms=100, indexed_at="t"),),
             gate_results=(),
         )
 
-        rec.record_preflight_results(run_id=run_id, preflight=preflight)
+        fac.run_lifecycle.record_preflight_results(run_id=run_id, preflight=preflight)
 
         with db.connection() as conn:
             rows = conn.execute(preflight_results_table.select().where(preflight_results_table.c.run_id == run_id)).fetchall()
@@ -125,8 +125,8 @@ class TestRecordPreflightResults:
         # Canonical JSON (RFC 8785) sorts keys and uses no unnecessary whitespace
         assert result_json == '{"duration_ms":100,"indexed_at":"t","run_id":"r","settings_hash":"h"}'
 
-    def test_mixed_deps_and_gates(self, recorder) -> None:
-        rec, run_id, db = recorder
+    def test_mixed_deps_and_gates(self, factory) -> None:
+        fac, run_id, db = factory
         preflight = PreflightResult(
             dependency_runs=(
                 DependencyRunResult(name="dep1", run_id="r1", settings_hash="h1", duration_ms=100, indexed_at="t1"),
@@ -135,7 +135,7 @@ class TestRecordPreflightResults:
             gate_results=(CommencementGateResult(name="gate1", condition="True", result=True, context_snapshot={}),),
         )
 
-        rec.record_preflight_results(run_id=run_id, preflight=preflight)
+        fac.run_lifecycle.record_preflight_results(run_id=run_id, preflight=preflight)
 
         with db.connection() as conn:
             rows = conn.execute(
@@ -152,11 +152,11 @@ class TestRecordPreflightResults:
 
 
 class TestRecordReadinessCheck:
-    def test_readiness_check_recorded_and_readable(self, recorder) -> None:
+    def test_readiness_check_recorded_and_readable(self, factory) -> None:
         """Readiness check result persists in the preflight_results table."""
-        rec, run_id, db = recorder
+        fac, run_id, db = factory
 
-        rec.record_readiness_check(
+        fac.run_lifecycle.record_readiness_check(
             run_id=run_id,
             name="rag_retrieval",
             collection="test-index",
@@ -178,11 +178,11 @@ class TestRecordReadinessCheck:
         assert data["count"] == 42
         assert "42 documents" in data["message"]
 
-    def test_readiness_json_is_canonical(self, recorder) -> None:
+    def test_readiness_json_is_canonical(self, factory) -> None:
         """result_json must use canonical JSON for deterministic hashing."""
-        rec, run_id, db = recorder
+        fac, run_id, db = factory
 
-        rec.record_readiness_check(
+        fac.run_lifecycle.record_readiness_check(
             run_id=run_id,
             name="rag",
             collection="c",

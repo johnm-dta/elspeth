@@ -12,19 +12,21 @@ evicting the wrong cache entry during retry races.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
 from pydantic import Field, model_validator
 
+from elspeth.contracts.audit_protocols import PluginAuditWriter
+from elspeth.contracts.value_source import DerivedFromSiblingValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient, ContentPolicyError, LLMClientError
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, parse_finish_reason
 from elspeth.plugins.transforms.llm.tracing import AzureAITracingConfig, TracingConfig
 
 if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 logger = structlog.get_logger(__name__)
@@ -76,6 +78,19 @@ class AzureOpenAIConfig(LLMConfig):
                 data["model"] = deployment
         return data
 
+    # Value-source declaration: ``model`` is derived from ``deployment_name``.
+    # The ``_set_model_from_deployment`` validator above fills the field when
+    # empty; the value-source compliance walker confirms post-validation that
+    # ``model == deployment_name`` (or that ``model`` was empty in the original
+    # config — accepted because the validator substitutes the sibling).
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = (
+        DerivedFromSiblingValueSource(
+            field_name="model",
+            sibling_field="deployment_name",
+            allow_empty_default=True,
+        ),
+    )
+
 
 class AzureLLMProvider:
     """Azure OpenAI provider — wraps AuditedLLMClient.
@@ -99,7 +114,7 @@ class AzureLLMProvider:
         api_key: str,
         api_version: str,
         deployment_name: str,
-        recorder: LandscapeRecorder,
+        recorder: PluginAuditWriter,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: Any = None,
@@ -167,28 +182,17 @@ class AzureLLMProvider:
 
             # Extract finish_reason from raw_response.
             # raw_response is the Azure SDK's deserialized API response (Tier 3
-            # external boundary — validate structure once, then direct access).
+            # external boundary — validate structure, then safe access on optional keys).
+            # Missing/empty choices or absent raw_response → finish_reason stays None.
+            # The full raw_response is already recorded in the audit trail via
+            # AuditedLLMClient.record_call(), so anomalies are diagnosable there.
             finish_reason = None
             if response.raw_response is not None:
-                if "choices" not in response.raw_response:
-                    logger.warning(
-                        "Azure SDK response missing choices — finish_reason unavailable, truncation undetectable",
-                        raw_response_keys=list(response.raw_response.keys()),
-                    )
-                else:
-                    choices = response.raw_response["choices"]
-                    if not choices:
-                        logger.warning(
-                            "Azure SDK response has empty choices — finish_reason unavailable",
-                        )
-                    else:
-                        raw_fr = choices[0].get("finish_reason")
-                        if raw_fr is not None:
-                            finish_reason = parse_finish_reason(str(raw_fr))
-            else:
-                logger.warning(
-                    "Azure SDK response has no raw_response — finish_reason unavailable, truncation undetectable",
-                )
+                choices = response.raw_response.get("choices")
+                if choices:
+                    raw_fr = choices[0].get("finish_reason")
+                    if raw_fr is not None:
+                        finish_reason = parse_finish_reason(str(raw_fr))
 
             # Empty/whitespace content — AuditedLLMClient converts None→""
             # (known fabrication). Detect here and raise typed errors so the
@@ -235,7 +239,7 @@ class AzureLLMProvider:
         with self._llm_clients_lock:
             if state_id not in self._llm_clients:
                 self._llm_clients[state_id] = AuditedLLMClient(
-                    recorder=self._recorder,
+                    execution=self._recorder,
                     state_id=state_id,
                     run_id=self._run_id,
                     telemetry_emit=self._telemetry_emit,
@@ -257,12 +261,17 @@ class AzureLLMProvider:
 
 
 # Optional SDK import — module-level so tests can mock it.
+_imported_configure_azure_monitor: Callable[..., None] | None
 try:
     from azure.monitor.opentelemetry import (
-        configure_azure_monitor,
+        configure_azure_monitor as _azure_monitor_sdk_configure,
     )
 except ImportError:
-    configure_azure_monitor = None  # type: ignore[assignment]
+    _imported_configure_azure_monitor = None
+else:
+    _imported_configure_azure_monitor = _azure_monitor_sdk_configure
+
+configure_azure_monitor: Callable[..., None] | None = _imported_configure_azure_monitor
 
 # Module-level idempotency guard — Azure Monitor is process-global.
 _azure_monitor_configured: bool = False

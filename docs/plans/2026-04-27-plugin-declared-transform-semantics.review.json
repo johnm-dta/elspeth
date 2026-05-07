@@ -1,0 +1,220 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "Plan has 7 unique blocking issues after deduplication: 1 trivial dataclass bug (PluginAssistance no-arg default), 1 freeze-guard violation (caught independently by all 4 reviewers), 2 architectural omissions (no shared edge-resolver primitive, undefined pass-through semantic propagation), 2 audit/safety gaps (secret-leakage test absent, WARN-path decisions unrecorded in Landscape), and 1 surface-asymmetry contradiction (/validate vs /execute error contracts not reconciled). Plus a plan-correctness blocker (Wardline regression surface not confirmed before declaring Phase 1 the fix). 9 warnings should be addressed; several are pre-conditions for blockers (extract resolver before semantic validator, add parity test before step 3).",
+  "plan_file": "/home/john/elspeth/docs/plans/2026-04-27-plugin-declared-transform-semantics.md",
+  "reviewed_at": "2026-04-27T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "sources": ["reality"],
+      "issue": "PluginAssistance() no-arg default in base classmethod is a TypeError",
+      "evidence": "Base-class default `return PluginAssistance()` cannot run: `plugin_name`, `issue_code`, `summary` are required positional fields. The classmethod literally crashes on first invocation.",
+      "severity": 4,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 12,
+      "resolution": "Either give those three fields sensible defaults (e.g. plugin_name=cls.__name__, issue_code='unspecified', summary='No assistance available'), OR change the base default to `return None` and make the return type `PluginAssistance | None`. The plan must pick one before any plugin author copies the broken signature."
+    },
+    {
+      "id": "B2",
+      "sources": ["reality", "architecture", "quality", "systems"],
+      "issue": "PluginAssistanceExample violates the deep-freeze contract; PluginAssistance.examples needs the same",
+      "evidence": "`PluginAssistanceExample` is `frozen=True` with `before/after: dict[str, object] | None` and no `__post_init__`. `scripts/cicd/enforce_freeze_guards.py` will fail the build. Independently flagged by all four reviewers (R2, A1, Q1, S1) — highest-confidence blocker. Quality additionally notes `PluginAssistance.examples: tuple[PluginAssistanceExample, ...]` needs `freeze_fields(self, 'examples')` because element containers are mutable.",
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 1,
+      "priority_score": 9,
+      "resolution": "Add `__post_init__` calling `freeze_fields(self, 'before', 'after')` (gated on None) per the canonical pattern in CLAUDE.md. On `PluginAssistance`, also call `freeze_fields(self, 'examples')`. Add a freeze-guard correctness test that attempts post-construction mutation and asserts TypeError."
+    },
+    {
+      "id": "B3",
+      "sources": ["architecture", "systems"],
+      "issue": "No shared edge-resolution primitive specified — two-validator divergence is structurally guaranteed",
+      "evidence": "Plan says 'build or reuse the same producer map' without specifying extraction. `_check_schema_contracts` already contains ~150 lines of producer-map / `_walk_to_real_producer` / pass-through propagation logic, with two existing implementations of `_walk_to_real_producer` (state.py:391 and :784). Open P2 ticket elspeth-87f6d5dea5 is fixing walk-back bugs in one of them. Adding a third copy in the semantic validator locks in three-way divergence.",
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 2,
+      "priority_score": 18,
+      "resolution": "Insert a Phase 0 step: extract `ProducerResolver` (or `_edge_resolver.py`) consolidating producer map construction, walk-back, and pass-through propagation. Both schema and semantic validators consume this single resolver. Land the P2 walk-back fix on the unified resolver before either validator is rewritten on top of it."
+    },
+    {
+      "id": "B4",
+      "sources": ["architecture"],
+      "issue": "Pass-through semantic propagation is under-specified — implementors will diverge",
+      "evidence": "Plan says preserve pass-through 'when the semantic API explicitly preserves or transforms the field facts' but defines no `transform_field_semantics(input_facts) -> FieldSemanticFacts | None` method on BaseTransform. Without an explicit contract, every plugin author guesses; the resolver cannot make a deterministic decision.",
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 2,
+      "priority_score": 18,
+      "resolution": "Either (a) define `BaseTransform.transform_field_semantics(input_facts: FieldSemanticFacts) -> FieldSemanticFacts | None` with a conservative UNKNOWN default and write its contract explicitly in the plan, OR (b) document that phase one degrades all pass-through to UNKNOWN and defer transform_field_semantics to a named follow-up. Pick one in the plan body, not in implementation."
+    },
+    {
+      "id": "B5",
+      "sources": ["quality"],
+      "issue": "Secret-leakage test is absent across the new diagnostic surfaces",
+      "evidence": "Plan tests determinism but never asserts that plugin secrets stay out of ValidationEntry.message, SemanticEdgeContract serialized form, MCP `_validation_to_dict`, ToolResult.to_dict, or PluginAssistance fields. `configured_by` is convention-only (per A6). With multiple new user-visible surfaces carrying plugin-derived strings, leakage is a real and irreversible audit-trail problem.",
+      "severity": 4,
+      "likelihood": 2,
+      "reversibility": 3,
+      "priority_score": 24,
+      "resolution": "Add a fixture configuring `web_scrape` (or any externally-configured plugin) with sentinel password and URL. Assert sentinels are absent from every new surface enumerated above. Additionally, make `configured_by` mechanically sanitised — `__post_init__` validator on the assistance dataclass that rejects `://`, `=`, and any value resembling a connection string."
+    },
+    {
+      "id": "B6",
+      "sources": ["quality"],
+      "issue": "Runtime audit recording of WARN-path semantic decisions is absent",
+      "evidence": "When `unknown_policy=WARN` lets a run proceed despite an UNKNOWN edge, the relaxation decision lands nowhere in Landscape. This violates the auditability standard ('every decision must be traceable to source data, configuration, and code version') — an auditor asking 'why did this run proceed despite a semantic gap?' has no record.",
+      "severity": 4,
+      "likelihood": 3,
+      "reversibility": 3,
+      "priority_score": 36,
+      "resolution": "Every WARN-path semantic relaxation MUST emit a Landscape audit record naming the edge, the missing facts, the policy that allowed it, and the configuration version. This is a hard precondition for shipping WARN at all — otherwise the audit trail silently contains 'looks validated' decisions that were not. (Note: reviewer originally suggested this might be a logging concern; per CLAUDE.md primacy order this is unambiguously an audit event, not a slog event.)"
+    },
+    {
+      "id": "B7",
+      "sources": ["systems"],
+      "issue": "/validate and /execute error surfaces are asymmetric and the plan does not pick one",
+      "evidence": "`validation.py` returns structured `ValidationResult` with check.name and structured `ValidationError`. `service.py:325-327` does `raise ValueError('; '.join(...))` discarding all structure. Plan says both call the same helper but never says what `service.py` does with `SemanticEdgeContract` records. Either route silently loses the new structure (defeating the plan) or `/execute` gets a behavioral change in error contract (not named, not tested, breaks frontend).",
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 2,
+      "priority_score": 18,
+      "resolution": "Plan must pick: (a) `/execute` raises a structured exception type carrying the SemanticEdgeContract list (frontend updated, tests added), or (b) `/execute` keeps stringification but the plan acknowledges that semantic context is dropped at the most critical user surface. Option (a) is correct given the auditability standard; do not silently choose (b)."
+    },
+    {
+      "id": "B8",
+      "sources": ["systems"],
+      "issue": "Wardline regression surface not confirmed before declaring Phase 1 the fix",
+      "evidence": "`data/wardline_line_export_pipeline.yaml:29` already has `text_separator: \"\\n\"` — the file is already fixed. CLI paths (`elspeth run`, `elspeth validate`) do not call any framing or semantic validator today, and Phase 1 does not add one. If the regression was originally observed via the CLI, Phase 1 is fixing the wrong surface and the user-visible bug will recur on the next CLI invocation.",
+      "severity": 3,
+      "likelihood": 2,
+      "reversibility": 2,
+      "priority_score": 12,
+      "resolution": "Before Phase 1 starts: (1) reproduce the original Wardline failure on its original surface; (2) confirm whether that surface is `/validate`, `/execute`, or `elspeth run`/`elspeth validate`; (3) if CLI, the plan must extend Phase 1 to wire the new validator into the CLI execution path, not just web. This is a 30-minute check that prevents the entire plan from missing its stated trigger."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "sources": ["systems", "architecture"],
+      "issue": "Add cross-validator parity test BEFORE step 3, not after",
+      "priority_score": 12,
+      "recommendation": "During steps 1-4 both validators run. Without a parity test asserting they agree on every edge in the existing fixture set, divergence detected at step 5 forces backing out 4 steps. Land the parity test as the first commit after the resolver extraction (B3)."
+    },
+    {
+      "id": "W2",
+      "sources": ["systems"],
+      "issue": "Check-name rename is a user-visible UI change, not acknowledged",
+      "priority_score": 6,
+      "recommendation": "`src/elspeth/web/frontend/src/components/execution/ValidationResult.tsx:66` renders `{check.name}` directly. Tests at test_validation.py:344, 359, 459 key on string `\"transform_framing\"`. Rename requires coordinated frontend + test update in the same commit, and a release note."
+    },
+    {
+      "id": "W3",
+      "sources": ["quality"],
+      "issue": "Wardline regression must be pinned, not replaced",
+      "priority_score": 8,
+      "recommendation": "Replacing 'hardcoded framing tests with generic semantic tests' allows the original regression to silently recur. Carry the existing fixture forward and assert the new system rejects it with the requirement code `line_explode.source_field.line_framed_text`."
+    },
+    {
+      "id": "W4",
+      "sources": ["quality"],
+      "issue": "WARN-then-FAIL migration plan conflicts with no-legacy-code policy",
+      "priority_score": 6,
+      "recommendation": "Per CLAUDE.md 'no users yet' — either (a) start at FAIL and force producers to declare upfront, or (b) document WARN as a permanent design choice with audit recording (B6). The current plan reads as a migration accommodation for users that don't exist."
+    },
+    {
+      "id": "W5",
+      "sources": ["quality"],
+      "issue": "WARN→FAIL treadmill needs explicit trigger condition",
+      "priority_score": 4,
+      "recommendation": "No mechanism currently measures 'coverage improving.' Either define the metric (% of edges with declared semantics) and the threshold for promotion to FAIL, or remove the migration plan entirely (see W4)."
+    },
+    {
+      "id": "W6",
+      "sources": ["architecture"],
+      "issue": "Plugin-probe instantiation cost — design the cache, do not just acknowledge",
+      "priority_score": 4,
+      "recommendation": "Per-validation-pass instance cache shared across schema + semantic validators. Cache key must include plugin config hash to prevent cross-pipeline pollution; add an isolation test."
+    },
+    {
+      "id": "W7",
+      "sources": ["architecture"],
+      "issue": "configured_by secret-leakage discipline must be mechanical, not convention",
+      "priority_score": 6,
+      "recommendation": "Move the discipline into `__post_init__` validator on the assistance dataclass (rejecting `://`, `=`, etc.). Conventions degrade across plugin authors; mechanical guards do not. Pairs with B5."
+    },
+    {
+      "id": "W8",
+      "sources": ["quality"],
+      "issue": "Layer/import boundary contract test absent for plugin_semantics.py L0 purity",
+      "priority_score": 4,
+      "recommendation": "`plugin_semantics.py` lives in `contracts/` (L0). Add a test asserting it imports nothing from `core/`, `engine/`, or `plugins/` so future drift is caught immediately. Also covered by `enforce_tier_model.py` but a unit test fails faster."
+    },
+    {
+      "id": "W9",
+      "sources": ["reality"],
+      "issue": "Five line-number citations are off in the plan",
+      "priority_score": 2,
+      "recommendation": "Most consequential: `_walk_to_real_producer` cited at state.py:838 actually lives at :391 and :784 (line :838 is `_effective_producer_vote`, the wrong function). Other drifts: web_scrape :291→:308-309, :479→:481, :517→:520; line_explode :174→:183; service.py :320→:325; `_check_schema_contracts` :809→:543. Fix the citations or implementors will land on wrong code. Also document the third call site of `validate_transform_framing_contracts` at state.py:1509 (R3) — migration step 5 must list all three."
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "TRACER_BULLET",
+      "source": "architecture",
+      "suggestion": "Land B3 (shared ProducerResolver) and W1 (parity test) as the first two commits. They are pre-conditions for everything else and de-risk the entire migration."
+    },
+    {
+      "type": "PROPERTY_TESTING",
+      "source": "quality",
+      "suggestion": "Use Hypothesis (already in dev infra) for `(ContentKind × TextFraming) → SemanticOutcome` exhaustiveness. Phase one scope per Q9."
+    },
+    {
+      "type": "AUDIT_FIRST",
+      "source": "synthesizer",
+      "suggestion": "B6 (WARN-path audit recording) is non-negotiable per CLAUDE.md auditability standard. If WARN ships without it, the audit trail contains decisions whose 'why' is unrecoverable. The reviewer originally flagged this in quality terms; per CLAUDE.md primacy order this is an audit-channel requirement, not a logging recommendation."
+    },
+    {
+      "type": "FUTURE",
+      "source": "systems",
+      "suggestion": "Coverage measurement infrastructure for Phase 8 trigger (S8) and composer LLM tool-call reliability (S9) — both deferrable to follow-up tickets, not blockers."
+    },
+    {
+      "type": "ASYMMETRY_FIX",
+      "source": "reality",
+      "suggestion": "R5 — `ToolResult.to_dict()` does not currently emit `edge_contracts`; only `_execute_preview_pipeline` does. Adding `semantic_contracts` to `ToolResult.to_dict()` creates asymmetry. Either backfill `edge_contracts` to `ToolResult.to_dict()` in the same commit, or do not add `semantic_contracts` there."
+    }
+  ],
+  "conflicts_resolved": [
+    {
+      "issue": "Severity of freeze-guard omission",
+      "reality_view": "Blocking — CI will reject",
+      "architecture_view": "Blocking — pattern violation",
+      "quality_view": "Blocking — also extends to PluginAssistance.examples",
+      "systems_view": "Blocking",
+      "resolution": "Consolidated to B2 with the highest scope (Quality's broader formulation including `examples`). All four reviewers agreeing independently is high-confidence signal — kept as single blocker rather than four."
+    },
+    {
+      "issue": "WARN-path semantic decision channel",
+      "quality_view": "Implicit suggestion of slog/visibility",
+      "synthesizer_resolution": "Per CLAUDE.md primacy order, this is an audit event, not a logging event. Recorded as B6 with audit-channel framing. Consistent with project memory note 'Don't recommend slog as a diagnostic channel'."
+    },
+    {
+      "issue": "Wardline regression interpretation",
+      "systems_view": "Phase 1 may fix the wrong surface (CLI vs web)",
+      "other_reviewers": "Did not flag",
+      "resolution": "Promoted to B8 because the consequence (plan fails its trigger) is plan-invalidating. 30-minute pre-check disposes of it cheaply."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {"status": "ISSUES_FOUND", "blocking": 2, "warnings": 4},
+    "architecture": {"status": "ISSUES_FOUND", "blocking": 3, "warnings": 3},
+    "quality": {"status": "ISSUES_FOUND", "blocking": 5, "warnings": 7},
+    "systems": {"status": "ISSUES_FOUND", "blocking": 3, "warnings": 4}
+  },
+  "priority_legend": {
+    "formula": "Severity (1-4) × Likelihood (1-3) × Reversibility (1-3)",
+    "ordered_blockers_by_priority": ["B6 (36)", "B5 (24)", "B3 (18)", "B4 (18)", "B7 (18)", "B1 (12)", "B8 (12)", "B2 (9)"]
+  }
+}

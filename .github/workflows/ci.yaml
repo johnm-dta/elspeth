@@ -90,6 +90,54 @@ jobs:
             --format text
 
   # ===========================================================================
+  # Stage 2a: Audit Evidence Nominal Enforcement
+  # ===========================================================================
+  enforce-audit-evidence-nominal:
+    name: Enforce Audit Evidence Nominal
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run audit evidence nominal enforcement
+        run: |
+          python scripts/cicd/enforce_audit_evidence_nominal.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_audit_evidence_nominal
+
+  # ===========================================================================
+  # Stage 2a: Tier-1 Decoration Enforcement
+  # ===========================================================================
+  enforce-tier-1-decoration:
+    name: Enforce Tier-1 Decoration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run tier-1 decoration enforcement
+        run: |
+          python scripts/cicd/enforce_tier_1_decoration.py check \
+            --file src/elspeth/contracts/errors.py \
+            --allowlist config/cicd/enforce_tier_1_decoration
+
+  # ===========================================================================
   # Stage 2b: Contract Enforcement (Settings→Runtime alignment)
   # ===========================================================================
   contract-enforcement:
@@ -126,7 +174,7 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, contract-enforcement]
+    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement]
     strategy:
       fail-fast: false
       matrix:
@@ -221,12 +269,88 @@ jobs:
         run: uv run pytest tests/integration/ -v -m integration || echo "Integration tests skipped (no API keys)"
 
   # ===========================================================================
+  # Stage 4: Frontend E2E (Playwright) — INFORMATIONAL until baseline lands
+  # ===========================================================================
+  # Boots the FastAPI backend + Vite dev server, runs Playwright tests
+  # against a real Chromium. Currently runs in informational mode
+  # (continue-on-error: true) for the first 2 weeks while a flake baseline
+  # is established. Once pass-rate is ≥99% across N runs, flip the flag and
+  # add this job to ci-success.needs to make it gating. Track via the
+  # follow-up filigree task created during the Playwright rollout.
+  #
+  # The job is NOT in ci-success.needs by design — that's what keeps it
+  # informational. continue-on-error makes failed runs render as ✓ in the
+  # PR check list while still uploading artefacts for diagnosis.
+  e2e-frontend:
+    name: Frontend E2E (Playwright, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsqlcipher-dev
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: src/elspeth/web/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: src/elspeth/web/frontend
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: src/elspeth/web/frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        working-directory: src/elspeth/web/frontend
+        env:
+          CI: "true"
+        run: npm run test:e2e
+
+      - name: Upload Playwright HTML report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: src/elspeth/web/frontend/playwright-report/
+          retention-days: 7
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: src/elspeth/web/frontend/test-results/
+          retention-days: 7
+
+  # ===========================================================================
   # Summary Job - Required for branch protection
   # ===========================================================================
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, contract-enforcement, test]
+    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -237,6 +361,14 @@ jobs:
           fi
           if [[ "${{ needs.enforce-tier-model.result }}" != "success" ]]; then
             echo "Tier model enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-audit-evidence-nominal.result }}" != "success" ]]; then
+            echo "Audit evidence nominal enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-tier-1-decoration.result }}" != "success" ]]; then
+            echo "Tier-1 decoration enforcement job failed"
             exit 1
           fi
           if [[ "${{ needs.contract-enforcement.result }}" != "success" ]]; then

@@ -1,0 +1,9 @@
+id,prompt_variant,score
+1,control,0.62
+2,control,0.68
+3,control,0.71
+4,control,0.74
+5,treatment,0.78
+6,treatment,0.82
+7,treatment,0.86
+8,treatment,0.9

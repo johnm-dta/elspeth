@@ -1,12 +1,11 @@
 # tests/property/core/test_operations_properties.py
 """Property-based tests for operation lifecycle management (track_operation).
 
-The track_operation context manager has 5 exit paths:
+The track_operation context manager has 4 exit paths:
 1. Normal exit → status="completed"
-2. BatchPendingError → status="pending" (control flow, not error)
-3. Exception → status="failed"
-4. BaseException (KeyboardInterrupt, SystemExit) → status="failed"
-5. DB failure in finally → original exception propagates (or DB error if no original)
+2. Exception → status="failed"
+3. BaseException (KeyboardInterrupt, SystemExit) → status="failed"
+4. DB failure in finally → original exception propagates (or DB error if no original)
 
 Properties tested:
 - Context restoration: ctx.operation_id always restored regardless of exit path
@@ -27,10 +26,9 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import BatchPendingError
 from elspeth.contracts.audit import Operation
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape import ExecutionRepository
 from elspeth.core.operations import track_operation
 
 OperationType = Literal["source_load", "sink_write"]
@@ -64,7 +62,7 @@ class RecordedCompletion:
 
 
 class FakeRecorder:
-    """Minimal LandscapeRecorder that records operations in memory."""
+    """Minimal ExecutionRepository that records operations in memory."""
 
     def __init__(self, *, fail_on_complete: bool = False) -> None:
         self._op_counter = 0
@@ -109,9 +107,9 @@ class FakeRecorder:
         )
 
 
-def _as_recorder(recorder: FakeRecorder) -> LandscapeRecorder:
-    """Cast FakeRecorder to LandscapeRecorder for track_operation calls."""
-    return cast(LandscapeRecorder, recorder)
+def _as_execution_repo(recorder: FakeRecorder) -> ExecutionRepository:
+    """Cast FakeRecorder to ExecutionRepository for track_operation calls."""
+    return cast(ExecutionRepository, recorder)
 
 
 def _as_ctx(ctx: FakePluginContext) -> PluginContext:
@@ -158,7 +156,7 @@ class TestContextRestorationProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext(operation_id=prev_op_id)
 
-        with track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
             # During operation, ctx.operation_id is set to new operation
             assert ctx.operation_id is not None
             assert ctx.operation_id != prev_op_id
@@ -173,20 +171,8 @@ class TestContextRestorationProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext(operation_id=prev_op_id)
 
-        with pytest.raises(type(exc)), track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with pytest.raises(type(exc)), track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
             raise exc
-
-        assert ctx.operation_id == prev_op_id
-
-    @given(prev_op_id=previous_op_ids)
-    @settings(max_examples=50)
-    def test_batch_pending_restores_context(self, prev_op_id: str | None) -> None:
-        """Property: BatchPendingError exit restores previous operation_id."""
-        recorder = FakeRecorder()
-        ctx = FakePluginContext(operation_id=prev_op_id)
-
-        with pytest.raises(BatchPendingError), track_operation(_as_recorder(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)):
-            raise BatchPendingError("batch-001", "submitted")
 
         assert ctx.operation_id == prev_op_id
 
@@ -197,7 +183,10 @@ class TestContextRestorationProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext(operation_id=prev_op_id)
 
-        with pytest.raises(KeyboardInterrupt), track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with (
+            pytest.raises(KeyboardInterrupt),
+            track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)),
+        ):
             raise KeyboardInterrupt()
 
         assert ctx.operation_id == prev_op_id
@@ -212,7 +201,7 @@ class TestContextRestorationProperties:
         # DB failure on successful operation → DB error propagates
         with (
             pytest.raises(RuntimeError, match="DB write failed"),
-            track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)),
+            track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)),
         ):
             pass  # Operation "succeeds"
 
@@ -234,7 +223,7 @@ class TestStatusCorrectnessProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with track_operation(_as_recorder(recorder), "run-1", "node-1", op_type, _as_ctx(ctx)):
+        with track_operation(_as_execution_repo(recorder), "run-1", "node-1", op_type, _as_ctx(ctx)):
             pass
 
         assert len(recorder.completions) == 1
@@ -248,32 +237,22 @@ class TestStatusCorrectnessProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with pytest.raises(type(exc)), track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with pytest.raises(type(exc)), track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
             raise exc
 
         assert len(recorder.completions) == 1
         assert recorder.completions[0].status == "failed"
         assert recorder.completions[0].error == str(exc)
 
-    def test_batch_pending_status_pending(self) -> None:
-        """Property: BatchPendingError produces status='pending'."""
-        recorder = FakeRecorder()
-        ctx = FakePluginContext()
-
-        with pytest.raises(BatchPendingError), track_operation(_as_recorder(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)):
-            raise BatchPendingError("batch-001", "submitted")
-
-        assert len(recorder.completions) == 1
-        assert recorder.completions[0].status == "pending"
-        # BatchPendingError is NOT an error - error field should be None
-        assert recorder.completions[0].error is None
-
     def test_keyboard_interrupt_status_failed(self) -> None:
         """Property: KeyboardInterrupt produces status='failed'."""
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with pytest.raises(KeyboardInterrupt), track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with (
+            pytest.raises(KeyboardInterrupt),
+            track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)),
+        ):
             raise KeyboardInterrupt()
 
         assert len(recorder.completions) == 1
@@ -284,7 +263,7 @@ class TestStatusCorrectnessProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with pytest.raises(SystemExit), track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with pytest.raises(SystemExit), track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
             raise SystemExit(1)
 
         assert len(recorder.completions) == 1
@@ -308,7 +287,7 @@ class TestExceptionTransparencyProperties:
 
         caught = None
         try:
-            with track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+            with track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
                 raise exc
         except type(exc) as e:
             caught = e
@@ -327,7 +306,7 @@ class TestExceptionTransparencyProperties:
 
         caught = None
         try:
-            with track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+            with track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
                 raise exc
         except type(exc) as e:
             caught = e
@@ -347,7 +326,7 @@ class TestExceptionTransparencyProperties:
 
         with (
             pytest.raises(RuntimeError, match="DB write failed"),
-            track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)),
+            track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)),
         ):
             pass  # Operation "succeeds"
 
@@ -367,7 +346,7 @@ class TestDurationProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with track_operation(_as_recorder(recorder), "run-1", "node-1", op_type, _as_ctx(ctx)):
+        with track_operation(_as_execution_repo(recorder), "run-1", "node-1", op_type, _as_ctx(ctx)):
             pass
 
         assert recorder.completions[0].duration_ms >= 0.0
@@ -379,7 +358,7 @@ class TestDurationProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with pytest.raises(type(exc)), track_operation(_as_recorder(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
+        with pytest.raises(type(exc)), track_operation(_as_execution_repo(recorder), "run-1", "node-1", "source_load", _as_ctx(ctx)):
             raise exc
 
         assert recorder.completions[0].duration_ms >= 0.0
@@ -409,7 +388,7 @@ class TestOutputDataProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext()
 
-        with track_operation(_as_recorder(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)) as handle:
+        with track_operation(_as_execution_repo(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)) as handle:
             handle.output_data = data
 
         assert recorder.completions[0].output_data == data
@@ -420,7 +399,7 @@ class TestOutputDataProperties:
         ctx = FakePluginContext()
 
         with track_operation(
-            _as_recorder(recorder),
+            _as_execution_repo(recorder),
             "run-1",
             "node-1",
             "source_load",
@@ -450,11 +429,11 @@ class TestNestingProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext(operation_id=outer_prev)
 
-        with track_operation(_as_recorder(recorder), "run-1", "source", "source_load", _as_ctx(ctx)):
+        with track_operation(_as_execution_repo(recorder), "run-1", "source", "source_load", _as_ctx(ctx)):
             outer_op_id = ctx.operation_id
             assert outer_op_id is not None
 
-            with track_operation(_as_recorder(recorder), "run-1", "sink", "sink_write", _as_ctx(ctx)):
+            with track_operation(_as_execution_repo(recorder), "run-1", "sink", "sink_write", _as_ctx(ctx)):
                 inner_op_id = ctx.operation_id
                 assert inner_op_id is not None
                 assert inner_op_id != outer_op_id
@@ -470,10 +449,10 @@ class TestNestingProperties:
         recorder = FakeRecorder()
         ctx = FakePluginContext(operation_id=None)
 
-        with track_operation(_as_recorder(recorder), "run-1", "source", "source_load", _as_ctx(ctx)):
+        with track_operation(_as_execution_repo(recorder), "run-1", "source", "source_load", _as_ctx(ctx)):
             outer_op_id = ctx.operation_id
 
-            with pytest.raises(ValueError), track_operation(_as_recorder(recorder), "run-1", "sink", "sink_write", _as_ctx(ctx)):
+            with pytest.raises(ValueError), track_operation(_as_execution_repo(recorder), "run-1", "sink", "sink_write", _as_ctx(ctx)):
                 raise ValueError("inner failed")
 
             # Inner failure restores outer's operation_id
@@ -494,7 +473,7 @@ class TestNestingProperties:
         # Build nested context managers
         cms = []
         for i in range(depth):
-            cm = track_operation(_as_recorder(recorder), "run-1", f"node-{i}", "source_load", _as_ctx(ctx))
+            cm = track_operation(_as_execution_repo(recorder), "run-1", f"node-{i}", "source_load", _as_ctx(ctx))
             cm.__enter__()
             op_ids.append(ctx.operation_id)
             cms.append(cm)

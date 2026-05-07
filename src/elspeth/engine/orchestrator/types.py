@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.processor import RowProcessor
 
@@ -90,27 +90,28 @@ class PipelineConfig:
             from elspeth.contracts.errors import OrchestrationInvariantError
 
             raise OrchestrationInvariantError("PipelineConfig requires at least one sink")
-        # Freeze mutable container fields — frozen=True prevents reassignment
-        # but list/dict contents remain mutable without explicit freezing.
+        # Freeze mutable container fields. freeze_fields deep-freezes recursively,
+        # converting nested dicts/lists to MappingProxyType/tuple throughout.
+        # transforms/gates/coalesce_settings contain frozen dataclass instances
+        # (scalars only) so tuple() is sufficient — no nested containers to freeze.
         object.__setattr__(self, "transforms", tuple(self.transforms))
-        object.__setattr__(self, "sinks", MappingProxyType(dict(self.sinks)))
-        object.__setattr__(self, "config", MappingProxyType(dict(self.config)))
         object.__setattr__(self, "gates", tuple(self.gates))
-        object.__setattr__(self, "aggregation_settings", MappingProxyType(dict(self.aggregation_settings)))
         object.__setattr__(self, "coalesce_settings", tuple(self.coalesce_settings))
+        freeze_fields(self, "sinks", "config", "aggregation_settings")
 
 
 @dataclass(frozen=True, slots=True)
 class AggregationFlushResult:
     """Result of flushing aggregation buffers.
 
-    Replaces the 9-element tuple return type with named fields for clarity
-    and type safety. Using frozen dataclass prevents accidental mutation.
+    Replaces a wide tuple return type with named fields for clarity and
+    type safety. Using frozen dataclass prevents accidental mutation.
     """
 
     rows_succeeded: int = 0
     rows_failed: int = 0
-    rows_routed: int = 0
+    rows_routed_success: int = 0
+    rows_routed_failure: int = 0
     rows_quarantined: int = 0
     rows_coalesced: int = 0
     rows_forked: int = 0
@@ -122,6 +123,26 @@ class AggregationFlushResult:
     def __post_init__(self) -> None:
         freeze_fields(self, "routed_destinations")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON export.
+
+        Replaces ``dataclasses.asdict()`` which cannot deep-copy
+        ``MappingProxyType`` fields.
+        """
+        return {
+            "rows_succeeded": self.rows_succeeded,
+            "rows_failed": self.rows_failed,
+            "rows_routed_success": self.rows_routed_success,
+            "rows_routed_failure": self.rows_routed_failure,
+            "rows_quarantined": self.rows_quarantined,
+            "rows_coalesced": self.rows_coalesced,
+            "rows_forked": self.rows_forked,
+            "rows_expanded": self.rows_expanded,
+            "rows_buffered": self.rows_buffered,
+            "rows_diverted": self.rows_diverted,
+            "routed_destinations": deep_thaw(self.routed_destinations),
+        }
+
     def __add__(self, other: AggregationFlushResult) -> AggregationFlushResult:
         """Combine two results by summing all counters."""
         combined_destinations: Counter[str] = Counter(self.routed_destinations)
@@ -129,7 +150,8 @@ class AggregationFlushResult:
         return AggregationFlushResult(
             rows_succeeded=self.rows_succeeded + other.rows_succeeded,
             rows_failed=self.rows_failed + other.rows_failed,
-            rows_routed=self.rows_routed + other.rows_routed,
+            rows_routed_success=self.rows_routed_success + other.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure + other.rows_routed_failure,
             rows_quarantined=self.rows_quarantined + other.rows_quarantined,
             rows_coalesced=self.rows_coalesced + other.rows_coalesced,
             rows_forked=self.rows_forked + other.rows_forked,
@@ -144,7 +166,7 @@ class AggregationFlushResult:
 class ExecutionCounters:
     """Mutable counters accumulated during pipeline execution.
 
-    Replaces the 11 loose counter variables + routed_destinations Counter
+    Replaces the loose counter variables + routed_destinations Counter
     that were duplicated in both _execute_run() and _process_resumed_rows().
 
     Mutable (not frozen) because counters are incremented row-by-row during
@@ -155,7 +177,8 @@ class ExecutionCounters:
     rows_processed: int = 0
     rows_succeeded: int = 0
     rows_failed: int = 0
-    rows_routed: int = 0
+    rows_routed_success: int = 0
+    rows_routed_failure: int = 0
     rows_quarantined: int = 0
     rows_forked: int = 0
     rows_coalesced: int = 0
@@ -168,12 +191,13 @@ class ExecutionCounters:
     def accumulate_flush_result(self, result: AggregationFlushResult) -> None:
         """Merge an AggregationFlushResult into these counters.
 
-        Replaces the 9 manual additions that appeared after every
+        Replaces the manual per-counter additions that appeared after every
         check_aggregation_timeouts() and flush_remaining_aggregation_buffers() call.
         """
         self.rows_succeeded += result.rows_succeeded
         self.rows_failed += result.rows_failed
-        self.rows_routed += result.rows_routed
+        self.rows_routed_success += result.rows_routed_success
+        self.rows_routed_failure += result.rows_routed_failure
         self.rows_quarantined += result.rows_quarantined
         self.rows_coalesced += result.rows_coalesced
         self.rows_forked += result.rows_forked
@@ -191,7 +215,8 @@ class ExecutionCounters:
         return AggregationFlushResult(
             rows_succeeded=self.rows_succeeded,
             rows_failed=self.rows_failed,
-            rows_routed=self.rows_routed,
+            rows_routed_success=self.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure,
             rows_quarantined=self.rows_quarantined,
             rows_coalesced=self.rows_coalesced,
             rows_forked=self.rows_forked,
@@ -214,7 +239,8 @@ class ExecutionCounters:
             rows_processed=self.rows_processed,
             rows_succeeded=self.rows_succeeded,
             rows_failed=self.rows_failed,
-            rows_routed=self.rows_routed,
+            rows_routed_success=self.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure,
             rows_quarantined=self.rows_quarantined,
             rows_forked=self.rows_forked,
             rows_coalesced=self.rows_coalesced,
@@ -233,6 +259,77 @@ class RouteValidationError(Exception):
     processed. It indicates a configuration problem that would cause
     failures during processing.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class ValueSourceFinding:
+    """Structured per-field violation report from the value-source walker.
+
+    Each finding pairs the offending ``component_id`` (the operator-facing
+    transform name, e.g. ``openrouter_llm_node_1``) with the ``field_name``
+    that violated its declaration and a human-readable ``reason``.
+
+    Carrying the three fields directly — rather than encoding them into a
+    formatted string and reverse-parsing at the consumer — eliminates the
+    silent-attribution failure mode where a future format change would
+    have produced ``ValidationError(component_id=None)`` records the
+    composer UI cannot tie back to a specific node.
+
+    All fields are scalars (per CLAUDE.md "Scalar-Only Fields Need No
+    Guard"); ``frozen=True, slots=True`` is sufficient — no freeze guard
+    is required.
+    """
+
+    component_id: str
+    field_name: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.component_id:
+            raise ValueError("ValueSourceFinding.component_id must be non-empty")
+        if not self.field_name:
+            raise ValueError("ValueSourceFinding.field_name must be non-empty")
+        if not self.reason:
+            raise ValueError("ValueSourceFinding.reason must be non-empty")
+
+    def format(self) -> str:
+        """Render as a human-readable string for log/check-detail surfaces.
+
+        The single point of stringification — anything wanting a flat
+        message synthesises it here. Keeps the format coupled to the
+        finding's own fields rather than scattering ``f"component '{...}'"``
+        templates across the codebase.
+        """
+        return f"component '{self.component_id}' field '{self.field_name}': {self.reason}"
+
+
+class ValueSourceValidationError(Exception):
+    """Raised when a plugin-config field violates its value-source declaration.
+
+    Examples:
+    - An OpenRouter LLM transform's ``model`` field is set to a string
+      that does not appear in the registered catalog.
+    - An Azure LLM transform's ``model`` field has been overridden to a
+      value that does not match its ``deployment_name`` sibling.
+
+    Like :class:`RouteValidationError`, this error fires at pipeline
+    initialization (pre-token), so the failure is per-pipeline rather
+    than per-row.
+
+    ``findings`` carries one :class:`ValueSourceFinding` per offending
+    field. Consumers (e.g. the composer ``/validate`` path) read
+    ``finding.component_id`` directly to attribute each violation to its
+    node — no string parsing.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        findings: tuple[ValueSourceFinding, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.findings = findings
 
 
 # --- Extraction return types ---
@@ -356,7 +453,7 @@ class ResumeState:
     Short-lived: consumed immediately by the resume method.
     """
 
-    recorder: LandscapeRecorder
+    factory: RecorderFactory
     run_id: str
     restored_aggregation_state: Mapping[str, AggregationCheckpointState]
     restored_coalesce_state: CoalesceCheckpointState | None

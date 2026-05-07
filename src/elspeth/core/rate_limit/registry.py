@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from types import TracebackType
 from typing import TYPE_CHECKING
 
 from elspeth.core.rate_limit.limiter import RateLimiter
+
+
+def _sanitize_limiter_name(service_name: str) -> str:
+    """Convert an arbitrary service name to a valid RateLimiter bucket name.
+
+    RateLimiter requires names matching ^[A-Za-z][A-Za-z0-9_]*$.
+    This converts hostname-style names (api.example.com) and other
+    non-identifier strings to safe bucket names while preserving
+    uniqueness.
+    """
+    # Replace any non-alphanumeric character with underscore
+    sanitized = re.sub(r"[^a-zA-Z0-9]", "_", service_name)
+    # Ensure starts with a letter
+    if not sanitized or not sanitized[0].isalpha():
+        sanitized = "svc_" + sanitized
+    return sanitized
+
 
 if TYPE_CHECKING:
     from elspeth.contracts.config.protocols import RuntimeRateLimitProtocol
@@ -99,7 +117,7 @@ class RateLimitRegistry:
             if service_name not in self._limiters:
                 service_config = self._config.get_service_config(service_name)
                 self._limiters[service_name] = RateLimiter(
-                    name=service_name,
+                    name=_sanitize_limiter_name(service_name),
                     requests_per_minute=service_config.requests_per_minute,
                     persistence_path=self._config.persistence_path,
                 )

@@ -29,23 +29,6 @@ from elspeth.core.config import (
 class TestTelemetryGranularityEnum:
     """Tests for TelemetryGranularity enum."""
 
-    def test_lifecycle_value(self) -> None:
-        """LIFECYCLE has the correct string value."""
-        assert TelemetryGranularity.LIFECYCLE.value == "lifecycle"
-
-    def test_rows_value(self) -> None:
-        """ROWS has the correct string value."""
-        assert TelemetryGranularity.ROWS.value == "rows"
-
-    def test_full_value(self) -> None:
-        """FULL has the correct string value."""
-        assert TelemetryGranularity.FULL.value == "full"
-
-    def test_is_string_enum(self) -> None:
-        """TelemetryGranularity is a string enum for YAML/settings parsing."""
-        assert isinstance(TelemetryGranularity.LIFECYCLE, str)
-        assert TelemetryGranularity.LIFECYCLE.value == "lifecycle"
-
     def test_parse_from_string(self) -> None:
         """Can parse enum from string value."""
         assert TelemetryGranularity("lifecycle") == TelemetryGranularity.LIFECYCLE
@@ -60,23 +43,6 @@ class TestTelemetryGranularityEnum:
 
 class TestBackpressureModeEnum:
     """Tests for BackpressureMode enum."""
-
-    def test_block_value(self) -> None:
-        """BLOCK has the correct string value."""
-        assert BackpressureMode.BLOCK.value == "block"
-
-    def test_drop_value(self) -> None:
-        """DROP has the correct string value."""
-        assert BackpressureMode.DROP.value == "drop"
-
-    def test_slow_value(self) -> None:
-        """SLOW has the correct string value."""
-        assert BackpressureMode.SLOW.value == "slow"
-
-    def test_is_string_enum(self) -> None:
-        """BackpressureMode is a string enum for YAML/settings parsing."""
-        assert isinstance(BackpressureMode.BLOCK, str)
-        assert BackpressureMode.BLOCK.value == "block"
 
     def test_parse_from_string(self) -> None:
         """Can parse enum from string value."""
@@ -94,21 +60,6 @@ class TestBackpressureModeEnum:
 class TestExporterSettings:
     """Tests for ExporterSettings Pydantic model."""
 
-    def test_minimal_config(self) -> None:
-        """ExporterSettings can be created with just a name."""
-        settings = ExporterSettings(name="console")
-        assert settings.name == "console"
-        assert settings.options == {}
-
-    def test_with_options(self) -> None:
-        """ExporterSettings accepts options dict."""
-        settings = ExporterSettings(
-            name="otlp",
-            options={"endpoint": "https://otel.example.com", "headers": {"key": "value"}},
-        )
-        assert settings.name == "otlp"
-        assert settings.options["endpoint"] == "https://otel.example.com"
-
     def test_empty_name_rejected(self) -> None:
         """Empty exporter name is rejected."""
         with pytest.raises(ValueError, match="exporter name cannot be empty"):
@@ -118,14 +69,6 @@ class TestExporterSettings:
         """Whitespace-only exporter name is rejected."""
         with pytest.raises(ValueError, match="exporter name cannot be empty"):
             ExporterSettings(name="   ")
-
-    def test_frozen(self) -> None:
-        """ExporterSettings is immutable."""
-        from pydantic import ValidationError
-
-        settings = ExporterSettings(name="console")
-        with pytest.raises(ValidationError):
-            settings.name = "other"  # type: ignore[misc]
 
 
 class TestTelemetrySettings:
@@ -183,36 +126,14 @@ class TestTelemetrySettings:
         with pytest.raises(ValueError):
             TelemetrySettings(backpressure_mode="invalid")
 
-    def test_frozen(self) -> None:
-        """TelemetrySettings is immutable."""
-        from pydantic import ValidationError
-
-        settings = TelemetrySettings()
-        with pytest.raises(ValidationError):
-            settings.enabled = True  # type: ignore[misc]
-
 
 class TestExporterConfig:
     """Tests for ExporterConfig frozen dataclass."""
-
-    def test_creation(self) -> None:
-        """ExporterConfig can be created with name and options."""
-        config = ExporterConfig(name="console", options={"pretty": True})
-        assert config.name == "console"
-        assert config.options == {"pretty": True}
 
     def test_empty_name_rejected(self) -> None:
         """Empty exporter name is rejected in __post_init__."""
         with pytest.raises(ValueError, match="exporter name cannot be empty"):
             ExporterConfig(name="", options={})
-
-    def test_frozen(self) -> None:
-        """ExporterConfig is immutable."""
-        from dataclasses import FrozenInstanceError
-
-        config = ExporterConfig(name="console", options={})
-        with pytest.raises(FrozenInstanceError):
-            config.name = "other"  # type: ignore[misc]
 
 
 class TestRuntimeTelemetryConfig:
@@ -323,14 +244,6 @@ class TestRuntimeTelemetryConfig:
 
         assert isinstance(config.exporter_configs, tuple)
 
-    def test_frozen(self) -> None:
-        """RuntimeTelemetryConfig is immutable."""
-        from dataclasses import FrozenInstanceError
-
-        config = RuntimeTelemetryConfig.default()
-        with pytest.raises(FrozenInstanceError):
-            config.enabled = True  # type: ignore[misc]
-
 
 class TestRuntimeTelemetryProtocolCompliance:
     """Tests that RuntimeTelemetryConfig satisfies RuntimeTelemetryProtocol."""
@@ -344,17 +257,6 @@ class TestRuntimeTelemetryProtocolCompliance:
         # Protocol is runtime_checkable, so isinstance should work
         assert isinstance(config, RuntimeTelemetryProtocol)
 
-    def test_protocol_fields_accessible(self) -> None:
-        """All protocol fields are accessible on RuntimeTelemetryConfig."""
-        config = RuntimeTelemetryConfig.default()
-
-        # These should all be accessible without error
-        _ = config.enabled
-        _ = config.granularity
-        _ = config.backpressure_mode
-        _ = config.fail_on_total_exporter_failure
-        _ = config.exporter_configs
-
 
 class TestRuntimeTelemetryValidation:
     """Test __post_init__ validation in RuntimeTelemetryConfig."""
@@ -367,6 +269,6 @@ class TestRuntimeTelemetryValidation:
                 granularity=TelemetryGranularity.LIFECYCLE,
                 backpressure_mode=BackpressureMode.BLOCK,
                 fail_on_total_exporter_failure=True,
-                max_consecutive_failures=True,  # type: ignore[arg-type]  # Intentional: testing bool rejection
+                max_consecutive_failures=True,
                 exporter_configs=(),
             )

@@ -21,7 +21,6 @@ Properties tested:
 
 from __future__ import annotations
 
-import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -441,11 +440,18 @@ class TestWhichTriggeredProperties:
 
 
 class TestNoTriggerProperties:
-    """TriggerConfig requires at least one trigger to be configured."""
+    """No configured early trigger means flush only at end-of-source."""
 
-    def test_empty_config_rejected_by_pydantic(self) -> None:
-        """Property: TriggerConfig() with all-None fields raises ValidationError."""
-        import pydantic
+    @given(accept_count=accept_counts)
+    def test_empty_config_never_fires_early_trigger(self, accept_count: int) -> None:
+        """Property: TriggerConfig() leaves early trigger evaluation false."""
+        config = TriggerConfig()
+        clock = MockClock()
+        evaluator = TriggerEvaluator(config, clock=clock)
 
-        with pytest.raises(pydantic.ValidationError, match="at least one trigger"):
-            TriggerConfig()
+        for _ in range(accept_count):
+            evaluator.record_accept()
+
+        assert evaluator.should_trigger() is False
+        assert evaluator.which_triggered() is None
+        assert evaluator.get_trigger_type() is None

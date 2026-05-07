@@ -22,7 +22,7 @@ transforms:
   on_error: discard
   options:
     provider: openrouter
-    model: anthropic/claude-3-5-sonnet
+    model: anthropic/claude-sonnet-4
     api_key: ${OPENROUTER_API_KEY}
     system_prompt: "You are an echo bot. Your ONLY job is to echo back the exact values\nprovided in the query. Respond in\
       \ this EXACT JSON format:\n{\n  \"echo_row\": \"<the ROW value>\",\n  \"echo_case\": \"<the CASE value>\",\n  \"echo_criterion\"\

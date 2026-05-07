@@ -27,7 +27,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
     RateLimitError,
     ServerError,
 )
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
+from elspeth.plugins.transforms.llm.provider import FinishReason, LLMProvider, LLMQueryResult
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -122,7 +122,7 @@ def _make_transform_with_mock_provider(
 ) -> tuple[LLMTransform, Mock]:
     """Create an LLMTransform with a mocked provider already set."""
     transform = LLMTransform(config or make_config())
-    mock_provider = Mock()
+    mock_provider = Mock(spec=LLMProvider)
     transform._provider = mock_provider
     return transform, mock_provider
 
@@ -430,7 +430,7 @@ class TestRowProcessingWithPipelining:
 
     @pytest.fixture()
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -456,7 +456,7 @@ class TestRowProcessingWithPipelining:
         """Create and initialize transform with pipelining."""
         t = LLMTransform(make_config())
         # Set up mock provider instead of calling on_start (avoids real provider creation)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = make_query_result({"score": 85, "rationale": "default"})
         t._provider = mock_provider
         t._recorder = mock_recorder
@@ -592,7 +592,7 @@ class TestRowProcessingWithPipelining:
             },
         }
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = make_query_result({"score": 85, "rationale": "Looks consistent"})
         transform._provider = mock_provider
         transform._recorder = mock_recorder
@@ -741,7 +741,7 @@ class TestMultiRowPipelining:
 
     @pytest.fixture()
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -759,7 +759,7 @@ class TestMultiRowPipelining:
         """Multiple rows are emitted in submission order (FIFO)."""
         config = make_config()
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = make_query_result({"score": 85, "rationale": "ok"})
         transform._provider = mock_provider
         transform._recorder = mock_recorder
@@ -857,7 +857,7 @@ class TestHTTPSpecificBehavior:
 
     @pytest.fixture()
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -882,7 +882,7 @@ class TestHTTPSpecificBehavior:
     def transform(self, collector: CollectorOutputPort, mock_recorder: Mock) -> Generator[LLMTransform, None, None]:
         """Create and initialize transform with pipelining."""
         t = LLMTransform(make_config())
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = make_query_result({"score": 85, "rationale": "default"})
         t._provider = mock_provider
         t._recorder = mock_recorder
@@ -1084,7 +1084,7 @@ class TestResourceCleanup:
     def test_close_clears_provider(self) -> None:
         """close() clears the provider reference."""
         transform = LLMTransform(make_config())
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         transform._provider = mock_provider
 
         transform.close()

@@ -16,14 +16,24 @@ Provides read-only tools for querying the audit database:
 
 def create_server(*args, **kwargs):  # type: ignore[no-untyped-def]
     """Create an MCP server instance. Requires the [mcp] extra."""
-    from elspeth.mcp.server import create_server as _create_server
+    try:
+        from elspeth.mcp.server import create_server as _create_server
+    except ModuleNotFoundError as exc:
+        if "mcp" in str(exc):
+            raise ImportError("MCP server requires the [mcp] extra. Install with: uv pip install -e '.[mcp]'") from exc
+        raise
 
     return _create_server(*args, **kwargs)
 
 
 def main(*args, **kwargs):  # type: ignore[no-untyped-def]
     """Run the MCP server. Requires the [mcp] extra."""
-    from elspeth.mcp.server import main as _main
+    try:
+        from elspeth.mcp.server import main as _main
+    except ModuleNotFoundError as exc:
+        if "mcp" in str(exc):
+            raise ImportError("MCP server requires the [mcp] extra. Install with: uv pip install -e '.[mcp]'") from exc
+        raise
 
     return _main(*args, **kwargs)
 

@@ -1,0 +1,325 @@
+"""Tests for WebSocket /ws/runs/{run_id} endpoint.
+
+Verifies authentication close codes (4001), IDOR protection close codes
+(4004), and the pre-accept vs post-accept distinction: auth failures close
+BEFORE accept (client never sees a successful connection), while IDOR
+failures close AFTER accept (connection established, then terminated).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
+
+import pytest
+from fastapi import FastAPI
+from fastapi.routing import APIWebSocketRoute
+from starlette.websockets import WebSocketDisconnect
+
+from elspeth.web.auth.models import AuthenticationError
+from elspeth.web.execution.schemas import (
+    ProgressData,
+    RunAccounting,
+    RunAccountingIntegrity,
+    RunAccountingRouting,
+    RunAccountingSource,
+    RunAccountingTokens,
+    RunEvent,
+    RunStatusResponse,
+)
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+_TEST_USER_ID = "ws-test-user"
+
+
+class FakeWebSocket:
+    """Minimal WebSocket double for direct route-handler tests."""
+
+    def __init__(self, app: FastAPI) -> None:
+        self.app = app
+        self.accepted = False
+        self.sent_json: list[dict[str, Any]] = []
+        self.close_code: int | None = None
+        self.close_reason: str | None = None
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.close_code = code
+        self.close_reason = reason
+
+    async def send_json(self, data: dict[str, Any]) -> None:
+        self.sent_json.append(data)
+
+
+def _websocket_endpoint(app: FastAPI) -> Callable[[FakeWebSocket, str, str | None], Awaitable[None]]:
+    for route in app.routes:
+        if isinstance(route, APIWebSocketRoute) and route.path == "/ws/runs/{run_id}":
+            return cast(Callable[[FakeWebSocket, str, str | None], Awaitable[None]], route.endpoint)
+    raise AssertionError("WebSocket route not found")
+
+
+async def _call_websocket(app: FastAPI, run_id: str, token: str | None = None) -> FakeWebSocket:
+    websocket = FakeWebSocket(app)
+    await _websocket_endpoint(app)(websocket, run_id, token)
+    return websocket
+
+
+def _create_ws_test_app(
+    auth_provider: MagicMock | None = None,
+    execution_service: MagicMock | None = None,
+    broadcaster: MagicMock | None = None,
+) -> FastAPI:
+    """Create a minimal app with only the WebSocket route wired.
+
+    Unlike the REST test app, WebSocket auth uses query-parameter tokens
+    and calls auth_provider.authenticate() directly (no get_current_user
+    dependency override).
+    """
+    from elspeth.web.execution.routes import create_execution_router
+
+    app = FastAPI()
+    app.state.auth_provider = auth_provider or MagicMock()
+    app.state.execution_service = execution_service or MagicMock()
+    app.state.broadcaster = broadcaster or MagicMock()
+    app.state.session_service = MagicMock()
+    app.state.session_service.get_run = AsyncMock(return_value=MagicMock(session_id=uuid4(), landscape_run_id=None))
+    app.state.settings = MagicMock()
+
+    app.include_router(create_execution_router())
+    return app
+
+
+def _accounting(
+    *,
+    source_rows: int = 1,
+    succeeded: int = 1,
+    failed: int = 0,
+    structural: int = 0,
+    pending: int = 0,
+    closure: Literal["closed", "open", "unknown"] = "closed",
+) -> RunAccounting:
+    terminal = succeeded + failed + structural
+    return RunAccounting(
+        source=RunAccountingSource(rows_processed=source_rows),
+        tokens=RunAccountingTokens(
+            emitted=terminal + pending,
+            terminal=terminal,
+            succeeded=succeeded,
+            failed=failed,
+            structural=structural,
+            pending=pending,
+        ),
+        routing=RunAccountingRouting(routed_success=0, routed_failure=0, quarantined=0, discarded=0),
+        integrity=RunAccountingIntegrity(
+            closure=closure,
+            missing_terminal_outcomes=0,
+            duplicate_terminal_outcomes=0,
+        ),
+    )
+
+
+def _make_broadcaster() -> MagicMock:
+    """Create a mock broadcaster with subscribe/unsubscribe."""
+    broadcaster = MagicMock()
+    broadcaster.subscribe.return_value = MagicMock()
+    return broadcaster
+
+
+# ── Auth Close Code Tests (4001 — before accept) ─────────────────────
+
+
+class TestWebSocketAuth:
+    """Close code 4001 on authentication failure."""
+
+    @pytest.mark.asyncio
+    async def test_missing_token_closes_4001(self) -> None:
+        """No ?token= query parameter → 4001 before accept."""
+        app = _create_ws_test_app()
+        websocket = await _call_websocket(app, "some-run-id")
+        assert websocket.accepted is False
+        assert websocket.close_code == 4001
+        assert "Missing" in (websocket.close_reason or "")
+
+    @pytest.mark.asyncio
+    async def test_invalid_token_closes_4001(self) -> None:
+        """Invalid JWT → auth_provider.authenticate() raises → 4001."""
+        auth = MagicMock()
+        auth.authenticate = AsyncMock(side_effect=AuthenticationError("bad token"))
+        app = _create_ws_test_app(auth_provider=auth)
+        websocket = await _call_websocket(app, "some-run-id", token="bad-jwt")
+        assert websocket.accepted is False
+        assert websocket.close_code == 4001
+        assert "Invalid" in (websocket.close_reason or "")
+
+
+# ── IDOR Close Code Tests (4004 — after accept) ─────────────────────
+
+
+class TestWebSocketIDOR:
+    """Close code 4004 on ownership verification failure."""
+
+    @pytest.mark.asyncio
+    async def test_wrong_user_closes_4004(self) -> None:
+        """Authenticated user does not own the run's session → 4004."""
+        from elspeth.web.auth.models import UserIdentity
+
+        auth = MagicMock()
+        user = UserIdentity(user_id=_TEST_USER_ID, username="testuser")
+        auth.authenticate = AsyncMock(return_value=user)
+
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(return_value=False)
+
+        broadcaster = _make_broadcaster()
+        app = _create_ws_test_app(
+            auth_provider=auth,
+            execution_service=svc,
+            broadcaster=broadcaster,
+        )
+        websocket = await _call_websocket(app, "some-run-id", token="valid")
+        assert websocket.accepted is True
+        assert websocket.close_code == 4004
+        assert "not found" in (websocket.close_reason or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_run_closes_4004(self) -> None:
+        """Run ID not found → verify_run_ownership raises ValueError → 4004."""
+        from elspeth.web.auth.models import UserIdentity
+
+        auth = MagicMock()
+        user = UserIdentity(user_id=_TEST_USER_ID, username="testuser")
+        auth.authenticate = AsyncMock(return_value=user)
+
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(side_effect=ValueError("Run not found"))
+
+        broadcaster = _make_broadcaster()
+        app = _create_ws_test_app(
+            auth_provider=auth,
+            execution_service=svc,
+            broadcaster=broadcaster,
+        )
+        websocket = await _call_websocket(app, "nonexistent", token="valid")
+        assert websocket.accepted is True
+        assert websocket.close_code == 4004
+        assert "not found" in (websocket.close_reason or "").lower()
+
+
+class TestWebSocketTimeoutRecovery:
+    """Timeout path must probe authoritative status, not send ad-hoc payloads."""
+
+    @staticmethod
+    def _make_authed_app(execution_service: MagicMock) -> FastAPI:
+        from elspeth.web.auth.models import UserIdentity
+
+        auth = MagicMock()
+        auth.authenticate = AsyncMock(return_value=UserIdentity(user_id=_TEST_USER_ID, username="testuser"))
+        broadcaster = _make_broadcaster()
+        return _create_ws_test_app(
+            auth_provider=auth,
+            execution_service=execution_service,
+            broadcaster=broadcaster,
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_with_still_running_status_does_not_emit_heartbeat_payload(self) -> None:
+        """After an idle timeout, the next payload must still be a real RunEvent."""
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(return_value=True)
+        svc.get_status = AsyncMock(
+            side_effect=[
+                RunStatusResponse(
+                    run_id=str(run_id),
+                    status="running",
+                    started_at=datetime.now(tz=UTC),
+                    finished_at=None,
+                    error=None,
+                    landscape_run_id=None,
+                ),
+                RunStatusResponse(
+                    run_id=str(run_id),
+                    status="running",
+                    started_at=datetime.now(tz=UTC),
+                    finished_at=None,
+                    error=None,
+                    landscape_run_id=None,
+                ),
+            ]
+        )
+        app = self._make_authed_app(svc)
+        # elspeth-5069612f3c — exercise the routed split on the streaming
+        # progress path so a regression that drops the new wire fields back
+        # to the pre-fix two-field shape would fail this assertion. Without
+        # this, only terminal events would carry the split and an in-flight
+        # silent-zero regression would slip through.
+        queued_event = RunEvent(
+            run_id=str(run_id),
+            timestamp=datetime.now(tz=UTC),
+            event_type="progress",
+            data=ProgressData(
+                source_rows_processed=2,
+                tokens_succeeded=0,
+                tokens_failed=0,
+                tokens_quarantined=0,
+                tokens_routed_success=3,
+                tokens_routed_failure=1,
+            ),
+        )
+
+        with patch(
+            "elspeth.web.execution.routes.asyncio.wait_for",
+            new=AsyncMock(side_effect=[TimeoutError(), queued_event, WebSocketDisconnect(code=1000)]),
+        ):
+            websocket = await _call_websocket(app, str(run_id), token="valid")
+        payload = websocket.sent_json[0]
+
+        assert payload["event_type"] == "progress"
+        assert payload["data"]["source_rows_processed"] == 2
+        assert payload["data"]["tokens_routed_success"] == 3
+        assert payload["data"]["tokens_routed_failure"] == 1
+        assert "type" not in payload
+
+    @pytest.mark.asyncio
+    async def test_timeout_synthesizes_terminal_event_when_status_turned_completed(self) -> None:
+        """Missed terminal broadcasts must be recovered from authoritative status."""
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(return_value=True)
+        svc.get_status = AsyncMock(
+            side_effect=[
+                RunStatusResponse(
+                    run_id=str(run_id),
+                    status="running",
+                    started_at=datetime.now(tz=UTC),
+                    finished_at=None,
+                    error=None,
+                    landscape_run_id=None,
+                ),
+                RunStatusResponse(
+                    run_id=str(run_id),
+                    status="completed",
+                    started_at=datetime.now(tz=UTC),
+                    finished_at=datetime.now(tz=UTC),
+                    accounting=_accounting(source_rows=1, succeeded=1),
+                    error=None,
+                    landscape_run_id="land-1",
+                ),
+            ]
+        )
+        app = self._make_authed_app(svc)
+        with patch(
+            "elspeth.web.execution.routes.asyncio.wait_for",
+            new=AsyncMock(side_effect=[TimeoutError()]),
+        ):
+            websocket = await _call_websocket(app, str(run_id), token="valid")
+        payload = websocket.sent_json[0]
+        assert payload["event_type"] == "completed"
+        assert payload["data"]["landscape_run_id"] == "land-1"
+        assert websocket.close_code == 1000

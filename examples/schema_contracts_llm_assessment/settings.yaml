@@ -14,7 +14,7 @@ transforms:
   on_error: quarantine
   options:
     provider: openrouter
-    model: anthropic/claude-3-5-sonnet
+    model: anthropic/claude-sonnet-4
     api_key: ${OPENROUTER_API_KEY}
     system_prompt: 'You are a medical assessment AI. For each case study and criterion,
 

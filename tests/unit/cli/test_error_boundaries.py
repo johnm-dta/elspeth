@@ -412,8 +412,8 @@ sinks:
 
         assert result.exit_code == 1
 
-    def test_exit_code_one_on_execution_error(self, tmp_path: Path) -> None:
-        """Runtime error during execution returns exit code 1."""
+    def test_exit_code_four_on_execution_error(self, tmp_path: Path) -> None:
+        """Unknown runtime error during execution returns exit code 4 (framework bug)."""
         # Reference a missing source file to cause execution error
         settings = {
             "source": {
@@ -442,7 +442,7 @@ sinks:
 
         result = runner.invoke(app, ["run", "-s", str(settings_file), "--execute"])
 
-        assert result.exit_code == 1
+        assert result.exit_code == 4
 
     def test_exit_code_one_for_missing_database(self) -> None:
         """explain --json returns exit code 1 when database can't be resolved.

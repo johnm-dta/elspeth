@@ -19,7 +19,7 @@ import pytest
 from elspeth.contracts import NodeType
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 
 pytestmark = pytest.mark.stress
 
@@ -30,8 +30,8 @@ _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
 @pytest.fixture
-def recorder() -> LandscapeRecorder:
-    """Create a LandscapeRecorder with in-memory database.
+def factory() -> RecorderFactory:
+    """Create a RecorderFactory with in-memory database.
 
     Pre-seeds per-thread state_ids by calling allocate_call_index once
     from the main thread. This ensures the DB-seeding slow path runs on
@@ -39,26 +39,26 @@ def recorder() -> LandscapeRecorder:
     SQLite threading limitations with SingletonThreadPool.
     """
     db = LandscapeDB.in_memory()
-    rec = LandscapeRecorder(db)
+    fact = RecorderFactory(db)
     # Pre-seed per-thread state_ids on the main thread so worker threads
     # only hit the fast path (in-memory counter). The loop covers state_0
     # through state_7, which includes state_1 used by the shared-key test.
     # Each allocate consumes index 0; tests account for this.
     for i in range(NUM_THREADS):
-        rec.allocate_call_index(f"state_{i}")
-    return rec
+        fact.execution.allocate_call_index(f"state_{i}")
+    return fact
 
 
 @pytest.fixture
-def recorder_with_operation() -> tuple[LandscapeRecorder, str]:
-    """Create a recorder with a run, node, and operation for operation call index tests.
+def factory_with_operation() -> tuple[RecorderFactory, str]:
+    """Create a factory with a run, node, and operation for operation call index tests.
 
     Pre-seeds operation call indices on the main thread.
     """
     db = LandscapeDB.in_memory()
-    rec = LandscapeRecorder(db)
-    rec.begin_run(config={}, canonical_version="v1", run_id="run-1")
-    rec.register_node(
+    fact = RecorderFactory(db)
+    fact.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+    fact.data_flow.register_node(
         run_id="run-1",
         plugin_name="csv",
         node_type=NodeType.SOURCE,
@@ -67,16 +67,16 @@ def recorder_with_operation() -> tuple[LandscapeRecorder, str]:
         node_id="source-0",
         schema_config=_DYNAMIC_SCHEMA,
     )
-    op = rec.begin_operation("run-1", "source-0", "source_load")
+    op = fact.execution.begin_operation("run-1", "source-0", "source_load")
     # Pre-seed the operation call index from the main thread
-    rec.allocate_operation_call_index(op.operation_id)
-    return rec, op.operation_id
+    fact.execution.allocate_operation_call_index(op.operation_id)
+    return fact, op.operation_id
 
 
 class TestAllocateCallIndexConcurrency:
     """Thread-safety stress tests for allocate_call_index."""
 
-    def test_concurrent_same_state_id(self, recorder: LandscapeRecorder) -> None:
+    def test_concurrent_same_state_id(self, factory: RecorderFactory) -> None:
         """8 threads allocating indices for the same state_id produce contiguous set.
 
         All threads call allocate_call_index("state_1") 500 times each.
@@ -91,7 +91,7 @@ class TestAllocateCallIndexConcurrency:
             barrier.wait()
             local: list[int] = []
             for _ in range(CALLS_PER_THREAD):
-                idx = recorder.allocate_call_index("state_1")
+                idx = factory.execution.allocate_call_index("state_1")
                 local.append(idx)
             all_indices[thread_idx] = local
 
@@ -109,7 +109,7 @@ class TestAllocateCallIndexConcurrency:
         # Indices start at 1 (0 consumed by pre-seed)
         assert set(flat) == set(range(1, expected_total + 1))
 
-    def test_concurrent_independent_state_ids(self, recorder: LandscapeRecorder) -> None:
+    def test_concurrent_independent_state_ids(self, factory: RecorderFactory) -> None:
         """8 threads with unique state_ids produce independent contiguous sequences.
 
         Each thread calls allocate_call_index with its own state_id 500 times.
@@ -125,7 +125,7 @@ class TestAllocateCallIndexConcurrency:
             state_id = f"state_{thread_idx}"
             local: list[int] = []
             for _ in range(CALLS_PER_THREAD):
-                idx = recorder.allocate_call_index(state_id)
+                idx = factory.execution.allocate_call_index(state_id)
                 local.append(idx)
             all_indices[thread_idx] = local
 
@@ -150,13 +150,13 @@ class TestAllocateOperationCallIndexConcurrency:
 
     def test_concurrent_same_operation(
         self,
-        recorder_with_operation: tuple[LandscapeRecorder, str],
+        factory_with_operation: tuple[RecorderFactory, str],
     ) -> None:
         """8 threads allocating indices for the same operation_id produce contiguous set.
 
         Index 0 was consumed by the pre-seed. Remaining indices: {1..4000}.
         """
-        recorder, operation_id = recorder_with_operation
+        factory, operation_id = factory_with_operation
         barrier = threading.Barrier(NUM_THREADS)
         all_indices: list[list[int]] = [[] for _ in range(NUM_THREADS)]
 
@@ -164,7 +164,7 @@ class TestAllocateOperationCallIndexConcurrency:
             barrier.wait()
             local: list[int] = []
             for _ in range(CALLS_PER_THREAD):
-                idx = recorder.allocate_operation_call_index(operation_id)
+                idx = factory.execution.allocate_operation_call_index(operation_id)
                 local.append(idx)
             all_indices[thread_idx] = local
 
@@ -182,23 +182,23 @@ class TestAllocateOperationCallIndexConcurrency:
 
     def test_concurrent_independent_operations(
         self,
-        recorder_with_operation: tuple[LandscapeRecorder, str],
+        factory_with_operation: tuple[RecorderFactory, str],
     ) -> None:
         """8 threads with independent operation_ids produce independent sequences.
 
         Creates additional operations and pre-seeds each. Each thread's indices
         must independently form {1..500}.
         """
-        recorder, _op_id = recorder_with_operation
+        factory, _op_id = factory_with_operation
 
         # Create independent operations for each thread
         operation_ids: list[str] = []
         for _i in range(NUM_THREADS):
             # Reuse the same run/node but create separate operations
             # (operation_ids are unique, not constrained per-node)
-            op = recorder.begin_operation("run-1", "source-0", "source_load")
+            op = factory.execution.begin_operation("run-1", "source-0", "source_load")
             # Pre-seed on main thread
-            recorder.allocate_operation_call_index(op.operation_id)
+            factory.execution.allocate_operation_call_index(op.operation_id)
             operation_ids.append(op.operation_id)
 
         barrier = threading.Barrier(NUM_THREADS)
@@ -208,7 +208,7 @@ class TestAllocateOperationCallIndexConcurrency:
             barrier.wait()
             local: list[int] = []
             for _ in range(CALLS_PER_THREAD):
-                idx = recorder.allocate_operation_call_index(operation_ids[thread_idx])
+                idx = factory.execution.allocate_operation_call_index(operation_ids[thread_idx])
                 local.append(idx)
             all_indices[thread_idx] = local
 

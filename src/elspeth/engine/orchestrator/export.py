@@ -23,7 +23,7 @@ from __future__ import annotations
 import csv
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,13 +34,14 @@ if TYPE_CHECKING:
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.core.operations import track_operation
 
 
 def export_landscape(
     db: LandscapeDB,
     run_id: str,
     settings: ElspethSettings,
-    sinks: Mapping[str, SinkProtocol],
+    sink_factory: Callable[[str], SinkProtocol],
 ) -> None:
     """Export audit trail to configured sink after run completion.
 
@@ -54,11 +55,13 @@ def export_landscape(
         db: LandscapeDB instance for reading audit data
         run_id: The completed run ID
         settings: Full settings containing export configuration
-        sinks: Dict of sink_name -> sink instance from PipelineConfig
+        sink_factory: Creates a fresh, unstarted sink instance by name.
+            The export path needs its own sink instance because the
+            pipeline's sinks have already completed their lifecycle.
 
     Raises:
         ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
-                   or if configured sink not found
+                   or if sink_factory raises for the configured sink name
     """
     from elspeth.core.landscape.exporter import LandscapeExporter
 
@@ -76,28 +79,41 @@ def export_landscape(
     # Create exporter
     exporter = LandscapeExporter(db, signing_key=signing_key)
 
-    # Get target sink config
     sink_name = export_config.sink
-    if sink_name is None or sink_name not in sinks:
-        raise ValueError(f"Export sink '{sink_name}' not found in sinks")
-    sink = sinks[sink_name]
+    if sink_name is None:
+        raise ValueError("Export sink name is None")
+    sink = sink_factory(sink_name)
+    sink.node_id = f"export:{sink_name}"
 
-    # Create context for sink writes.
-    # LandscapeRecorder is needed by sinks with headers: original mode
-    # (ctx.landscape.get_source_field_resolution is called during lazy resolution).
-    # Import inside function body to avoid circular imports (see module docstring).
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.contracts import Determinism, NodeType
+    from elspeth.contracts.schema import SchemaConfig
+    from elspeth.core.landscape.factory import RecorderFactory
 
-    recorder = LandscapeRecorder(db)
-    ctx = PluginContext(run_id=run_id, config={}, landscape=recorder)
+    factory = RecorderFactory(db)
+    ctx = PluginContext(
+        run_id=run_id, config={}, landscape=factory.plugin_audit_writer(), payload_store=factory.payload_store, node_id=sink.node_id
+    )
+
+    # Register the export sink as a node so the FK constraint in `operations` is satisfied.
+    # The export sink writes post-run audit data and is not part of the execution graph,
+    # so it must be registered here before begin_operation() is called.
+    factory.data_flow.register_node(
+        run_id=run_id,
+        node_id=sink.node_id,
+        plugin_name=sink.name,
+        node_type=NodeType.SINK,
+        plugin_version=sink.plugin_version,
+        config=dict(sink.config),
+        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+        determinism=Determinism.IO_WRITE,
+        source_file_hash=sink.source_file_hash,
+    )
 
     if export_config.format == "csv":
-        # Multi-file CSV export: one file per record type
-        # CSV export writes files directly (not via sink.write), so we need
-        # the path from sink config. CSV format requires file-based sink.
         if "path" not in sink.config:
             raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
         artifact_path: str = sink.config["path"]
+        sink.close()
         _export_csv_multifile(
             exporter=exporter,
             run_id=run_id,
@@ -105,14 +121,22 @@ def export_landscape(
             sign=export_config.sign,
         )
     else:
-        # JSON export: batch all records for single write
         records = list(exporter.export_run(run_id, sign=export_config.sign))
+        sink.on_start(ctx)
         try:
-            if records:
-                # Capture ArtifactDescriptor for audit trail (future use)
-                _artifact_descriptor = sink.write(records, ctx)
-            sink.flush()
+            with track_operation(
+                factory.execution,
+                run_id,
+                sink.node_id,
+                "sink_write",
+                ctx,
+                input_data={"export_format": "json", "record_count": len(records)},
+            ):
+                if records:
+                    sink.write(records, ctx)
+                sink.flush()
         finally:
+            sink.on_complete(ctx)
             sink.close()
 
 
@@ -313,7 +337,7 @@ def _json_schema_to_python_type(
         any_of_items = cast(list[Mapping[str, object]], field_info["anyOf"])
         type_strs = {cast(str, item["type"]) for item in any_of_items if "type" in item}
         has_null = "null" in type_strs
-        non_null_items = [item for item in any_of_items if item.get("type") != "null"]
+        non_null_items = [item for item in any_of_items if "type" not in item or item["type"] != "null"]
         non_null_types = {cast(str, item["type"]) for item in non_null_items if "type" in item}
 
         # Pattern 1: Decimal or Optional[Decimal]

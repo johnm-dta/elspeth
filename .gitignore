@@ -1,3 +1,41 @@
+# Superpowers brainstorming artifacts
+.superpowers/
+
+# notes/ — previously gitignored as session scratch; unignored 2026-05-03
+# after a content audit confirmed no credentials, tokens, PII, or other
+# sensitive material in the existing files. Going forward, treat notes/
+# as a tracked record of evaluation work, session reports, and remediation
+# plans — not a credential dumping ground. If you need to capture transient
+# secrets, write them to /tmp/ or to a path explicitly added to .gitignore.
+
+# Credential-shaped filenames — refused regardless of directory.
+# Defence-in-depth so an accidental jwt.txt or .env can't slip into a tracked
+# location. Filename patterns catch ~80% of leaks; the per-commit content
+# scan at scripts/git-hooks/pre-commit-secret-scan.sh catches most of the rest.
+**/jwt.txt
+**/jwt-*.txt
+**/jwt_*.txt
+**/*.api_key
+**/*.access_token
+**/*.bearer_token
+**/login.json
+**/login_*.json
+**/*.pem
+**/*.p12
+**/*.pfx
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.template
+!**/.env.sample
+
+# Composer MCP scratch folder (session state, test configs)
+.scratch/*
+!.scratch/.gitkeep
+
+# Generated bug analysis docs (can be regenerated)
+docs/bugs/generated/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -16,6 +54,13 @@ eggs/
 .eggs/
 lib/
 lib64/
+# evals/lib/ is the eval-harness shared library, NOT a Python build artefact —
+# the generic `lib/` rule above would otherwise hide it.
+!evals/lib/
+!evals/lib/**
+# Tests for evals/lib mirror the source tree; same hide-by-default issue.
+!tests/unit/evals/lib/
+!tests/unit/evals/lib/**
 parts/
 sdist/
 var/
@@ -25,6 +70,11 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Pycache and other Python build artefacts
+__pycache__/
+*.py[cod]
+
 
 # PyInstaller
 *.manifest
@@ -108,10 +158,24 @@ cython_debug/
 test-results.txt
 instantiation-*.txt
 
+# Playwright (frontend E2E)
+# Generated artefacts from src/elspeth/web/frontend Playwright runs.
+# - test-results/      per-test traces, videos, screenshots on failure
+# - playwright-report/ HTML reporter output
+# - .e2e-data/         disposable backend ELSPETH_DATA_DIR (SQLite, blob store)
+# - tests/e2e/.auth/   saved storageState (logged-in cookies, JWT) — never commit
+src/elspeth/web/frontend/test-results/
+src/elspeth/web/frontend/playwright-report/
+src/elspeth/web/frontend/.e2e-data/
+src/elspeth/web/frontend/tests/e2e/.auth/
+src/elspeth/web/frontend/playwright/.cache/
+
 # Secrets - NEVER commit these
 .env.local
 .env.*.local
 secrets/
+!src/elspeth/**/secrets/
+!tests/**/secrets/
 credentials.json
 *.pem
 *.key
@@ -146,6 +210,13 @@ examples/**/chroma_data/*
 # Local test databases and logs
 state/
 
+# Local web app data - keep only the placeholder directory marker
+data/*
+!data/.gitkeep
+!data/skills/
+!data/skills/.gitignore
+!data/skills/*.example
+
 # Real/production/example data - never commit
 real/
 examples/large_scale_test/input.csv
@@ -164,11 +235,19 @@ landscape.db-wal
 .filigree/
 .mcp.json
 
+# Deployment artifacts
+deploy/
+
 # FINAL RULE: Always keep .gitkeep files (preserve directory structure)
 # This must be at the end to override any earlier ignore patterns
 !.gitkeep
 
 # Temporary
-.filigree-backups/
-mutation-testing-report-2026-03-07.md
-wiki/site/
+.codex
+
+# Build-artefact PDFs from tools/pdf/ (regeneratable; exceed
+# the pre-commit large-file threshold).
+docs/assets/*.pdf
+.claude/scheduled_tasks.lock
+*.db-shm
+*.db-wal

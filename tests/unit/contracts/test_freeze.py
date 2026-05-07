@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from enum import Enum
 from types import MappingProxyType
+from typing import Any
 
 import pytest
 
@@ -99,10 +100,17 @@ class TestDeepFreeze:
 
     # --- Already-frozen passthrough ---
 
-    def test_mapping_proxy_returned_as_is(self) -> None:
+    def test_mapping_proxy_detached_copy(self) -> None:
+        """MappingProxyType is always detached (no identity preservation).
+
+        MappingProxyType is a read-only view, not a copy. deep_freeze must
+        always create a fresh detached mapping to prevent caller mutations
+        from leaking through.
+        """
         already = MappingProxyType({"k": "v"})
         result = deep_freeze(already)
-        assert result is already
+        assert result == already
+        assert isinstance(result, MappingProxyType)
 
     def test_tuple_returned_as_is(self) -> None:
         already = (1, 2, 3)
@@ -314,8 +322,9 @@ class TestIdempotency:
         original = {"a": [1, {"b": 2}]}
         once = deep_freeze(original)
         twice = deep_freeze(once)
-        # Already-frozen MappingProxyType is returned as-is (identity check)
-        assert twice is once
+        # MappingProxyType is always detached — content is equal, not identical
+        assert twice == once
+        assert isinstance(twice, MappingProxyType)
 
     def test_double_freeze_list(self) -> None:
         original = [1, 2, 3]
@@ -352,7 +361,7 @@ class TestShallowDictVsDeepThaw:
         assert isinstance(shallow, dict)  # Top level is mutable
         assert isinstance(shallow["outer"], MappingProxyType)  # Inner is STILL frozen
         with pytest.raises(TypeError):
-            shallow["outer"]["new_key"] = "crash"  # This is the resume crash
+            shallow["outer"]["new_key"] = "crash"  # type: ignore[index]  # This is the resume crash
 
     def test_deep_thaw_fully_unfreezes_nested_structure(self) -> None:
         """deep_thaw() recursively unfreezes all containers."""
@@ -387,3 +396,111 @@ class TestShallowDictVsDeepThaw:
         # Can mutate nested values (downstream transform scenario)
         restored["metadata"]["tags"].append("processed")
         assert "processed" in restored["metadata"]["tags"]
+
+
+class TestDeepFreezeMappingProxyDetachment:
+    """Regression: deep_freeze must detach MappingProxyType from caller-owned dicts.
+
+    Bug: deep_freeze returned incoming MappingProxyType unchanged when all values
+    were already frozen (identity-preserving optimization). But MappingProxyType
+    is a READ-ONLY VIEW, not a COPY — the caller's original dict remains mutable,
+    and mutations are visible through the supposedly-frozen proxy.
+    """
+
+    def test_mapping_proxy_detaches_from_source_dict(self) -> None:
+        """Mutations to source dict must not affect deep_freeze result."""
+        source = {"key": "original"}
+        proxy = MappingProxyType(source)
+        frozen = deep_freeze(proxy)
+
+        # Mutate the source dict
+        source["key"] = "mutated"
+        source["new_key"] = "added"
+
+        # Frozen result must be detached — still shows original values
+        assert frozen["key"] == "original", (
+            "deep_freeze returned a proxy aliasing the source dict — caller mutation visible through frozen result"
+        )
+        assert "new_key" not in frozen
+
+    def test_nested_mapping_proxy_detaches_recursively(self) -> None:
+        """Nested MappingProxyType must also be detached."""
+        inner = {"nested": "value"}
+        outer = {"inner": MappingProxyType(inner)}
+        frozen = deep_freeze(outer)
+
+        inner["nested"] = "mutated"
+
+        assert frozen["inner"]["nested"] == "value"
+
+    def test_freeze_fields_detaches_mapping_proxy_field(self) -> None:
+        """freeze_fields on a field containing MappingProxyType must detach."""
+        from dataclasses import dataclass
+
+        from elspeth.contracts.freeze import freeze_fields as _ff
+
+        source = {"key": "original"}
+
+        @dataclass(frozen=True)
+        class FrozenHolder:
+            data: Any
+
+            def __post_init__(self) -> None:
+                _ff(self, "data")
+
+        holder = FrozenHolder(data=MappingProxyType(source))
+        source["key"] = "mutated"
+
+        assert holder.data["key"] == "original"
+
+
+class TestFreezeFieldsValidation:
+    """freeze_fields must reject unknown field names to prevent silent typo bugs."""
+
+    def test_rejects_unknown_field_name(self) -> None:
+        from dataclasses import dataclass
+
+        from elspeth.contracts.freeze import freeze_fields as _ff
+
+        @dataclass(frozen=True)
+        class Example:
+            data: Any
+
+            def __post_init__(self) -> None:
+                pass  # Don't call freeze_fields here — we test it explicitly
+
+        instance = Example(data={"key": "value"})
+        with pytest.raises(AttributeError, match="not declared on Example"):
+            _ff(instance, "nonexistent_field")
+
+    def test_rejects_multiple_unknown_fields(self) -> None:
+        from dataclasses import dataclass
+
+        from elspeth.contracts.freeze import freeze_fields as _ff
+
+        @dataclass(frozen=True)
+        class Example:
+            data: Any
+
+            def __post_init__(self) -> None:
+                pass
+
+        instance = Example(data={"key": "value"})
+        with pytest.raises(AttributeError, match="not declared on Example"):
+            _ff(instance, "data", "fake_field", "another_fake")
+
+    def test_accepts_valid_field_names(self) -> None:
+        from dataclasses import dataclass
+
+        from elspeth.contracts.freeze import freeze_fields as _ff
+
+        @dataclass(frozen=True)
+        class Example:
+            data: Any
+            items: Any
+
+            def __post_init__(self) -> None:
+                _ff(self, "data", "items")
+
+        instance = Example(data={"key": "value"}, items=[1, 2])
+        assert isinstance(instance.items, tuple)

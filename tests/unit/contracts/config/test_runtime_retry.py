@@ -5,6 +5,8 @@ Retry-specific tests only. Common tests (frozen, slots, protocol, orphan fields)
 are in test_runtime_common.py.
 """
 
+from types import MappingProxyType
+
 import pytest
 
 # NOTE: Protocol compliance, orphan detection, frozen/slots tests are in test_runtime_common.py
@@ -23,7 +25,7 @@ class TestRetryFieldNameMapping:
             "max_delay_seconds": "max_delay",
         }
 
-        actual_mappings = FIELD_MAPPINGS.get("RetrySettings", {})
+        actual_mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get("RetrySettings", {})
 
         assert actual_mappings == expected_mappings, (
             f"RetrySettings field mappings incorrect.\nExpected: {expected_mappings}\nActual: {actual_mappings}"
@@ -33,7 +35,7 @@ class TestRetryFieldNameMapping:
         """Fields with same name in Settings and Runtime should NOT be in FIELD_MAPPINGS."""
         from elspeth.contracts.config import FIELD_MAPPINGS
 
-        mappings = FIELD_MAPPINGS.get("RetrySettings", {})
+        mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get("RetrySettings", {})
 
         # These fields have the SAME name in both - should not be in mapping
         same_name_fields = {"max_attempts", "exponential_base"}
@@ -391,9 +393,63 @@ class TestRuntimeRetryValidation:
 
         with pytest.raises(TypeError, match="max_attempts must be int"):
             RuntimeRetryConfig(
-                max_attempts=True,  # type: ignore[arg-type]  # Intentional: testing bool rejection
+                max_attempts=True,
                 base_delay=1.0,
                 max_delay=60.0,
                 jitter=1.0,
                 exponential_base=2.0,
             )
+
+
+class TestRuntimeRetryNonFiniteRejection:
+    """Non-finite float fields must be rejected at construction time."""
+
+    @pytest.mark.parametrize("field", ["base_delay", "max_delay", "jitter", "exponential_base"])
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
+    def test_rejects_non_finite_float(self, field: str, bad_value: float) -> None:
+        from elspeth.contracts.config.runtime import RuntimeRetryConfig
+
+        valid: dict[str, int | float] = {
+            "max_attempts": 3,
+            "base_delay": 1.0,
+            "max_delay": 60.0,
+            "jitter": 1.0,
+            "exponential_base": 2.0,
+        }
+        valid[field] = bad_value
+        with pytest.raises(ValueError, match=f"{field} must be finite"):
+            RuntimeRetryConfig(**valid)  # type: ignore[arg-type]
+
+    def test_finite_floats_accepted(self) -> None:
+        from elspeth.contracts.config.runtime import RuntimeRetryConfig
+
+        config = RuntimeRetryConfig(
+            max_attempts=3,
+            base_delay=1.0,
+            max_delay=60.0,
+            jitter=1.0,
+            exponential_base=2.0,
+        )
+        assert config.base_delay == 1.0
+        assert config.max_delay == 60.0
+
+
+class TestValidateIntFieldFractionalFloats:
+    """Regression: _validate_int_field must reject non-integral floats."""
+
+    def test_fractional_float_rejected(self) -> None:
+        from elspeth.contracts.config.runtime import _validate_int_field
+
+        with pytest.raises(ValueError, match="must be an integer"):
+            _validate_int_field("max_attempts", 2.9)
+
+    def test_integral_float_accepted(self) -> None:
+        from elspeth.contracts.config.runtime import _validate_int_field
+
+        assert _validate_int_field("max_attempts", 3.0) == 3
+
+    def test_fractional_float_in_from_policy_rejected(self) -> None:
+        from elspeth.contracts.config.runtime import RuntimeRetryConfig
+
+        with pytest.raises(ValueError, match="must be an integer"):
+            RuntimeRetryConfig.from_policy({"max_attempts": 2.7})  # type: ignore[arg-type]  # deliberate: tests rejection of fractional float in int field

@@ -64,6 +64,7 @@ _agg_token_checkpoints = st.builds(
     expand_group_id=st.none() | _safe_ids,
     row_data=st.dictionaries(_node_names, json_primitives, max_size=3),
     contract_version=_safe_ids,
+    contract=st.just({"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []}),
 )
 
 _agg_node_checkpoints = st.builds(
@@ -73,12 +74,11 @@ _agg_node_checkpoints = st.builds(
     elapsed_age_seconds=st.floats(min_value=0.0, max_value=3600.0, allow_nan=False, allow_infinity=False),
     count_fire_offset=st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
     condition_fire_offset=st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False),
-    contract=st.just({"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []}),
 )
 
 aggregation_states = st.builds(
     AggregationCheckpointState,
-    version=st.just("3.0"),
+    version=st.just("4.0"),
     nodes=st.dictionaries(_node_names, _agg_node_checkpoints, min_size=0, max_size=3),
 )
 
@@ -329,7 +329,7 @@ class TestAggregationStateRoundTripProperties:
             setup_checkpoint_prerequisites(db, "test-nan", token_id="token-nan")
 
             nan_state = AggregationCheckpointState(
-                version="3.0",
+                version="4.0",
                 nodes={
                     "test_node": AggregationNodeCheckpoint(
                         tokens=(
@@ -342,13 +342,13 @@ class TestAggregationStateRoundTripProperties:
                                 expand_group_id=None,
                                 row_data={"avg": float("nan")},
                                 contract_version="test",
+                                contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                             ),
                         ),
                         batch_id="batch-001",
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
-                        contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                     ),
                 },
             )
@@ -380,7 +380,7 @@ class TestAggregationStateRoundTripProperties:
             setup_checkpoint_prerequisites(db, "test-inf", token_id="token-inf")
 
             inf_state = AggregationCheckpointState(
-                version="3.0",
+                version="4.0",
                 nodes={
                     "test_node": AggregationNodeCheckpoint(
                         tokens=(
@@ -393,13 +393,13 @@ class TestAggregationStateRoundTripProperties:
                                 expand_group_id=None,
                                 row_data={"value": float("inf")},
                                 contract_version="test",
+                                contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                             ),
                         ),
                         batch_id="batch-001",
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
-                        contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                     ),
                 },
             )

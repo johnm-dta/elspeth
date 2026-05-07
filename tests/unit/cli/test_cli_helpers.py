@@ -223,10 +223,12 @@ sinks:
     assert isinstance(replaced, PluginBundle)
     assert replaced.source is null_source
 
-    # Unchanged fields preserved by identity
+    # Unchanged fields preserved by value (deep_freeze detaches MappingProxyType
+    # inputs, so identity is not preserved across __post_init__ re-freeze).
+    # transforms is a tuple (identity-preserved), sinks/aggregations are proxies (detached).
     assert replaced.transforms is bundle.transforms
-    assert replaced.sinks is bundle.sinks
-    assert replaced.aggregations is bundle.aggregations
+    assert replaced.sinks == bundle.sinks
+    assert replaced.aggregations == bundle.aggregations
     assert replaced.source_settings is bundle.source_settings
 
 
@@ -403,7 +405,10 @@ def test_aggregation_rejects_transform_without_is_batch_aware_attribute():
     adapter = TypeAdapter(ElspethSettings)
     config = adapter.validate_python(config_dict)
 
-    with patch("elspeth.cli._get_plugin_manager", return_value=mock_manager), pytest.raises(ValueError) as exc_info:
+    with (
+        patch("elspeth.plugins.infrastructure.manager.get_shared_plugin_manager", return_value=mock_manager),
+        pytest.raises(ValueError) as exc_info,
+    ):
         instantiate_plugins_from_config(config)
 
     # Verify the error mentions is_batch_aware requirement

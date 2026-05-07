@@ -1,5 +1,8 @@
 """Tests for BaseTransform._build_output_schema_config helper."""
 
+import pytest
+
+from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.plugins.transforms.keyword_filter import KeywordFilter
 
@@ -77,6 +80,23 @@ class TestBuildOutputSchemaConfig:
         result = transform._build_output_schema_config(base)
         assert result.required_fields == ("req_field",)
 
-    def test_class_attribute_defaults_to_none(self):
+    def test_keyword_filter_initializes_output_schema_config(self):
         transform = _make_minimal_transform()
-        assert transform._output_schema_config is None
+        assert transform._output_schema_config is not None
+
+    def test_effective_static_contract_exposes_guaranteed_fields(self):
+        transform = _make_minimal_transform()
+        assert transform.effective_static_contract() == frozenset()
+
+    def test_effective_static_contract_empty_for_shape_preserving_missing_config(self):
+        transform = _make_minimal_transform()
+        transform._output_schema_config = None
+
+        assert transform.effective_static_contract() == frozenset()
+
+    def test_effective_static_contract_crashes_when_field_adding_config_missing(self):
+        transform = _make_minimal_transform(frozenset({"new_field"}))
+        transform._output_schema_config = None
+
+        with pytest.raises(FrameworkBugError, match="effective static contract"):
+            transform.effective_static_contract()

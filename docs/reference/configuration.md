@@ -15,6 +15,9 @@ Complete reference for ELSPETH pipeline configuration.
 - [Gate Settings](#gate-settings)
 - [Aggregation Settings](#aggregation-settings)
 - [Coalesce Settings](#coalesce-settings)
+- [Pipeline Dependencies](#pipeline-dependencies)
+- [Commencement Gates](#commencement-gates)
+- [Collection Probes](#collection-probes)
 - [Landscape Settings (Audit Trail)](#landscape-settings-audit-trail)
 - [Concurrency Settings](#concurrency-settings)
 - [Rate Limit Settings](#rate-limit-settings)
@@ -61,6 +64,9 @@ Nested environment variables use double underscore: `ELSPETH_LANDSCAPE__URL`.
 | `gates` | list | No | `[]` | Config-driven routing gates |
 | `coalesce` | list | No | `[]` | Fork path merge configurations |
 | `aggregations` | list | No | `[]` | Batch processing configurations |
+| `depends_on` | list | No | `[]` | Pipeline dependencies — run these before the main pipeline |
+| `commencement_gates` | list | No | `[]` | Go/no-go conditions evaluated after dependencies complete |
+| `collection_probes` | list | No | `[]` | Vector store collections to probe for gate context |
 | `landscape` | object | No | (defaults) | Audit trail configuration |
 | `concurrency` | object | No | (defaults) | Parallel processing settings |
 | `retry` | object | No | (defaults) | Retry behavior settings |
@@ -152,7 +158,7 @@ source:
   options:
     path: data/input.csv
     schema:
-      mode: free
+      mode: fixed
       fields:
         - "id: int"
         - "amount: int"
@@ -161,7 +167,7 @@ source:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `azure_blob`, `null` |
+| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `text`, `azure_blob`, `dataverse`, `null` |
 | `on_success` | string | **Yes** | Connection name for source output (transforms reference this via `input`) |
 | `options` | object | No | Plugin-specific configuration |
 
@@ -171,14 +177,16 @@ source:
 |--------|---------|
 | `csv` | Load from CSV file |
 | `json` | Load from JSON file or JSONL |
+| `text` | Load one output row per text line into a configured column |
 | `azure_blob` | Load from Azure Blob Storage |
+| `dataverse` | Load from Microsoft Dataverse via OData v4 REST API |
 | `null` | Empty source (for testing) |
 
 ### Schema Options
 
 ```yaml
 schema:
-  mode: free          # free, strict, or dynamic
+  mode: fixed          # fixed, flexible, or observed
   fields:
     - "id: int"       # Field name and type
     - "name: str"
@@ -188,32 +196,32 @@ on_validation_failure: quarantine  # quarantine or discard
 
 | Schema Mode | Behavior |
 |-------------|----------|
-| `free` | Accept any fields, coerce specified types |
-| `strict` | Require exactly the specified fields |
-| `dynamic` | Infer schema from first row |
+| `fixed` | Require exactly the specified fields (extras rejected) |
+| `flexible` | At least these fields must be present (extras allowed) |
+| `observed` | Infer schema from data (no explicit field definitions) |
 
 ### Schema Contracts (DAG Validation)
 
-For dynamic schemas that still have field requirements, use contract fields:
+For observed schemas that still have field requirements, use contract fields:
 
 ```yaml
 # Producer guarantees these fields will exist in output
 schema:
-  fields: dynamic
+  mode: observed
   guaranteed_fields: [customer_id, timestamp, amount]
 
 # Consumer requires these fields in input
 schema:
-  fields: dynamic
+  mode: observed
   required_fields: [customer_id, amount]
 ```
 
 | Field | Purpose |
 |-------|---------|
-| `guaranteed_fields` | Fields the producer guarantees will exist (for dynamic schemas) |
-| `required_fields` | Fields the consumer requires in input (for dynamic schemas) |
+| `guaranteed_fields` | Fields the producer guarantees will exist (for observed schemas) |
+| `required_fields` | Fields the consumer requires in input (for observed schemas) |
 
-The DAG validates at construction time that upstream `guaranteed_fields` satisfy downstream `required_fields`. For explicit schemas (`mode: strict` or `free`), declared fields are implicitly guaranteed.
+The DAG validates at construction time that upstream `guaranteed_fields` satisfy downstream `required_fields`. For explicit schemas (`mode: fixed` or `flexible`), declared fields are implicitly guaranteed.
 
 ---
 
@@ -225,30 +233,45 @@ Named output destinations. At least one required.
 sinks:
   output:
     plugin: csv
+    on_write_failure: discard
     options:
       path: output/results.csv
+      collision_policy: fail_if_exists
       schema:
-        fields: dynamic
+        mode: observed
 
   flagged:
     plugin: csv
+    on_write_failure: quarantine
     options:
       path: output/flagged.csv
+      collision_policy: fail_if_exists
       schema:
-        fields: dynamic
+        mode: observed
 
   quarantine:
     plugin: csv
+    on_write_failure: discard
     options:
       path: output/quarantine.csv
+      collision_policy: fail_if_exists
       schema:
-        fields: dynamic
+        mode: observed
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `database`, `azure_blob` |
+| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `database`, `azure_blob`, `dataverse`, `chroma_sink` |
+| `on_write_failure` | string | **Yes** | Per-row write failure handling: `discard` to drop with audit record, or a sink name to divert to a failsink |
 | `options` | object | No | Plugin-specific configuration |
+
+For local file sinks (`csv`, `json`), `options.collision_policy` can make output-path collisions explicit:
+
+| Policy | Use with | Behavior |
+|--------|----------|----------|
+| `fail_if_exists` | `mode: write` | Refuse to write if the requested output path already exists |
+| `auto_increment` | `mode: write` | Pick a free sibling path such as `results-1.json` |
+| `append_or_create` | `mode: append` | Append to an existing output or create it if missing |
 
 ### Available Sink Plugins
 
@@ -258,6 +281,8 @@ sinks:
 | `json` | Write to JSON file |
 | `database` | Write to SQL database |
 | `azure_blob` | Write to Azure Blob Storage |
+| `dataverse` | Write to Microsoft Dataverse via OData v4 REST API |
+| `chroma_sink` | Write to a ChromaDB vector database |
 
 ---
 
@@ -274,7 +299,7 @@ transforms:
     on_error: quarantine
     options:
       schema:
-        fields: dynamic
+        mode: observed
       mappings:
         old_field: new_field
       computed:
@@ -288,7 +313,7 @@ transforms:
 | `plugin` | string | **Yes** | Plugin name |
 | `input` | string | **Yes** | Connection name to receive data from (source `on_success` or another transform's `on_success`) |
 | `on_success` | string | **Yes** | Where successful rows go (sink name or connection name for downstream node) |
-| `on_error` | string | No | Sink name for rows that fail processing, or `discard` |
+| `on_error` | string | **Yes** | Sink name for rows that fail processing, or `discard` |
 | `options` | object | No | Plugin-specific configuration |
 | `options.required_input_fields` | list | No | Fields this transform requires in input (enables DAG validation) |
 
@@ -322,15 +347,15 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `field_mapper` | Rename, compute, drop fields |
 | `truncate` | Limit string field lengths |
 | `keyword_filter` | Filter rows by regex patterns |
-| `json_explode` | Expand JSON arrays to multiple rows |
-| `batch_stats` | Compute statistics over batch |
-| `batch_replicate` | Replicate rows N times |
+| `json_explode` | Expand list-valued fields to multiple rows |
+| `batch_stats` | Compute statistics over a batch, optionally one row per `group_by` value |
+| `batch_replicate` | Batch deaggregation; configure as an aggregation with `output_mode: transform` |
+| `batch_distribution_profile` | Numeric-only batch distribution statistics; use `batch_top_k` for categorical counts/frequencies |
 | `web_scrape` | HTML content extraction with SSRF prevention |
 | `llm` | Unified LLM transform (azure/openrouter providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
 | `azure_prompt_shield` | Detect prompt injection via Azure AI |
-| `azure_batch_llm` | Azure Batch API for LLM (50% cost savings) |
-| `openrouter_batch_llm` | OpenRouter Batch HTTP API |
+| `rag_retrieval` | Enriches rows with retrieval-augmented context from search providers |
 
 ---
 
@@ -344,15 +369,15 @@ gates:
     input: enriched
     condition: "row['confidence'] >= 0.85"
     routes:
-      "true": continue      # Forward to next step
-      "false": review_sink  # Route to named sink
+      "true": next_step_in   # Connection name for downstream node
+      "false": discard       # Virtual terminal discard; records gate_discarded
 
   - name: amount_threshold
     input: validated
     condition: "row['amount'] > 1000"
     routes:
       "true": high_values
-      "false": continue
+      "false": output
 ```
 
 | Field | Type | Required | Description |
@@ -367,9 +392,12 @@ gates:
 
 | Destination | Behavior |
 |-------------|----------|
-| `continue` | Forward to next pipeline step |
+| `<connection_name>` | Forward to a downstream node that declares this as its `input` |
 | `<sink_name>` | Route directly to named sink |
 | `fork` | Split to multiple paths (requires `fork_to`) |
+| `discard` | Stop this branch without a sink; records an audited `gate_discarded` terminal outcome |
+
+All route destinations must be explicit connection names, sink names, `fork`, or the virtual `discard` target. There is no implicit "forward to next step" — every routing decision must name its destination.
 
 ### Boolean Conditions
 
@@ -382,7 +410,7 @@ gates:
     condition: "row['amount'] > 1000"
     routes:
       "true": high_values
-      "false": continue
+      "false": output
 
 # WRONG - boolean condition with non-boolean labels
 gates:
@@ -390,7 +418,7 @@ gates:
     condition: "row['amount'] > 1000"
     routes:
       "above": high_values  # ERROR: condition returns True/False, not "above"
-      "below": continue
+      "below": output
 ```
 
 ### Fork Operations
@@ -408,8 +436,6 @@ gates:
       - entity_path
 ```
 
-**Note:** The label `continue` is reserved and cannot be used as a route label or fork branch name.
-
 ---
 
 ## Aggregation Settings
@@ -419,7 +445,7 @@ Batch rows until a trigger fires, then process as a group.
 ```yaml
 aggregations:
   - name: batch_stats
-    plugin: stats_aggregation
+    plugin: batch_stats
     input: enriched
     on_success: output
     on_error: discard           # Sink name for batch errors, or 'discard'
@@ -427,9 +453,12 @@ aggregations:
       count: 100              # Fire after 100 rows
       timeout_seconds: 3600   # Or after 1 hour
     output_mode: transform
-    expected_output_count: 1  # Optional: validate N→1 cardinality
+    expected_output_count: 1  # Optional; omit when group_by can emit multiple rows
     options:
-      fields: ["value"]
+      schema:
+        mode: observed
+      value_field: amount
+      group_by: customer_tier  # Optional: one aggregate row per tier
       compute_mean: true
 ```
 
@@ -438,7 +467,7 @@ aggregations:
 | `name` | string | **Yes** | Unique aggregation identifier |
 | `plugin` | string | **Yes** | Aggregation plugin name |
 | `input` | string | **Yes** | Connection name to receive data from |
-| `on_success` | string | **Yes** | Where successful output rows go (sink name or connection name) |
+| `on_success` | string | No | Where successful output rows go (sink name or connection name) |
 | `on_error` | string | **Yes** | Sink name for rows that fail batch processing, or `discard` |
 | `trigger` | object | **Yes** | When to flush the batch |
 | `output_mode` | string | No | `passthrough` or `transform` (default: `transform`) |
@@ -461,8 +490,10 @@ Multiple triggers can be combined (first to fire wins):
 trigger:
   count: 1000
   timeout_seconds: 3600
-  condition: "row['type'] == 'flush_signal'"
+  condition: "row['batch_count'] >= 500 and row['batch_age_seconds'] < 30"
 ```
+
+**Important:** Trigger conditions operate at the **batch level**, not the row level. Only `batch_count` and `batch_age_seconds` are available as row keys. For row-level routing decisions, use Gates instead.
 
 **Note:** End-of-source is always checked implicitly and doesn't need configuration.
 
@@ -504,11 +535,11 @@ coalesce:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | **Yes** | Unique coalesce identifier |
-| `input` | string | **Yes** | Connection name to receive data from (typically a fork gate's output) |
-| `on_success` | string | **Yes** | Where merged output rows go (sink name or connection name) |
-| `branches` | list | **Yes** | Branch names to wait for (min 2) |
+| `branches` | list or dict | **Yes** | Branch names to wait for (min 2). List form `[a, b]` is shorthand for `{a: a, b: b}`. Dict form maps branch identity → input connection. |
+| `on_success` | string | No | Sink name or connection name for coalesce output (required when coalesce is terminal) |
 | `policy` | string | No | How to handle partial arrivals (default: `require_all`) |
 | `merge` | string | No | How to combine data (default: `union`) |
+| `union_collision_policy` | string | No | Field-level collision resolution for `merge: union` (default: `last_wins`) |
 | `timeout_seconds` | float | No | Max wait time |
 | `quorum_count` | int | No | Minimum branches required (for `quorum` policy) |
 | `select_branch` | string | No | Which branch to take (for `select` merge) |
@@ -529,6 +560,97 @@ coalesce:
 | `union` | Combine all fields from all branches | - |
 | `nested` | Each branch's data nested under branch name | - |
 | `select` | Take data from one specific branch | `select_branch` required |
+
+### Union Collision Policy
+
+When `merge: union` is used and two or more branches emit the same field name, `union_collision_policy` controls how the field-level conflict is resolved. This is **only meaningful for `merge: union`** — it is ignored for `nested` and `select`.
+
+| Value | Behavior |
+|-------|----------|
+| `last_wins` *(default)* | The last branch in declaration order wins. Matches the historical behavior of union merges. |
+| `first_wins` | The first branch in declaration order wins. |
+| `fail` | Raise `CoalesceCollisionError` the moment any field collides. No merged row is produced. The full collision record (origin of every field plus each contributing `(branch, value)` pair) is still written to the audit trail on the failed node state. |
+
+> **Note on `fail`:** Collision detection is **name-based**, not value-based. Two branches that both emit a field called `id` with the *same* value still trigger `fail` — the executor does not compare values to decide whether the overlap is "real." If your branches share trivially-identical fields (like an `id` carried unchanged through both transforms), use `last_wins` or `first_wins` instead, or rename the shared fields out of one branch.
+
+Regardless of the chosen value, every union merge records:
+
+- `union_field_origins` — a mapping from every merged field to the branch that produced the winning value. Always populated so auditors can reconstruct field-level provenance even when no collision occurred.
+- `union_field_collision_values` — a mapping from each colliding field to the ordered list of `(branch, value)` pairs. Populated only when at least one field collided.
+
+`union_collision_policy` is **orthogonal to `policy`**: `policy` governs branch-level arrival (what to do when some branches never arrive), while `union_collision_policy` governs field-level conflict within an already-assembled merge. They are independent axes and can be combined freely.
+
+```yaml
+coalesce:
+  - name: strict_merge
+    branches:
+      - sentiment_path
+      - entity_path
+    policy: require_all          # branch-level arrival policy
+    merge: union
+    union_collision_policy: fail  # field-level collision policy — abort on overlap
+    on_success: output
+```
+
+---
+
+## Pipeline Dependencies
+
+Declare pipelines that must run before this one. Used for multi-pipeline workflows like RAG ingestion (index first, then query).
+
+```yaml
+depends_on:
+  - name: indexing
+    settings: pipelines/index_pipeline.yaml
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | **Yes** | Unique label for this dependency |
+| `settings` | string | **Yes** | Path to the dependency pipeline settings file |
+
+Dependencies are executed in order before the main pipeline starts. Each dependency produces a `DependencyRunResult` recorded in the audit trail.
+
+---
+
+## Commencement Gates
+
+Go/no-go conditions evaluated after dependencies complete but before the main pipeline starts. Use these for pre-flight checks (e.g., verifying a vector store is populated).
+
+```yaml
+commencement_gates:
+  - name: collection_ready
+    condition: "probes['products'].document_count > 0"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | **Yes** | Unique label for this gate |
+| `condition` | string | **Yes** | Expression evaluated against pre-flight context (including probe results) |
+
+Gate failures raise `CommencementGateFailedError` and abort the pipeline. Gate passes are recorded in the audit trail.
+
+---
+
+## Collection Probes
+
+Vector store readiness checks that run after dependencies and populate context for commencement gates.
+
+```yaml
+collection_probes:
+  - collection: products
+    provider: chroma
+    provider_config:
+      persist_directory: ./chroma_data
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `collection` | string | **Yes** | Collection name to probe |
+| `provider` | string | **Yes** | Provider type (e.g., `chroma`) |
+| `provider_config` | object | No | Provider-specific connection configuration |
+
+Probe results (document count, metadata) are available to commencement gate expressions via `probes['<collection_name>']`.
 
 ---
 
@@ -555,7 +677,8 @@ landscape:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable audit trail recording |
-| `backend` | string | `sqlite` | Database backend: `sqlite`, `postgresql` |
+| `backend` | string | `sqlite` | Database backend: `sqlite`, `sqlcipher`, `postgresql` |
+| `encryption_key_env` | string | `ELSPETH_AUDIT_KEY` | Environment variable holding the SQLCipher passphrase (`backend: sqlcipher` only) |
 | `url` | string | `sqlite:///./state/audit.db` | SQLAlchemy database URL |
 | `export` | object | (disabled) | Post-run audit export configuration |
 | `dump_to_jsonl` | bool | `false` | Write append-only JSONL change journal |
@@ -614,7 +737,7 @@ landscape:
 ```yaml
 landscape:
   backend: postgresql
-  url: postgresql://user:password@host:5432/elspeth
+  url: postgresql://user@host:5432/elspeth
 ```
 
 **Note:** Passwords in URLs are fingerprinted (not stored) when `ELSPETH_FINGERPRINT_KEY` is set.
@@ -695,14 +818,19 @@ Rate limits apply per-service across all uses in a pipeline. For example, if you
 ```yaml
 source:
   plugin: csv
+  on_success: classify_in
   options:
     path: data/prompts.csv
     schema:
-      fields: dynamic
+      mode: observed
 
 transforms:
   # First LLM transform
-  - plugin: llm
+  - name: classifier
+    plugin: llm
+    input: classify_in
+    on_success: summarize_in
+    on_error: discard
     options:
       provider: azure
       deployment_name: gpt-4o
@@ -710,10 +838,14 @@ transforms:
       api_key: ${AZURE_OPENAI_KEY}
       template: "Classify: {{ row.text }}"
       schema:
-        fields: dynamic
+        mode: observed
 
   # Second LLM transform - shares rate limit with first
-  - plugin: llm
+  - name: summarizer
+    plugin: llm
+    input: summarize_in
+    on_success: output
+    on_error: discard
     options:
       provider: azure
       deployment_name: gpt-4o
@@ -721,15 +853,16 @@ transforms:
       api_key: ${AZURE_OPENAI_KEY}
       template: "Summarize: {{ row.text }}"
       schema:
-        fields: dynamic
+        mode: observed
 
 sinks:
   output:
     plugin: csv
+    on_write_failure: discard
     options:
       path: output/results.csv
       schema:
-        fields: dynamic
+        mode: observed
 
 # Rate limiting - both transforms share this limit
 rate_limit:
@@ -822,7 +955,11 @@ rate_limit:
 
 # Reactive handling (plugin options)
 transforms:
-  - plugin: llm
+  - name: multi_query_llm
+    plugin: llm
+    input: source_out
+    on_success: output
+    on_error: discard
     options:
       provider: azure
       deployment_name: gpt-4o
@@ -1100,7 +1237,8 @@ Gate conditions and aggregation triggers use a restricted expression language.
 
 | Construct | Example |
 |-----------|---------|
-| Field access | `row['field']`, `row.get('field', default)` |
+| Field access | `row['field']`, `row.get('field')` |
+| Built-in functions | `len()`, `abs()` |
 | Comparisons | `==`, `!=`, `<`, `<=`, `>`, `>=` |
 | Boolean operators | `and`, `or`, `not` |
 | Arithmetic | `+`, `-`, `*`, `/`, `%` |
@@ -1108,38 +1246,34 @@ Gate conditions and aggregation triggers use a restricted expression language.
 | Literals | `True`, `False`, `None`, numbers, strings |
 | Ternary | `x if condition else y` |
 
+**`row.get()` does not accept default values.** `row.get('field')` returns `None` if the key is missing. `row.get('field', 'fallback')` is **forbidden** — default values fabricate data the source never provided. Use `row.get('field') is not None` to test for field presence.
+
 ### Forbidden Constructs
 
 | Forbidden | Reason |
 |-----------|--------|
-| Function calls (`int()`, `len()`, `str()`) | Security - no arbitrary function execution |
+| Coercive function calls (`int()`, `str()`, `float()`, `bool()`) | Not needed — the source schema guarantees type safety before expressions run |
 | Imports | Security |
 | Lambda expressions | Security |
 | Comprehensions | Security |
-| Attribute access (except `row.get`) | Security |
+| Attribute access (except `row.get()`) | Security |
 | F-strings | Security |
 
-### Type Coercion
+### Type Safety
 
-The expression parser does **not** allow type coercion functions. Instead, coerce types at the source:
+Type coercion functions like `int()` are not needed in expressions. The source schema handles type conversion at the boundary — by the time data reaches a gate or trigger, fields already have the types declared in the schema:
 
 ```yaml
-# CORRECT - coerce at source
 source:
   plugin: csv
   options:
     schema:
       fields:
-        - "amount: int"  # CSV strings coerced to int
+        - "amount: int"  # CSV strings are coerced to int at load time
 
 gates:
   - name: threshold
-    condition: "row['amount'] > 1000"  # amount is already int
-
-# WRONG - function calls not allowed
-gates:
-  - name: threshold
-    condition: "int(row['amount']) > 1000"  # ERROR: int() forbidden
+    condition: "row['amount'] > 1000"  # amount is guaranteed to be int here
 ```
 
 ---
@@ -1154,7 +1288,7 @@ source:
   options:
     path: data/transactions.csv
     schema:
-      mode: free
+      mode: fixed
       fields:
         - "id: int"
         - "amount: int"
@@ -1165,24 +1299,27 @@ source:
 sinks:
   output:
     plugin: csv
+    on_write_failure: discard
     options:
       path: output/normal.csv
       schema:
-        fields: dynamic
+        mode: observed
 
   high_values:
     plugin: csv
+    on_write_failure: discard
     options:
       path: output/high_values.csv
       schema:
-        fields: dynamic
+        mode: observed
 
   quarantine:
     plugin: csv
+    on_write_failure: discard
     options:
       path: output/quarantine.csv
       schema:
-        fields: dynamic
+        mode: observed
 
 # Transforms
 transforms:
@@ -1190,9 +1327,10 @@ transforms:
     plugin: field_mapper
     input: raw_data
     on_success: enriched
+    on_error: quarantine
     options:
       schema:
-        fields: dynamic
+        mode: observed
       computed:
         processed_at: "row.get('timestamp', 'unknown')"
 

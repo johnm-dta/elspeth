@@ -1,0 +1,127 @@
+flowchart LR
+    subgraph _[.]
+        _[".<br/><sub>2958 LOC</sub>"]
+    end
+    subgraph composer_mcp[composer_mcp]
+        composer_mcp["composer_mcp<br/><sub>824 LOC</sub>"]
+    end
+    subgraph mcp[mcp]
+        mcp["mcp<br/><sub>1661 LOC</sub>"]
+        mcp_analyzers["mcp/analyzers<br/><sub>2453 LOC</sub>"]
+    end
+    subgraph plugins[plugins]
+        plugins["plugins<br/><sub>8 LOC</sub>"]
+        plugins_infrastructure["plugins/infrastructure<br/><sub>3804 LOC</sub>"]
+        plugins_infrastructure_batching["plugins/infrastructure/batching<br/><sub>1024 LOC</sub>"]
+        plugins_infrastructure_clients["plugins/infrastructure/clients<br/><sub>3790 LOC</sub>"]
+        plugins_infrastructure_clients_retrieval["plugins/infrastructure/clients/retrieval<br/><sub>1031 LOC</sub>"]
+        plugins_infrastructure_pooling["plugins/infrastructure/pooling<br/><sub>1133 LOC</sub>"]
+        plugins_sinks["plugins/sinks<br/><sub>3515 LOC</sub>"]
+        plugins_sources["plugins/sources<br/><sub>3519 LOC</sub>"]
+        plugins_transforms["plugins/transforms<br/><sub>4125 LOC</sub>"]
+        plugins_transforms_azure["plugins/transforms/azure<br/><sub>1125 LOC</sub>"]
+        plugins_transforms_llm["plugins/transforms/llm<br/><sub>5740 LOC</sub>"]
+        plugins_transforms_llm_providers["plugins/transforms/llm/providers<br/><sub>663 LOC</sub>"]
+        plugins_transforms_rag["plugins/transforms/rag<br/><sub>922 LOC</sub>"]
+    end
+    subgraph telemetry[telemetry]
+        telemetry["telemetry<br/><sub>1497 LOC</sub>"]
+        telemetry_exporters["telemetry/exporters<br/><sub>1387 LOC</sub>"]
+    end
+    subgraph testing[testing]
+        testing["testing<br/><sub>877 LOC</sub>"]
+    end
+    subgraph tui[tui]
+        tui["tui<br/><sub>307 LOC</sub>"]
+        tui_screens["tui/screens<br/><sub>352 LOC</sub>"]
+        tui_widgets["tui/widgets<br/><sub>516 LOC</sub>"]
+    end
+    subgraph web[web]
+        web["web<br/><sub>1072 LOC</sub>"]
+        web_auth["web/auth<br/><sub>1224 LOC</sub>"]
+        web_blobs["web/blobs<br/><sub>1952 LOC</sub>"]
+        web_catalog["web/catalog<br/><sub>407 LOC</sub>"]
+        web_composer["web/composer<br/><sub>8189 LOC</sub>"]
+        web_composer_skills["web/composer/skills<br/><sub>85 LOC</sub>"]
+        web_execution["web/execution<br/><sub>3748 LOC</sub>"]
+        web_middleware["web/middleware<br/><sub>257 LOC</sub>"]
+        web_secrets["web/secrets<br/><sub>1011 LOC</sub>"]
+        web_sessions["web/sessions<br/><sub>4080 LOC</sub>"]
+    end
+    _ -->|7| plugins_infrastructure
+    _ -->|2| plugins_sources
+    _ --> telemetry
+    _ -.->|cond| tui
+    composer_mcp --> web
+    composer_mcp --> web_catalog
+    composer_mcp ==>|12| web_composer
+    mcp -->|4| mcp_analyzers
+    mcp_analyzers ==>|29| mcp
+    plugins_infrastructure --> plugins_infrastructure_clients_retrieval
+    plugins_infrastructure_clients_retrieval -->|3| plugins_infrastructure_clients
+    plugins_sinks ==>|45| plugins_infrastructure
+    plugins_sinks -->|4| plugins_infrastructure_clients
+    plugins_sinks --> plugins_infrastructure_clients_retrieval
+    plugins_sources ==>|17| plugins_infrastructure
+    plugins_sources -->|5| plugins_infrastructure_clients
+    plugins_transforms ==>|40| plugins_infrastructure
+    plugins_transforms --> plugins_infrastructure_clients
+    plugins_transforms_azure -->|6| plugins_infrastructure
+    plugins_transforms_azure -->|2| plugins_infrastructure_batching
+    plugins_transforms_azure --> plugins_infrastructure_clients
+    plugins_transforms_azure -->|2| plugins_infrastructure_pooling
+    plugins_transforms_azure -->|2| plugins_transforms
+    plugins_transforms_llm ==>|17| plugins_infrastructure
+    plugins_transforms_llm -->|2| plugins_infrastructure_batching
+    plugins_transforms_llm -->|3| plugins_infrastructure_clients
+    plugins_transforms_llm -->|4| plugins_infrastructure_pooling
+    plugins_transforms_llm -->|5| plugins_transforms_llm_providers
+    plugins_transforms_llm_providers ==>|12| plugins_infrastructure_clients
+    plugins_transforms_llm_providers ==>|10| plugins_transforms_llm
+    plugins_transforms_rag -->|4| plugins_infrastructure
+    plugins_transforms_rag -->|9| plugins_infrastructure_clients_retrieval
+    telemetry -->|2| telemetry_exporters
+    telemetry_exporters ==>|18| telemetry
+    testing -->|4| plugins_infrastructure
+    tui -->|4| tui_screens
+    tui_screens -->|2| tui
+    tui_screens -->|2| tui_widgets
+    tui_widgets -->|7| tui
+    web --> plugins_infrastructure
+    web -->|6| web_auth
+    web -->|2| web_blobs
+    web -->|3| web_catalog
+    web -->|3| web_composer
+    web -->|3| web_execution
+    web -->|2| web_middleware
+    web -->|5| web_secrets
+    web -->|5| web_sessions
+    web_auth -->|6| web
+    web_auth --> web_middleware
+    web_blobs --> web
+    web_blobs -->|2| web_auth
+    web_blobs -->|4| web_sessions
+    web_catalog -->|3| plugins_infrastructure
+    web_composer ==>|22| plugins_infrastructure
+    web_composer -->|4| web
+    web_composer -->|5| web_blobs
+    web_composer -->|4| web_catalog
+    web_composer -->|2| web_composer_skills
+    web_composer -->|5| web_sessions
+    web_execution -->|3| _
+    web_execution -->|4| plugins_infrastructure
+    web_execution -.->|cond| telemetry
+    web_execution ==>|15| web
+    web_execution -->|6| web_auth
+    web_execution -->|5| web_blobs
+    web_execution -->|9| web_composer
+    web_execution -->|7| web_sessions
+    web_secrets -->|6| web
+    web_secrets -->|2| web_auth
+    web_secrets --> web_sessions
+    web_sessions -->|3| web
+    web_sessions -->|2| web_auth
+    web_sessions -->|2| web_blobs
+    web_sessions ==>|15| web_composer
+    web_sessions -->|2| web_execution
+    web_sessions -->|2| web_middleware

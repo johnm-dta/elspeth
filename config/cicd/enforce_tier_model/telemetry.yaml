@@ -14,6 +14,18 @@ per_file_rules:
   reason: Type discrimination for telemetry event serialization and exporter dispatch
   expires: null
   max_hits: 56
+- pattern: telemetry/serialization.py
+  rules:
+  - R5
+  reason: Type dispatch for OTEL attribute serialization (datetime/Enum/dict/tuple)
+  expires: null
+  max_hits: 4
+- pattern: telemetry/serialization.py
+  rules:
+  - R6
+  reason: Optional opentelemetry dependency import guard
+  expires: null
+  max_hits: 1
 - pattern: telemetry/factory.py
   rules:
   - R5
@@ -23,71 +35,71 @@ per_file_rules:
 - pattern: telemetry/manager.py
   rules:
   - R5
-  reason: FrameworkBugError/AuditIntegrityError re-raise guards
+  reason: TELEMETRY_TRANSPORT_ERRORS isinstance guards for inverted exception pattern
   expires: null
   max_hits: 4
 allow_hits:
-- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=fa9c7097f1c1e794
+- key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=ff397de66d5f4424
+  owner: architecture
+  reason: Queue.get() is stdlib API, not dict access
+  safety: Code reviewed - legitimate pattern
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=32610a7c35236337
+  owner: architecture
+  reason: TelemetryExporterError stored for re-raise on flush() — not silently swallowed
+  safety: Stored exception re-raised on main thread via flush()/close()
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=dab16ec747e74f86
+  owner: architecture
+  reason: Inverted transport-error pattern — only transport errors swallowed, all others re-raise
+  safety: Non-transport exceptions stored and re-raised on main thread
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R1:TelemetryManager:_dispatch_to_exporters:fp=ffa2333c72f0c3ed
+  owner: architecture
+  reason: Counter increment with dict.get() default — standard Python counter pattern
+  safety: Code reviewed - legitimate pattern
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=8d294302ec31bc67
+  owner: architecture
+  reason: Silent recovery with explicit error handling path
+  safety: Code reviewed - legitimate pattern
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=fa4b085fe4c0cf82
+  owner: architecture
+  reason: Silent recovery with explicit error handling path
+  safety: Code reviewed - legitimate pattern
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=30098fd13284c047
   owner: architecture
   reason: Queue overflow handling at telemetry backpressure boundary
   safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
   expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=e119525a4dfa1926
-  owner: architecture
-  reason: Sentinel reinsertion loop handles bounded queue contention
-  safety: Empty queue during contention is a race retry path only; loop continues and fails loudly if unresolved
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:close:fp=ab5ccc9a67eb0dad
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=591aa6cb3bc863be
-  owner: architecture
-  reason: Optional field access at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=146e33a3af87bc33
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=cd4d80934208b92c
-  owner: architecture
-  reason: Broad exception handling at external boundary with logging
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R1:TelemetryManager:_dispatch_to_exporters:fp=c53a171abb7d97f3
-  owner: architecture
-  reason: Optional field access at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=5a8a81b7924e3145
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=4862bd7085ecb6e8
-  owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=86d01b5df37aef96
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=eeff63a9135513fd
   owner: architecture
   reason: Queue overflow handling at telemetry backpressure boundary
   safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
   expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=fe59cf071879bd1c
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=540532928ce6fbfe
   owner: architecture
   reason: Queue overflow handling at telemetry backpressure boundary
   safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
   expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=6557d5ad1d4d8bc4
+- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=45deae25e428a8e9
   owner: architecture
   reason: Sentinel reinsertion loop handles bounded queue contention
   safety: Full queue retries with bounded drain then explicit RuntimeError fail-fast
   expires: '2026-05-15'
-- key: telemetry/manager.py:R6:TelemetryManager:close:fp=9a5b0d10051f8281
+- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=64a767e1a6835af2
+  owner: architecture
+  reason: Sentinel reinsertion loop handles bounded queue contention
+  safety: Empty queue during contention is a race retry path only; loop continues and fails loudly if unresolved
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=aec2c28bc46bcb13
+  owner: architecture
+  reason: Silent recovery with explicit error handling path
+  safety: Code reviewed - legitimate pattern
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=bd4e524c30614a5a
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern

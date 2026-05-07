@@ -13,7 +13,7 @@ from elspeth.contracts import EdgeInfo, ExecutionError, NodeID, NodeType, Routin
 from elspeth.core.dag import ExecutionGraph
 from elspeth.plugins.infrastructure.manager import PluginManager
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 # Dynamic schema config for tests - PathConfig now requires schema
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -103,28 +103,28 @@ class TestIntegrationAuditFixes:
         assert "traceback" in error_with_traceback.to_dict()
 
     def test_plugin_context_recorder_can_record(self) -> None:
-        """PluginContext with real LandscapeRecorder can begin and complete a run.
+        """PluginContext with real RecorderFactory can begin and complete a run.
 
         Verifies:
         - Task 6: PluginContext.landscape type fix
         - Recording actually works through the context
         """
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"source": {"plugin": "csv"}},
             canonical_version="1.0.0",
         )
 
         ctx = make_context(
             run_id=run.run_id,
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),
         )
 
-        # Verify recording works through the context's recorder
+        # Verify recording works through the context's factory
         assert ctx.landscape is not None
-        completed = ctx.landscape.complete_run(run.run_id, RunStatus.COMPLETED)
+        completed = factory.run_lifecycle.complete_run(run.run_id, RunStatus.COMPLETED)
         assert completed.run_id == run.run_id
 
         # Cleanup
@@ -211,29 +211,29 @@ class TestIntegrationAuditFixes:
         assert sink.node_id == "sink-001"
 
     def test_landscape_recorder_run_lifecycle(self) -> None:
-        """LandscapeRecorder records complete run lifecycle through PluginContext.
+        """RecorderFactory records complete run lifecycle through PluginContext.
 
-        End-to-end test combining multiple fixes — verifies the recorder
+        End-to-end test combining multiple fixes — verifies the factory
         actually persists data, not just that assignment works.
         """
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Begin a run
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"source": {"plugin": "csv"}},
             canonical_version="1.0.0",
         )
 
-        # Create context with recorder
+        # Create context with factory
         ctx = make_context(
             run_id=run.run_id,
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),
         )
 
-        # Complete the run through the context's recorder
+        # Complete the run through the factory's run_lifecycle repo
         assert ctx.landscape is not None
-        completed = ctx.landscape.complete_run(run.run_id, RunStatus.COMPLETED)
+        completed = factory.run_lifecycle.complete_run(run.run_id, RunStatus.COMPLETED)
         assert completed.run_id == run.run_id
         assert completed.status == RunStatus.COMPLETED
 

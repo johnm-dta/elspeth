@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 # Strict schema config for tests - PathConfig now requires schema
 # CSVSink requires fixed-column structure, so we use strict mode
@@ -22,15 +23,15 @@ class TestCSVSink:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        recorder = make_recorder()
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_write_creates_file(self, tmp_path: Path, ctx: PluginContext) -> None:
         """write() creates CSV file with headers."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
@@ -45,12 +46,60 @@ class TestCSVSink:
         assert rows[0]["id"] == "1"
         assert rows[0]["name"] == "alice"
 
+    def test_fail_if_exists_collision_policy_refuses_existing_write_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit fail-if-exists mode must not truncate a taken output file."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        output_file.write_text("existing\n")
+        with pytest.raises(FileExistsError, match="already exists"):
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": STRICT_SCHEMA,
+                    "collision_policy": "fail_if_exists",
+                }
+            )
+
+        assert output_file.read_text() == "existing\n"
+
+    def test_auto_increment_collision_policy_writes_free_sibling(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+    ) -> None:
+        """Auto-increment mode must leave the taken path alone and report the chosen artifact."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        output_file.write_text("existing\n")
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": STRICT_SCHEMA,
+                    "collision_policy": "auto_increment",
+                }
+            )
+        )
+
+        artifact = sink.write([{"id": "1", "name": "alice"}], ctx)
+        sink.close()
+
+        chosen_file = tmp_path / "output-1.csv"
+        assert output_file.read_text() == "existing\n"
+        assert chosen_file.exists()
+        assert artifact.artifact.path_or_uri == f"file://{chosen_file}"
+
     def test_write_multiple_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Multiple writes append to CSV."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.write([{"id": "2", "name": "bob"}], ctx)
@@ -70,7 +119,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "delimiter": ";", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "delimiter": ";", "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
@@ -85,7 +134,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.close()
@@ -96,7 +145,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
@@ -114,7 +163,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         artifact = sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.close()
@@ -129,7 +178,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         artifact = sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.close()
@@ -145,7 +194,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         rows = [
             {"id": "1", "name": "alice"},
@@ -169,7 +218,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         artifact = sink.write([], ctx)
         sink.close()
@@ -189,7 +238,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         # Both 'id' and 'name' are required (no '?' suffix in STRICT_SCHEMA)
         assert sink.declared_required_fields == frozenset({"id", "name"})
@@ -200,7 +249,7 @@ class TestCSVSink:
 
         optional_schema = {"mode": "fixed", "fields": ["id: str", "name: str?"]}
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": optional_schema})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": optional_schema}))
 
         # Only 'id' is required; 'name' has '?' suffix so it's optional
         assert sink.declared_required_fields == frozenset({"id"})
@@ -212,7 +261,7 @@ class TestCSVSink:
 
         optional_schema = {"mode": "fixed", "fields": ["id: str", "name: str?"]}
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": optional_schema})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": optional_schema}))
 
         sink.write([{"id": "1"}], ctx)
         sink.close()
@@ -228,7 +277,7 @@ class TestCSVSink:
         """CSVSink has plugin_version attribute."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        sink = CSVSink({"path": "/tmp/test.csv", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": "/tmp/test.csv", "schema": STRICT_SCHEMA}))
         assert hasattr(sink, "plugin_version")
         assert sink.plugin_version == "1.0.0"
 
@@ -237,7 +286,7 @@ class TestCSVSink:
         from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        sink = CSVSink({"path": "/tmp/test.csv", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": "/tmp/test.csv", "schema": STRICT_SCHEMA}))
         assert sink.determinism == Determinism.IO_WRITE
 
     def test_cumulative_hash_after_multiple_writes(self, tmp_path: Path, ctx: PluginContext) -> None:
@@ -249,7 +298,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
 
         # First write
         artifact1 = sink.write([{"id": "1", "name": "alice"}], ctx)
@@ -300,11 +349,13 @@ class TestCSVSink:
         }
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": explicit_schema,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": explicit_schema,
+                }
+            )
         )
 
         # First batch WITHOUT optional field
@@ -386,7 +437,7 @@ class TestCSVSinkSchemaValidation:
 
         strict_schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
 
-        sink = CSVSink({"path": str(tmp_path / "output.csv"), "schema": strict_schema})
+        sink = inject_write_failure(CSVSink({"path": str(tmp_path / "output.csv"), "schema": strict_schema}))
         assert sink is not None
 
     def test_accepts_free_mode_schema(self, tmp_path: Path) -> None:
@@ -395,7 +446,7 @@ class TestCSVSinkSchemaValidation:
 
         free_schema = {"mode": "flexible", "fields": ["id: int"]}
 
-        sink = CSVSink({"path": str(tmp_path / "output.csv"), "schema": free_schema})
+        sink = inject_write_failure(CSVSink({"path": str(tmp_path / "output.csv"), "schema": free_schema}))
         assert sink is not None
 
     def test_accepts_dynamic_schema(self, tmp_path: Path) -> None:
@@ -404,20 +455,22 @@ class TestCSVSinkSchemaValidation:
 
         dynamic_schema = {"mode": "observed"}
 
-        sink = CSVSink({"path": str(tmp_path / "output.csv"), "schema": dynamic_schema})
+        sink = inject_write_failure(CSVSink({"path": str(tmp_path / "output.csv"), "schema": dynamic_schema}))
         assert sink is not None
 
     def test_dynamic_schema_infers_columns_from_first_row(self, tmp_path: Path) -> None:
         """Dynamic schema uses first row's keys as column headers."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
-        sink = CSVSink(
-            {
-                "path": str(tmp_path / "output.csv"),
-                "schema": {"mode": "observed"},
-            }
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_path / "output.csv"),
+                    "schema": {"mode": "observed"},
+                }
+            )
         )
 
         # First write establishes columns
@@ -433,13 +486,15 @@ class TestCSVSinkSchemaValidation:
         """After first write, new fields are rejected (infer-and-lock)."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
-        sink = CSVSink(
-            {
-                "path": str(tmp_path / "output.csv"),
-                "schema": {"mode": "observed"},
-            }
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_path / "output.csv"),
+                    "schema": {"mode": "observed"},
+                }
+            )
         )
 
         # First write locks columns to {a, b}
@@ -459,15 +514,17 @@ class TestCSVSinkSchemaValidation:
         """
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
         # Schema declares only 'id', but first row has 'id', 'name', 'extra'
         flexible_schema = {"mode": "flexible", "fields": ["id: int"]}
-        sink = CSVSink(
-            {
-                "path": str(tmp_path / "output.csv"),
-                "schema": flexible_schema,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_path / "output.csv"),
+                    "schema": flexible_schema,
+                }
+            )
         )
 
         # First write has declared field + two extras
@@ -495,15 +552,17 @@ class TestCSVSinkSchemaValidation:
         """Flexible mode should place declared fields before extras for predictability."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
         # Schema declares 'id' and 'name'
         flexible_schema = {"mode": "flexible", "fields": ["id: int", "name: str"]}
-        sink = CSVSink(
-            {
-                "path": str(tmp_path / "output.csv"),
-                "schema": flexible_schema,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_path / "output.csv"),
+                    "schema": flexible_schema,
+                }
+            )
         )
 
         # First row has extras interspersed (dict order depends on Python version)

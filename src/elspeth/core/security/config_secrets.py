@@ -106,20 +106,12 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
     except ImportError as e:
         raise SecretLoadError("Azure Key Vault packages not installed. Install with: uv pip install 'elspeth[azure]'") from e
 
-    # Create loader (has built-in caching)
-    # load_secrets_from_config() only called when config.source == "keyvault"
+    # Create loader (has built-in caching).
+    # Note: KeyVaultSecretLoader uses lazy client initialization — the constructor
+    # does no network I/O. Azure exceptions (auth, HTTP, network) are only raised
+    # during get_secret() calls, where they're caught in the loop below.
     assert config.vault_url is not None, "vault_url required when source=keyvault"
-    try:
-        loader = KeyVaultSecretLoader(vault_url=config.vault_url)
-    except ClientAuthenticationError as e:
-        raise SecretLoadError(
-            f"Failed to authenticate to Key Vault ({config.vault_url})\n"
-            f"DefaultAzureCredential could not find valid credentials.\n"
-            f"Ensure Managed Identity, Azure CLI login, or service principal env vars are configured.\n"
-            f"Error: {e}"
-        ) from e
-    except (HttpResponseError, ServiceRequestError) as e:
-        raise SecretLoadError(f"Failed to initialize Key Vault loader for {config.vault_url}\nError: {e}") from e
+    loader = KeyVaultSecretLoader(vault_url=config.vault_url)
 
     # Load each mapped secret, fingerprint immediately, collect resolution records.
     # Plaintext values are fingerprinted and discarded within this loop iteration —
@@ -150,10 +142,11 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
     pending_env: list[tuple[str, str]] = []  # (env_var_name, secret_value)
 
     for env_var_name, keyvault_secret_name in ordered_mapping:
-        start_time = time.time()
+        timestamp = time.time()  # Wall-clock for audit record
+        start_perf = time.perf_counter()  # Monotonic for latency measurement
         try:
             secret_value, _ref = loader.get_secret(keyvault_secret_name)
-            latency_ms = (time.time() - start_time) * 1000
+            latency_ms = (time.perf_counter() - start_perf) * 1000
 
             # Stage the env var for atomic application later
             pending_env.append((env_var_name, str(secret_value)))
@@ -175,7 +168,7 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
                     source="keyvault",
                     vault_url=config.vault_url,
                     secret_name=keyvault_secret_name,
-                    timestamp=start_time,
+                    timestamp=timestamp,
                     resolution_latency_ms=latency_ms,
                     fingerprint=fp,
                 )
@@ -202,6 +195,13 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
             raise SecretLoadError(
                 f"Failed to load secret '{keyvault_secret_name}' from Key Vault ({config.vault_url})\n"
                 f"Mapped from: {env_var_name}\n"
+                f"Error: {e}"
+            ) from e
+        except ValueError as e:
+            raise SecretLoadError(
+                f"Fingerprint computation failed for secret '{keyvault_secret_name}' "
+                f"(env var: {env_var_name})\n"
+                f"Check ELSPETH_FINGERPRINT_KEY is set and non-empty.\n"
                 f"Error: {e}"
             ) from e
 

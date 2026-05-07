@@ -20,9 +20,12 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import Determinism, NodeType, RoutingMode, RowOutcome, RunStatus
+from elspeth.contracts import Determinism, NodeType, RoutingMode, RunStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.types import NodeID, SinkName
+from elspeth.core.canonical import canonical_json
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -34,12 +37,13 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from elspeth.core.payload_store import FilesystemPayloadStore
-from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+from elspeth.engine.orchestrator import Orchestrator, PipelineConfig, prepare_for_run
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.json_sink import JSONSink
 from elspeth.plugins.sources.null_source import NullSource
 from elspeth.plugins.transforms.passthrough import PassThrough
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.base_classes import inject_write_failure
+from tests.fixtures.landscape import make_factory
 
 
 def _null_source(on_success: str = "default") -> NullSource:
@@ -47,6 +51,12 @@ def _null_source(on_success: str = "default") -> NullSource:
     source = NullSource({})
     source.on_success = on_success
     return source
+
+
+def _runtime_val_manifest_json() -> str:
+    """Mirror the run-header manifest production begin_run() stores."""
+    prepare_for_run()
+    return canonical_json(build_runtime_val_manifest())
 
 
 class TestResumeComprehensive:
@@ -164,6 +174,7 @@ class TestResumeComprehensive:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -264,12 +275,12 @@ class TestResumeComprehensive:
                 f.write(f"{i},row-{i}\n")
 
         # Mark first 3 rows as completed
-        recorder = make_recorder(db)
+        factory = make_factory(db)
         for i in range(3):
-            recorder.record_token_outcome(
-                run_id=run_id,
-                token_id=f"t{i}",
-                outcome=RowOutcome.COMPLETED,
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="sink",
             )
 
@@ -301,7 +312,7 @@ class TestResumeComprehensive:
         config = PipelineConfig(
             source=_null_source("default"),
             transforms=[passthrough],
-            sinks={"default": CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"})},
+            sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
 
         # Build graph manually
@@ -372,12 +383,12 @@ class TestResumeComprehensive:
                 f.write(f"{i},row-{i}\n")
 
         # Mark ALL rows as completed (terminal outcome)
-        recorder = make_recorder(db)
+        factory = make_factory(db)
         for i in range(3):
-            recorder.record_token_outcome(
-                run_id=run_id,
-                token_id=f"t{i}",
-                outcome=RowOutcome.COMPLETED,
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="sink",
             )
 
@@ -409,7 +420,7 @@ class TestResumeComprehensive:
         config = PipelineConfig(
             source=_null_source("default"),
             transforms=[passthrough],
-            sinks={"default": CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"})},
+            sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
 
         resume_graph = ExecutionGraph()
@@ -429,9 +440,18 @@ class TestResumeComprehensive:
             payload_store=payload_store,
         )
 
-        # Verify early-exit behavior
-        assert result.rows_processed == 0, "Early-exit path should process 0 rows (all already done)"
-        assert result.rows_succeeded == 0
+        # Verify early-exit behavior.
+        #
+        # Phase 2.2 (elspeth-0de989c56d): the early-exit branch now derives
+        # the truthful row counts from token_outcomes rather than reporting
+        # the resume's zero-delta.  The pre-Phase-2.2 behavior was
+        # ``rows_processed=0`` regardless of how many rows the original run
+        # had completed — under the new four-value RunStatus taxonomy that
+        # would force EMPTY for runs that actually succeeded.  Reading the
+        # audit DB makes the ``RunStatus`` correct AND surfaces the true
+        # row counts to operators reading the CLI summary on resume.
+        assert result.rows_processed == 3, "Early-exit path now reports truthful counts from token_outcomes"
+        assert result.rows_succeeded == 3
         assert result.status == RunStatus.COMPLETED
 
         # CRITICAL: Verify checkpoints deleted on early-exit path (Bug #8 fix)
@@ -514,6 +534,7 @@ class TestResumeComprehensive:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -582,11 +603,11 @@ class TestResumeComprehensive:
                 )
 
         # Mark first row as completed (checkpoint will be at row 0)
-        recorder = make_recorder(db)
-        recorder.record_token_outcome(
-            run_id=run_id,
-            token_id="t0",
-            outcome=RowOutcome.COMPLETED,
+        factory = make_factory(db)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id="t0", run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -606,19 +627,27 @@ class TestResumeComprehensive:
 
         orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
 
-        # Use CSVSink with strict schema matching the data: {"id": int, "timestamp": datetime}
-        # CSVSink stringifies datetime values automatically
-        strict_schema = {"mode": "fixed", "fields": ["id: int", "timestamp: str"]}
-        passthrough = PassThrough({"schema": strict_schema})
+        # Resume schema matches recovery output types: the recovery system
+        # deserializes datetime objects from format: "date-time", not strings.
+        # Schema field specs don't support datetime directly, so use observed
+        # mode with explicit field guarantees instead of declaring a fake type.
+        resume_schema = {"mode": "observed", "guaranteed_fields": ["id", "timestamp"], "required_fields": ["id", "timestamp"]}
+
+        class DatetimeAssertingPassThrough(PassThrough):
+            def process(self, row: Any, ctx: Any) -> Any:
+                assert isinstance(row["timestamp"], datetime)
+                return super().process(row, ctx)
+
+        passthrough = DatetimeAssertingPassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
             source=_null_source("default"),
             transforms=[passthrough],
-            sinks={"default": CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"})},
+            sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": resume_schema, "mode": "append"}))},
         )
 
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": strict_schema}
+        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=resume_schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
@@ -719,6 +748,7 @@ class TestResumeComprehensive:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -787,11 +817,11 @@ class TestResumeComprehensive:
                 )
 
         # Mark first row as completed (checkpoint will be at row 0)
-        recorder = make_recorder(db)
-        recorder.record_token_outcome(
-            run_id=run_id,
-            token_id="t0",
-            outcome=RowOutcome.COMPLETED,
+        factory = make_factory(db)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id="t0", run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -811,19 +841,19 @@ class TestResumeComprehensive:
 
         orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
 
-        # Use CSVSink with strict schema matching the data: {"id": int, "amount": Decimal}
-        # CSVSink stringifies Decimal values automatically
-        strict_schema = {"mode": "fixed", "fields": ["id: int", "amount: str"]}
-        passthrough = PassThrough({"schema": strict_schema})
+        # Resume schema matches recovery output types: the recovery system
+        # coerces Decimal to float per the schema contract.
+        resume_schema = {"mode": "fixed", "fields": ["id: int", "amount: float"]}
+        passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
             source=_null_source("default"),
             transforms=[passthrough],
-            sinks={"default": CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"})},
+            sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": resume_schema, "mode": "append"}))},
         )
 
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": strict_schema}
+        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=resume_schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
@@ -920,6 +950,7 @@ class TestResumeComprehensive:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -988,11 +1019,11 @@ class TestResumeComprehensive:
                 )
 
         # Mark first row as completed (checkpoint will be at row 0)
-        recorder = make_recorder(db)
-        recorder.record_token_outcome(
-            run_id=run_id,
-            token_id="t0",
-            outcome=RowOutcome.COMPLETED,
+        factory = make_factory(db)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id="t0", run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -1018,8 +1049,10 @@ class TestResumeComprehensive:
             source=_null_source("default"),
             transforms=[passthrough],
             sinks={
-                "default": JSONSink(
-                    {"path": str(output_path.with_suffix(".json")), "schema": {"mode": "observed"}, "mode": "append", "format": "jsonl"}
+                "default": inject_write_failure(
+                    JSONSink(
+                        {"path": str(output_path.with_suffix(".json")), "schema": {"mode": "observed"}, "mode": "append", "format": "jsonl"}
+                    )
                 )
             },
         )
@@ -1121,6 +1154,7 @@ class TestResumeComprehensive:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -1189,11 +1223,11 @@ class TestResumeComprehensive:
                 )
 
         # Mark first row as completed (checkpoint will be at row 0)
-        recorder = make_recorder(db)
-        recorder.record_token_outcome(
-            run_id=run_id,
-            token_id="t0",
-            outcome=RowOutcome.COMPLETED,
+        factory = make_factory(db)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id="t0", run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -1219,8 +1253,10 @@ class TestResumeComprehensive:
             source=_null_source("default"),
             transforms=[passthrough],
             sinks={
-                "default": JSONSink(
-                    {"path": str(output_path.with_suffix(".json")), "schema": {"mode": "observed"}, "mode": "append", "format": "jsonl"}
+                "default": inject_write_failure(
+                    JSONSink(
+                        {"path": str(output_path.with_suffix(".json")), "schema": {"mode": "observed"}, "mode": "append", "format": "jsonl"}
+                    )
                 )
             },
         )
@@ -1315,6 +1351,7 @@ class TestResumeComprehensive:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -1399,7 +1436,11 @@ class TestResumeComprehensive:
         config = PipelineConfig(
             source=_null_source("default"),
             transforms=[passthrough],
-            sinks={"default": JSONSink({"path": "/tmp/dummy.json", "schema": {"mode": "observed"}, "mode": "write", "format": "jsonl"})},
+            sinks={
+                "default": inject_write_failure(
+                    JSONSink({"path": "/tmp/dummy.json", "schema": {"mode": "observed"}, "mode": "write", "format": "jsonl"})
+                )
+            },
         )
 
         resume_graph = ExecutionGraph()
@@ -1420,3 +1461,360 @@ class TestResumeComprehensive:
                 graph=resume_graph,
                 payload_store=payload_store,
             )
+
+    def test_resume_gate_routed_pipeline_classifies_as_completed(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """elspeth-5069612f3c — pin the resume code path's correct accumulation
+        of rows_routed_success.
+
+        The L0 unit test test_resume_continuation_still_classifies_as_completed
+        pins the predicate's behavior on a synthetic resume-shaped counter
+        tuple, but does NOT exercise the actual resume site where the terminal
+        status is derived from the resume-side accumulator.  A regression in
+        the resume-side local accumulators (an off-by-one in the new locals,
+        a missed kwarg in the derive_terminal_run_status call, or a broken
+        return-tuple expansion) would slip past that unit test.
+
+        Scenario (early-exit resume — all rows already gate-routed before the
+        pre-resume crash):
+        1. Failed run with 5 rows (0-4), linear topology re-used from
+           ``_setup_failed_run`` for the persisted DAG, but every row is
+           pre-marked as ``(SUCCESS, GATE_ROUTED)`` via ``record_token_outcome`` —
+           the canonical pre-split-fix shape for gate-routed rows.
+        2. Resume's early-exit path reads existing terminal outcomes from
+           Landscape and calls ``derive_terminal_run_status`` with the
+           accumulated counters.
+        3. Verify: ``result.status == RunStatus.COMPLETED`` (not FAILED).
+        4. Verify: ``result.rows_succeeded == 5`` — routed successes occupy
+           the lifecycle success bucket while ``rows_routed_success`` records
+           the orthogonal routing provenance.
+        5. Verify: ``result.rows_routed_success == 5`` — the resume-side
+           accumulator must surface the existing ``ROUTED`` outcomes via the
+           split counter (orthogonal attribution: which gate, which sink).
+        6. Verify: ``result.rows_routed_failure == 0`` — no on_error reroutes.
+
+        Pre-PR (commit 8865559e, before the rows_routed split): the resume's
+        ``derive_terminal_run_status`` excludes ``rows_routed`` from the
+        predicate (DIVERT/MOVE conflation), so the run misclassifies as
+        FAILED.  Post-PR: classifies as COMPLETED.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-gate-routed-test"
+        output_path = tmp_path / "gate_routed_output.csv"
+        run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=5, checkpoint_at=4)
+
+        # Mark every row as gate-routed (SUCCESS/GATE_ROUTED, sink_name set,
+        # error_hash NULL — the canonical pre-split-fix shape for
+        # intentional gate route_to_sink MOVE rows).  By marking ALL rows
+        # as terminal, the resume takes the early-exit path; what we are
+        # pinning is whether the resume's terminal-status derivation
+        # correctly accumulates ``rows_routed_success`` from Landscape.
+        factory = make_factory(db)
+        for i in range(5):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
+                sink_name="sink",
+            )
+
+        # Create checkpoint at the last row so resume's recovery path is
+        # exercised even though no rows remain to process.
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="t4",
+            node_id="xform",
+            sequence_number=4,
+            graph=graph,
+        )
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(
+            db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        # Resume config matches the persisted DAG topology (linear src ->
+        # xform -> sink), even though every persisted outcome is ROUTED.
+        # The predicate's behaviour, not the topology, is the unit under
+        # test here.
+        resume_schema = {"mode": "fixed", "fields": ["id: int", "value: str"]}
+        passthrough = PassThrough({"schema": resume_schema})
+        passthrough.on_error = "discard"
+        config = PipelineConfig(
+            source=_null_source("default"),
+            transforms=[passthrough],
+            sinks={
+                "default": inject_write_failure(
+                    CSVSink(
+                        {
+                            "path": str(output_path),
+                            "schema": resume_schema,
+                            "mode": "append",
+                        }
+                    )
+                )
+            },
+        )
+        resume_graph = ExecutionGraph()
+        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "xform",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="passthrough",
+            config=resume_schema_config,
+        )
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
+        resume_graph.add_edge("src", "xform", label="continue")
+        resume_graph.add_edge("xform", "sink", label="continue")
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
+
+        # Pre-write the output file header so any append-mode interaction
+        # is consistent (no remaining rows will actually be written; this
+        # is the early-exit path).
+        with open(output_path, "w") as f:
+            f.write("id,value\n")
+            for i in range(5):
+                f.write(f"{i},row-{i}\n")
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=resume_graph,
+            payload_store=payload_store,
+        )
+
+        # CORE ASSERTION — verify the resume-side accumulator + predicate
+        # together classify a gate-routed run as COMPLETED.
+        assert result.status == RunStatus.COMPLETED, (
+            "Resume of gate-routed pipeline misclassified — expected "
+            f"COMPLETED, got {result.status!r}. The resume-side "
+            f"derive_terminal_run_status call must accumulate "
+            f"rows_routed_success from the resume locals (or the "
+            f"early-exit Landscape readback). "
+            f"result={result.to_dict()}"
+        )
+        # ROUTED rows are lifecycle successes with gate-routing provenance.
+        assert result.rows_succeeded == 5
+        assert result.rows_routed_success == 5  # All rows recorded as ROUTED.
+        assert result.rows_routed_failure == 0  # No on_error reroutes.
+
+        # Cross-check against Landscape: every token_outcomes row has the
+        # routed shape (matches Step 9c's audit-distinguishability test).
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        with db.engine.connect() as conn:
+            outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path, token_outcomes_table.c.sink_name).where(
+                    token_outcomes_table.c.run_id == run_id
+                )
+            ).fetchall()
+        routed_outcomes = [o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.SUCCESS.value, TerminalPath.GATE_ROUTED.value)]
+        assert len(routed_outcomes) == 5
+
+    def test_resume_routed_on_error_pipeline_classifies_as_failed(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Complement to ``test_resume_gate_routed_pipeline_classifies_as_completed``
+        — pin the resume code path's correct accumulation of
+        ``rows_routed_failure`` for the on_error DIVERT side of the
+        rows_routed split.
+
+        Why this test exists (and why the unit-level coverage is not
+        sufficient): ``_derive_resume_terminal_status_from_audit`` has two
+        symmetric match arms — ``(SUCCESS, GATE_ROUTED)`` (gate MOVE; counts
+        toward ``rows_routed_success``) and ``(FAILURE, ON_ERROR_ROUTED)``
+        (transform on_error DIVERT; counts toward ``rows_routed_failure``).
+        A regression that swapped the two ``rows_routed_*`` increments in
+        the ROUTED_ON_ERROR arm would slip past the unit-level predicate
+        test (which exercises the predicate's success/failure shape on
+        synthetic counters but does not invoke the resume aggregation
+        site).  The gate-MOVE side has integration coverage above; this
+        test mirrors that coverage for the on_error side so a swap in the
+        match arm fails loudly at the resume layer.
+
+        Scenario (early-exit resume — every row already DIVERTED via
+        on_error before the pre-resume crash):
+        1. Failed run with 5 rows (0-4), reusing ``_setup_failed_run`` for
+           the persisted DAG.
+        2. Every row pre-marked as ``(FAILURE, ON_ERROR_ROUTED)`` —
+           ``sink_name="error_sink"`` and ``error_hash`` set per the
+           outcome contract for DIVERT rows.
+        3. Resume's early-exit path reads existing terminal outcomes and
+           calls ``derive_terminal_run_status`` with the accumulated
+           counters.
+        4. Verify: ``result.status == RunStatus.FAILED`` — predicate
+           output for ``(rows_processed=5, rows_succeeded=0,
+           rows_routed_success=0, rows_routed_failure=5,
+           rows_failed=5, rows_quarantined=0)``.  Reasoning:
+           ``success_indicator = (rows_succeeded > 0) OR
+           (rows_routed_success > 0) = False`` and ``rows_processed > 0``
+           drives the ``not success_indicator -> FAILED`` arm of
+           ``derive_terminal_run_status``.
+        5. Verify: ``result.rows_routed_failure == 5`` — the resume-side
+           accumulator surfaces every ROUTED_ON_ERROR outcome via the
+           failure-side split counter.
+        6. Verify: ``result.rows_routed_success == 0`` — no MOVE rows.
+        7. Verify: ``result.rows_succeeded == 0`` and
+           ``result.rows_failed == 5`` — every row has lifecycle FAILURE,
+           with ``rows_routed_failure`` preserving the on_error routing
+           provenance.
+
+        Regression catcher: an inversion of the two ``rows_routed_*``
+        increments in ``_derive_resume_terminal_status_from_audit``'s
+        ``ROUTED_ON_ERROR`` arm would (a) miscount as
+        ``rows_routed_success=5`` and (b) flip the predicate to
+        ``RunStatus.COMPLETED``.  Both assertions fail under the swap.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-routed-on-error-test"
+        output_path = tmp_path / "routed_on_error_output.csv"
+        run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=5, checkpoint_at=4)
+
+        # Mark every row as on_error DIVERT (FAILURE/ON_ERROR_ROUTED).
+        # Contract requires sink_name AND error_hash for this outcome
+        # (see data_flow_repository._validate_outcome_fields:236-249 and
+        # contracts/results.py:408-419).  The 16-char hex string mirrors
+        # the existing ROUTED_ON_ERROR fixture in
+        # tests/integration/audit/test_recorder_routing_events.py:617.
+        factory = make_factory(db)
+        for i in range(5):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
+                sink_name="error_sink",
+                error_hash="0123456789abcdef",
+            )
+
+        # Create checkpoint at the last row so resume's recovery path is
+        # exercised even though no rows remain to process.  Mirrors the
+        # gate-MOVE test setup.
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="t4",
+            node_id="xform",
+            sequence_number=4,
+            graph=graph,
+        )
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(
+            db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        resume_schema = {"mode": "fixed", "fields": ["id: int", "value: str"]}
+        passthrough = PassThrough({"schema": resume_schema})
+        passthrough.on_error = "discard"
+        config = PipelineConfig(
+            source=_null_source("default"),
+            transforms=[passthrough],
+            sinks={
+                "default": inject_write_failure(
+                    CSVSink(
+                        {
+                            "path": str(output_path),
+                            "schema": resume_schema,
+                            "mode": "append",
+                        }
+                    )
+                )
+            },
+        )
+        resume_graph = ExecutionGraph()
+        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "xform",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="passthrough",
+            config=resume_schema_config,
+        )
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
+        resume_graph.add_edge("src", "xform", label="continue")
+        resume_graph.add_edge("xform", "sink", label="continue")
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
+
+        # Pre-write the output file header so any append-mode interaction
+        # is consistent (no remaining rows will be processed; this is the
+        # early-exit path).  Mirrors the gate-MOVE test setup.
+        with open(output_path, "w") as f:
+            f.write("id,value\n")
+            for i in range(5):
+                f.write(f"{i},row-{i}\n")
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=resume_graph,
+            payload_store=payload_store,
+        )
+
+        # CORE ASSERTION — verify the resume-side accumulator + predicate
+        # together classify a fully-DIVERTED run as FAILED.  Predicate
+        # output derived from ``derive_terminal_run_status`` in
+        # contracts/run_result.py:180 — when ``rows_succeeded == 0`` AND
+        # ``rows_routed_success == 0``, ``success_indicator`` is False
+        # and the predicate returns FAILED for any non-zero
+        # ``rows_processed``.
+        assert result.status == RunStatus.FAILED, (
+            "Resume of fully-DIVERTED pipeline misclassified — expected "
+            f"FAILED, got {result.status!r}. The resume-side "
+            f"derive_terminal_run_status call must accumulate "
+            f"rows_routed_failure (NOT rows_routed_success) from the "
+            f"early-exit Landscape readback's ROUTED_ON_ERROR rows. "
+            f"result={result.to_dict()}"
+        )
+        assert result.rows_succeeded == 0  # No on_success success-path sink.
+        assert result.rows_routed_failure == 5  # All rows recorded as ROUTED_ON_ERROR.
+        assert result.rows_routed_success == 0  # No gate MOVE rows.
+        assert result.rows_failed == 5  # Lifecycle FAILURE plus on_error provenance.
+        assert result.rows_quarantined == 0  # No quarantine outcomes.
+
+        # Cross-check against Landscape: every token_outcomes row has the
+        # routed_on_error shape (audit-distinguishability mirror of the
+        # gate-MOVE cross-check above).
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        with db.engine.connect() as conn:
+            outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path, token_outcomes_table.c.sink_name).where(
+                    token_outcomes_table.c.run_id == run_id
+                )
+            ).fetchall()
+        routed_on_error_outcomes = [
+            o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.FAILURE.value, TerminalPath.ON_ERROR_ROUTED.value)
+        ]
+        assert len(routed_on_error_outcomes) == 5
+        # Every ROUTED_ON_ERROR row carries the error sink, distinct from
+        # the gate-MOVE shape (where ``sink_name`` matches the on_success
+        # destination).  This pins the audit-distinguishability invariant
+        # at the resume layer.
+        assert all(o.sink_name == "error_sink" for o in routed_on_error_outcomes)

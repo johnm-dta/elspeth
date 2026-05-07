@@ -16,11 +16,13 @@ NOTE: AcceptResult tests deleted in aggregation structural cleanup.
 Aggregation is now engine-controlled via batch-aware transforms.
 """
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
-from elspeth.contracts import RoutingAction, RowOutcome, TokenInfo, TransformErrorReason
+from elspeth.contracts import RoutingAction, TokenInfo, TransformErrorReason
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import ConfigGateReason, MaxRetriesExceeded, OrchestrationInvariantError
 from elspeth.contracts.results import (
     ArtifactDescriptor,
@@ -218,19 +220,6 @@ class TestTransformResult:
         assert result.status == "error"
         assert result.retryable is True
 
-    def test_status_is_literal_not_enum(self) -> None:
-        """Status is Literal string, not enum - can compare directly to string."""
-        success = TransformResult.success(make_pipeline_row({"x": 1}), success_reason={"action": "test"})
-        error = TransformResult.error({"reason": "test_error", "error": "msg"})
-
-        # Direct string comparison works (not .value)
-        assert success.status == "success"
-        assert error.status == "error"
-
-        # String identity check - must be exactly str, not StrEnum
-        assert type(success.status) is str
-        assert type(error.status) is str
-
     def test_audit_fields_default_to_none(self) -> None:
         """Audit fields default to None, set by executor."""
         result = TransformResult.success(make_pipeline_row({"x": 1}), success_reason={"action": "test"})
@@ -278,6 +267,11 @@ class TestTransformResultErrorInvariants:
         with pytest.raises(ValueError, match="MUST provide reason"):
             TransformResult(status="error", row=None, reason=None)
 
+    def test_error_without_reason_key_raises(self) -> None:
+        """status='error' payloads must include the required 'reason' key."""
+        with pytest.raises(ValueError, match=r"MUST include reason\['reason'\]"):
+            TransformResult.error({})
+
     def test_error_with_row_raises(self) -> None:
         """status='error' with row set raises ValueError."""
         with pytest.raises(ValueError, match="MUST NOT include output data"):
@@ -294,7 +288,7 @@ class TestTransformResultErrorInvariants:
                 status="error",
                 row=None,
                 reason={"reason": "test_error"},
-                rows=[make_pipeline_row({"x": 1})],
+                rows=(make_pipeline_row({"x": 1}),),
             )
 
     def test_error_with_success_reason_raises(self) -> None:
@@ -404,23 +398,26 @@ class TestRowResult:
         result = RowResult(
             token=token,
             final_data=_wrap_dict_as_pipeline_row({"x": 1, "processed": True}),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="processed",
         )
 
         assert result.token == token
         assert result.final_data.to_dict() == {"x": 1, "processed": True}
-        assert result.outcome == RowOutcome.COMPLETED
+        assert result.outcome == TerminalOutcome.SUCCESS
+        assert result.path == TerminalPath.DEFAULT_FLOW
         assert result.sink_name == "processed"
 
     def test_completed_without_sink_name_raises(self) -> None:
         """COMPLETED outcome requires sink_name."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
-        with pytest.raises(OrchestrationInvariantError, match="COMPLETED outcome requires sink_name"):
+        with pytest.raises(OrchestrationInvariantError, match="DEFAULT_FLOW"):
             RowResult(
                 token=token,
                 final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
             )
 
     def test_routed_with_sink_name(self) -> None:
@@ -429,31 +426,35 @@ class TestRowResult:
         result = RowResult(
             token=token,
             final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-            outcome=RowOutcome.ROUTED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.GATE_ROUTED,
             sink_name="flagged",
         )
 
-        assert result.outcome == RowOutcome.ROUTED
+        assert result.outcome == TerminalOutcome.SUCCESS
+        assert result.path == TerminalPath.GATE_ROUTED
         assert result.sink_name == "flagged"
 
     def test_routed_without_sink_name_raises(self) -> None:
         """ROUTED outcome requires sink_name."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
-        with pytest.raises(OrchestrationInvariantError, match="ROUTED outcome requires sink_name"):
+        with pytest.raises(OrchestrationInvariantError, match="GATE_ROUTED"):
             RowResult(
                 token=token,
                 final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-                outcome=RowOutcome.ROUTED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
             )
 
     def test_coalesced_without_sink_name_raises(self) -> None:
         """COALESCED outcome requires sink_name."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
-        with pytest.raises(OrchestrationInvariantError, match="COALESCED outcome requires sink_name"):
+        with pytest.raises(OrchestrationInvariantError, match="COALESCED"):
             RowResult(
                 token=token,
                 final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-                outcome=RowOutcome.COALESCED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
             )
 
     def test_coalesced_with_sink_name(self) -> None:
@@ -462,11 +463,13 @@ class TestRowResult:
         result = RowResult(
             token=token,
             final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-            outcome=RowOutcome.COALESCED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
             sink_name="output",
         )
 
-        assert result.outcome == RowOutcome.COALESCED
+        assert result.outcome == TerminalOutcome.SUCCESS
+        assert result.path == TerminalPath.COALESCED
         assert result.sink_name == "output"
 
     def test_is_frozen(self) -> None:
@@ -475,7 +478,8 @@ class TestRowResult:
         result = RowResult(
             token=token,
             final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
 
@@ -483,7 +487,57 @@ class TestRowResult:
             result.sink_name = "tampered"  # type: ignore[misc]
 
         with pytest.raises(AttributeError):
-            result.outcome = RowOutcome.FAILED  # type: ignore[misc]
+            result.outcome = TerminalOutcome.FAILURE  # type: ignore[misc]
+
+
+class TestRowResultTwoAxis:
+    """ADR-019 Phase 1: RowResult carries (outcome, path) at the producer site."""
+
+    def test_completed_row_result(self) -> None:
+        token = TokenInfo(row_id="row_001", token_id="tok_001", row_data=_wrap_dict_as_pipeline_row({"k": "v"}))
+        result = RowResult(
+            token=token,
+            final_data=_wrap_dict_as_pipeline_row({"k": "v"}),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="primary",
+        )
+        assert result.outcome == TerminalOutcome.SUCCESS
+        assert result.path == TerminalPath.DEFAULT_FLOW
+
+    def test_routed_on_error_requires_error_field(self) -> None:
+        token = TokenInfo(row_id="row_001", token_id="tok_001", row_data=_wrap_dict_as_pipeline_row({"k": "v"}))
+        with pytest.raises(OrchestrationInvariantError, match="ON_ERROR_ROUTED"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"k": "v"}),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
+                sink_name="error_sink",
+                error=None,
+            )
+
+    def test_buffered_row_result(self) -> None:
+        token = TokenInfo(row_id="row_001", token_id="tok_001", row_data=_wrap_dict_as_pipeline_row({"k": "v"}))
+        result = RowResult(
+            token=token,
+            final_data=_wrap_dict_as_pipeline_row({"k": "v"}),
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+        )
+        assert result.outcome is None
+        assert result.path == TerminalPath.BUFFERED
+
+    def test_illegal_completed_pair_rejected_before_recording(self) -> None:
+        token = TokenInfo(row_id="row_001", token_id="tok_001", row_data=_wrap_dict_as_pipeline_row({"k": "v"}))
+        with pytest.raises(OrchestrationInvariantError, match="legal"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"k": "v"}),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.UNROUTED,
+                sink_name="primary",
+            )
 
 
 class TestArtifactDescriptor:
@@ -556,7 +610,7 @@ class TestArtifactDescriptor:
             path_or_uri="db://table@url",
             content_hash="hash",
             size_bytes=100,
-            metadata={"table": "results", "row_count": 50},
+            metadata=MappingProxyType({"table": "results", "row_count": 50}),
         )
         assert descriptor.metadata == {"table": "results", "row_count": 50}
 
@@ -585,7 +639,7 @@ class TestArtifactDescriptor:
             path_or_uri="db://table@url",
             content_hash="hash",
             size_bytes=100,
-            metadata=original,
+            metadata=MappingProxyType(original),
         )
 
         # Mutating the metadata dict must raise TypeError
@@ -594,6 +648,7 @@ class TestArtifactDescriptor:
 
         # Mutating the original dict must NOT affect the descriptor (defensive copy)
         original["injected"] = "evil"
+        assert descriptor.metadata is not None
         assert "injected" not in descriptor.metadata
 
     def test_missing_required_fields_raises_type_error(self) -> None:
@@ -704,7 +759,7 @@ class TestArtifactDescriptorTypeSafety:
             fingerprint: str | None
 
         fake_url = FakeSanitizedUrl(
-            sanitized_url="postgresql://user:SECRET@host/db",  # Contains secret!
+            sanitized_url="postgresql://host/db?credential=redacted",  # Contains secret!
             fingerprint=None,
         )
 
@@ -748,7 +803,7 @@ class TestArtifactDescriptorTypeSafety:
         """for_database rejects plain string URLs."""
         with pytest.raises(TypeError, match="must be a SanitizedDatabaseUrl instance"):
             ArtifactDescriptor.for_database(
-                url="postgresql://user:pass@host/db",  # type: ignore[arg-type]
+                url="postgresql://host/db",  # type: ignore[arg-type]
                 table="test",
                 content_hash="abc",
                 payload_size=100,
@@ -870,11 +925,13 @@ class TestRowResultWithFailureInfo:
         result = RowResult(
             token=token,
             final_data=_wrap_dict_as_pipeline_row({"x": 1}),
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             error=error,
         )
 
-        assert result.outcome == RowOutcome.FAILED
+        assert result.outcome == TerminalOutcome.FAILURE
+        assert result.path == TerminalPath.UNROUTED
         assert result.error is not None
         assert result.error.exception_type == "MaxRetriesExceeded"
         assert result.error.attempts == 3
@@ -890,6 +947,69 @@ class TestRowResultWithFailureInfo:
         # We verify by checking that FailureInfo is in the string representation
         type_str = str(error_field.type)
         assert "FailureInfo" in type_str or error_field.type is FailureInfo
+
+    def test_routed_on_error_with_failure_info(self) -> None:
+        """ROUTED_ON_ERROR carries sink_name and typed originating failure evidence."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+        error = FailureInfo(
+            exception_type="ValueError",
+            message="bad row",
+        )
+
+        result = RowResult(
+            token=token,
+            final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
+            sink_name="error_sink",
+            error=error,
+        )
+
+        assert result.outcome == TerminalOutcome.FAILURE
+        assert result.path == TerminalPath.ON_ERROR_ROUTED
+        assert result.sink_name == "error_sink"
+        assert result.error is error
+
+    def test_routed_on_error_without_sink_name_raises(self) -> None:
+        """ROUTED_ON_ERROR must identify the failure sink for audit lineage."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+        error = FailureInfo(exception_type="ValueError", message="bad row")
+
+        with pytest.raises(OrchestrationInvariantError, match="ON_ERROR_ROUTED"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
+                error=error,
+            )
+
+    def test_routed_on_error_without_error_raises(self) -> None:
+        """ROUTED_ON_ERROR must carry the originating transform failure."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+
+        with pytest.raises(OrchestrationInvariantError, match=r"ON_ERROR_ROUTED.*error \(FailureInfo\)"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
+                sink_name="error_sink",
+            )
+
+    def test_routed_on_error_with_non_failure_info_error_raises(self) -> None:
+        """ROUTED_ON_ERROR rejects untyped error evidence at runtime."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+
+        with pytest.raises(OrchestrationInvariantError, match=r"ON_ERROR_ROUTED.*FailureInfo instance"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
+                sink_name="error_sink",
+                error=object(),  # type: ignore[arg-type]
+            )
 
 
 class TestExceptionResult:
@@ -942,7 +1062,7 @@ class TestArtifactDescriptorDeepFreeze:
             path_or_uri="/tmp/test.csv",
             content_hash="abc123",
             size_bytes=100,
-            metadata={"nested": {"inner_key": "inner_value"}},
+            metadata=MappingProxyType({"nested": {"inner_key": "inner_value"}}),
         )
         assert isinstance(descriptor.metadata, MappingProxyType)
         # The nested dict must also be frozen
@@ -957,7 +1077,7 @@ class TestArtifactDescriptorDeepFreeze:
             path_or_uri="/tmp/test.csv",
             content_hash="abc123",
             size_bytes=100,
-            metadata={"tags": ["a", "b"]},
+            metadata=MappingProxyType({"tags": ["a", "b"]}),
         )
         assert isinstance(descriptor.metadata, MappingProxyType)
         assert isinstance(descriptor.metadata["tags"], tuple)
@@ -969,17 +1089,19 @@ class TestArtifactDescriptorDeepFreeze:
 
 
 class TestSourceRowExceptionType:
-    """SourceRow.to_pipeline_row must raise FrameworkBugError for missing contract."""
+    """SourceRow construction and to_pipeline_row exception types."""
 
-    def test_no_contract_raises_framework_bug_error(self) -> None:
-        """Regression: elspeth-a286241cfb — missing contract is a framework bug,
-        not a ValueError. Consistent with GateResult.to_pipeline_row()."""
-        from elspeth.contracts.errors import FrameworkBugError
+    def test_no_contract_raises_at_construction(self) -> None:
+        """Valid SourceRow without contract raises ValueError at construction.
+
+        Bug fix: elspeth-a27e71979f — the invariant is now enforced in
+        __post_init__ instead of deferring to to_pipeline_row(). This
+        supersedes elspeth-a286241cfb which moved the error to FrameworkBugError.
+        """
         from elspeth.contracts.results import SourceRow
 
-        row = SourceRow(row={"id": 1}, is_quarantined=False, contract=None)
-        with pytest.raises(FrameworkBugError, match="no contract"):
-            row.to_pipeline_row()
+        with pytest.raises(ValueError, match=r"[Vv]alid.*contract"):
+            SourceRow(row={"id": 1}, is_quarantined=False, contract=None)
 
     def test_quarantined_row_still_raises_value_error(self) -> None:
         """Quarantined rows raise ValueError — this is a state violation, not a bug."""

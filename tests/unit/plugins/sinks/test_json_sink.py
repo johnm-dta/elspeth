@@ -10,8 +10,9 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 # Dynamic schema config for tests - PathConfig now requires schema
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -24,15 +25,15 @@ class TestJSONSink:
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        return make_context(landscape=recorder)
+        factory = make_factory(db)
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_write_json_array(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Write rows as JSON array."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
@@ -44,12 +45,62 @@ class TestJSONSink:
         assert len(data) == 2
         assert data[0]["name"] == "alice"
 
+    def test_json_array_fail_if_exists_collision_policy_refuses_existing_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit fail-if-exists mode must not replace an existing JSON output."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        output_file.write_text('[{"id": 0}]')
+        with pytest.raises(FileExistsError, match="already exists"):
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "schema": DYNAMIC_SCHEMA,
+                    "collision_policy": "fail_if_exists",
+                }
+            )
+
+        assert json.loads(output_file.read_text()) == [{"id": 0}]
+
+    def test_json_array_auto_increment_collision_policy_writes_free_sibling(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+    ) -> None:
+        """Auto-increment mode must preserve existing JSON output and report the chosen path."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        output_file.write_text('[{"id": 0}]')
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "schema": DYNAMIC_SCHEMA,
+                    "collision_policy": "auto_increment",
+                }
+            )
+        )
+
+        artifact = sink.write([{"id": 1}], ctx)
+        sink.close()
+
+        chosen_file = tmp_path / "output-1.json"
+        assert json.loads(output_file.read_text()) == [{"id": 0}]
+        assert json.loads(chosen_file.read_text()) == [{"id": 1}]
+        assert artifact.artifact.path_or_uri == f"file://{chosen_file}"
+
     def test_write_jsonl(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Write rows as JSONL (one per line)."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
@@ -67,7 +118,7 @@ class TestJSONSink:
 
         # .jsonl extension should default to jsonl format
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1}], ctx)
         sink.flush()
@@ -83,7 +134,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1}], ctx)
         sink.flush()
@@ -129,13 +180,15 @@ class TestJSONSink:
         output_file = tmp_path / "output.jsonl"
         output_file.write_text(json.dumps({"id": 1}) + "\n")
 
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "format": "jsonl",
-                "mode": "append",
-                "schema": DYNAMIC_SCHEMA,
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "jsonl",
+                    "mode": "append",
+                    "schema": DYNAMIC_SCHEMA,
+                }
+            )
         )
         sink.write([{"id": 2}], ctx)
         sink.flush()
@@ -151,7 +204,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1}], ctx)
         sink.close()
@@ -162,13 +215,15 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "format": "json",
-                "indent": 2,
-                "schema": DYNAMIC_SCHEMA,
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "indent": 2,
+                    "schema": DYNAMIC_SCHEMA,
+                }
+            )
         )
 
         sink.write([{"id": 1}], ctx)
@@ -185,7 +240,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         artifact = sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.close()
@@ -200,7 +255,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         artifact = sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.close()
@@ -215,7 +270,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         artifact = sink.write([{"id": 1}, {"id": 2}], ctx)
         sink.close()
@@ -231,7 +286,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA}))
 
         artifact = sink.write([], ctx)
         sink.close()
@@ -244,7 +299,7 @@ class TestJSONSink:
         """JSONSink has plugin_version attribute."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
-        sink = JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA}))
         assert sink.plugin_version == "1.0.0"
 
     def test_has_determinism(self) -> None:
@@ -252,7 +307,7 @@ class TestJSONSink:
         from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.json_sink import JSONSink
 
-        sink = JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA}))
         assert sink.determinism == Determinism.IO_WRITE
 
     def test_cumulative_hash_after_multiple_writes(self, tmp_path: Path, ctx: PluginContext) -> None:
@@ -260,7 +315,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
 
         # First write
         artifact1 = sink.write([{"id": 1}], ctx)
@@ -282,7 +337,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
 
         # First write succeeds - establishes file with data
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -311,7 +366,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1}], ctx)
         sink.close()
@@ -325,7 +380,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
         sink._mode = "append"
 
         with pytest.raises(ValueError, match="does not support mode='append'"):
@@ -338,10 +393,46 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
 
         sink.write([{"id": 1}, {"id": 2}, {"id": 3}], ctx)
         assert len(sink._rows) == 3
 
         sink.close()
         assert len(sink._rows) == 0
+
+
+class TestJSONSinkNonFiniteRejection:
+    """Non-finite floats must be rejected at the JSON serialization boundary."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        db = make_landscape_db()
+        factory = make_factory(db)
+        return make_context(landscape=factory.plugin_audit_writer())
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
+    def test_jsonl_rejects_non_finite_float(self, tmp_path: Path, ctx: PluginContext, bad_value: float) -> None:
+        """JSONL format must reject NaN/Infinity instead of emitting non-standard JSON."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.jsonl"
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}))
+
+        with pytest.raises(ValueError, match="Out of range float values"):
+            sink.write([{"id": 1, "value": bad_value}], ctx)
+
+        sink.close()
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
+    def test_json_array_rejects_non_finite_float(self, tmp_path: Path, ctx: PluginContext, bad_value: float) -> None:
+        """JSON array format must reject NaN/Infinity instead of emitting non-standard JSON."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
+
+        with pytest.raises(ValueError, match="Out of range float values"):
+            sink.write([{"id": 1, "value": bad_value}], ctx)
+
+        sink.close()

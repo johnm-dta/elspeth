@@ -10,8 +10,8 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, select
+from sqlalchemy.engine import Row as SQLAlchemyRow
 
 from elspeth.contracts import (
     ContractAuditRecord,
@@ -22,7 +22,6 @@ from elspeth.contracts import (
     NonCanonicalMetadata,
     RoutingMode,
     Row,
-    RowOutcome,
     Token,
     TokenOutcome,
     TransformErrorReason,
@@ -30,7 +29,10 @@ from elspeth.contracts import (
     ValidationErrorRecord,
     ValidationErrorWithContract,
 )
+from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, DISCARD_SINK_NAME, TokenRef
+from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import repr_hash
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -44,7 +46,10 @@ from elspeth.core.landscape.model_loaders import (
     ValidationErrorLoader,
 )
 from elspeth.core.landscape.schema import (
+    artifacts_table,
+    batches_table,
     edges_table,
+    node_states_table,
     nodes_table,
     rows_table,
     token_outcomes_table,
@@ -53,8 +58,6 @@ from elspeth.core.landscape.schema import (
     transform_errors_table,
     validation_errors_table,
 )
-
-logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from elspeth.contracts.errors import ContractViolation
@@ -95,6 +98,21 @@ class DataFlowRepository:
         self._payload_store = payload_store
 
     # ── Token recording: private helpers ─────────────────────────────────
+
+    def _sanitize_node_config_for_audit(self, config: Mapping[str, object]) -> Mapping[str, object]:
+        """Return an audit-safe node config with secrets fingerprinted."""
+        import os
+
+        from elspeth.core.config import _fingerprint_secrets
+
+        thawed = deep_thaw(config)
+        if type(thawed) is not dict:
+            raise TypeError(f"Node config must thaw to dict[str, object], got {type(thawed).__name__}: {thawed!r}")
+
+        allow_raw = False
+        if "ELSPETH_ALLOW_RAW_SECRETS" in os.environ:
+            allow_raw = os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
+        return _fingerprint_secrets(thawed, fail_if_no_key=not allow_raw)
 
     def _resolve_run_id_for_row(self, row_id: str) -> str:
         """Resolve the run_id that owns a given row_id.
@@ -145,24 +163,23 @@ class DataFlowRepository:
             )
         return result.row_id, result.run_id
 
-    def _validate_token_run_ownership(self, token_id: str, run_id: str) -> None:
+    def _validate_token_run_ownership(self, ref: TokenRef) -> None:
         """Validate that a token belongs to the specified run.
 
         Per Tier 1 trust model: cross-run contamination of audit records is
         evidence tampering. Crash immediately if the invariant is violated.
 
         Args:
-            token_id: Token to validate
-            run_id: Expected run ID
+            ref: TokenRef to validate — token_id must belong to run_id
 
         Raises:
             AuditIntegrityError: If token does not belong to the specified run
         """
-        _row_id, actual_run_id = self._resolve_token_ownership(token_id)
-        if actual_run_id != run_id:
+        _row_id, actual_run_id = self._resolve_token_ownership(ref.token_id)
+        if actual_run_id != ref.run_id:
             raise AuditIntegrityError(
-                f"Cross-run contamination prevented: token {token_id!r} belongs to "
-                f"run {actual_run_id!r}, but caller supplied run_id={run_id!r}. "
+                f"Cross-run contamination prevented: token {ref.token_id!r} belongs to "
+                f"run {actual_run_id!r}, but caller supplied run_id={ref.run_id!r}. "
                 f"This would corrupt the audit trail by attributing records to the wrong run."
             )
 
@@ -189,7 +206,8 @@ class DataFlowRepository:
 
     def _validate_outcome_fields(
         self,
-        outcome: RowOutcome,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         *,
         sink_name: str | None,
         batch_id: str | None,
@@ -198,73 +216,165 @@ class DataFlowRepository:
         expand_group_id: str | None,
         error_hash: str | None,
     ) -> None:
-        """Validate required fields are present for each outcome type.
+        """Validate discriminator fields for the (outcome, path) pair.
 
-        Enforces the token outcome contract from docs/contracts/token-outcomes/00-token-outcome-contract.md.
-        This is defense-in-depth: callers SHOULD pass correct fields, but this catches bugs.
-
-        Raises:
-            ValueError: If a required field is missing for the outcome type
+        Per ADR-019, producers declare both axes; the recorder must crash before
+        writing an ambiguous audit row if the pair is illegal or if required,
+        exact, or forbidden discriminator fields are violated.
         """
-        # Map outcome to required field(s)
-        # Contract: Each outcome type has specific required fields
-        if outcome == RowOutcome.COMPLETED:
-            if sink_name is None:
-                raise ValueError(
-                    "COMPLETED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.ROUTED:
-            if sink_name is None:
-                raise ValueError(
-                    "ROUTED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.FORKED:
-            if fork_group_id is None:
-                raise ValueError(
-                    "FORKED outcome requires fork_group_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.FAILED:
-            if error_hash is None:
-                raise ValueError(
-                    "FAILED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.QUARANTINED:
-            if error_hash is None:
-                raise ValueError(
-                    "QUARANTINED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.CONSUMED_IN_BATCH:
-            if batch_id is None:
-                raise ValueError(
-                    "CONSUMED_IN_BATCH outcome requires batch_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.COALESCED:
-            if join_group_id is None:
-                raise ValueError(
-                    "COALESCED outcome requires join_group_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.EXPANDED:
-            if expand_group_id is None:
-                raise ValueError(
-                    "EXPANDED outcome requires expand_group_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.BUFFERED:
-            if batch_id is None:
-                raise ValueError(
-                    "BUFFERED outcome requires batch_id but got None. Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        else:
+        pair = (outcome, path)
+        if pair not in _TERMINAL_PAIR_FIELD_CONSTRAINTS:
             raise ValueError(
-                f"Unhandled RowOutcome variant in validation: {outcome!r}. Add required-field validation for this outcome type."
+                f"Unhandled (outcome, path) pair in validation: {pair!r}. "
+                "See ADR-019 mapping table and update _TERMINAL_PAIR_FIELD_CONSTRAINTS."
             )
+        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+        field_values = {
+            "sink_name": sink_name,
+            "batch_id": batch_id,
+            "fork_group_id": fork_group_id,
+            "join_group_id": join_group_id,
+            "expand_group_id": expand_group_id,
+            "error_hash": error_hash,
+        }
+        pair_label = f"({outcome.name if outcome else 'NULL'}, {path.name})"
+        for field_name in constraints.required:
+            if field_values[field_name] is None:
+                raise ValueError(
+                    f"{pair_label} outcome requires {field_name} but got None. Contract violation — see ADR-019 Implementation Notes."
+                )
+        for field_name, expected in constraints.exact.items():
+            if field_values[field_name] != expected:
+                raise ValueError(
+                    f"{pair_label} outcome requires {field_name}={expected!r}, "
+                    f"got {field_values[field_name]!r}. "
+                    "Contract violation — see ADR-019 Implementation Notes."
+                )
+        for field_name in constraints.forbidden:
+            if field_values[field_name] is not None:
+                raise ValueError(
+                    f"{pair_label} outcome forbids {field_name}, got {field_values[field_name]!r}. "
+                    "Contract violation — see ADR-019 Implementation Notes."
+                )
+
+    def _validate_cross_table_invariants(
+        self,
+        ref: TokenRef,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
+        *,
+        sink_name: str | None,
+        sink_node_id: str | None,
+        artifact_id: str | None,
+    ) -> None:
+        """Validate ADR-019 real-time cross-table invariants.
+
+        I1c validates exact failsink node-state and artifact witnesses for
+        failsink fallback. I3 validates that discard records do not coexist
+        with a completed sink node-state for the same token.
+        """
+        pair = (outcome, path)
+
+        if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
+            if sink_node_id is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    "(TRANSIENT, SINK_FALLBACK_TO_FAILSINK) requires an exact "
+                    "failsink node_id witness."
+                )
+            if artifact_id is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    "(TRANSIENT, SINK_FALLBACK_TO_FAILSINK) requires an exact "
+                    "failsink artifact_id witness."
+                )
+
+            completed_sink_state = self._ops.execute_fetchone(
+                select(node_states_table.c.state_id, node_states_table.c.node_id)
+                .select_from(
+                    node_states_table.join(
+                        nodes_table,
+                        and_(
+                            node_states_table.c.node_id == nodes_table.c.node_id,
+                            node_states_table.c.run_id == nodes_table.c.run_id,
+                        ),
+                    )
+                )
+                .where(node_states_table.c.token_id == ref.token_id)
+                .where(node_states_table.c.run_id == ref.run_id)
+                .where(node_states_table.c.node_id == sink_node_id)
+                .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
+                .where(nodes_table.c.node_type == NodeType.SINK.value)
+            )
+            if completed_sink_state is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    "failsink fallback requires a paired COMPLETED sink "
+                    f"node_state at sink_node_id={sink_node_id!r}."
+                )
+
+            artifact_row = self._ops.execute_fetchone(
+                select(artifacts_table.c.artifact_id)
+                .select_from(
+                    artifacts_table.join(
+                        node_states_table,
+                        and_(
+                            artifacts_table.c.produced_by_state_id == node_states_table.c.state_id,
+                            artifacts_table.c.run_id == node_states_table.c.run_id,
+                        ),
+                    ).join(
+                        nodes_table,
+                        and_(
+                            node_states_table.c.node_id == nodes_table.c.node_id,
+                            node_states_table.c.run_id == nodes_table.c.run_id,
+                        ),
+                    )
+                )
+                .where(artifacts_table.c.artifact_id == artifact_id)
+                .where(artifacts_table.c.run_id == ref.run_id)
+                .where(artifacts_table.c.sink_node_id == sink_node_id)
+                .where(node_states_table.c.node_id == sink_node_id)
+                .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
+                .where(nodes_table.c.node_type == NodeType.SINK.value)
+            )
+            if artifact_row is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    f"failsink node {completed_sink_state.node_id!r} has no "
+                    f"artifact_id={artifact_id!r} witness produced by a "
+                    "COMPLETED sink node_state at this sink."
+                )
+
+        if pair == (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
+            if sink_name != DISCARD_SINK_NAME:
+                raise AuditIntegrityError(
+                    f"ADR-019 I3 violation for token {ref.token_id}: "
+                    f"SINK_DISCARDED requires sink_name={DISCARD_SINK_NAME!r}, "
+                    f"got {sink_name!r}."
+                )
+
+            completed_sink_state = self._ops.execute_fetchone(
+                select(node_states_table.c.state_id)
+                .select_from(
+                    node_states_table.join(
+                        nodes_table,
+                        and_(
+                            node_states_table.c.node_id == nodes_table.c.node_id,
+                            node_states_table.c.run_id == nodes_table.c.run_id,
+                        ),
+                    )
+                )
+                .where(node_states_table.c.token_id == ref.token_id)
+                .where(node_states_table.c.run_id == ref.run_id)
+                .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
+                .where(nodes_table.c.node_type == NodeType.SINK.value)
+            )
+            if completed_sink_state is not None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I3 violation for token {ref.token_id}: discard "
+                    "recording contradicts an existing COMPLETED sink "
+                    f"node_state ({completed_sink_state.state_id})."
+                )
 
     # ── Token recording: public methods ──────────────────────────────────
 
@@ -293,7 +403,7 @@ class DataFlowRepository:
             Row model
 
         Note:
-            Payload persistence is handled by LandscapeRecorder, not callers.
+            Payload persistence is handled by PayloadStore, not callers.
             If self._payload_store is configured, the method will:
             1. Serialize data using canonical_json (handles pandas/numpy/datetime/Decimal)
             2. Store in payload store
@@ -309,10 +419,6 @@ class DataFlowRepository:
             try:
                 data_hash = stable_hash(data)
             except (ValueError, TypeError):
-                logger.warning(
-                    "Quarantined row data not canonically hashable (using repr_hash fallback): %s",
-                    type(data).__name__,
-                )
                 data_hash = repr_hash(data)
         else:
             data_hash = stable_hash(data)
@@ -329,10 +435,6 @@ class DataFlowRepository:
                 try:
                     payload_bytes = canonical_json(data).encode("utf-8")
                 except (ValueError, TypeError):
-                    logger.warning(
-                        "Quarantined row data not canonically serializable (using repr fallback for payload): %s",
-                        type(data).__name__,
-                    )
                     payload_bytes = json.dumps({"_repr": repr(data)}, allow_nan=False).encode("utf-8")
             else:
                 payload_bytes = canonical_json(data).encode("utf-8")
@@ -396,6 +498,25 @@ class DataFlowRepository:
         # Derive run_id from the row record (Tier 1 -- our data, must exist)
         run_id = self._resolve_run_id_for_row(row_id)
 
+        # Validate lineage metadata invariants (Tier 1 write-side enforcement)
+        # The read side (explain) assumes these are mutually exclusive.
+        group_ids = [gid for gid in (fork_group_id, join_group_id) if gid is not None]
+        if len(group_ids) > 1:
+            raise AuditIntegrityError(
+                f"create_token: conflicting lineage metadata — at most one of "
+                f"fork_group_id, join_group_id may be set. "
+                f"Got fork_group_id={fork_group_id!r}, join_group_id={join_group_id!r}"
+            )
+
+        # branch_name requires fork_group_id (it names which fork branch this token is on)
+        if branch_name is not None and fork_group_id is None:
+            raise AuditIntegrityError(f"create_token: branch_name={branch_name!r} requires fork_group_id to be set")
+
+        # Reject empty-string group IDs (should be None, not "")
+        for name, value in [("fork_group_id", fork_group_id), ("join_group_id", join_group_id)]:
+            if value is not None and not value.strip():
+                raise AuditIntegrityError(f"create_token: {name} must be None or non-empty, got {value!r}")
+
         token = Token(
             token_id=token_id,
             row_id=row_id,
@@ -422,11 +543,10 @@ class DataFlowRepository:
 
     def fork_token(
         self,
-        parent_token_id: str,
+        parent_ref: TokenRef,
         row_id: str,
         branches: list[str],
         *,
-        run_id: str,
         step_in_pipeline: int | None = None,
     ) -> tuple[list[Token], str]:
         """Fork a token to multiple branches.
@@ -434,15 +554,14 @@ class DataFlowRepository:
         ATOMIC: Creates children AND records parent FORKED outcome in single transaction.
         Stores branch contract for recovery validation.
 
-        Validates that parent_token_id belongs to the specified row_id and run_id
+        Validates that parent token belongs to the specified row_id and run_id
         before any writes. Cross-run/cross-row contamination crashes immediately
         per Tier 1 trust model.
 
         Args:
-            parent_token_id: Token being forked
+            parent_ref: TokenRef bundling parent token_id and run_id
             row_id: Row ID (same for all children)
             branches: List of branch names (must have at least one)
-            run_id: Run ID (required for outcome recording)
             step_in_pipeline: Step in the DAG where the fork occurs
 
         Returns:
@@ -459,8 +578,8 @@ class DataFlowRepository:
             raise ValueError("fork_token requires at least one branch")
 
         # Validate parent token ownership before any writes (Tier 1 invariant)
-        self._validate_token_run_ownership(parent_token_id, run_id)
-        self._validate_token_row_ownership(parent_token_id, row_id)
+        self._validate_token_run_ownership(parent_ref)
+        self._validate_token_row_ownership(parent_ref.token_id, row_id)
 
         fork_group_id = generate_id()
         children = []
@@ -476,7 +595,7 @@ class DataFlowRepository:
                     tokens_table.insert().values(
                         token_id=child_id,
                         row_id=row_id,
-                        run_id=run_id,
+                        run_id=parent_ref.run_id,
                         fork_group_id=fork_group_id,
                         branch_name=branch_name,
                         step_in_pipeline=step_in_pipeline,
@@ -492,13 +611,13 @@ class DataFlowRepository:
                 result = conn.execute(
                     token_parents_table.insert().values(
                         token_id=child_id,
-                        parent_token_id=parent_token_id,
+                        parent_token_id=parent_ref.token_id,
                         ordinal=ordinal,
                     )
                 )
                 if result.rowcount == 0:
                     raise AuditIntegrityError(
-                        f"fork_token: token_parent INSERT affected zero rows (child={child_id}, parent={parent_token_id})"
+                        f"fork_token: token_parent INSERT affected zero rows (child={child_id}, parent={parent_ref.token_id})"
                     )
 
                 children.append(
@@ -509,7 +628,7 @@ class DataFlowRepository:
                         branch_name=branch_name,
                         step_in_pipeline=step_in_pipeline,
                         created_at=timestamp,
-                        run_id=run_id,
+                        run_id=parent_ref.run_id,
                     )
                 )
 
@@ -518,10 +637,11 @@ class DataFlowRepository:
             result = conn.execute(
                 token_outcomes_table.insert().values(
                     outcome_id=outcome_id,
-                    run_id=run_id,
-                    token_id=parent_token_id,
-                    outcome=RowOutcome.FORKED,
-                    is_terminal=1,
+                    run_id=parent_ref.run_id,
+                    token_id=parent_ref.token_id,
+                    outcome=TerminalOutcome.TRANSIENT.value,
+                    path=TerminalPath.FORK_PARENT.value,
+                    completed=1,
                     recorded_at=now(),
                     fork_group_id=fork_group_id,
                     expected_branches_json=json.dumps(branches, allow_nan=False),
@@ -529,14 +649,14 @@ class DataFlowRepository:
             )
             if result.rowcount == 0:
                 raise AuditIntegrityError(
-                    f"fork_token: FORKED outcome INSERT affected zero rows (parent={parent_token_id}, outcome_id={outcome_id})"
+                    f"fork_token: FORKED outcome INSERT affected zero rows (parent={parent_ref.token_id}, outcome_id={outcome_id})"
                 )
 
         return children, fork_group_id
 
     def coalesce_tokens(
         self,
-        parent_token_ids: list[str],
+        parent_refs: list[TokenRef],
         row_id: str,
         *,
         step_in_pipeline: int | None = None,
@@ -551,7 +671,7 @@ class DataFlowRepository:
         crashes immediately per Tier 1 trust model.
 
         Args:
-            parent_token_ids: Tokens being merged
+            parent_refs: TokenRefs for tokens being merged (bundled token_id + run_id)
             row_id: Row ID for the merged token
             step_in_pipeline: Step in the DAG where the coalesce occurs
 
@@ -562,17 +682,22 @@ class DataFlowRepository:
             AuditIntegrityError: If parent tokens do not belong to specified row
                 or if parent tokens span multiple runs
         """
+        if not parent_refs:
+            raise AuditIntegrityError(
+                "coalesce_tokens requires at least one parent token — a coalesce with zero parents creates an unexplainable audit state"
+            )
+
         # Validate all parent tokens belong to the same row and run (Tier 1 invariant)
         run_id: str | None = None
-        for parent_id in parent_token_ids:
-            self._validate_token_row_ownership(parent_id, row_id)
-            _row_id, parent_run_id = self._resolve_token_ownership(parent_id)
+        for ref in parent_refs:
+            self._validate_token_row_ownership(ref.token_id, row_id)
+            self._validate_token_run_ownership(ref)
             if run_id is None:
-                run_id = parent_run_id
-            elif parent_run_id != run_id:
+                run_id = ref.run_id
+            elif ref.run_id != run_id:
                 raise AuditIntegrityError(
-                    f"Cross-run contamination prevented in coalesce: parent token {parent_id!r} "
-                    f"belongs to run {parent_run_id!r}, but other parents belong to run {run_id!r}. "
+                    f"Cross-run contamination prevented in coalesce: parent token {ref.token_id!r} "
+                    f"belongs to run {ref.run_id!r}, but other parents belong to run {run_id!r}. "
                     f"All parent tokens in a coalesce must belong to the same run."
                 )
 
@@ -600,17 +725,17 @@ class DataFlowRepository:
                 raise AuditIntegrityError(f"coalesce_tokens: merged token INSERT affected zero rows (token_id={token_id})")
 
             # Record all parent relationships
-            for ordinal, parent_id in enumerate(parent_token_ids):
+            for ordinal, ref in enumerate(parent_refs):
                 result = conn.execute(
                     token_parents_table.insert().values(
                         token_id=token_id,
-                        parent_token_id=parent_id,
+                        parent_token_id=ref.token_id,
                         ordinal=ordinal,
                     )
                 )
                 if result.rowcount == 0:
                     raise AuditIntegrityError(
-                        f"coalesce_tokens: token_parent INSERT affected zero rows (child={token_id}, parent={parent_id})"
+                        f"coalesce_tokens: token_parent INSERT affected zero rows (child={token_id}, parent={ref.token_id})"
                     )
 
         return Token(
@@ -624,11 +749,10 @@ class DataFlowRepository:
 
     def expand_token(
         self,
-        parent_token_id: str,
+        parent_ref: TokenRef,
         row_id: str,
         count: int,
         *,
-        run_id: str,
         step_in_pipeline: int | None = None,
         record_parent_outcome: bool = True,
     ) -> tuple[list[Token], str]:
@@ -637,7 +761,7 @@ class DataFlowRepository:
         ATOMIC: Creates children AND optionally records parent EXPANDED outcome
         in single transaction.
 
-        Validates that parent_token_id belongs to the specified row_id and run_id
+        Validates that parent token belongs to the specified row_id and run_id
         before any writes. Cross-run/cross-row contamination crashes immediately
         per Tier 1 trust model.
 
@@ -649,10 +773,9 @@ class DataFlowRepository:
         creates sequential children for deaggregation transforms.
 
         Args:
-            parent_token_id: Token being expanded
+            parent_ref: TokenRef bundling parent token_id and run_id
             row_id: Row ID (same for all children)
             count: Number of child tokens to create (must be >= 1)
-            run_id: Run ID (required for atomic outcome recording)
             step_in_pipeline: Step where expansion occurs (optional)
             record_parent_outcome: If True (default), record EXPANDED outcome for parent.
                 Set to False for batch aggregation where parent gets CONSUMED_IN_BATCH.
@@ -668,8 +791,8 @@ class DataFlowRepository:
             raise ValueError("expand_token requires at least 1 child")
 
         # Validate parent token ownership before any writes (Tier 1 invariant)
-        self._validate_token_run_ownership(parent_token_id, run_id)
-        self._validate_token_row_ownership(parent_token_id, row_id)
+        self._validate_token_run_ownership(parent_ref)
+        self._validate_token_row_ownership(parent_ref.token_id, row_id)
 
         expand_group_id = generate_id()
         children = []
@@ -684,7 +807,7 @@ class DataFlowRepository:
                     tokens_table.insert().values(
                         token_id=child_id,
                         row_id=row_id,
-                        run_id=run_id,
+                        run_id=parent_ref.run_id,
                         expand_group_id=expand_group_id,
                         step_in_pipeline=step_in_pipeline,
                         created_at=timestamp,
@@ -699,13 +822,13 @@ class DataFlowRepository:
                 result = conn.execute(
                     token_parents_table.insert().values(
                         token_id=child_id,
-                        parent_token_id=parent_token_id,
+                        parent_token_id=parent_ref.token_id,
                         ordinal=ordinal,
                     )
                 )
                 if result.rowcount == 0:
                     raise AuditIntegrityError(
-                        f"expand_token: token_parent INSERT affected zero rows (child={child_id}, parent={parent_token_id})"
+                        f"expand_token: token_parent INSERT affected zero rows (child={child_id}, parent={parent_ref.token_id})"
                     )
 
                 children.append(
@@ -715,7 +838,7 @@ class DataFlowRepository:
                         expand_group_id=expand_group_id,
                         step_in_pipeline=step_in_pipeline,
                         created_at=timestamp,
-                        run_id=run_id,
+                        run_id=parent_ref.run_id,
                     )
                 )
 
@@ -730,10 +853,11 @@ class DataFlowRepository:
                 result = conn.execute(
                     token_outcomes_table.insert().values(
                         outcome_id=outcome_id,
-                        run_id=run_id,
-                        token_id=parent_token_id,
-                        outcome=RowOutcome.EXPANDED,
-                        is_terminal=1,
+                        run_id=parent_ref.run_id,
+                        token_id=parent_ref.token_id,
+                        outcome=TerminalOutcome.TRANSIENT.value,
+                        path=TerminalPath.EXPAND_PARENT.value,
+                        completed=1,
                         recorded_at=now(),
                         expand_group_id=expand_group_id,
                         # Store expected count for recovery validation
@@ -742,18 +866,20 @@ class DataFlowRepository:
                 )
                 if result.rowcount == 0:
                     raise AuditIntegrityError(
-                        f"expand_token: EXPANDED outcome INSERT affected zero rows (parent={parent_token_id}, outcome_id={outcome_id})"
+                        f"expand_token: EXPANDED outcome INSERT affected zero rows (parent={parent_ref.token_id}, outcome_id={outcome_id})"
                     )
 
         return children, expand_group_id
 
     def record_token_outcome(
         self,
-        run_id: str,
-        token_id: str,
-        outcome: RowOutcome,
+        ref: TokenRef,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         *,
         sink_name: str | None = None,
+        sink_node_id: str | None = None,
+        artifact_id: str | None = None,
         batch_id: str | None = None,
         fork_group_id: str | None = None,
         join_group_id: str | None = None,
@@ -761,25 +887,29 @@ class DataFlowRepository:
         error_hash: str | None = None,
         context: Mapping[str, object] | None = None,
     ) -> str:
-        """Record a token's outcome in the audit trail.
+        """Record a token's (outcome, path) audit terminal in the audit trail.
 
-        Called at the moment the outcome is determined in processor.py.
-        For BUFFERED tokens, a second call records the terminal outcome
-        when the batch flushes.
+        Called at the moment the producer determines the terminal pair. For
+        BUFFERED tokens (outcome=None, path=BUFFERED), a second call records
+        the actual lifecycle terminal when the batch flushes.
 
         Validates that the token belongs to the specified run_id before recording.
         Cross-run contamination crashes immediately per Tier 1 trust model.
 
         Args:
-            run_id: Current run ID
-            token_id: Token that reached this outcome
-            outcome: The RowOutcome enum value
-            sink_name: For ROUTED/COMPLETED - which sink (REQUIRED)
-            batch_id: For CONSUMED_IN_BATCH/BUFFERED - which batch (REQUIRED)
-            fork_group_id: For FORKED - the fork group (REQUIRED)
-            join_group_id: For COALESCED - the join group (REQUIRED)
-            expand_group_id: For EXPANDED - the expand group (REQUIRED)
-            error_hash: For FAILED/QUARANTINED - hash of error details (REQUIRED)
+            ref: TokenRef bundling token_id and run_id
+            outcome: TerminalOutcome lifecycle answer, or None for BUFFERED
+            path: TerminalPath provenance answer (always required)
+            sink_name: For paths that reach a sink (REQUIRED for those)
+            sink_node_id: Forward-compatible Phase 4 witness keyword for
+                failsink-paired outcomes. Accepted but not written in Phase 1.
+            artifact_id: Forward-compatible Phase 4 witness keyword for
+                failsink-paired outcomes. Accepted but not written in Phase 1.
+            batch_id: For BATCH_CONSUMED / BUFFERED (REQUIRED)
+            fork_group_id: For FORK_PARENT (REQUIRED)
+            join_group_id: For COALESCED (REQUIRED)
+            expand_group_id: For EXPAND_PARENT (REQUIRED)
+            error_hash: Error witness for failure/transient error paths
             context: Optional additional context (stored as JSON)
 
         Returns:
@@ -790,10 +920,9 @@ class DataFlowRepository:
             AuditIntegrityError: If token does not belong to the specified run
             IntegrityError: If terminal outcome already exists for token
         """
-        # Validate required fields per outcome type (contract enforcement)
-        # See docs/contracts/token-outcomes/00-token-outcome-contract.md
         self._validate_outcome_fields(
-            outcome=outcome,
+            outcome,
+            path,
             sink_name=sink_name,
             batch_id=batch_id,
             fork_group_id=fork_group_id,
@@ -803,19 +932,28 @@ class DataFlowRepository:
         )
 
         # Validate token belongs to the specified run (Tier 1 invariant)
-        self._validate_token_run_ownership(token_id, run_id)
+        self._validate_token_run_ownership(ref)
+        self._validate_cross_table_invariants(
+            ref,
+            outcome,
+            path,
+            sink_name=sink_name,
+            sink_node_id=sink_node_id,
+            artifact_id=artifact_id,
+        )
 
         outcome_id = f"out_{generate_id()[:12]}"
-        is_terminal = outcome.is_terminal
+        completed = outcome is not None
         context_json = canonical_json(context) if context is not None else None
 
         self._ops.execute_insert(
             token_outcomes_table.insert().values(
                 outcome_id=outcome_id,
-                run_id=run_id,
-                token_id=token_id,
-                outcome=outcome,
-                is_terminal=1 if is_terminal else 0,
+                run_id=ref.run_id,
+                token_id=ref.token_id,
+                outcome=outcome.value if outcome is not None else None,
+                path=path.value,
+                completed=1 if completed else 0,
                 recorded_at=now(),
                 sink_name=sink_name,
                 batch_id=batch_id,
@@ -828,6 +966,73 @@ class DataFlowRepository:
         )
 
         return outcome_id
+
+    def find_orphaned_transient_parents(self, run_id: str) -> list[SQLAlchemyRow[Any]]:
+        """Find I1a parent tokens with no child token outcome witnesses."""
+        parent_paths = (
+            TerminalPath.FORK_PARENT.value,
+            TerminalPath.EXPAND_PARENT.value,
+        )
+        child_outcomes = token_outcomes_table.alias("child_outcomes")
+        child_witness = (
+            select(child_outcomes.c.outcome_id)
+            .select_from(
+                token_parents_table.join(
+                    child_outcomes,
+                    and_(
+                        child_outcomes.c.token_id == token_parents_table.c.token_id,
+                        child_outcomes.c.run_id == run_id,
+                    ),
+                )
+            )
+            .where(token_parents_table.c.parent_token_id == token_outcomes_table.c.token_id)
+        )
+        query = (
+            select(token_outcomes_table.c.token_id, token_outcomes_table.c.path)
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.path.in_(parent_paths))
+            .where(token_outcomes_table.c.outcome == TerminalOutcome.TRANSIENT.value)
+            .where(~child_witness.exists())
+        )
+        return list(self._ops.execute_fetchall(query))
+
+    def find_orphaned_batch_consumptions(self, run_id: str) -> list[str]:
+        """Find I1b batch IDs consumed by tokens whose batch did not complete."""
+        completed_batch_witness = (
+            select(batches_table.c.batch_id)
+            .where(batches_table.c.batch_id == token_outcomes_table.c.batch_id)
+            .where(batches_table.c.run_id == run_id)
+            .where(batches_table.c.status == BatchStatus.COMPLETED.value)
+        )
+        query = (
+            select(token_outcomes_table.c.batch_id)
+            .distinct()
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.path == TerminalPath.BATCH_CONSUMED.value)
+            .where(token_outcomes_table.c.outcome == TerminalOutcome.TRANSIENT.value)
+            .where(~completed_batch_witness.exists())
+        )
+        return [row.batch_id for row in self._ops.execute_fetchall(query)]
+
+    def sweep_deferred_invariants_or_crash(self, run_id: str) -> None:
+        """Sweep ADR-019 deferred I1a/I1b invariants at a stable run boundary."""
+        orphan_parents = self.find_orphaned_transient_parents(run_id)
+        if orphan_parents:
+            examples = ", ".join(f"{row.token_id} (path={row.path})" for row in orphan_parents[:10])
+            raise AuditIntegrityError(
+                f"ADR-019 I1a violation: {len(orphan_parents)} fork/expand "
+                "parent token(s) have no child token_outcomes rows at run-end. "
+                f"Examples: {examples}."
+            )
+
+        orphan_batches = self.find_orphaned_batch_consumptions(run_id)
+        if orphan_batches:
+            examples = ", ".join(orphan_batches[:10])
+            raise AuditIntegrityError(
+                f"ADR-019 I1b violation: {len(orphan_batches)} batch_id(s) had "
+                "BATCH_CONSUMED tokens but the batch never reached "
+                f"BatchStatus.COMPLETED. Examples: {examples}."
+            )
 
     def get_token_outcome(self, token_id: str) -> TokenOutcome | None:
         """Get the terminal outcome for a token.
@@ -846,7 +1051,7 @@ class DataFlowRepository:
             select(token_outcomes_table)
             .where(token_outcomes_table.c.token_id == token_id)
             .order_by(
-                token_outcomes_table.c.is_terminal.desc(),  # Terminal first
+                token_outcomes_table.c.completed.desc(),  # Terminal first
                 token_outcomes_table.c.recorded_at.desc(),  # Then by time
             )
             .limit(1)
@@ -877,7 +1082,8 @@ class DataFlowRepository:
                 token_outcomes_table.c.run_id,
                 token_outcomes_table.c.token_id,
                 token_outcomes_table.c.outcome,
-                token_outcomes_table.c.is_terminal,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
                 token_outcomes_table.c.recorded_at,
                 token_outcomes_table.c.sink_name,
                 token_outcomes_table.c.batch_id,
@@ -914,22 +1120,24 @@ class DataFlowRepository:
         schema_hash: str | None = None,
         determinism: Determinism = Determinism.DETERMINISTIC,
         schema_config: SchemaConfig,
+        source_file_hash: str | None = None,
         input_contract: SchemaContract | None = None,
         output_contract: SchemaContract | None = None,
     ) -> Node:
-        """Register a plugin instance (node) in the execution graph.
+        """Register a node in the execution graph.
 
         Args:
             run_id: Run this node belongs to
-            plugin_name: Name of the plugin
+            plugin_name: Name of the plugin (None for gates and coalesces, which are config-driven)
             node_type: NodeType enum (SOURCE, TRANSFORM, GATE, AGGREGATION, COALESCE, SINK)
-            plugin_version: Version of the plugin
-            config: Plugin configuration
+            plugin_version: Version of the plugin (None for non-plugin nodes)
+            config: Node configuration
             node_id: Optional node ID (generated if not provided)
             sequence: Position in pipeline
             schema_hash: Optional input/output schema hash
             determinism: Determinism enum (defaults to DETERMINISTIC)
             schema_config: Schema configuration for audit trail (WP-11.99)
+            source_file_hash: Optional truncated SHA-256 hash of the plugin source file
             input_contract: Optional input schema contract (what node requires)
             output_contract: Optional output schema contract (what node guarantees)
 
@@ -937,8 +1145,9 @@ class DataFlowRepository:
             Node model
         """
         node_id = node_id or generate_id()
-        config_json = canonical_json(config)
-        config_hash = stable_hash(config)
+        audit_safe_config = self._sanitize_node_config_for_audit(config)
+        config_json = canonical_json(audit_safe_config)
+        config_hash = stable_hash(audit_safe_config)
         timestamp = now()
 
         # Extract schema info for audit (WP-11.99)
@@ -971,6 +1180,7 @@ class DataFlowRepository:
             determinism=determinism,
             config_hash=config_hash,
             config_json=config_json,
+            source_file_hash=source_file_hash,
             schema_hash=schema_hash,
             sequence_in_pipeline=sequence,
             registered_at=timestamp,
@@ -988,6 +1198,7 @@ class DataFlowRepository:
                 determinism=node.determinism,
                 config_hash=node.config_hash,
                 config_json=node.config_json,
+                source_file_hash=node.source_file_hash,
                 schema_hash=node.schema_hash,
                 sequence_in_pipeline=node.sequence_in_pipeline,
                 registered_at=node.registered_at,
@@ -1257,6 +1468,7 @@ class DataFlowRepository:
         schema_mode: str,
         destination: str,
         *,
+        row_id: str | None = None,
         contract_violation: ContractViolation | None = None,
     ) -> str:
         """Record a validation error in the audit trail.
@@ -1285,14 +1497,6 @@ class DataFlowRepository:
             row_hash = stable_hash(row_data)
             row_data_json = canonical_json(row_data)
         except (ValueError, TypeError) as e:
-            # Non-canonical data (NaN, Infinity, non-dict, etc.)
-            # Use repr() fallback to preserve audit trail
-            row_preview = repr(row_data)[:200] + "..." if len(repr(row_data)) > 200 else repr(row_data)
-            logger.warning(
-                "Validation error row not canonically serializable (using repr fallback): %s | Row preview: %s",
-                str(e),
-                row_preview,
-            )
             row_hash = repr_hash(row_data)
             # Store non-canonical representation with type metadata
             metadata = NonCanonicalMetadata.from_error(row_data, e)
@@ -1318,6 +1522,7 @@ class DataFlowRepository:
                 error_id=error_id,
                 run_id=run_id,
                 node_id=node_id,
+                row_id=row_id,
                 row_hash=row_hash,
                 row_data_json=row_data_json,
                 error=error,
@@ -1334,10 +1539,54 @@ class DataFlowRepository:
 
         return error_id
 
+    def link_validation_error_to_row(
+        self,
+        *,
+        run_id: str,
+        error_id: str,
+        row_id: str,
+    ) -> None:
+        """Attach a persisted quarantine row to an existing validation error."""
+        actual_run_id = self._resolve_run_id_for_row(row_id)
+        if actual_run_id != run_id:
+            raise AuditIntegrityError(
+                f"Validation error linkage prevented cross-run contamination: row {row_id!r} belongs to "
+                f"run {actual_run_id!r}, but caller supplied run_id={run_id!r}."
+            )
+
+        error_row = self._ops.execute_fetchone(
+            select(
+                validation_errors_table.c.run_id,
+                validation_errors_table.c.row_id,
+            ).where(validation_errors_table.c.error_id == error_id)
+        )
+        if error_row is None:
+            raise AuditIntegrityError(f"Validation error {error_id!r} does not exist in validation_errors. This is Tier 1 data corruption.")
+        if error_row.run_id != run_id:
+            raise AuditIntegrityError(
+                f"Validation error linkage prevented cross-run contamination: error {error_id!r} belongs to "
+                f"run {error_row.run_id!r}, but caller supplied run_id={run_id!r}."
+            )
+        if error_row.row_id is not None:
+            if error_row.row_id != row_id:
+                raise AuditIntegrityError(
+                    f"Validation error {error_id!r} is already linked to row {error_row.row_id!r}; refusing to relink it to {row_id!r}."
+                )
+            return
+
+        self._ops.execute_update(
+            validation_errors_table.update()
+            .where(
+                validation_errors_table.c.error_id == error_id,
+                validation_errors_table.c.run_id == run_id,
+            )
+            .values(row_id=row_id),
+            context="validation_errors.row_id linkage",
+        )
+
     def record_transform_error(
         self,
-        run_id: str,
-        token_id: str,
+        ref: TokenRef,
         transform_id: str,
         row_data: Mapping[str, object] | PipelineRow,
         error_details: TransformErrorReason,
@@ -1352,8 +1601,7 @@ class DataFlowRepository:
         Cross-run contamination crashes immediately per Tier 1 trust model.
 
         Args:
-            run_id: Current run ID
-            token_id: Token ID for the row
+            ref: TokenRef bundling token_id and run_id
             transform_id: Transform that returned the error
             row_data: The row that could not be processed
             error_details: Error details from TransformResult (TransformErrorReason TypedDict)
@@ -1366,7 +1614,23 @@ class DataFlowRepository:
             AuditIntegrityError: If token does not belong to the specified run
         """
         # Validate token belongs to the specified run (Tier 1 invariant)
-        self._validate_token_run_ownership(token_id, run_id)
+        self._validate_token_run_ownership(ref)
+
+        # Validate reason is a known TransformErrorCategory (Tier 1 write guard).
+        # TypedDict has zero runtime enforcement — the Literal annotation only
+        # helps at compile time. Invalid reasons must crash before persisting.
+        from typing import get_args
+
+        from elspeth.contracts.errors import TransformErrorCategory
+
+        reason = error_details["reason"]
+        valid_reasons = get_args(TransformErrorCategory)
+        if reason not in valid_reasons:
+            raise AuditIntegrityError(
+                f"Invalid TransformErrorCategory '{reason}' at Tier 1 write boundary. "
+                f"This is a plugin bug — transforms must use a valid error category. "
+                f"Valid categories: {sorted(valid_reasons)}"
+            )
 
         error_id = f"terr_{generate_id()[:12]}"
 
@@ -1377,10 +1641,6 @@ class DataFlowRepository:
         try:
             error_details_json = canonical_json(error_details)
         except (ValueError, TypeError) as e:
-            logger.warning(
-                "Transform error details not canonically serializable (using repr fallback): %s",
-                str(e),
-            )
             error_details_json = json.dumps(
                 {
                     "__non_canonical__": True,
@@ -1398,10 +1658,6 @@ class DataFlowRepository:
             row_hash = stable_hash(row_data)
             row_data_json = canonical_json(row_data)
         except (ValueError, TypeError) as e:
-            logger.warning(
-                "Transform error row data not canonically serializable (using repr fallback): %s",
-                str(e),
-            )
             row_hash = repr_hash(row_data)
             metadata = NonCanonicalMetadata.from_error(row_data, e)
             row_data_json = json.dumps(metadata.to_dict(), allow_nan=False)
@@ -1409,8 +1665,8 @@ class DataFlowRepository:
         self._ops.execute_insert(
             transform_errors_table.insert().values(
                 error_id=error_id,
-                run_id=run_id,
-                token_id=token_id,
+                run_id=ref.run_id,
+                token_id=ref.token_id,
                 transform_id=transform_id,
                 row_hash=row_hash,
                 row_data_json=row_data_json,
@@ -1422,25 +1678,41 @@ class DataFlowRepository:
 
         return error_id
 
-    def get_validation_errors_for_row(self, run_id: str, row_hash: str) -> list[ValidationErrorRecord]:
-        """Get validation errors for a row by its hash.
-
-        Validation errors are keyed by row_hash since quarantined rows
-        never get row_ids (they're rejected before entering the pipeline).
+    def get_validation_errors_for_row(
+        self,
+        run_id: str,
+        row_hash: str | None = None,
+        *,
+        row_id: str | None = None,
+    ) -> list[ValidationErrorRecord]:
+        """Get validation errors for a row by stable row linkage or legacy hash.
 
         Args:
             run_id: Run ID to query
-            row_hash: Hash of the row data
+            row_hash: Legacy hash of the row data (used for historical/fallback lookup)
+            row_id: Persisted row identifier for quarantined rows when available
 
         Returns:
             List of ValidationErrorRecord models
         """
-        query = select(validation_errors_table).where(
+        if row_id is not None:
+            row_query = select(validation_errors_table).where(
+                validation_errors_table.c.run_id == run_id,
+                validation_errors_table.c.row_id == row_id,
+            )
+            row_rows = self._ops.execute_fetchall(row_query)
+            if row_rows or row_hash is None:
+                return [self._validation_error_loader.load(r) for r in row_rows]
+
+        if row_hash is None:
+            raise ValueError("get_validation_errors_for_row requires row_id or row_hash")
+
+        hash_query = select(validation_errors_table).where(
             validation_errors_table.c.run_id == run_id,
             validation_errors_table.c.row_hash == row_hash,
         )
-        rows = self._ops.execute_fetchall(query)
-        return [self._validation_error_loader.load(r) for r in rows]
+        hash_rows = self._ops.execute_fetchall(hash_query)
+        return [self._validation_error_loader.load(r) for r in hash_rows]
 
     def get_validation_errors_for_run(self, run_id: str) -> list[ValidationErrorRecord]:
         """Get all validation errors for a run.

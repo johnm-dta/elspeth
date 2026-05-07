@@ -119,6 +119,7 @@ class TestNodeIdProtocol:
         class TestSink(BaseSink):
             name = "test"
             input_schema = TestSchema
+            _on_write_failure: str | None = "discard"
 
             def write(self, row: dict[str, Any], ctx: SinkContext) -> None:  # type: ignore[override]
                 pass

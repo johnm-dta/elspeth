@@ -1,0 +1,9 @@
+id,variant,latency_ms,quality_score
+1,control,820,0.70
+2,control,790,0.72
+3,control,845,0.69
+4,control,810,0.71
+5,treatment,610,0.78
+6,treatment,640,0.80
+7,treatment,595,0.77
+8,treatment,625,0.79

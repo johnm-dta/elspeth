@@ -1,5 +1,5 @@
 # tests/integration/audit/test_tier1_integrity.py
-"""Tier 1 audit integrity tests for LandscapeRecorder.
+"""Tier 1 audit integrity tests for RecorderFactory.
 
 Per the Three-Tier Trust Model, the audit database is FULL TRUST (Tier 1).
 Bad data in the audit trail means corruption or tampering -- the response
@@ -26,10 +26,11 @@ from elspeth.contracts import (
     Run,
     RunStatus,
 )
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import CANONICAL_VERSION, canonical_json, stable_hash
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import nodes_table, rows_table
 
 # Dynamic schema for tests that do not care about specific field definitions
@@ -41,14 +42,14 @@ DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 # ---------------------------------------------------------------------------
 
 
-def _begin_run(recorder: LandscapeRecorder) -> Run:
+def _begin_run(factory: RecorderFactory) -> Run:
     """Create a minimal run for tests that need a prerequisite run."""
-    return recorder.begin_run(config={"test": True}, canonical_version=CANONICAL_VERSION)
+    return factory.run_lifecycle.begin_run(config={"test": True}, canonical_version=CANONICAL_VERSION)
 
 
-def _register_source(recorder: LandscapeRecorder, run_id: str) -> Node:
+def _register_source(factory: RecorderFactory, run_id: str) -> Node:
     """Register a minimal source node for tests that need one."""
-    return recorder.register_node(
+    return factory.data_flow.register_node(
         run_id=run_id,
         plugin_name="csv_source",
         node_type=NodeType.SOURCE,
@@ -71,27 +72,27 @@ class TestRecorderCrashesOnInvalidEnums:
     must raise an error -- never silently store garbage.
     """
 
-    def test_invalid_run_status_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_invalid_run_status_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """complete_run with a bogus status string must crash.
 
         complete_run calls `status.value` -- a plain string has no `.value`,
         so this raises AttributeError.
         """
-        run = _begin_run(recorder)
+        run = _begin_run(landscape_factory)
 
         with pytest.raises((AttributeError, TypeError, ValueError)):
-            recorder.complete_run(run.run_id, status="bogus_status")  # type: ignore[arg-type]
+            landscape_factory.run_lifecycle.complete_run(run.run_id, status="bogus_status")  # type: ignore[arg-type]
 
-    def test_invalid_node_type_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_invalid_node_type_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node with an invalid node_type must crash.
 
         The recorder calls `node_type.value` to store the string representation.
         A raw string has no `.value` attribute.
         """
-        run = _begin_run(recorder)
+        run = _begin_run(landscape_factory)
 
         with pytest.raises((AttributeError, TypeError, ValueError)):
-            recorder.register_node(
+            landscape_factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_plugin",
                 node_type="not_a_valid_type",  # type: ignore[arg-type]
@@ -100,15 +101,15 @@ class TestRecorderCrashesOnInvalidEnums:
                 schema_config=DYNAMIC_SCHEMA,
             )
 
-    def test_invalid_determinism_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_invalid_determinism_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node with invalid determinism must crash.
 
         Same pattern: determinism.value is called, raw string crashes.
         """
-        run = _begin_run(recorder)
+        run = _begin_run(landscape_factory)
 
         with pytest.raises((AttributeError, TypeError, ValueError)):
-            recorder.register_node(
+            landscape_factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_plugin",
                 node_type=NodeType.TRANSFORM,
@@ -118,26 +119,25 @@ class TestRecorderCrashesOnInvalidEnums:
                 schema_config=DYNAMIC_SCHEMA,
             )
 
-    def test_invalid_terminal_state_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_invalid_terminal_state_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """record_token_outcome with invalid outcome must crash.
 
         The method calls outcome.value and outcome.is_terminal on the enum.
         A raw string has neither attribute.
         """
-        run = _begin_run(recorder)
-        source: Node = _register_source(recorder, run.run_id)
-        row = recorder.create_row(
+        run = _begin_run(landscape_factory)
+        source: Node = _register_source(landscape_factory, run.run_id)
+        row = landscape_factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
         )
-        token = recorder.create_token(row.row_id)
+        token = landscape_factory.data_flow.create_token(row.row_id)
 
         with pytest.raises((AttributeError, TypeError, ValueError)):
-            recorder.record_token_outcome(
-                run_id=run.run_id,
-                token_id=token.token_id,
+            landscape_factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
                 outcome="bogus_terminal",  # type: ignore[arg-type]
                 sink_name="output",
             )
@@ -155,18 +155,20 @@ class TestRecorderCrashesOnNullAuditFields:
     level.  The recorder must not silently allow NULL through.
     """
 
-    def test_null_plugin_name_in_register_node_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_null_plugin_name_in_register_node_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node with None as plugin_name must crash.
 
         The nodes table has plugin_name NOT NULL.  Passing None should
-        raise IntegrityError from the database or TypeError upstream.
+        surface as LandscapeRecordError with the database IntegrityError as cause.
         """
         from sqlalchemy.exc import IntegrityError
 
-        run = _begin_run(recorder)
+        from elspeth.core.landscape.errors import LandscapeRecordError
 
-        with pytest.raises((IntegrityError, TypeError)):
-            recorder.register_node(
+        run = _begin_run(landscape_factory)
+
+        with pytest.raises(LandscapeRecordError) as exc_info:
+            landscape_factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name=None,  # type: ignore[arg-type]
                 node_type=NodeType.SOURCE,
@@ -174,16 +176,17 @@ class TestRecorderCrashesOnNullAuditFields:
                 config={},
                 schema_config=DYNAMIC_SCHEMA,
             )
+        assert isinstance(exc_info.value.__cause__, IntegrityError)
 
-    def test_null_config_hash_prevented(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_null_config_hash_prevented(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node computes config_hash from config dict.
 
         Even with an empty config, the hash is computed (not NULL).
         Verify the stored config_hash is always non-NULL by checking
         the returned Node object.
         """
-        run = _begin_run(recorder)
-        node = recorder.register_node(
+        run = _begin_run(landscape_factory)
+        node = landscape_factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_plugin",
             node_type=NodeType.SOURCE,
@@ -196,15 +199,18 @@ class TestRecorderCrashesOnNullAuditFields:
         assert node.config_hash is not None
         assert len(node.config_hash) > 0
 
-    def test_null_run_id_in_register_node_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_null_run_id_in_register_node_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node with None as run_id must crash.
 
-        The nodes table has run_id NOT NULL with a FK to runs.
+        The nodes table has run_id NOT NULL with a FK to runs; repository writes
+        surface DB rejection as LandscapeRecordError.
         """
         from sqlalchemy.exc import IntegrityError
 
-        with pytest.raises((IntegrityError, TypeError)):
-            recorder.register_node(
+        from elspeth.core.landscape.errors import LandscapeRecordError
+
+        with pytest.raises(LandscapeRecordError) as exc_info:
+            landscape_factory.data_flow.register_node(
                 run_id=None,  # type: ignore[arg-type]
                 plugin_name="test_plugin",
                 node_type=NodeType.SOURCE,
@@ -212,6 +218,7 @@ class TestRecorderCrashesOnNullAuditFields:
                 config={},
                 schema_config=DYNAMIC_SCHEMA,
             )
+        assert isinstance(exc_info.value.__cause__, IntegrityError)
 
 
 # ===================================================================
@@ -227,7 +234,7 @@ class TestRecorderCrashesOnWrongTypes:
     type contracts catch wrong types before or during construction.
     """
 
-    def test_string_status_in_run_dataclass_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_string_status_in_run_dataclass_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """Constructing a Run with a plain string status must crash.
 
         The Run dataclass __post_init__ calls _validate_enum() which
@@ -243,18 +250,18 @@ class TestRecorderCrashesOnWrongTypes:
                 status="running",  # type: ignore[arg-type]
             )
 
-    def test_non_hashable_data_in_create_row_crashes(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_non_hashable_data_in_create_row_crashes(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """create_row with un-serializable data must crash.
 
         stable_hash calls canonical_json which rejects non-serializable values.
         Passing data that contains non-JSON-serializable objects (e.g., a set)
         must raise TypeError or ValueError, not silently store garbage.
         """
-        run = _begin_run(recorder)
-        source: Node = _register_source(recorder, run.run_id)
+        run = _begin_run(landscape_factory)
+        source: Node = _register_source(landscape_factory, run.run_id)
 
         with pytest.raises((TypeError, ValueError)):
-            recorder.create_row(
+            landscape_factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=0,
@@ -274,7 +281,7 @@ class TestRecorderPositiveAuditIntegrity:
     No silent transformation, truncation, or timezone loss.
     """
 
-    def test_run_round_trips_exactly(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_run_round_trips_exactly(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """begin_run -> get_run must return identical field values.
 
         Note: SQLite drops timezone info on DateTime round-trip, so
@@ -284,9 +291,9 @@ class TestRecorderPositiveAuditIntegrity:
         recorder's in-memory objects carry UTC timezone info.
         """
         config = {"source": "data.csv", "transforms": [{"plugin": "passthrough"}]}
-        run = recorder.begin_run(config=config, canonical_version=CANONICAL_VERSION)
+        run = landscape_factory.run_lifecycle.begin_run(config=config, canonical_version=CANONICAL_VERSION)
 
-        retrieved = recorder.get_run(run.run_id)
+        retrieved = landscape_factory.run_lifecycle.get_run(run.run_id)
         assert retrieved is not None
 
         assert retrieved.run_id == run.run_id
@@ -298,12 +305,12 @@ class TestRecorderPositiveAuditIntegrity:
         assert retrieved.started_at.replace(tzinfo=None) == run.started_at.replace(tzinfo=None)
         assert retrieved.completed_at is None
 
-    def test_node_registration_round_trips(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_node_registration_round_trips(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node -> get_node must return identical field values."""
-        run = _begin_run(recorder)
+        run = _begin_run(landscape_factory)
         config = {"path": "data.csv", "delimiter": ","}
 
-        node = recorder.register_node(
+        node = landscape_factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -314,7 +321,7 @@ class TestRecorderPositiveAuditIntegrity:
             schema_config=DYNAMIC_SCHEMA,
         )
 
-        retrieved = recorder.get_node(node.node_id, run.run_id)
+        retrieved = landscape_factory.data_flow.get_node(node.node_id, run.run_id)
         assert retrieved is not None
 
         assert retrieved.node_id == node.node_id
@@ -329,16 +336,16 @@ class TestRecorderPositiveAuditIntegrity:
         # Compare timestamps stripped of tzinfo (SQLite drops it on round-trip)
         assert retrieved.registered_at.replace(tzinfo=None) == node.registered_at.replace(tzinfo=None)
 
-    def test_row_creation_round_trips(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_row_creation_round_trips(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """create_row -> query back must produce matching source_data_hash.
 
         The hash stored in the rows table must equal stable_hash(data).
         """
-        run = _begin_run(recorder)
-        source: Node = _register_source(recorder, run.run_id)
+        run = _begin_run(landscape_factory)
+        source: Node = _register_source(landscape_factory, run.run_id)
         data = {"customer_id": "C-123", "amount": 99.95, "currency": "USD"}
 
-        row = recorder.create_row(
+        row = landscape_factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -359,15 +366,15 @@ class TestRecorderPositiveAuditIntegrity:
         assert db_row.run_id == run.run_id
         assert db_row.source_node_id == source.node_id
 
-    def test_timestamps_are_utc(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_timestamps_are_utc(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """All recorded timestamps must have UTC timezone info.
 
         Naive timestamps in the audit trail would make cross-timezone
         comparison impossible -- a direct audit integrity failure.
         """
-        run = _begin_run(recorder)
-        source: Node = _register_source(recorder, run.run_id)
-        row = recorder.create_row(
+        run = _begin_run(landscape_factory)
+        source: Node = _register_source(landscape_factory, run.run_id)
+        row = landscape_factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -384,7 +391,7 @@ class TestRecorderPositiveAuditIntegrity:
         assert row.created_at.tzinfo is not None, "row.created_at must be timezone-aware"
 
         # Token timestamp
-        token = recorder.create_token(row.row_id)
+        token = landscape_factory.data_flow.create_token(row.row_id)
         assert token.created_at.tzinfo is not None, "token.created_at must be timezone-aware"
 
 
@@ -400,16 +407,16 @@ class TestRecorderHashIntegrity:
     proof.  If hash != canonical_json(data), audit integrity is broken.
     """
 
-    def test_config_hash_matches_canonical(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_config_hash_matches_canonical(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """register_node must store config_hash == stable_hash(config).
 
         The config_hash is the integrity proof for the node configuration.
         It must be deterministically derived from canonical_json(config).
         """
-        run = _begin_run(recorder)
+        run = _begin_run(landscape_factory)
         config = {"model": "gpt-4", "temperature": 0.7, "max_tokens": 100}
 
-        node = recorder.register_node(
+        node = landscape_factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -437,14 +444,14 @@ class TestRecorderHashIntegrity:
         assert db_row is not None
         assert db_row.config_hash == expected_hash
 
-    def test_source_data_hash_matches_canonical(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_source_data_hash_matches_canonical(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """create_row must store source_data_hash == stable_hash(data).
 
         The source_data_hash is the permanent fingerprint of what the
         source loaded.  It must exactly match canonical_json(data) hashed.
         """
-        run = _begin_run(recorder)
-        source: Node = _register_source(recorder, run.run_id)
+        run = _begin_run(landscape_factory)
+        source: Node = _register_source(landscape_factory, run.run_id)
         data = {
             "id": 42,
             "name": "Alice",
@@ -453,7 +460,7 @@ class TestRecorderHashIntegrity:
             "tags": ["premium", "verified"],
         }
 
-        row = recorder.create_row(
+        row = landscape_factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -470,7 +477,7 @@ class TestRecorderHashIntegrity:
         manual_hash = hashlib.sha256(canonical.encode()).hexdigest()
         assert row.source_data_hash == manual_hash
 
-    def test_run_config_hash_matches_canonical(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_run_config_hash_matches_canonical(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """begin_run must store config_hash == stable_hash(config).
 
         The run-level config_hash is the integrity proof for the entire
@@ -482,7 +489,7 @@ class TestRecorderHashIntegrity:
             "sinks": [{"plugin": "csv", "path": "output.csv"}],
         }
 
-        run = recorder.begin_run(config=config, canonical_version=CANONICAL_VERSION)
+        run = landscape_factory.run_lifecycle.begin_run(config=config, canonical_version=CANONICAL_VERSION)
 
         expected_hash = stable_hash(config)
         assert run.config_hash == expected_hash
@@ -491,7 +498,7 @@ class TestRecorderHashIntegrity:
         expected_json = canonical_json(config)
         assert run.settings_json == expected_json
 
-    def test_settings_json_is_canonical(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_settings_json_is_canonical(self, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """settings_json must be canonical JSON (RFC 8785 deterministic).
 
         If two runs have identical config, their settings_json must be
@@ -500,12 +507,12 @@ class TestRecorderHashIntegrity:
         """
         config = {"z_last": 1, "a_first": 2, "m_middle": 3}
 
-        run1 = recorder.begin_run(
+        run1 = landscape_factory.run_lifecycle.begin_run(
             config=config,
             canonical_version=CANONICAL_VERSION,
             run_id="run-canonical-1",
         )
-        run2 = recorder.begin_run(
+        run2 = landscape_factory.run_lifecycle.begin_run(
             config=config,
             canonical_version=CANONICAL_VERSION,
             run_id="run-canonical-2",

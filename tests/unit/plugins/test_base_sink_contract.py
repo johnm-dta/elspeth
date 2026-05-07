@@ -16,6 +16,7 @@ class StubSink(BaseSink):
 
     name = "stub"
     input_schema = None  # type: ignore
+    _on_write_failure: str | None = "discard"
 
     def write(
         self,

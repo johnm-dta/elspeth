@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy.engine import Row as SARow
 
 from elspeth.contracts.audit import (
+    _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
     Batch,
     BatchMember,
@@ -48,8 +49,9 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
@@ -152,7 +154,9 @@ class TestRunLoader:
 
     @pytest.mark.parametrize("status_value", [s.value for s in RunStatus])
     def test_valid_run_status_values(self, status_value: str) -> None:
-        sa_row = self._make_run_row(status=status_value)
+        # COMPLETED requires completed_at; RUNNING must not have it; FAILED/INTERRUPTED may or may not
+        completed_at = None if status_value == RunStatus.RUNNING else LATER
+        sa_row = self._make_run_row(status=status_value, completed_at=completed_at)
         loader = RunLoader()
         result = loader.load(sa_row)
         assert result.status == RunStatus(status_value)
@@ -189,6 +193,34 @@ class TestRunLoader:
         with pytest.raises(ValueError):
             loader.load(sa_row)
 
+    def test_completed_without_completed_at_raises_audit_integrity(self) -> None:
+        """Completed run with NULL completed_at is a Tier 1 integrity violation."""
+        sa_row = self._make_run_row(status="completed", completed_at=None)
+        loader = RunLoader()
+        with pytest.raises(AuditIntegrityError, match="completed_at"):
+            loader.load(sa_row)
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            RunStatus.COMPLETED_WITH_FAILURES,
+            RunStatus.EMPTY,
+        ],
+    )
+    def test_terminal_success_status_without_completed_at_raises_audit_integrity(self, status: RunStatus) -> None:
+        """Terminal successful run statuses with NULL completed_at are Tier 1 integrity violations."""
+        sa_row = self._make_run_row(status=status.value, completed_at=None)
+        loader = RunLoader()
+        with pytest.raises(AuditIntegrityError, match=f"status='{status.value}'"):
+            loader.load(sa_row)
+
+    def test_running_with_completed_at_raises_audit_integrity(self) -> None:
+        """Running run with completed_at set is a Tier 1 integrity violation."""
+        sa_row = self._make_run_row(status="running", completed_at=LATER)
+        loader = RunLoader()
+        with pytest.raises(AuditIntegrityError, match="completed_at"):
+            loader.load(sa_row)
+
 
 # ---------------------------------------------------------------------------
 # NodeLoader
@@ -199,12 +231,13 @@ class TestNodeLoader:
     """Tests for NodeLoader.load()."""
 
     def _make_node_row(self, **overrides: object) -> SARow[Any]:
-        defaults = {
+        defaults: dict[str, object] = {
             "node_id": "node-1",
             "run_id": "run-1",
             "plugin_name": "csv",
             "node_type": "source",
             "plugin_version": "1.0.0",
+            "source_file_hash": None,
             "determinism": "deterministic",
             "config_hash": "cfg123",
             "config_json": "{}",
@@ -587,6 +620,20 @@ class TestCallLoader:
         with pytest.raises(ValueError):
             loader.load(sa_row)
 
+    def test_both_state_and_operation_raises_audit_integrity(self) -> None:
+        """Both state_id and operation_id set is a Tier 1 integrity violation."""
+        sa_row = self._make_call_row(state_id="state-1", operation_id="op-1")
+        loader = CallLoader()
+        with pytest.raises(AuditIntegrityError, match="exactly one"):
+            loader.load(sa_row)
+
+    def test_neither_state_nor_operation_raises_audit_integrity(self) -> None:
+        """Neither state_id nor operation_id set is a Tier 1 integrity violation."""
+        sa_row = self._make_call_row(state_id=None, operation_id=None)
+        loader = CallLoader()
+        with pytest.raises(AuditIntegrityError, match="exactly one"):
+            loader.load(sa_row)
+
 
 # ---------------------------------------------------------------------------
 # RoutingEventLoader
@@ -654,6 +701,7 @@ class TestBatchLoader:
             "status": "draft",
             "created_at": NOW,
             "aggregation_state_id": None,
+            "retry_of_batch_id": None,
             "trigger_type": None,
             "trigger_reason": None,
             "completed_at": None,
@@ -673,6 +721,7 @@ class TestBatchLoader:
         sa_row = self._make_batch_row(
             status="completed",
             aggregation_state_id="agg-state-1",
+            retry_of_batch_id="batch-0",
             trigger_type="count",
             trigger_reason="threshold=10",
             completed_at=LATER,
@@ -681,6 +730,7 @@ class TestBatchLoader:
         result = loader.load(sa_row)
         assert result.batch_id == "batch-1"
         assert result.aggregation_state_id == "agg-state-1"
+        assert result.retry_of_batch_id == "batch-0"
         assert result.trigger_type == TriggerType.COUNT
         assert isinstance(result.trigger_type, TriggerType)
         assert result.trigger_reason == "threshold=10"
@@ -708,6 +758,12 @@ class TestBatchLoader:
 
     def test_invalid_trigger_type_raises_value_error(self) -> None:
         sa_row = self._make_batch_row(trigger_type="not_a_trigger")
+        loader = BatchLoader()
+        with pytest.raises(ValueError):
+            loader.load(sa_row)
+
+    def test_manual_trigger_type_raises_value_error(self) -> None:
+        sa_row = self._make_batch_row(trigger_type="manual")
         loader = BatchLoader()
         with pytest.raises(ValueError):
             loader.load(sa_row)
@@ -1004,22 +1060,15 @@ class TestNodeStateLoader:
 
     # === FAILED variant ===
 
-    def test_failed_valid(self) -> None:
+    def test_failed_with_null_error_json_raises(self) -> None:
         sa_row = self._make_node_state_row(
             status="failed",
             completed_at=LATER,
             duration_ms=50.0,
         )
         loader = NodeStateLoader()
-        result = loader.load(sa_row)
-
-        assert isinstance(result, NodeStateFailed)
-        assert result.status == NodeStateStatus.FAILED
-        assert result.started_at == NOW
-        assert result.completed_at == LATER
-        assert result.duration_ms == 50.0
-        assert result.error_json is None
-        assert result.output_hash is None
+        with pytest.raises(AuditIntegrityError, match="NULL error_json"):
+            loader.load(sa_row)
 
     def test_failed_with_error_json(self) -> None:
         sa_row = self._make_node_state_row(
@@ -1040,6 +1089,7 @@ class TestNodeStateLoader:
             completed_at=NOW,
             duration_ms=50.0,
             output_hash="partial_out",
+            error_json='{"reason": "division by zero"}',
         )
         loader = NodeStateLoader()
         result = loader.load(sa_row)
@@ -1068,6 +1118,7 @@ class TestNodeStateLoader:
             duration_ms=50.0,
             context_before_json='{"b": 1}',
             context_after_json='{"a": 2}',
+            error_json='{"reason": "division by zero"}',
         )
         loader = NodeStateLoader()
         result = loader.load(sa_row)
@@ -1101,6 +1152,7 @@ class TestNodeStateLoader:
             status="failed",
             completed_at=NOW,
             duration_ms=50.0,
+            error_json='{"reason": "division by zero"}',
             success_reason_json='{"action": "should not be here"}',
         )
         loader = NodeStateLoader()
@@ -1135,8 +1187,14 @@ class TestNodeStateLoader:
     def test_status_routes_to_correct_variant(self, status_str: str, expected_type: type) -> None:
         """Each status string produces the correct variant type."""
         extra: dict[str, object] = {}
-        if status_str in ("pending", "failed"):
+        if status_str == "pending":
             extra = {"completed_at": NOW, "duration_ms": 100.0}
+        elif status_str == "failed":
+            extra = {
+                "completed_at": NOW,
+                "duration_ms": 100.0,
+                "error_json": '{"reason": "division by zero"}',
+            }
         elif status_str == "completed":
             extra = {
                 "output_hash": "out",
@@ -1164,11 +1222,17 @@ class TestValidationErrorLoader:
             run_id="run-1",
             node_id="node-src",
             row_hash="hash123",
+            row_id="row-1",
             error="Missing required field 'amount'",
             schema_mode="fixed",
             destination="quarantine",
             created_at=NOW,
             row_data_json='{"name": "test"}',
+            violation_type="missing_field",
+            original_field_name="Amount USD",
+            normalized_field_name="amount_usd",
+            expected_type="int",
+            actual_type=None,
         )
         loader = ValidationErrorLoader()
         result = loader.load(sa_row)
@@ -1177,7 +1241,13 @@ class TestValidationErrorLoader:
         assert result.error_id == "ve-1"
         assert result.error == "Missing required field 'amount'"
         assert result.schema_mode == "fixed"
+        assert result.row_id == "row-1"
         assert result.row_data_json == '{"name": "test"}'
+        assert result.violation_type == "missing_field"
+        assert result.original_field_name == "Amount USD"
+        assert result.normalized_field_name == "amount_usd"
+        assert result.expected_type == "int"
+        assert result.actual_type is None
 
     def test_valid_load_with_none_optionals(self) -> None:
         sa_row = _make_sa_row(
@@ -1185,16 +1255,25 @@ class TestValidationErrorLoader:
             run_id="run-1",
             node_id=None,
             row_hash="hash456",
+            row_id=None,
             error="Type error",
             schema_mode="flexible",
             destination="quarantine",
             created_at=NOW,
             row_data_json=None,
+            violation_type=None,
+            original_field_name=None,
+            normalized_field_name=None,
+            expected_type=None,
+            actual_type=None,
         )
         loader = ValidationErrorLoader()
         result = loader.load(sa_row)
         assert result.node_id is None
+        assert result.row_id is None
         assert result.row_data_json is None
+        assert result.violation_type is None
+        assert result.original_field_name is None
 
 
 # ---------------------------------------------------------------------------
@@ -1249,18 +1328,19 @@ class TestTransformErrorLoader:
 # ---------------------------------------------------------------------------
 
 
-class TestTokenOutcomeLoader:
-    """Tests for TokenOutcomeLoader.load()."""
+class TestTokenOutcomeLoaderTwoAxis:
+    """ADR-019 Phase 1: loader runs two-axis cross-checks at read time."""
 
     def _make_outcome_row(self, **overrides: object) -> SARow[Any]:
         defaults = {
             "outcome_id": "oc-1",
             "run_id": "run-1",
             "token_id": "tok-1",
-            "outcome": "completed",
-            "is_terminal": 1,
+            "outcome": "success",
+            "path": "default_flow",
+            "completed": 1,
             "recorded_at": NOW,
-            "sink_name": None,
+            "sink_name": "output",
             "batch_id": None,
             "fork_group_id": None,
             "join_group_id": None,
@@ -1272,162 +1352,156 @@ class TestTokenOutcomeLoader:
         defaults.update(overrides)
         return _make_sa_row(**defaults)
 
-    def test_valid_load_completed(self) -> None:
-        sa_row = self._make_outcome_row(
-            outcome="completed",
-            is_terminal=1,
-            sink_name="output",
-        )
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
+    def _valid_fields(self, pair: tuple[TerminalOutcome | None, TerminalPath]) -> dict[str, str]:
+        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+        values = {
+            "sink_name": "output",
+            "batch_id": "batch-1",
+            "fork_group_id": "fork-1",
+            "join_group_id": "join-1",
+            "expand_group_id": "expand-1",
+            "error_hash": "e" * 64,
+        }
+        fields: dict[str, str] = {}
+        for field_name in constraints.required:
+            exact_value = constraints.exact.get(field_name)
+            fields[field_name] = str(exact_value if exact_value is not None else values[field_name])
+        for field_name, exact_value in constraints.exact.items():
+            fields[field_name] = str(exact_value)
+        return fields
+
+    def _row_for_pair(self, pair: tuple[TerminalOutcome | None, TerminalPath], **overrides: object) -> SARow[Any]:
+        outcome, path = pair
+        row_overrides: dict[str, object] = {
+            "outcome": outcome.value if outcome is not None else None,
+            "path": path.value,
+            "completed": 1 if outcome is not None else 0,
+            "sink_name": None,
+            "batch_id": None,
+            "fork_group_id": None,
+            "join_group_id": None,
+            "expand_group_id": None,
+            "error_hash": None,
+        }
+        row_overrides.update(self._valid_fields(pair))
+        row_overrides.update(overrides)
+        return self._make_outcome_row(**row_overrides)
+
+    def test_loads_completed_default_flow(self) -> None:
+        result = TokenOutcomeLoader().load(self._row_for_pair((TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)))
 
         assert isinstance(result, TokenOutcome)
-        assert result.outcome == RowOutcome.COMPLETED
-        assert result.is_terminal is True
+        assert result.outcome == TerminalOutcome.SUCCESS
+        assert result.path == TerminalPath.DEFAULT_FLOW
+        assert result.completed is True
         assert result.sink_name == "output"
 
-    def test_valid_load_buffered_non_terminal(self) -> None:
+    def test_loads_buffered(self) -> None:
+        result = TokenOutcomeLoader().load(self._row_for_pair((None, TerminalPath.BUFFERED)))
+
+        assert result.outcome is None
+        assert result.path == TerminalPath.BUFFERED
+        assert result.completed is False
+        assert result.batch_id == "batch-1"
+
+    @pytest.mark.parametrize("pair", tuple(_TERMINAL_PAIR_FIELD_CONSTRAINTS))
+    def test_every_legal_pair_loads(self, pair: tuple[TerminalOutcome | None, TerminalPath]) -> None:
+        outcome, path = pair
+
+        result = TokenOutcomeLoader().load(self._row_for_pair(pair))
+
+        assert result.outcome == outcome
+        assert result.path == path
+        assert result.completed is (outcome is not None)
+
+    def test_completed_xor_outcome_violation_crashes(self) -> None:
+        sa_row = self._make_outcome_row(outcome=None, path="default_flow", completed=1)
+
+        with pytest.raises(AuditIntegrityError, match="completed"):
+            TokenOutcomeLoader().load(sa_row)
+
+    def test_illegal_pair_in_db_crashes(self) -> None:
         sa_row = self._make_outcome_row(
-            outcome="buffered",
-            is_terminal=0,
+            outcome="success",
+            path="unrouted",
+            completed=1,
+            sink_name="output",
         )
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
 
-        assert result.outcome == RowOutcome.BUFFERED
-        assert result.is_terminal is False
+        with pytest.raises(AuditIntegrityError, match="_LEGAL_TERMINAL_PAIRS"):
+            TokenOutcomeLoader().load(sa_row)
 
-    @pytest.mark.parametrize("outcome_value", [o.value for o in RowOutcome])
-    def test_all_row_outcome_values(self, outcome_value: str) -> None:
-        expected_outcome = RowOutcome(outcome_value)
-        sa_row = self._make_outcome_row(outcome=outcome_value, is_terminal=1 if expected_outcome.is_terminal else 0)
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.outcome == expected_outcome
-        assert result.is_terminal is expected_outcome.is_terminal
-
-    def test_is_terminal_1_becomes_true(self) -> None:
-        sa_row = self._make_outcome_row(is_terminal=1)
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.is_terminal is True
-
-    def test_is_terminal_0_becomes_false(self) -> None:
-        sa_row = self._make_outcome_row(outcome="buffered", is_terminal=0)
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.is_terminal is False
-
-    def test_outcome_buffered_with_terminal_1_raises_value_error(self) -> None:
-        sa_row = self._make_outcome_row(outcome="buffered", is_terminal=1)
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="inconsistent is_terminal"):
-            loader.load(sa_row)
-
-    def test_outcome_completed_with_terminal_0_raises_value_error(self) -> None:
-        sa_row = self._make_outcome_row(outcome="completed", is_terminal=0)
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="inconsistent is_terminal"):
-            loader.load(sa_row)
-
-    def test_is_terminal_2_raises_value_error(self) -> None:
-        sa_row = self._make_outcome_row(is_terminal=2)
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="invalid is_terminal"):
-            loader.load(sa_row)
-
-    def test_is_terminal_negative_1_raises_value_error(self) -> None:
-        sa_row = self._make_outcome_row(is_terminal=-1)
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="invalid is_terminal"):
-            loader.load(sa_row)
-
-    def test_is_terminal_none_raises_value_error(self) -> None:
-        sa_row = self._make_outcome_row(is_terminal=None)
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="invalid is_terminal"):
-            loader.load(sa_row)
-
-    def test_is_terminal_string_raises_value_error(self) -> None:
-        """String '1' is NOT in (0, 1) -- Tier 1, no coercion."""
-        sa_row = self._make_outcome_row(is_terminal="1")
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="invalid is_terminal"):
-            loader.load(sa_row)
-
-    def test_is_terminal_true_bool_raises_value_error(self) -> None:
-        """Bool is a subclass of int in Python, so True == 1.
-        But Tier 1 strictness requires exact int type — bool must be rejected."""
-        sa_row = self._make_outcome_row(is_terminal=True)
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="invalid is_terminal"):
-            loader.load(sa_row)
-
-    def test_is_terminal_false_bool_raises_value_error(self) -> None:
-        """bool False must be rejected — bool is subclass of int in Python."""
-        sa_row = self._make_outcome_row(is_terminal=False, outcome="buffered")
-        loader = TokenOutcomeLoader()
-        with pytest.raises(AuditIntegrityError, match="invalid is_terminal"):
-            loader.load(sa_row)
-
-    def test_invalid_outcome_raises_value_error(self) -> None:
-        sa_row = self._make_outcome_row(outcome="vanished")
-        loader = TokenOutcomeLoader()
-        with pytest.raises(ValueError):
-            loader.load(sa_row)
-
-    def test_valid_load_with_all_optional_fields(self) -> None:
-        sa_row = self._make_outcome_row(
-            outcome="forked",
-            is_terminal=1,
+    def test_required_field_missing_crashes(self) -> None:
+        sa_row = self._row_for_pair(
+            (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
             sink_name=None,
-            batch_id=None,
-            fork_group_id="fg-1",
-            join_group_id=None,
-            expand_group_id=None,
-            error_hash=None,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="requires sink_name"):
+            TokenOutcomeLoader().load(sa_row)
+
+    @pytest.mark.parametrize("pair", tuple(_TERMINAL_PAIR_FIELD_CONSTRAINTS))
+    def test_every_pair_constraint_row_is_enforced(
+        self,
+        pair: tuple[TerminalOutcome | None, TerminalPath],
+    ) -> None:
+        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+        overrides: dict[str, object]
+        if constraints.required:
+            overrides = {constraints.required[0]: None}
+        elif constraints.exact:
+            field_name = next(iter(constraints.exact))
+            overrides = {field_name: "wrong-exact-value"}
+        else:
+            overrides = {constraints.forbidden[0]: "forbidden-extra"}
+
+        with pytest.raises(AuditIntegrityError, match="audit integrity violation"):
+            TokenOutcomeLoader().load(self._row_for_pair(pair, **overrides))
+
+    @pytest.mark.parametrize(
+        ("completed", "outcome", "path", "match"),
+        [
+            (1, None, "default_flow", "completed"),
+            (0, "success", "buffered", "completed"),
+            (0, None, "default_flow", "BUFFERED"),
+            (1, "success", None, "path is NULL"),
+            (1, "success", "not_a_path", "invalid path"),
+            ("1", "success", "default_flow", "invalid completed"),
+            (True, "success", "default_flow", "invalid completed"),
+        ],
+    )
+    def test_tampered_shape_crashes(
+        self,
+        completed: object,
+        outcome: object,
+        path: object,
+        match: str,
+    ) -> None:
+        sa_row = self._make_outcome_row(completed=completed, outcome=outcome, path=path)
+
+        with pytest.raises(AuditIntegrityError, match=match):
+            TokenOutcomeLoader().load(sa_row)
+
+    def test_invalid_outcome_crashes_as_audit_integrity_error(self) -> None:
+        sa_row = self._make_outcome_row(outcome="vanished")
+
+        with pytest.raises(AuditIntegrityError, match="invalid outcome"):
+            TokenOutcomeLoader().load(sa_row)
+
+    def test_valid_load_with_optional_context_fields(self) -> None:
+        sa_row = self._row_for_pair(
+            (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT),
             context_json='{"paths": ["a", "b"]}',
             expected_branches_json='["path_a", "path_b"]',
         )
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.outcome == RowOutcome.FORKED
-        assert result.fork_group_id == "fg-1"
+
+        result = TokenOutcomeLoader().load(sa_row)
+
+        assert result.outcome == TerminalOutcome.TRANSIENT
+        assert result.path == TerminalPath.FORK_PARENT
+        assert result.fork_group_id == "fork-1"
         assert result.context_json == '{"paths": ["a", "b"]}'
         assert result.expected_branches_json == '["path_a", "path_b"]'
-
-    def test_valid_load_routed_with_sink_name(self) -> None:
-        sa_row = self._make_outcome_row(
-            outcome="routed",
-            is_terminal=1,
-            sink_name="priority_output",
-        )
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.outcome == RowOutcome.ROUTED
-        assert result.sink_name == "priority_output"
-
-    def test_valid_load_consumed_in_batch(self) -> None:
-        sa_row = self._make_outcome_row(
-            outcome="consumed_in_batch",
-            is_terminal=1,
-            batch_id="batch-1",
-        )
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.outcome == RowOutcome.CONSUMED_IN_BATCH
-        assert result.batch_id == "batch-1"
-
-    def test_valid_load_failed_with_error_hash(self) -> None:
-        sa_row = self._make_outcome_row(
-            outcome="failed",
-            is_terminal=1,
-            error_hash="err123",
-        )
-        loader = TokenOutcomeLoader()
-        result = loader.load(sa_row)
-        assert result.outcome == RowOutcome.FAILED
-        assert result.error_hash == "err123"
 
 
 # ---------------------------------------------------------------------------
@@ -1490,6 +1564,7 @@ class TestBatchMemberLoader:
     def test_valid_load(self) -> None:
         sa_row = _make_sa_row(
             batch_id="batch-1",
+            run_id="run-1",
             token_id="tok-1",
             ordinal=0,
         )
@@ -1498,12 +1573,14 @@ class TestBatchMemberLoader:
 
         assert isinstance(result, BatchMember)
         assert result.batch_id == "batch-1"
+        assert result.run_id == "run-1"
         assert result.token_id == "tok-1"
         assert result.ordinal == 0
 
     def test_valid_load_higher_ordinal(self) -> None:
         sa_row = _make_sa_row(
             batch_id="batch-2",
+            run_id="run-2",
             token_id="tok-5",
             ordinal=10,
         )
@@ -1608,36 +1685,36 @@ class TestOperationLoader:
         assert result.status == "pending"
         assert result.completed_at == LATER
 
-    # === Lifecycle invariant violations (validated by __post_init__) ===
+    # === Lifecycle invariant violations (validated by OperationLoader, Tier 1) ===
 
     def test_invalid_operation_type_raises(self) -> None:
         sa_row = self._make_operation_row(operation_type="kafka_consume")
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="operation_type"):
+        with pytest.raises(AuditIntegrityError, match="operation_type"):
             loader.load(sa_row)
 
     def test_invalid_status_raises(self) -> None:
         sa_row = self._make_operation_row(status="running")
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="status"):
+        with pytest.raises(AuditIntegrityError, match="status"):
             loader.load(sa_row)
 
     def test_open_with_completed_at_raises(self) -> None:
         sa_row = self._make_operation_row(status="open", completed_at=NOW)
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="completed_at"):
+        with pytest.raises(AuditIntegrityError, match="completed_at"):
             loader.load(sa_row)
 
     def test_open_with_duration_ms_raises(self) -> None:
         sa_row = self._make_operation_row(status="open", duration_ms=100.0)
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="duration_ms"):
+        with pytest.raises(AuditIntegrityError, match="duration_ms"):
             loader.load(sa_row)
 
     def test_open_with_error_message_raises(self) -> None:
         sa_row = self._make_operation_row(status="open", error_message="bad")
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="error_message"):
+        with pytest.raises(AuditIntegrityError, match="error_message"):
             loader.load(sa_row)
 
     def test_completed_with_null_completed_at_raises(self) -> None:
@@ -1647,7 +1724,7 @@ class TestOperationLoader:
             duration_ms=100.0,
         )
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="completed_at"):
+        with pytest.raises(AuditIntegrityError, match="completed_at"):
             loader.load(sa_row)
 
     def test_completed_with_null_duration_ms_raises(self) -> None:
@@ -1657,7 +1734,7 @@ class TestOperationLoader:
             duration_ms=None,
         )
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="duration_ms"):
+        with pytest.raises(AuditIntegrityError, match="duration_ms"):
             loader.load(sa_row)
 
     def test_completed_with_error_message_raises(self) -> None:
@@ -1668,7 +1745,7 @@ class TestOperationLoader:
             error_message="should not be here",
         )
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="error_message"):
+        with pytest.raises(AuditIntegrityError, match="error_message"):
             loader.load(sa_row)
 
     def test_failed_with_null_error_message_raises(self) -> None:
@@ -1679,7 +1756,18 @@ class TestOperationLoader:
             error_message=None,
         )
         loader = OperationLoader()
-        with pytest.raises(ValueError, match="error_message"):
+        with pytest.raises(AuditIntegrityError, match="error_message"):
+            loader.load(sa_row)
+
+    def test_failed_with_empty_error_message_raises(self) -> None:
+        sa_row = self._make_operation_row(
+            status="failed",
+            completed_at=LATER,
+            duration_ms=100.0,
+            error_message="",
+        )
+        loader = OperationLoader()
+        with pytest.raises(AuditIntegrityError, match="error_message"):
             loader.load(sa_row)
 
     # === Both operation types accepted ===

@@ -42,8 +42,10 @@ class _TestSourceBase:
     node_id: str | None = None
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
+    source_file_hash: str | None = None
     _on_validation_failure: str = "discard"
     on_success: str = "default"
+    declared_guaranteed_fields: frozenset[str] = frozenset()
 
     def __init__(self) -> None:
         self.config: dict[str, Any] = {"schema": {"mode": "observed"}}
@@ -139,9 +141,10 @@ class _TestSinkBase:
     node_id: str | None = None
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    validate_input: bool = False
+    source_file_hash: str | None = None
     declared_required_fields: frozenset[str] = frozenset()
-    _on_write_failure: str = "discard"
+    _on_write_failure: str | None = "discard"
+    supports_resume: bool = False
 
     def __init__(self) -> None:
         self.config: dict[str, Any] = {"schema": {"mode": "observed"}}
@@ -161,6 +164,32 @@ class _TestSinkBase:
 
     def close(self) -> None:
         pass
+
+    def configure_for_resume(self) -> None:
+        raise NotImplementedError("Test sinks do not support resume")
+
+    def validate_output_target(self) -> Any:
+        from elspeth.contracts.sink import OutputValidationResult
+
+        return OutputValidationResult.success()
+
+    @property
+    def needs_resume_field_resolution(self) -> bool:
+        return False
+
+    def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
+        pass
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> None:
+        return None
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Minimal schema stub — production sinks return a JSON schema,
+        test fixtures only need the attribute to satisfy SinkProtocol.
+        """
+        return {"type": "object", "additionalProperties": True}
 
 
 class _TestTransformBase(BaseTransform):
@@ -201,17 +230,31 @@ def as_batch_transform(transform: Any) -> BatchTransformProtocol:
     return cast("BatchTransformProtocol", transform)
 
 
+def inject_write_failure[S](sink: S, value: str = "discard") -> S:
+    """Inject _on_write_failure on a production sink instance.
+
+    Production code injects this via cli_helpers from SinkSettings.
+    Tests that construct sinks directly bypass that path. Call this
+    on any production sink (CSVSink, JSONSink, etc.) after construction.
+
+    Returns the same sink for call-chaining.
+    """
+    # Access via Any — S is always a concrete sink with _on_write_failure,
+    # but the generic type parameter can't express the SinkProtocol bound.
+    s: Any = sink
+    if s._on_write_failure is None:
+        s._on_write_failure = value
+    return sink
+
+
 def as_sink(sink: Any) -> SinkProtocol:
     """Cast a test sink to SinkProtocol.
 
     Also ensures _on_write_failure is set if not already — production code
     injects this via cli_helpers, but tests that construct sinks directly
-    bypass that path. Uses direct attribute access: BaseSink subclasses
-    always have _on_write_failure (class-level default None); test sinks
-    from _TestSinkBase have it set to "discard".
+    bypass that path.
     """
-    if sink._on_write_failure is None:
-        sink._on_write_failure = "discard"
+    inject_write_failure(sink)
     return cast("SinkProtocol", sink)
 
 

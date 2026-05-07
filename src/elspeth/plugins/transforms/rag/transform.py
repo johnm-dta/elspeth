@@ -13,15 +13,17 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from elspeth.contracts import Determinism, TransformResult, propagate_contract
-from elspeth.contracts.errors import RetrievalNotReadyError, TransformErrorReason
+from elspeth.contracts.errors import FrameworkBugError, RetrievalNotReadyError, TransformErrorReason
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
+from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 from elspeth.plugins.transforms.rag.config import PROVIDERS, RAGRetrievalConfig
 from elspeth.plugins.transforms.rag.formatter import format_context
 from elspeth.plugins.transforms.rag.query import QueryBuilder
@@ -55,12 +57,94 @@ class RAGRetrievalTransform(BaseTransform):
     """
 
     name = "rag_retrieval"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:9026ebd1220106b1"
     determinism: Determinism = Determinism.EXTERNAL_CALL
+    config_model = RAGRetrievalConfig
+    passes_through_input = True
+    _provider: RetrievalProvider | None
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Minimal no-network config for the ADR-009 forward invariant."""
+        return {
+            "output_prefix": "policy",
+            "query_field": "rag_probe_query",
+            "provider": "azure_search",
+            "provider_config": {
+                "endpoint": "https://invariant.example.search.windows.net",
+                "index": "invariant-probe",
+                "api_key": "probe-key",
+            },
+            "schema": {"mode": "observed"},
+        }
+
+    def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Inject a deterministic retrieval query for invariant probing."""
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name="rag_probe_query",
+                value="What is the policy?",
+            )
+        ]
+
+    def execute_forward_invariant_probe(
+        self,
+        probe_rows: list[PipelineRow],
+        ctx: Any,
+    ) -> TransformResult:
+        """Exercise the real retrieval path with a provider-agnostic local double."""
+        if len(probe_rows) != 1:
+            raise FrameworkBugError(
+                f"{self.__class__.__name__}.execute_forward_invariant_probe() "
+                f"received {len(probe_rows)} rows; RAG invariant probes require exactly 1 row."
+            )
+
+        class _InvariantProvider:
+            def __init__(self) -> None:
+                self.last_skipped_count = 0
+                self.last_skipped_reasons: list[dict[str, Any]] = []
+
+            def search(
+                self,
+                query: str,
+                top_k: int,
+                min_score: float,
+                *,
+                state_id: str,
+                token_id: str | None,
+            ) -> list[RetrievalChunk]:
+                del query, top_k, min_score, state_id, token_id
+                return [
+                    RetrievalChunk(
+                        content="Probe context",
+                        score=0.95,
+                        source_id="probe-doc",
+                        metadata={"kind": "invariant"},
+                    )
+                ]
+
+            def close(self) -> None:
+                return None
+
+        original_provider = self._provider
+        original_on_start_called = self._on_start_called
+        probe_provider = _InvariantProvider()
+        try:
+            self.__dict__["_provider"] = probe_provider
+            self._on_start_called = True
+            return super().execute_forward_invariant_probe(probe_rows, ctx)
+        finally:
+            self._on_start_called = original_on_start_called
+            self.__dict__["_provider"] = original_provider
+            probe_provider.close()
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
 
-        self._rag_config = RAGRetrievalConfig.from_dict(config)
+        self._rag_config = RAGRetrievalConfig.from_dict(config, plugin_name=self.name)
+        self._initialize_declared_input_fields(self._rag_config)
         prefix = self._rag_config.output_prefix
 
         # Output field names
@@ -120,35 +204,44 @@ class RAGRetrievalTransform(BaseTransform):
         provider_name = self._rag_config.provider
         config_cls, factory = PROVIDERS[provider_name]
         provider_config = config_cls(**self._rag_config.provider_config)
+        collection_name = self._configured_collection_name(provider_config)
 
-        self._provider = factory(
-            provider_config,
-            recorder=ctx.landscape,
-            run_id=ctx.run_id,
-            telemetry_emit=ctx.telemetry_emit,
-            limiter=(ctx.rate_limit_registry.get_limiter(provider_name) if ctx.rate_limit_registry is not None else None),
-        )
+        try:
+            self._provider = factory(
+                provider_config,
+                execution=ctx.landscape,
+                run_id=ctx.run_id,
+                telemetry_emit=ctx.telemetry_emit,
+                limiter=(ctx.rate_limit_registry.get_limiter(provider_name) if ctx.rate_limit_registry is not None else None),
+            )
 
-        # Readiness check — refuse to start against empty/missing collection.
-        # Two distinct failure modes: unreachable (infra problem) and empty
-        # (operator error). Both crash startup, but the message distinguishes them.
-        readiness = self._provider.check_readiness()
+            # Readiness check — refuse to start against empty/missing collection.
+            # Two distinct failure modes: unreachable (infra problem) and empty
+            # (operator error). Both crash startup, but the message distinguishes them.
+            readiness = self._provider.check_readiness()
+        except RetrievalError as exc:
+            self._record_readiness_check(
+                ctx,
+                collection=collection_name,
+                reachable=False,
+                count=None,
+                message=str(exc),
+            )
+            raise RetrievalNotReadyError(collection=collection_name, reason=str(exc)) from exc
 
         # Record first — the readiness result is an auditable fact regardless of outcome.
         # "If it's not recorded, it didn't happen" — an auditor can query
         # what the collection state was when this pipeline started, including failures.
-        if ctx.landscape is not None:
-            ctx.landscape.record_readiness_check(
-                run_id=ctx.run_id,
-                name=self.name,
-                collection=readiness.collection,
-                reachable=readiness.reachable,
-                count=readiness.count,
-                message=readiness.message,
-            )
+        self._record_readiness_check(
+            ctx,
+            collection=readiness.collection,
+            reachable=readiness.reachable,
+            count=readiness.count,
+            message=readiness.message,
+        )
 
         # Then guard on the result
-        if not readiness.reachable or readiness.count <= 0:
+        if not readiness.reachable or readiness.count is None or readiness.count <= 0:
             raise RetrievalNotReadyError(
                 collection=readiness.collection,
                 reason=readiness.message,
@@ -179,7 +272,7 @@ class RAGRetrievalTransform(BaseTransform):
         if query_result.error is not None:
             self._quarantine_count += 1
             return TransformResult.error(
-                cast(TransformErrorReason, query_result.error),
+                query_result.error,
                 retryable=False,
             )
 
@@ -200,28 +293,35 @@ class RAGRetrievalTransform(BaseTransform):
             if e.retryable:
                 raise  # Engine retry handles transient failures
             self._quarantine_count += 1
-            error_reason: TransformErrorReason = {
+            retrieval_error_reason: TransformErrorReason = {
                 "reason": "retrieval_failed",
                 "error": str(e),
                 "cause": f"{type(e).__name__}: {e.__cause__}" if e.__cause__ else str(e),
                 "provider": self._rag_config.provider,
             }
             if e.status_code is not None:
-                error_reason["status_code"] = e.status_code
-            return TransformResult.error(error_reason, retryable=False)
+                retrieval_error_reason["status_code"] = e.status_code
+            return TransformResult.error(retrieval_error_reason, retryable=False)
+
+        # Providers surface skip evidence on the instance so the transform can
+        # persist why candidate hits were rejected even when no usable chunks remain.
+        skipped_count = self._provider.last_skipped_count
+        skipped_reasons = self._provider.last_skipped_reasons
 
         # 3. Handle zero results
         if not chunks:
             if self._rag_config.on_no_results == "quarantine":
                 self._quarantine_count += 1
-                return TransformResult.error(
-                    TransformErrorReason(
-                        reason="no_results",
-                        query=query,
-                        provider=self._rag_config.provider,
-                    ),
-                    retryable=False,
-                )
+                no_results_error_reason: TransformErrorReason = {
+                    "reason": "no_results",
+                    "query": query,
+                    "provider": self._rag_config.provider,
+                }
+                if skipped_count > 0:
+                    no_results_error_reason["skipped_count"] = skipped_count
+                if skipped_reasons:
+                    no_results_error_reason["skipped_reasons"] = skipped_reasons
+                return TransformResult.error(no_results_error_reason, retryable=False)
             # on_no_results == "continue" — None sentinels preserve semantic
             # distinction: None means "no retrieval happened", 0.0/"" would
             # fabricate a result indistinguishable from "zero relevance".
@@ -236,11 +336,17 @@ class RAGRetrievalTransform(BaseTransform):
                 output_row=output,
                 transform_adds_fields=True,
             )
+            output_contract = self._align_output_contract(output_contract)
+            no_results_success_metadata: dict[str, Any] = {"chunk_count": 0, "no_results": True}
+            if skipped_count > 0:
+                no_results_success_metadata["skipped_count"] = skipped_count
+            if skipped_reasons:
+                no_results_success_metadata["skipped_reasons"] = skipped_reasons
             return TransformResult.success(
                 PipelineRow(output, output_contract),
                 success_reason={
                     "action": "rag_retrieval",
-                    "metadata": {"chunk_count": 0, "no_results": True},
+                    "metadata": no_results_success_metadata,
                 },
             )
 
@@ -263,7 +369,7 @@ class RAGRetrievalTransform(BaseTransform):
                 {
                     "source_id": chunk.source_id,
                     "score": chunk.score,
-                    "metadata": chunk.metadata,
+                    "metadata": deep_thaw(chunk.metadata),
                 }
                 for chunk in chunks
             ],
@@ -281,18 +387,56 @@ class RAGRetrievalTransform(BaseTransform):
             output_row=output,
             transform_adds_fields=True,
         )
+        output_contract = self._align_output_contract(output_contract)
+
+        success_metadata: dict[str, Any] = {
+            "chunk_count": len(chunks),
+            "best_score": best_score,
+            "truncated": formatted.truncated,
+        }
+        if skipped_count > 0:
+            success_metadata["skipped_count"] = skipped_count
+        if skipped_reasons:
+            success_metadata["skipped_reasons"] = skipped_reasons
 
         return TransformResult.success(
             PipelineRow(output, output_contract),
             success_reason={
                 "action": "rag_retrieval",
-                "metadata": {
-                    "chunk_count": len(chunks),
-                    "best_score": best_score,
-                    "truncated": formatted.truncated,
-                },
+                "metadata": success_metadata,
             },
         )
+
+    def _configured_collection_name(self, provider_config: Any) -> str:
+        """Extract the configured collection/index name for readiness audit records."""
+        for field_name in ("collection", "index"):
+            value = getattr(provider_config, field_name, None)
+            if isinstance(value, str) and value:
+                return value
+        raise FrameworkBugError(
+            f"{self.__class__.__name__} provider config {type(provider_config).__name__} "
+            "must expose a non-empty 'collection' or 'index' for readiness auditing."
+        )
+
+    def _record_readiness_check(
+        self,
+        ctx: LifecycleContext,
+        *,
+        collection: str,
+        reachable: bool,
+        count: int | None,
+        message: str,
+    ) -> None:
+        """Persist retrieval readiness facts when the audit writer is available."""
+        if ctx.landscape is not None:
+            ctx.landscape.record_readiness_check(
+                run_id=ctx.run_id,
+                name=self.name,
+                collection=collection,
+                reachable=reachable,
+                count=count,
+                message=message,
+            )
 
     def on_complete(self, ctx: LifecycleContext) -> None:
         """Emit telemetry with run statistics."""

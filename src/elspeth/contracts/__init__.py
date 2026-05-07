@@ -55,7 +55,6 @@ from elspeth.contracts.audit import (
     TransformErrorRecord,
     ValidationErrorRecord,
 )
-from elspeth.contracts.batch_checkpoint import BatchCheckpointState, RowMappingEntry
 from elspeth.contracts.call_data import (
     CallPayload,
     HTTPCallError,
@@ -147,15 +146,16 @@ from elspeth.contracts.enums import (
     ReproducibilityGrade,
     RoutingKind,
     RoutingMode,
-    RowOutcome,
     RunMode,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
     error_edge_label,
 )
 from elspeth.contracts.errors import (
-    BatchPendingError,
+    # Tier 1 guard tuple — single source of truth for "never catch" exceptions
     CoalesceFailureReason,
     CommencementGateFailedError,
     ConfigGateReason,
@@ -171,6 +171,8 @@ from elspeth.contracts.errors import (
     GracefulShutdownError,
     MaxRetriesExceeded,
     MissingFieldViolation,
+    OrchestrationInvariantError,
+    PassThroughContractViolation,
     PluginContractViolation,
     QueryFailureDetail,
     RetrievalNotReadyError,
@@ -268,7 +270,7 @@ from elspeth.contracts.transform_contract import (
     create_output_contract_from_schema,
     validate_output_against_contract,
 )
-from elspeth.contracts.type_normalization import normalize_type_for_contract
+from elspeth.contracts.type_normalization import classify_runtime_type, normalize_type_for_contract
 from elspeth.contracts.types import (
     AggregationName,
     BranchName,
@@ -283,19 +285,25 @@ from elspeth.contracts.url import (
     SanitizedDatabaseUrl,
     SanitizedWebhookUrl,
 )
+from elspeth.contracts.value_source import (
+    CatalogValueSource,
+    DerivedFromSiblingValueSource,
+    ValueSource,
+)
 
 __all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
     "Operation",
     # errors
-    "BatchPendingError",
     "CommencementGateFailedError",
     "DependencyFailedError",
     "DuplicateDocumentError",
     "FrameworkBugError",
     "GracefulShutdownError",
+    "OrchestrationInvariantError",
     "MaxRetriesExceeded",
+    "PassThroughContractViolation",
     "PluginContractViolation",
     "RetrievalNotReadyError",
     "CoalesceFailureReason",
@@ -375,17 +383,15 @@ __all__ = [  # Grouped by category for readability
     "ReproducibilityGrade",
     "RoutingKind",
     "RoutingMode",
-    "RowOutcome",
     "RunMode",
     "RunStatus",
     "TelemetryGranularity",
+    "TerminalOutcome",
+    "TerminalPath",
     "TriggerType",
     "error_edge_label",
     # identity
     "TokenInfo",
-    # batch checkpoint
-    "BatchCheckpointState",
-    "RowMappingEntry",
     # checkpoint
     "AggregationCheckpointState",
     "AggregationNodeCheckpoint",
@@ -505,6 +511,7 @@ __all__ = [  # Grouped by category for readability
     "create_contract_from_config",
     "FieldContract",
     "map_schema_mode",
+    "classify_runtime_type",
     "normalize_type_for_contract",
     "PipelineRow",
     "PipelineRunner",
@@ -526,4 +533,8 @@ __all__ = [  # Grouped by category for readability
     # probes
     "CollectionProbe",
     "CollectionReadinessResult",
+    # value-source declarations
+    "CatalogValueSource",
+    "DerivedFromSiblingValueSource",
+    "ValueSource",
 ]

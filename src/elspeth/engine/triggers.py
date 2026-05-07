@@ -67,6 +67,7 @@ class TriggerEvaluator:
         # Per plugin-protocol.md:1211: "Multiple triggers can be combined (first one to fire wins)"
         self._count_fire_time: float | None = None
         self._condition_fire_time: float | None = None
+        self._last_condition_check_time: float | None = None
 
         # Pre-parse condition expression if applicable
         self._condition_parser: ExpressionParser | None = None
@@ -187,11 +188,12 @@ class TriggerEvaluator:
                         f"Expression: {self._condition_parser.expression!r}"
                     )
                 if result:
-                    # First time detecting condition is true - set fire time now.
-                    # For conditions that became true due to time passing (not row accepts),
-                    # we use current_time as a conservative estimate.
-                    self._condition_fire_time = current_time
+                    self._condition_fire_time = (
+                        self._last_condition_check_time if self._last_condition_check_time is not None else self._first_accept_time
+                    )
                     candidates.append((self._condition_fire_time, "condition"))
+                else:
+                    self._last_condition_check_time = current_time
 
         if not candidates:
             return False
@@ -303,6 +305,12 @@ class TriggerEvaluator:
         else:
             self._condition_fire_time = None
 
+        # _last_condition_check_time is not persisted in checkpoints.
+        # On resume, the first should_trigger() call that finds a condition
+        # newly true will fall back to _first_accept_time as the fire time
+        # lower bound — same behavior as the first batch evaluation.
+        self._last_condition_check_time = None
+
     def reset(self) -> None:
         """Reset state for a new batch.
 
@@ -313,3 +321,4 @@ class TriggerEvaluator:
         self._last_triggered = None
         self._count_fire_time = None
         self._condition_fire_time = None
+        self._last_condition_check_time = None

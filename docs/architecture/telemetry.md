@@ -262,8 +262,8 @@ XOR enforcement: exactly ONE of `state_id` or `operation_id` must be set.
 | LLMTransform (provider: azure, multi-query) | Azure OpenAI | Via `AuditedLLMClient` | OK |
 | LLMTransform (provider: openrouter, single-query) | OpenRouter API | Via `AuditedHTTPClient` | OK |
 | LLMTransform (provider: openrouter, multi-query) | OpenRouter API | Via `AuditedHTTPClient` | OK |
-| AzureBatchLLMTransform | Azure Batch API | Has `record_call()` but gap | **GAP** |
-| OpenRouterBatchLLMTransform | OpenRouter API | Raw `httpx.Client()` | **GAP** |
+<!-- AzureBatchLLMTransform and OpenRouterBatchLLMTransform retired 2026-05-06 per ADR-020. -->
+
 
 ### Components Without Telemetry (Correct)
 
@@ -422,7 +422,7 @@ telemetry_emit=self._emit_telemetry,  # Add to PluginContext creation
 
 **Phase 3 (Medium):** Aggregation flush missing telemetry - `execute_flush()` doesn't emit `TransformCompleted`.
 
-**Phase 4 (Medium):** OpenRouterBatchLLMTransform uses raw `httpx.Client()` instead of `AuditedHTTPClient` - complete blind spot even after orchestrator fix.
+**Phase 4 (Medium):** OpenRouterBatchLLMTransform uses raw `httpx.Client()` instead of `AuditedHTTPClient` - complete blind spot even after orchestrator fix. *(Resolved 2026-05-06 by ADR-020 retirement of the transform.)*
 
 ### Decisions Made
 
@@ -456,8 +456,8 @@ telemetry_emit=self._emit_telemetry,  # Add to PluginContext creation
 |-----|----------|-------|
 | Orchestrator telemetry_emit wiring | P0 | Root cause - all plugin telemetry broken |
 | Operation context ID bug | P1 | state_id field contains operation_id for source/sink |
-| OpenRouterBatchLLMTransform | P1 | Uses raw httpx.Client, no instrumentation |
-| AzureBatchLLMTransform | P2 | record_call works but operation context bug affects it |
+| ~~OpenRouterBatchLLMTransform~~ | — | Retired 2026-05-06 (ADR-020). |
+| ~~AzureBatchLLMTransform~~ | — | Retired 2026-05-06 (ADR-020). |
 | Aggregation flush telemetry | P3 | execute_flush() doesn't emit TransformCompleted |
 | OTLP time-based flushing | P4 | flush_interval_ms accepted but not implemented |
 | Slow backpressure mode | P4 | Placeholder only |

@@ -68,6 +68,8 @@ class TestConfigGateToConfigGate:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
         assert result.status == RunStatus.COMPLETED
         # gate2 routes: value > 50 → high, else → default
         assert len(high_sink.results) == 1  # value=100
@@ -110,6 +112,8 @@ class TestConfigGateToConfigGate:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
         assert result.status == RunStatus.COMPLETED
         assert len(high_sink.results) == 1  # value=100
         assert len(default_sink.results) == 1  # value=10
@@ -172,6 +176,8 @@ class TestGateToGateWithDownstreamTransform:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
         assert result.status == RunStatus.COMPLETED
         # gate2: value > 50 → high, else → default
         assert len(high_sink.results) == 1  # value=100
@@ -206,6 +212,8 @@ class TestGateRouteToTransformChain:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
         assert result.status == RunStatus.COMPLETED
         assert len(high_sink.results) == 1
         assert len(default_sink.results) == 1

@@ -15,8 +15,9 @@ from elspeth.contracts import (
     NodeType,
     PayloadStore,
     PluginSchema,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.aggregation_checkpoint import (
     AggregationCheckpointState,
@@ -33,6 +34,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
+from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -88,7 +90,7 @@ def _insert_run(
     conn: Connection,
     run_id: str,
     *,
-    status: RunStatus,
+    status: RunStatus | str,
     with_contract: bool = False,
     contract_json_override: str | None = None,
 ) -> None:
@@ -156,14 +158,31 @@ def _insert_token(conn: Connection, run_id: str, token_id: str, row_id: str) -> 
     )
 
 
-def _insert_terminal_outcome(conn: Connection, run_id: str, token_id: str, *, outcome: RowOutcome = RowOutcome.COMPLETED) -> None:
+def _insert_terminal_outcome(
+    conn: Connection,
+    run_id: str,
+    token_id: str,
+    *,
+    outcome: TerminalOutcome | None = TerminalOutcome.SUCCESS,
+    path: TerminalPath | None = None,
+    completed: bool | None = None,
+) -> None:
+    resolved_outcome = outcome
+    resolved_path = path or TerminalPath.DEFAULT_FLOW
+    resolved_completed = completed if completed is not None else outcome is not None
+    if path is not None:
+        resolved_path = path
+    if completed is not None:
+        resolved_completed = completed
+
     conn.execute(
         token_outcomes_table.insert().values(
             outcome_id=f"out-{token_id}",
             run_id=run_id,
             token_id=token_id,
-            outcome=outcome.value,
-            is_terminal=1,
+            outcome=resolved_outcome.value if resolved_outcome is not None else None,
+            path=resolved_path.value,
+            completed=1 if resolved_completed else 0,
             recorded_at=datetime.now(UTC),
             sink_name="sink",
         )
@@ -175,6 +194,7 @@ def _create_failed_run_with_checkpoint(
     checkpoint_manager: CheckpointManager,
     run_id: str,
     *,
+    status: RunStatus | str = RunStatus.FAILED,
     checkpoint_node_id: str = "checkpoint-node",
     with_contract: bool = True,
     aggregation_state: AggregationCheckpointState | None = None,
@@ -184,7 +204,7 @@ def _create_failed_run_with_checkpoint(
     active_graph = graph or _create_graph(node_id=checkpoint_node_id)
 
     with db.connection() as conn:
-        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=with_contract)
+        _insert_run(conn, run_id, status=status, with_contract=with_contract)
         _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, checkpoint_node_id)
         _insert_row(conn, run_id, "row-0", row_index=0, source_data_ref=None)
@@ -224,6 +244,37 @@ def test_can_resume_rejects_running_run(db: LandscapeDB, recovery_manager: Recov
     check = recovery_manager.can_resume("run-running", _create_graph())
     assert check.can_resume is False
     assert check.reason == "Run is still in progress"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY],
+)
+def test_can_resume_rejects_terminal_statuses_even_when_checkpoint_exists(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    status: RunStatus,
+) -> None:
+    run_id = f"run-terminal-{status.value}"
+    graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id, status=status)
+
+    check = recovery_manager.can_resume(run_id, graph)
+
+    assert check.can_resume is False
+    assert check.reason == f"Run status {status.value!r} is not resumable"
+
+
+def test_can_resume_rejects_corrupt_stored_run_status(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    run_id = "run-corrupt-status"
+    graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id, status="bogus")
+
+    with pytest.raises(CheckpointCorruptionError, match="invalid status 'bogus'"):
+        recovery_manager.can_resume(run_id, graph)
 
 
 def test_can_resume_rejects_failed_run_without_checkpoint(db: LandscapeDB, recovery_manager: RecoveryManager) -> None:
@@ -311,7 +362,7 @@ def test_get_resume_point_restores_aggregation_state(
         checkpoint_manager,
         run_id,
         aggregation_state=AggregationCheckpointState(
-            version="3.0",
+            version="4.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -324,13 +375,13 @@ def test_get_resume_point_restores_aggregation_state(
                             expand_group_id=None,
                             row_data={"id": 5},
                             contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                         ),
                     ),
                     batch_id="batch-001",
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
-                    contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                 ),
             },
         ),
@@ -349,6 +400,47 @@ def test_get_unprocessed_rows_returns_empty_when_no_checkpoint(recovery_manager:
     assert recovery_manager.get_unprocessed_rows("missing-run") == []
 
 
+@pytest.mark.parametrize("delegation_path", [TerminalPath.FORK_PARENT, TerminalPath.EXPAND_PARENT])
+def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    delegation_path: TerminalPath,
+) -> None:
+    """ADR-019: fork/expand parents are delegation markers by path."""
+    expected_delegation_paths = (
+        TerminalPath.FORK_PARENT.value,
+        TerminalPath.EXPAND_PARENT.value,
+    )
+    assert expected_delegation_paths == _DELEGATION_PATHS
+    run_id = f"run-resume-{delegation_path.value}"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "row-resume-delegation", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "token-resume-delegation-parent", "row-resume-delegation")
+        _insert_terminal_outcome(
+            conn,
+            run_id,
+            "token-resume-delegation-parent",
+            outcome=TerminalOutcome.TRANSIENT,
+            path=delegation_path,
+            completed=True,
+        )
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        token_id="token-resume-delegation-parent",
+        node_id="checkpoint-node",
+        sequence_number=1,
+        graph=graph,
+    )
+
+    assert recovery_manager.get_unprocessed_rows(run_id) == ["row-resume-delegation"]
+
+
 def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
     db: LandscapeDB,
     checkpoint_manager: CheckpointManager,
@@ -364,17 +456,17 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         # row-completed: one completed token -> should be excluded.
         _insert_row(conn, run_id, "row-completed", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-completed", "row-completed")
-        _insert_terminal_outcome(conn, run_id, "tok-completed", outcome=RowOutcome.COMPLETED)
+        _insert_terminal_outcome(conn, run_id, "tok-completed", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
         # row-delegation-only: FORKED parent only, no child terminal -> should be included.
         _insert_row(conn, run_id, "row-delegation-only", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-parent", "row-delegation-only")
-        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=RowOutcome.FORKED)
+        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=TerminalOutcome.TRANSIENT, path=TerminalPath.FORK_PARENT)
 
         # row-child-pending: one completed child + one pending child -> should be included.
         _insert_row(conn, run_id, "row-child-pending", row_index=2, source_data_ref=None)
         _insert_token(conn, run_id, "tok-child-ok", "row-child-pending")
-        _insert_terminal_outcome(conn, run_id, "tok-child-ok", outcome=RowOutcome.COMPLETED)
+        _insert_terminal_outcome(conn, run_id, "tok-child-ok", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
         _insert_token(conn, run_id, "tok-child-pending", "row-child-pending")
 
         # row-buffered: appears incomplete but all incomplete tokens are buffered
@@ -395,7 +487,7 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         sequence_number=10,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="3.0",
+            version="4.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -408,6 +500,7 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
                             expand_group_id=None,
                             row_data={},
                             contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                         ),
                         AggregationTokenCheckpoint(
                             token_id="tok-mixed-buffered",
@@ -418,13 +511,13 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
                             expand_group_id=None,
                             row_data={},
                             contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                         ),
                     ),
                     batch_id="batch-001",
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
-                    contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                 ),
             },
         ),
@@ -474,7 +567,7 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="3.0",
+            version="4.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -487,6 +580,7 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
                             expand_group_id=None,
                             row_data={},
                             contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                         ),
                         AggregationTokenCheckpoint(
                             token_id="tok-c",
@@ -497,13 +591,13 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
                             expand_group_id=None,
                             row_data={},
                             contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                         ),
                     ),
                     batch_id="batch-001",
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
-                    contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                 ),
             },
         ),
@@ -613,7 +707,7 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="3.0",
+            version="4.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -626,13 +720,13 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
                             expand_group_id=None,
                             row_data={},
                             contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                         ),
                     ),
                     batch_id="batch-001",
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
-                    contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
                 ),
             },
         ),
@@ -733,7 +827,7 @@ def test_get_unprocessed_row_data_errors_on_missing_source_data_ref(
         _insert_row(conn, "run-meta", "row-1", row_index=1, source_data_ref=None)
 
     monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
-    with pytest.raises(AuditIntegrityError, match="has no source_data_ref"):
+    with pytest.raises(ValueError, match="has no source_data_ref"):
         recovery_manager.get_unprocessed_row_data("run-meta", payload_store, source_schema_class=_SimpleSchema)
 
 
@@ -917,9 +1011,9 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-forked-complete", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-parent", "row-forked-complete")
-        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=RowOutcome.FORKED)
+        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=TerminalOutcome.TRANSIENT, path=TerminalPath.FORK_PARENT)
         _insert_token(conn, run_id, "tok-child", "row-forked-complete")
-        _insert_terminal_outcome(conn, run_id, "tok-child", outcome=RowOutcome.COMPLETED)
+        _insert_terminal_outcome(conn, run_id, "tok-child", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
@@ -930,6 +1024,54 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
     )
 
     assert recovery_manager.get_unprocessed_rows(run_id) == []
+
+
+def test_get_unprocessed_row_data_corrupt_utf8_raises_audit_integrity(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corrupt UTF-8 payload must raise AuditIntegrityError, not UnicodeDecodeError.
+
+    Regression: If persisted payload bytes are not valid UTF-8 (e.g. disk corruption,
+    encoding mismatch), get_unprocessed_row_data must raise AuditIntegrityError
+    with a clear message rather than leaking a raw UnicodeDecodeError.
+    """
+    corrupt_bytes = b"\xff\xfe invalid"
+    payload_ref = payload_store.store(corrupt_bytes)
+    with db.connection() as conn:
+        _insert_run(conn, "run-corrupt-utf8", status=RunStatus.FAILED)
+        _insert_node(conn, "run-corrupt-utf8", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, "run-corrupt-utf8", "row-1", row_index=0, source_data_ref=payload_ref)
+
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+    with pytest.raises(AuditIntegrityError, match="Corrupt payload"):
+        recovery_manager.get_unprocessed_row_data("run-corrupt-utf8", payload_store, source_schema_class=_SimpleSchema)
+
+
+def test_get_unprocessed_row_data_non_dict_json_raises_audit_integrity(
+    db: LandscapeDB,
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JSON payload that decodes to non-dict must raise AuditIntegrityError.
+
+    Regression: If persisted payload is valid JSON but not a dict (e.g. a list),
+    get_unprocessed_row_data must raise AuditIntegrityError with "expected dict"
+    rather than silently passing a list where a dict is expected.
+    """
+    non_dict_bytes = b"[1, 2, 3]"
+    payload_ref = payload_store.store(non_dict_bytes)
+    with db.connection() as conn:
+        _insert_run(conn, "run-non-dict", status=RunStatus.FAILED)
+        _insert_node(conn, "run-non-dict", "source-node", node_type=NodeType.SOURCE)
+        _insert_row(conn, "run-non-dict", "row-1", row_index=0, source_data_ref=payload_ref)
+
+    monkeypatch.setattr(recovery_manager, "get_unprocessed_rows", lambda _run_id: ["row-1"])
+    with pytest.raises(AuditIntegrityError, match="expected dict"):
+        recovery_manager.get_unprocessed_row_data("run-non-dict", payload_store, source_schema_class=_SimpleSchema)
 
 
 def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
@@ -962,3 +1104,46 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
 
     assert point is not None
     assert point.sequence_number == 99
+
+
+def test_get_unprocessed_rows_excludes_diverted_rows(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """DIVERTED rows are terminal — they must not be requeued on resume.
+
+    Regression test for elspeth-46b30e2917: the manual terminal_outcome_values
+    list omitted DIVERTED, causing diverted rows to appear as 'incomplete'
+    during recovery and get reprocessed (duplicate side effects).
+    """
+    run_id = "run-diverted-terminal"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
+        _insert_node(conn, run_id, "checkpoint-node")
+
+        # row-diverted: one token diverted to failsink -> terminal, exclude.
+        _insert_row(conn, run_id, "row-diverted", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-diverted", "row-diverted")
+        _insert_terminal_outcome(
+            conn, run_id, "tok-diverted", outcome=TerminalOutcome.TRANSIENT, path=TerminalPath.SINK_FALLBACK_TO_FAILSINK
+        )
+
+        # row-pending: no terminal outcome -> should be included.
+        _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)
+        _insert_token(conn, run_id, "tok-pending", "row-pending")
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        token_id="tok-diverted",
+        node_id="checkpoint-node",
+        sequence_number=1,
+        graph=graph,
+    )
+
+    unprocessed = recovery_manager.get_unprocessed_rows(run_id)
+
+    assert "row-diverted" not in unprocessed, "DIVERTED row should be excluded — it is terminal"
+    assert "row-pending" in unprocessed

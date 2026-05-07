@@ -161,6 +161,15 @@ class ContractAuditRecord:
         """
         data = json.loads(json_str)
 
+        # Tier 1 structural validation: crash on malformed JSON shape.
+        if not isinstance(data, dict):
+            raise AuditIntegrityError(f"Contract audit record must be a JSON object, got {type(data).__name__}")
+        if "fields" not in data or not isinstance(data["fields"], list):
+            raise AuditIntegrityError("Contract audit record missing or malformed 'fields' — expected a list")
+        for i, entry in enumerate(data["fields"]):
+            if not isinstance(entry, dict):
+                raise AuditIntegrityError(f"Contract audit record fields[{i}] must be a JSON object, got {type(entry).__name__}")
+
         # Tier 1 audit data: crash on invalid enum-like values.
         # Literal type hints are static-only; runtime validation is required
         # to reject corrupted/tampered records that would silently change
@@ -168,6 +177,12 @@ class ContractAuditRecord:
         mode = data["mode"]
         if mode not in _VALID_MODES:
             raise AuditIntegrityError(f"Invalid contract mode '{mode}' in audit record. Valid modes: {', '.join(sorted(_VALID_MODES))}")
+
+        # Tier 1: boolean fields must be exactly bool, not truthy ints/strings.
+        # Non-boolean locked silently changes contract enforcement semantics.
+        locked = data["locked"]
+        if not isinstance(locked, bool):
+            raise AuditIntegrityError(f"Contract 'locked' must be bool, got {type(locked).__name__}: {locked!r}")
 
         fields: list[FieldAuditRecord] = []
         for f in data["fields"]:
@@ -185,20 +200,31 @@ class ContractAuditRecord:
                     f"'{f['normalized_name']}' in audit record. "
                     f"Valid types: {', '.join(sorted(CONTRACT_TYPE_MAP.keys()))}"
                 )
+            # Tier 1: boolean fields must be exactly bool.
+            required = f["required"]
+            nullable = f["nullable"]
+            if not isinstance(required, bool):
+                raise AuditIntegrityError(
+                    f"Field '{f['normalized_name']}' 'required' must be bool, got {type(required).__name__}: {required!r}"
+                )
+            if not isinstance(nullable, bool):
+                raise AuditIntegrityError(
+                    f"Field '{f['normalized_name']}' 'nullable' must be bool, got {type(nullable).__name__}: {nullable!r}"
+                )
             fields.append(
                 FieldAuditRecord(
                     normalized_name=f["normalized_name"],
                     original_name=f["original_name"],
                     python_type=python_type,
-                    required=f["required"],
+                    required=required,
                     source=source,
-                    nullable=f["nullable"],
+                    nullable=nullable,
                 )
             )
 
         return cls(
             mode=mode,
-            locked=data["locked"],
+            locked=locked,
             version_hash=data["version_hash"],
             fields=tuple(fields),
         )
@@ -226,6 +252,10 @@ class ContractAuditRecord:
                 f"Invalid contract mode '{self.mode}' in audit record. Valid modes: {', '.join(sorted(_VALID_MODES))}"
             )
 
+        # Tier 1: validate boolean fields before constructing live contracts.
+        if not isinstance(self.locked, bool):
+            raise AuditIntegrityError(f"Contract 'locked' must be bool, got {type(self.locked).__name__}: {self.locked!r}")
+
         for f in self.fields:
             if f.source not in _VALID_SOURCES:
                 raise AuditIntegrityError(
@@ -238,6 +268,14 @@ class ContractAuditRecord:
                     f"Invalid python_type '{f.python_type}' for field "
                     f"'{f.normalized_name}' in audit record. "
                     f"Valid types: {', '.join(sorted(CONTRACT_TYPE_MAP.keys()))}"
+                )
+            if not isinstance(f.required, bool):
+                raise AuditIntegrityError(
+                    f"Field '{f.normalized_name}' 'required' must be bool, got {type(f.required).__name__}: {f.required!r}"
+                )
+            if not isinstance(f.nullable, bool):
+                raise AuditIntegrityError(
+                    f"Field '{f.normalized_name}' 'nullable' must be bool, got {type(f.nullable).__name__}: {f.nullable!r}"
                 )
 
         fields = tuple(

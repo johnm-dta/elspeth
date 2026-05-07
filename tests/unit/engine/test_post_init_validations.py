@@ -3,30 +3,37 @@
 Covers: _FlushContext coalesce pairing, TriggerEvaluator.restore_from_checkpoint.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
 from elspeth.contracts import TokenInfo
+from elspeth.contracts.types import CoalesceName, NodeID
+
+if TYPE_CHECKING:
+    from elspeth.engine.triggers import TriggerEvaluator
 
 
 class TestFlushContextPostInit:
     """Tests for _FlushContext.__post_init__ validation."""
 
-    def _make_token(self):
+    def _make_token(self) -> MagicMock:
         """Create a mock TokenInfo to avoid PipelineRow/contract construction."""
         token = MagicMock(spec=TokenInfo)
         token.row_id = "r1"
         token.token_id = "t1"
         return token
 
-    def _make_transform(self):
+    def _make_transform(self) -> MagicMock:
         """Create a minimal mock transform for _FlushContext."""
         transform = MagicMock()
         transform.name = "test_transform"
         return transform
 
-    def _make_settings(self):
+    def _make_settings(self) -> MagicMock:
         """Create a mock AggregationSettings."""
         return MagicMock()
 
@@ -35,7 +42,7 @@ class TestFlushContextPostInit:
 
         with pytest.raises(ValueError, match="node_id must not be empty"):
             _FlushContext(
-                node_id="",
+                node_id=NodeID(""),
                 transform=self._make_transform(),
                 settings=self._make_settings(),
                 buffered_tokens=(self._make_token(),),
@@ -52,7 +59,7 @@ class TestFlushContextPostInit:
 
         with pytest.raises(ValueError, match="buffered_tokens must not be empty"):
             _FlushContext(
-                node_id="n1",
+                node_id=NodeID("n1"),
                 transform=self._make_transform(),
                 settings=self._make_settings(),
                 buffered_tokens=(),
@@ -69,7 +76,7 @@ class TestFlushContextPostInit:
 
         with pytest.raises(ValueError, match="batch_id must not be empty"):
             _FlushContext(
-                node_id="n1",
+                node_id=NodeID("n1"),
                 transform=self._make_transform(),
                 settings=self._make_settings(),
                 buffered_tokens=(self._make_token(),),
@@ -86,7 +93,7 @@ class TestFlushContextPostInit:
 
         with pytest.raises(ValueError, match="coalesce_node_id and coalesce_name must be both set or both None"):
             _FlushContext(
-                node_id="n1",
+                node_id=NodeID("n1"),
                 transform=self._make_transform(),
                 settings=self._make_settings(),
                 buffered_tokens=(self._make_token(),),
@@ -94,7 +101,7 @@ class TestFlushContextPostInit:
                 error_msg="test",
                 expand_parent_token=self._make_token(),
                 triggering_token=None,
-                coalesce_node_id="c1",
+                coalesce_node_id=NodeID("c1"),
                 coalesce_name=None,
             )
 
@@ -103,7 +110,7 @@ class TestFlushContextPostInit:
 
         with pytest.raises(ValueError, match="coalesce_node_id and coalesce_name must be both set or both None"):
             _FlushContext(
-                node_id="n1",
+                node_id=NodeID("n1"),
                 transform=self._make_transform(),
                 settings=self._make_settings(),
                 buffered_tokens=(self._make_token(),),
@@ -112,14 +119,14 @@ class TestFlushContextPostInit:
                 expand_parent_token=self._make_token(),
                 triggering_token=None,
                 coalesce_node_id=None,
-                coalesce_name="merge1",
+                coalesce_name=CoalesceName("merge1"),
             )
 
     def test_accepts_both_coalesce_none(self) -> None:
         from elspeth.engine.processor import _FlushContext
 
         ctx = _FlushContext(
-            node_id="n1",
+            node_id=NodeID("n1"),
             transform=self._make_transform(),
             settings=self._make_settings(),
             buffered_tokens=(self._make_token(),),
@@ -136,7 +143,7 @@ class TestFlushContextPostInit:
         from elspeth.engine.processor import _FlushContext
 
         ctx = _FlushContext(
-            node_id="n1",
+            node_id=NodeID("n1"),
             transform=self._make_transform(),
             settings=self._make_settings(),
             buffered_tokens=(self._make_token(),),
@@ -144,8 +151,8 @@ class TestFlushContextPostInit:
             error_msg="test",
             expand_parent_token=self._make_token(),
             triggering_token=None,
-            coalesce_node_id="c1",
-            coalesce_name="merge1",
+            coalesce_node_id=NodeID("c1"),
+            coalesce_name=CoalesceName("merge1"),
         )
         assert ctx.coalesce_node_id == "c1"
 
@@ -153,7 +160,7 @@ class TestFlushContextPostInit:
 class TestTriggerEvaluatorRestoreValidation:
     """Tests for TriggerEvaluator.restore_from_checkpoint input validation."""
 
-    def _make_evaluator(self):
+    def _make_evaluator(self) -> TriggerEvaluator:
         from elspeth.core.config import TriggerConfig
         from elspeth.engine.triggers import TriggerEvaluator
 

@@ -23,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from elspeth.contracts import Determinism, NodeType, RowOutcome, RunStatus
+from elspeth.contracts import Determinism, NodeType, RunStatus
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
@@ -185,8 +186,9 @@ def run_with_checkpoint_and_payloads(
                     outcome_id=f"outcome-{i:03d}",
                     run_id=run_id,
                     token_id=f"tok-{i:03d}",
-                    outcome=RowOutcome.COMPLETED.value,
-                    is_terminal=1,
+                    outcome=TerminalOutcome.SUCCESS.value,
+                    path=TerminalPath.DEFAULT_FLOW.value,
+                    completed=1,
                     recorded_at=now,
                     sink_name="sink-node",
                 )

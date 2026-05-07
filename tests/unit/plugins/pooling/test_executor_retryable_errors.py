@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
 import pytest
 
 from elspeth.contracts import TransformResult
+from elspeth.contracts.errors import CapacityError
 from elspeth.plugins.infrastructure.clients.llm import (
     ContentPolicyError,
     ContextLengthError,
@@ -18,7 +20,6 @@ from elspeth.plugins.infrastructure.clients.llm import (
     ServerError,
 )
 from elspeth.plugins.infrastructure.pooling.config import PoolConfig
-from elspeth.plugins.infrastructure.pooling.errors import CapacityError
 from elspeth.plugins.infrastructure.pooling.executor import PooledExecutor, RowContext
 from elspeth.testing import make_pipeline_row
 
@@ -441,3 +442,88 @@ class TestCapacityErrorShutdownPath:
         assert results[0].result.reason is not None
         assert results[0].result.reason["reason"] == "shutdown_requested"
         assert call_count[0] == 1
+
+
+class TestFatalBatchFailureHandling:
+    """Unexpected worker bugs should fail fast instead of waiting on retry loops."""
+
+    def test_fatal_worker_exception_is_not_blocked_by_sibling_retry_loop(self) -> None:
+        config = PoolConfig(
+            pool_size=2,
+            max_capacity_retry_seconds=1,
+            min_dispatch_delay_ms=0,
+            max_dispatch_delay_ms=500,
+            recovery_step_ms=500,
+        )
+        executor = PooledExecutor(config)
+        retry_started = threading.Event()
+        call_counts = {0: 0, 1: 0}
+        lock = threading.Lock()
+
+        def process_fn(row: dict[str, Any], state_id: str) -> TransformResult:
+            idx = row["id"]
+            with lock:
+                call_counts[idx] += 1
+
+            if idx == 1:
+                retry_started.set()
+                raise NetworkError("retry me")
+
+            retry_started.wait(timeout=2)
+            time.sleep(0.05)
+            raise RuntimeError("fatal bug after sibling started retrying")
+
+        start = time.monotonic()
+        with pytest.raises(RuntimeError, match="fatal bug"):
+            executor.execute_batch(
+                [
+                    RowContext(row={"id": 1}, state_id="retrying-row", row_index=0),
+                    RowContext(row={"id": 0}, state_id="fatal-row", row_index=1),
+                ],
+                process_fn,
+            )
+        elapsed = time.monotonic() - start
+        executor.shutdown(wait=True)
+
+        assert elapsed < 0.6, f"fatal exception took {elapsed:.3f}s to surface instead of failing fast"
+        assert call_counts[1] <= 1, f"sibling retry loop kept running after fatal failure: {call_counts}"
+
+
+class TestStrictRetryBudget:
+    """Retry timeout should be a hard wall-clock boundary for retry work."""
+
+    def test_retry_timeout_prevents_post_deadline_success_dispatch(self) -> None:
+        config = PoolConfig(
+            pool_size=1,
+            max_capacity_retry_seconds=1,
+            min_dispatch_delay_ms=0,
+            max_dispatch_delay_ms=900,
+            recovery_step_ms=900,
+        )
+        executor = PooledExecutor(config)
+        call_times: list[float] = []
+
+        def process_fn(row: dict[str, Any], state_id: str) -> TransformResult:
+            call_times.append(time.monotonic())
+            if len(call_times) == 1:
+                time.sleep(0.3)
+                raise CapacityError(status_code=429, message="first capacity error after work")
+            return TransformResult.success(
+                make_pipeline_row({"ok": True}),
+                success_reason={"action": "late-success"},
+            )
+
+        start = time.monotonic()
+        results = executor.execute_batch(
+            [RowContext(row={"id": 1}, state_id="budget-row", row_index=0)],
+            process_fn,
+        )
+        elapsed = time.monotonic() - start
+        executor.shutdown(wait=True)
+
+        assert len(results) == 1
+        assert results[0].result.status == "error"
+        assert results[0].result.reason is not None
+        assert results[0].result.reason["reason"] == "retry_timeout"
+        assert len(call_times) == 1, f"executor dispatched another call after the retry budget expired: {call_times}"
+        assert elapsed < 1.1, f"retry timeout overshot the 1s budget: {elapsed:.3f}s"

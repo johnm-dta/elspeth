@@ -1,0 +1,13 @@
+# AuditEvidenceBase is the nominal base class itself — it declares to_audit_dict
+# as an @abstractmethod.  The scanner rule "any class defining to_audit_dict must
+# inherit AuditEvidenceBase" is intentionally structured so that the base class
+# itself is detected, giving us an explicit permanent record of this well-known
+# exception rather than a special-cased code path in the scanner.
+allow_classes:
+- key: contracts/audit_evidence.py:AEN1:AuditEvidenceBase
+  owner: architecture
+  reason: AuditEvidenceBase is the root of the inheritance hierarchy — it IS the
+    required base class. The abstract to_audit_dict here is the declaration, not
+    a violation. Permanent allowlist entry; do not add expires.
+  task: ADR-010
+  expires: null

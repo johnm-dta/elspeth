@@ -41,6 +41,12 @@ def get_nested_field(
         >>> get_nested_field(data, "user.email", default="unknown")
         'unknown'
     """
+    # Prefer exact key match over dotted traversal.
+    # A JSON key like "meta.source" that exists as a literal top-level key
+    # must be returned directly, not split into ["meta", "source"] for traversal.
+    if path in data:
+        return data[path]
+
     parts = path.split(".")
     current: Any = data
 

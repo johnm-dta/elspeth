@@ -3,6 +3,7 @@
 
 import json
 import logging
+from collections.abc import Iterator
 
 import pytest
 
@@ -10,26 +11,25 @@ import pytest
 class TestLoggingConfig:
     """Tests for logging configuration."""
 
-    def test_get_logger_exists(self) -> None:
-        """get_logger function exists."""
-        from elspeth.core.logging import get_logger
+    @pytest.fixture(autouse=True)
+    def _restore_root_logger(self) -> Iterator[None]:
+        """Save/restore root logger handlers so configure_logging() doesn't leak.
 
-        assert callable(get_logger)
+        configure_logging() adds a StreamHandler(sys.stdout) to the root logger.
+        Under pytest, sys.stdout is a capture wrapper that gets closed after each
+        test. Without cleanup, subsequent tests hit the dead stream (221 times).
+        """
+        from elspeth.core.logging import _elspeth_handler_ids
 
-    def test_get_logger_returns_logger(self) -> None:
-        """get_logger returns a bound logger."""
-        from elspeth.core.logging import get_logger
-
-        logger = get_logger("test")
-        assert hasattr(logger, "info")
-        assert hasattr(logger, "error")
-        assert hasattr(logger, "bind")
-
-    def test_configure_logging_exists(self) -> None:
-        """configure_logging function exists."""
-        from elspeth.core.logging import configure_logging
-
-        assert callable(configure_logging)
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        saved_ids = set(_elspeth_handler_ids)
+        yield
+        root.handlers = saved_handlers
+        root.level = saved_level
+        _elspeth_handler_ids.clear()
+        _elspeth_handler_ids.update(saved_ids)
 
     def test_logger_outputs_structured(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Logger outputs structured JSON."""
@@ -71,6 +71,52 @@ class TestLoggingConfig:
         assert bound is not None
         # Bound logger is a new instance
         assert bound is not logger
+
+    def test_configure_logging_preserves_non_elspeth_handlers(self) -> None:
+        """configure_logging must not remove handlers it didn't create.
+
+        Bug: elspeth-afb11494b7 — root.handlers = [] drops ALL handlers
+        including pytest caplog. Only ELSPETH-owned handlers should be replaced.
+        """
+        from elspeth.core.logging import configure_logging
+
+        root = logging.getLogger()
+
+        # Add a foreign handler (simulates pytest caplog or other tools)
+        foreign_handler = logging.StreamHandler()
+        foreign_handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(foreign_handler)
+
+        # Reconfigure logging — should NOT remove the foreign handler
+        configure_logging(json_output=True)
+
+        # The foreign handler must still be present
+        assert foreign_handler in root.handlers, "configure_logging removed a handler it did not create"
+
+        # Clean up
+        root.removeHandler(foreign_handler)
+
+    def test_configure_logging_replaces_own_handler_on_reconfig(self) -> None:
+        """Repeated configure_logging calls should not accumulate ELSPETH handlers."""
+        from elspeth.core.logging import _elspeth_handler_ids, configure_logging
+
+        root = logging.getLogger()
+        handlers_before = list(root.handlers)
+
+        try:
+            configure_logging(json_output=True)
+            elspeth_count_first = len([h for h in root.handlers if id(h) in _elspeth_handler_ids])
+
+            configure_logging(json_output=False)
+            elspeth_count_second = len([h for h in root.handlers if id(h) in _elspeth_handler_ids])
+
+            # Should have exactly one ELSPETH handler after each call
+            assert elspeth_count_first == 1
+            assert elspeth_count_second == 1
+        finally:
+            # Restore root logger state to avoid polluting other tests
+            root.handlers = handlers_before
+            _elspeth_handler_ids.clear()
 
     def test_noisy_third_party_loggers_silenced(self) -> None:
         """Third-party loggers (Azure SDK, urllib3, etc.) are silenced to WARNING.

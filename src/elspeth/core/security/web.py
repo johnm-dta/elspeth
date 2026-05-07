@@ -123,8 +123,14 @@ def _resolve_hostname(hostname: str) -> list[str]:
         # results[i] = (family, type, proto, canonname, sockaddr)
         # sockaddr = (ip, port) for IPv4 or (ip, port, flow, scope) for IPv6
         # sockaddr[0] is always the IP address string for both AF_INET and AF_INET6
-        ips: set[str] = {str(r[4][0]) for r in results}
-        return list(ips)
+        seen: set[str] = set()
+        ips: list[str] = []
+        for r in results:
+            ip = str(r[4][0])
+            if ip not in seen:
+                seen.add(ip)
+                ips.append(ip)
+        return ips
     except socket.gaierror as e:
         raise NetworkError(f"DNS resolution failed: {hostname}: {e}") from e
 
@@ -188,15 +194,17 @@ class SSRFSafeRequest:
     Attributes:
         original_url: The URL as provided by the user
         resolved_ip: The validated IP address we will connect to
-        host_header: Original hostname for Host header (virtual hosting)
+        host_header: HTTP Host header value — includes port for non-default ports
+            (e.g. "example.com:8443" for https on port 8443)
         port: Port number (explicit or default based on scheme)
         path: URL path including query string
         scheme: "http" or "https"
+        bare_hostname: Bare hostname without port, for TLS SNI
 
     Example:
-        safe_request = validate_url_for_ssrf("https://example.com/path?q=1")
-        # safe_request.connection_url = "https://93.184.216.34:443/path?q=1"
-        # safe_request.host_header = "example.com"
+        safe_request = validate_url_for_ssrf("https://example.com:8443/path?q=1")
+        # safe_request.connection_url = "https://93.184.216.34:8443/path?q=1"
+        # safe_request.host_header = "example.com:8443"
         # safe_request.sni_hostname = "example.com"
     """
 
@@ -206,6 +214,7 @@ class SSRFSafeRequest:
     port: int
     path: str
     scheme: str
+    bare_hostname: str
 
     @property
     def connection_url(self) -> str:
@@ -221,9 +230,9 @@ class SSRFSafeRequest:
     def sni_hostname(self) -> str:
         """Hostname for TLS SNI (Server Name Indication).
 
-        Same as host_header - the original hostname for certificate verification.
+        Always the bare hostname without port — TLS SNI must not include port.
         """
-        return self.host_header
+        return self.bare_hostname
 
 
 def validate_url_for_ssrf(
@@ -246,6 +255,8 @@ def validate_url_for_ssrf(
     Args:
         url: URL to validate and prepare for fetching
         timeout: DNS resolution timeout in seconds
+        allowed_ranges: Additional IP ranges to permit (e.g. RFC1918 for
+            internal services). These bypass the default blocklist check.
 
     Returns:
         SSRFSafeRequest ready for secure fetching
@@ -327,11 +338,18 @@ def validate_url_for_ssrf(
     ipv4_addrs = [ip for ip in ip_list if ":" not in ip]
     selected_ip = ipv4_addrs[0] if ipv4_addrs else ip_list[0]
 
+    # Host header must include port for non-default ports (RFC 7230 §5.4).
+    # SNI hostname is always bare (no port) — TLS SNI is hostname-only.
+    scheme_lower = parsed.scheme.lower()
+    default_port = 443 if scheme_lower == "https" else 80
+    host_header = f"{hostname}:{port}" if port != default_port else hostname
+
     return SSRFSafeRequest(
         original_url=url,
         resolved_ip=selected_ip,
-        host_header=hostname,
+        host_header=host_header,
         port=port,
         path=path,
-        scheme=parsed.scheme.lower(),
+        scheme=scheme_lower,
+        bare_hostname=hostname,
     )

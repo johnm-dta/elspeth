@@ -1,0 +1,18 @@
+# Allowlist for enforce_composer_catch_order.py.
+#
+# Rule CCO1 flags an except-handler whose class is shadowed by an earlier
+# handler for one of its supertypes in the same try block. There should be
+# no legitimate reason to ship code in this state: the subclass handler
+# would be dead, and the "silent laundering" of plugin crashes is precisely
+# what the narrowed catch was introduced to prevent.
+#
+# Entries here are explicit exemptions — each MUST include a non-empty
+# justification field (enforced by the script; missing/empty justification
+# fails the build). Before adding an entry, prefer fixing the handler
+# order: move the narrow except above the broader one.
+#
+# Entry schema:
+#   - file: web/sessions/routes.py   # relative to --root (e.g. src/elspeth)
+#     line: 483                      # lineno of the shadowed subclass handler
+#     justification: "why this catch order is acceptable — explain."
+allowed: []

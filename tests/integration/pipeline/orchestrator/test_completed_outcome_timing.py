@@ -21,7 +21,8 @@ from sqlalchemy import select
 
 from elspeth.contracts import (
     NodeStateStatus,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
@@ -71,7 +72,9 @@ class TestCompletedOutcomeTimingContract:
 
         with db.engine.connect() as conn:
             completed_outcomes = conn.execute(
-                select(token_outcomes_table).where(token_outcomes_table.c.outcome == RowOutcome.COMPLETED)
+                select(token_outcomes_table).where(
+                    (token_outcomes_table.c.outcome == TerminalOutcome.SUCCESS) & (token_outcomes_table.c.path == TerminalPath.DEFAULT_FLOW)
+                )
             ).fetchall()
 
             completed_sink_states = conn.execute(
@@ -112,7 +115,9 @@ class TestCompletedOutcomeTimingContract:
 
         with db.engine.connect() as conn:
             completed_outcomes = conn.execute(
-                select(token_outcomes_table).where(token_outcomes_table.c.outcome == RowOutcome.COMPLETED)
+                select(token_outcomes_table).where(
+                    (token_outcomes_table.c.outcome == TerminalOutcome.SUCCESS) & (token_outcomes_table.c.path == TerminalPath.DEFAULT_FLOW)
+                )
             ).fetchall()
 
             completed_sink_states = conn.execute(
@@ -162,7 +167,9 @@ class TestCompletedOutcomeTimingContract:
 
         with db.engine.connect() as conn:
             completed_outcomes = conn.execute(
-                select(token_outcomes_table).where(token_outcomes_table.c.outcome == RowOutcome.COMPLETED)
+                select(token_outcomes_table).where(
+                    (token_outcomes_table.c.outcome == TerminalOutcome.SUCCESS) & (token_outcomes_table.c.path == TerminalPath.DEFAULT_FLOW)
+                )
             ).fetchall()
             completed_count = len(completed_outcomes)
 

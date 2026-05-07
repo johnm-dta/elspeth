@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
@@ -31,7 +30,7 @@ def _make_contract() -> SchemaContract:
 
 
 def _make_mock_recorder() -> MagicMock:
-    """Create a mock LandscapeRecorder."""
+    """Create a mock ExecutionRepository."""
     recorder = MagicMock()
     recorder.create_row.return_value = Mock(row_id="row_001")
     recorder.create_token.return_value = Mock(token_id="token_001")
@@ -69,7 +68,7 @@ class TestTokenManagerCreateInitialToken:
         assert call_kwargs["data"] == {"amount": 100}
 
     def test_create_initial_token_requires_contract(self) -> None:
-        """create_initial_token should raise ValueError if SourceRow has no contract.
+        """SourceRow.valid() should fail fast when contract is omitted.
 
         This is a critical guard - if a source plugin returns SourceRow without
         contract, we crash immediately with a clear message rather than propagating
@@ -79,19 +78,13 @@ class TestTokenManagerCreateInitialToken:
         from elspeth.engine.tokens import TokenManager
 
         recorder = _make_mock_recorder()
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
+        TokenManager(recorder, step_resolver=_make_step_resolver())
 
-        # SourceRow without contract -- uses SourceRow.valid directly because
-        # make_source_row auto-creates a contract when contract=None
-        source_row = SourceRow.valid({"amount": 100}, contract=None)
-
-        with pytest.raises(OrchestrationInvariantError, match="must have contract"):
-            manager.create_initial_token(
-                run_id="run_001",
-                source_node_id="source_001",
-                row_index=0,
-                source_row=source_row,
-            )
+        # Since elspeth-a27e71979f, SourceRow.__post_init__ rejects contract=None
+        # at construction time, so the engine's guard is now unreachable via
+        # normal construction. Verify the earlier guard fires instead.
+        with pytest.raises(TypeError, match="contract"):
+            SourceRow.valid({"amount": 100})
 
 
 class TestTokenManagerForkToken:
@@ -214,6 +207,7 @@ class TestTokenManagerCoalesceTokens:
             parents=[parent_a, parent_b],
             merged_data=merged_row,
             node_id=NodeID("coalesce_node"),
+            run_id="test-run",
         )
 
         assert merged_token.token_id == "merged_001"
@@ -262,38 +256,29 @@ class TestPipelineRowDeepCopy:
         assert copied.to_dict()["items"] is not original.to_dict()["items"]
 
 
-class TestTokenManagerUpdateRowData:
-    """Tests for TokenManager.update_row_data() with PipelineRow."""
+class TestTokenInfoWithUpdatedData:
+    """Tests for TokenInfo.with_updated_data() with PipelineRow."""
 
-    def test_update_row_data_accepts_pipeline_row(self) -> None:
-        """update_row_data should accept PipelineRow and return updated TokenInfo."""
-        from elspeth.engine.tokens import TokenManager
-
+    def test_with_updated_data_accepts_pipeline_row(self) -> None:
+        """with_updated_data should accept PipelineRow and return updated TokenInfo."""
         contract = _make_contract()
-        recorder = _make_mock_recorder()
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
         original_row = make_row({"amount": 100}, contract=contract)
         token = TokenInfo(row_id="row_001", token_id="token_001", row_data=original_row)
 
         new_row = make_row({"amount": 200, "computed": True}, contract=contract)
-        updated = manager.update_row_data(token, new_row)
+        updated = token.with_updated_data(new_row)
 
         assert isinstance(updated.row_data, PipelineRow)
-        # Use to_dict() for fields that may not be in the original contract
         data = updated.row_data.to_dict()
         assert data["amount"] == 200
         assert data["computed"] is True
         assert updated.token_id == token.token_id
         assert updated.row_id == token.row_id
 
-    def test_update_row_data_preserves_lineage(self) -> None:
-        """update_row_data should preserve all lineage fields."""
-        from elspeth.engine.tokens import TokenManager
-
+    def test_with_updated_data_preserves_lineage(self) -> None:
+        """with_updated_data should preserve all lineage fields."""
         contract = _make_contract()
-        recorder = _make_mock_recorder()
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
 
         original_row = make_row({"amount": 100}, contract=contract)
         token = TokenInfo(
@@ -306,9 +291,8 @@ class TestTokenManagerUpdateRowData:
         )
 
         new_row = make_row({"amount": 200}, contract=contract)
-        updated = manager.update_row_data(token, new_row)
+        updated = token.with_updated_data(new_row)
 
-        # All lineage preserved
         assert updated.branch_name == "my_branch"
         assert updated.fork_group_id == "fork_001"
         assert updated.expand_group_id == "expand_001"

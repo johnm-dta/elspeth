@@ -33,7 +33,8 @@ from elspeth.contracts.config import RuntimeTelemetryProtocol
 from elspeth.contracts.config.defaults import INTERNAL_DEFAULTS
 from elspeth.contracts.enums import BackpressureMode
 from elspeth.contracts.events import TelemetryEvent
-from elspeth.telemetry.errors import TelemetryExporterError
+from elspeth.telemetry.circuit_breaker import CircuitBreaker
+from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
 from elspeth.telemetry.filtering import should_emit
 from elspeth.telemetry.protocols import ExporterProtocol
 
@@ -53,6 +54,7 @@ class HealthMetrics(TypedDict):
     consecutive_total_failures: int
     queue_depth: int
     queue_maxsize: int
+    circuit_breakers: dict[str, dict[str, int | str]]
 
 
 class TelemetryManager:
@@ -106,6 +108,21 @@ class TelemetryManager:
         self._exporters = exporters
         self._consecutive_total_failures = 0
         self._max_consecutive_failures = config.max_consecutive_failures
+
+        # Per-exporter circuit breakers for failure isolation
+        # Each exporter gets its own breaker so one failing exporter
+        # doesn't block events to healthy exporters.
+        # Keyed by id(exporter) to handle same-named instances (e.g., two OTLP endpoints).
+        # failure_threshold uses config value so per-exporter and total thresholds align:
+        # when all breakers trip after N failures, consecutive_total_failures is exactly N.
+        self._circuit_breakers: dict[int, CircuitBreaker] = {
+            id(exporter): CircuitBreaker(
+                exporter.name,  # Name for logging/metrics
+                failure_threshold=config.max_consecutive_failures,
+                reset_timeout_seconds=60.0,
+            )
+            for exporter in exporters
+        }
 
         # Health metrics
         self._events_emitted = 0
@@ -164,17 +181,13 @@ class TelemetryManager:
                 logger.error("Export loop failed unexpectedly", error=str(e))
                 self._stored_exception = e
             except Exception as e:
-                from elspeth.contracts import FrameworkBugError
-                from elspeth.contracts.errors import AuditIntegrityError
-
-                # System-level exceptions must not be silently swallowed.
-                # Background thread can't raise to main thread directly —
-                # store for re-raise on flush()/close().
-                if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
+                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                    # Programming error — store for re-raise on flush()/close().
+                    # Background thread can't raise to main thread directly.
                     self._stored_exception = e
                     break  # Stop processing — system integrity compromised
 
-                # CRITICAL: Log but don't crash - telemetry must not kill pipeline
+                # Transport failure — log but don't crash
                 logger.error("Export loop failed unexpectedly", error=str(e))
             finally:
                 # ALWAYS call task_done() to prevent join() hangs
@@ -182,7 +195,11 @@ class TelemetryManager:
                 self._queue.task_done()
 
     def _dispatch_to_exporters(self, event: TelemetryEvent) -> None:
-        """Export to all exporters with failure isolation.
+        """Export to all exporters with failure isolation via circuit breakers.
+
+        Each exporter has its own circuit breaker. When an exporter fails
+        repeatedly, its breaker trips OPEN and calls are skipped until the
+        reset timeout expires.
 
         Thread Safety:
             Called only from export thread. _events_dropped protected by lock
@@ -192,17 +209,31 @@ class TelemetryManager:
             event: The telemetry event to export
         """
         failures = 0
+        skipped = 0  # Exporters skipped due to open circuit breaker
+        successes = 0
+
         for exporter in self._exporters:
+            breaker = self._circuit_breakers[id(exporter)]
+
+            # Skip exporters with open circuit breakers
+            if breaker.is_open():
+                skipped += 1
+                logger.debug(
+                    "Skipping exporter due to open circuit breaker",
+                    exporter=exporter.name,
+                    event_type=type(event).__name__,
+                )
+                continue
+
             try:
                 exporter.export(event)
+                breaker.record_success()
+                successes += 1
             except Exception as e:
-                from elspeth.contracts import FrameworkBugError
-                from elspeth.contracts.errors import AuditIntegrityError
+                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                    raise  # Programming error — must crash
 
-                # System-level exceptions must not be suppressed by telemetry
-                if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                    raise
-
+                breaker.record_failure()
                 failures += 1
                 self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
                 logger.warning(
@@ -210,15 +241,36 @@ class TelemetryManager:
                     exporter=exporter.name,
                     event_type=type(event).__name__,
                     error=str(e),
+                    circuit_state=breaker.state.name,
                 )
 
         # Update metrics based on outcome
-        if failures == 0:
-            # Complete success
+        # "Available exporters" = exporters not skipped by circuit breakers
+        available_exporters = len(self._exporters) - skipped
+
+        if successes > 0:
+            # At least one exporter succeeded
             self._events_emitted += 1
             self._consecutive_total_failures = 0
-        elif failures == len(self._exporters):
-            # ALL exporters failed
+        elif available_exporters == 0:
+            # All exporters have open circuit breakers — event is dropped.
+            # This is NOT a failure: breakers are deliberately skipping calls to
+            # allow recovery. When reset_timeout elapses, HALF_OPEN state allows
+            # a probe call. If that probe fails, THAT counts as a failure.
+            # Counting breaker-open skips as failures would defeat the circuit
+            # breaker's purpose — a 60s timeout with high event rate would hit
+            # max_consecutive_failures before recovery is even attempted.
+            with self._dropped_lock:
+                self._events_dropped += 1
+                if self._events_dropped - self._last_logged_drop_count >= self._LOG_INTERVAL:
+                    logger.warning(
+                        "All circuit breakers open - events dropped (awaiting recovery)",
+                        dropped_since_last_log=self._events_dropped - self._last_logged_drop_count,
+                        dropped_total=self._events_dropped,
+                    )
+                    self._last_logged_drop_count = self._events_dropped
+        elif failures == available_exporters:
+            # ALL available exporters failed this event
             self._consecutive_total_failures += 1
             # Lock required - pipeline thread also writes in DROP mode.
             # Log check MUST be inside lock to prevent race on _last_logged_drop_count
@@ -247,10 +299,6 @@ class TelemetryManager:
                         events_dropped=self._events_dropped,
                     )
                     self._disabled = True
-        else:
-            # Partial success - at least one exporter worked
-            self._events_emitted += 1
-            self._consecutive_total_failures = 0
 
     def handle_event(self, event: TelemetryEvent) -> None:
         """Queue event for async export.
@@ -416,6 +464,7 @@ class TelemetryManager:
         - consecutive_total_failures: Current streak of total failures
         - queue_depth: Current number of events in queue
         - queue_maxsize: Maximum queue capacity
+        - circuit_breakers: Per-exporter circuit breaker state and metrics
 
         Thread Safety:
             Reads are approximately consistent. _events_dropped uses lock
@@ -434,6 +483,10 @@ class TelemetryManager:
             "consecutive_total_failures": self._consecutive_total_failures,
             "queue_depth": self._queue.qsize(),
             "queue_maxsize": self._queue.maxsize,
+            # Use indexed keys to preserve same-named exporters (e.g., two OTLP endpoints).
+            # The internal _circuit_breakers is keyed by id(exporter) which isn't serializable,
+            # so we use sequential indexing with the name for human readability.
+            "circuit_breakers": {f"{breaker.name}_{i}": breaker.metrics for i, breaker in enumerate(self._circuit_breakers.values())},
         }
 
     def flush(self) -> None:
@@ -462,11 +515,8 @@ class TelemetryManager:
             try:
                 exporter.flush()
             except Exception as e:
-                from elspeth.contracts import FrameworkBugError
-                from elspeth.contracts.errors import AuditIntegrityError
-
-                if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                    raise
+                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                    raise  # Programming error — must crash
                 logger.warning(
                     "Exporter flush failed",
                     exporter=exporter.name,
@@ -535,11 +585,8 @@ class TelemetryManager:
             try:
                 exporter.close()
             except Exception as e:
-                from elspeth.contracts import FrameworkBugError
-                from elspeth.contracts.errors import AuditIntegrityError
-
-                if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                    raise
+                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                    raise  # Programming error — must crash
                 logger.warning(
                     "Exporter close failed",
                     exporter=exporter.name,

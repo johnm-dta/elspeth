@@ -13,9 +13,10 @@ variables, not hardcoded in configuration files.
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import TYPE_CHECKING, Self, cast
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 if TYPE_CHECKING:
     from azure.storage.blob import BlobServiceClient
@@ -52,11 +53,11 @@ class AzureAuthConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    # Option 1: Connection string
-    connection_string: str | None = None
+    # Option 1: Connection string (repr=False prevents credential exposure in stack traces)
+    connection_string: str | None = Field(default=None, repr=False)
 
     # Option 2: SAS token
-    sas_token: str | None = None
+    sas_token: str | None = Field(default=None, repr=False)
 
     # Option 3: Managed Identity
     use_managed_identity: bool = False
@@ -65,7 +66,24 @@ class AzureAuthConfig(BaseModel):
     # Option 4: Service Principal
     tenant_id: str | None = None
     client_id: str | None = None
-    client_secret: str | None = None
+    client_secret: str | None = Field(default=None, repr=False)
+
+    @field_validator("account_url")
+    @classmethod
+    def validate_account_url_https(cls, v: str | None) -> str | None:
+        """Enforce HTTPS on account_url to prevent credential exposure in transit.
+
+        SAS tokens are appended to the URL and bearer tokens are sent as headers —
+        both would be transmitted in cleartext over HTTP.
+        """
+        if v is not None and v.strip():
+            parsed = urllib.parse.urlparse(v)
+            if parsed.scheme and parsed.scheme.lower() != "https":
+                raise ValueError(
+                    f"account_url must use HTTPS scheme to protect credentials in transit, "
+                    f"got {parsed.scheme!r}. Example: https://mystorageaccount.blob.core.windows.net"
+                )
+        return v
 
     @model_validator(mode="after")
     def validate_auth_method(self) -> Self:

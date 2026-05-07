@@ -11,33 +11,17 @@ CRITICAL: The `allow_coercion` parameter enforces the three-tier trust model:
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
-from pydantic import ConfigDict, Field, create_model, model_validator
+from pydantic import ConfigDict, create_model, model_validator
 
 from elspeth.contracts import PluginSchema
+from elspeth.contracts.schema import FIELD_TYPE_MAP as TYPE_MAP
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 
 # Type alias for extra field handling modes
 ExtraMode = Literal["allow", "forbid"]
-
-# Finite float type that rejects NaN and Infinity at the source boundary.
-# Per CLAUDE.md Three-Tier Trust Model and canonical.py policy:
-# - NaN/Infinity cannot be represented in RFC 8785 canonical JSON
-# - They must be rejected at the source boundary (Tier 3), not crash downstream
-# - Use None for intentional missing values, not NaN
-FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
-
-# Python type mapping for schema field types
-# NOTE: float uses FiniteFloat to reject NaN/Infinity at source boundary
-TYPE_MAP: dict[str, type] = {
-    "str": str,
-    "int": int,
-    "float": FiniteFloat,
-    "bool": bool,
-    "any": Any,
-}
 
 
 def _find_non_finite_value_path(value: Any, path: str = "$") -> str | None:
@@ -59,10 +43,27 @@ def _find_non_finite_value_path(value: Any, path: str = "$") -> str | None:
             nested_path = _find_non_finite_value_path(nested, f"{path}[{idx}]")
             if nested_path is not None:
                 return nested_path
+        return None
 
     # Catch numpy floating scalars (longdouble, float16, float32, float64, etc.)
-    if isinstance(value, np.floating) and not math.isfinite(float(value)):
+    # Use np.isfinite() — math.isfinite(float(value)) overflows for np.longdouble
+    # values outside IEEE 754 double range, falsely treating finite values as inf.
+    if isinstance(value, np.floating) and not np.isfinite(value):
         return path
+
+    # NumPy arrays: scan for non-finite elements and report a useful path
+    if isinstance(value, np.ndarray) and value.size > 0:
+        try:
+            if np.any(~np.isfinite(value)):
+                flat = value.flat
+                for idx, elem in enumerate(flat):
+                    if isinstance(elem, float | np.floating) and not np.isfinite(elem):
+                        indices = np.unravel_index(idx, value.shape)
+                        index_str = "][".join(str(i) for i in indices)
+                        return f"{path}[{index_str}]"
+        except TypeError:
+            # np.isfinite raises TypeError for non-numeric dtypes (e.g., strings)
+            pass
 
     return None
 

@@ -1,0 +1,146 @@
+digraph l3_imports {
+    rankdir=LR;
+    node [shape=box, style=rounded];
+    subgraph "cluster_0" {
+        label=".";
+        style=dashed;
+        "." [label=".\n2958 LOC"];
+    }
+    subgraph "cluster_1" {
+        label="composer_mcp";
+        style=dashed;
+        "composer_mcp" [label="composer_mcp\n824 LOC"];
+    }
+    subgraph "cluster_2" {
+        label="mcp";
+        style=dashed;
+        "mcp" [label="mcp\n1661 LOC"];
+        "mcp/analyzers" [label="mcp/analyzers\n2453 LOC"];
+    }
+    subgraph "cluster_3" {
+        label="plugins";
+        style=dashed;
+        "plugins" [label="plugins\n8 LOC"];
+        "plugins/infrastructure" [label="plugins/infrastructure\n3804 LOC"];
+        "plugins/infrastructure/batching" [label="plugins/infrastructure/batching\n1024 LOC"];
+        "plugins/infrastructure/clients" [label="plugins/infrastructure/clients\n3790 LOC"];
+        "plugins/infrastructure/clients/retrieval" [label="plugins/infrastructure/clients/retrieval\n1031 LOC"];
+        "plugins/infrastructure/pooling" [label="plugins/infrastructure/pooling\n1133 LOC"];
+        "plugins/sinks" [label="plugins/sinks\n3515 LOC"];
+        "plugins/sources" [label="plugins/sources\n3519 LOC"];
+        "plugins/transforms" [label="plugins/transforms\n4125 LOC"];
+        "plugins/transforms/azure" [label="plugins/transforms/azure\n1125 LOC"];
+        "plugins/transforms/llm" [label="plugins/transforms/llm\n5740 LOC"];
+        "plugins/transforms/llm/providers" [label="plugins/transforms/llm/providers\n663 LOC"];
+        "plugins/transforms/rag" [label="plugins/transforms/rag\n922 LOC"];
+    }
+    subgraph "cluster_4" {
+        label="telemetry";
+        style=dashed;
+        "telemetry" [label="telemetry\n1497 LOC"];
+        "telemetry/exporters" [label="telemetry/exporters\n1387 LOC"];
+    }
+    subgraph "cluster_5" {
+        label="testing";
+        style=dashed;
+        "testing" [label="testing\n877 LOC"];
+    }
+    subgraph "cluster_6" {
+        label="tui";
+        style=dashed;
+        "tui" [label="tui\n307 LOC"];
+        "tui/screens" [label="tui/screens\n352 LOC"];
+        "tui/widgets" [label="tui/widgets\n516 LOC"];
+    }
+    subgraph "cluster_7" {
+        label="web";
+        style=dashed;
+        "web" [label="web\n1072 LOC"];
+        "web/auth" [label="web/auth\n1224 LOC"];
+        "web/blobs" [label="web/blobs\n1952 LOC"];
+        "web/catalog" [label="web/catalog\n407 LOC"];
+        "web/composer" [label="web/composer\n8189 LOC"];
+        "web/composer/skills" [label="web/composer/skills\n85 LOC"];
+        "web/execution" [label="web/execution\n3748 LOC"];
+        "web/middleware" [label="web/middleware\n257 LOC"];
+        "web/secrets" [label="web/secrets\n1011 LOC"];
+        "web/sessions" [label="web/sessions\n4080 LOC"];
+    }
+    "." -> "plugins/infrastructure" [label="7"];
+    "." -> "plugins/sources" [label="2"];
+    "." -> "telemetry" [label="1"];
+    "." -> "tui" [style="dotted", label="cond"];
+    "composer_mcp" -> "web" [label="1"];
+    "composer_mcp" -> "web/catalog" [label="1"];
+    "composer_mcp" -> "web/composer" [label="12", penwidth=3];
+    "mcp" -> "mcp/analyzers" [label="4"];
+    "mcp/analyzers" -> "mcp" [label="29", penwidth=3];
+    "plugins/infrastructure" -> "plugins/infrastructure/clients/retrieval" [label="1"];
+    "plugins/infrastructure/clients/retrieval" -> "plugins/infrastructure/clients" [label="3"];
+    "plugins/sinks" -> "plugins/infrastructure" [label="45", penwidth=3];
+    "plugins/sinks" -> "plugins/infrastructure/clients" [label="4"];
+    "plugins/sinks" -> "plugins/infrastructure/clients/retrieval" [label="1"];
+    "plugins/sources" -> "plugins/infrastructure" [label="17", penwidth=3];
+    "plugins/sources" -> "plugins/infrastructure/clients" [label="5"];
+    "plugins/transforms" -> "plugins/infrastructure" [label="40", penwidth=3];
+    "plugins/transforms" -> "plugins/infrastructure/clients" [label="1"];
+    "plugins/transforms/azure" -> "plugins/infrastructure" [label="6"];
+    "plugins/transforms/azure" -> "plugins/infrastructure/batching" [label="2"];
+    "plugins/transforms/azure" -> "plugins/infrastructure/clients" [label="1"];
+    "plugins/transforms/azure" -> "plugins/infrastructure/pooling" [label="2"];
+    "plugins/transforms/azure" -> "plugins/transforms" [label="2"];
+    "plugins/transforms/llm" -> "plugins/infrastructure" [label="17", penwidth=3];
+    "plugins/transforms/llm" -> "plugins/infrastructure/batching" [label="2"];
+    "plugins/transforms/llm" -> "plugins/infrastructure/clients" [label="3"];
+    "plugins/transforms/llm" -> "plugins/infrastructure/pooling" [label="4"];
+    "plugins/transforms/llm" -> "plugins/transforms/llm/providers" [label="5"];
+    "plugins/transforms/llm/providers" -> "plugins/infrastructure/clients" [label="12", penwidth=3];
+    "plugins/transforms/llm/providers" -> "plugins/transforms/llm" [label="10", penwidth=3];
+    "plugins/transforms/rag" -> "plugins/infrastructure" [label="4"];
+    "plugins/transforms/rag" -> "plugins/infrastructure/clients/retrieval" [label="9"];
+    "telemetry" -> "telemetry/exporters" [label="2"];
+    "telemetry/exporters" -> "telemetry" [label="18", penwidth=3];
+    "testing" -> "plugins/infrastructure" [label="4"];
+    "tui" -> "tui/screens" [label="4"];
+    "tui/screens" -> "tui" [label="2"];
+    "tui/screens" -> "tui/widgets" [label="2"];
+    "tui/widgets" -> "tui" [label="7"];
+    "web" -> "plugins/infrastructure" [label="1"];
+    "web" -> "web/auth" [label="6"];
+    "web" -> "web/blobs" [label="2"];
+    "web" -> "web/catalog" [label="3"];
+    "web" -> "web/composer" [label="3"];
+    "web" -> "web/execution" [label="3"];
+    "web" -> "web/middleware" [label="2"];
+    "web" -> "web/secrets" [label="5"];
+    "web" -> "web/sessions" [label="5"];
+    "web/auth" -> "web" [label="6"];
+    "web/auth" -> "web/middleware" [label="1"];
+    "web/blobs" -> "web" [label="1"];
+    "web/blobs" -> "web/auth" [label="2"];
+    "web/blobs" -> "web/sessions" [label="4"];
+    "web/catalog" -> "plugins/infrastructure" [label="3"];
+    "web/composer" -> "plugins/infrastructure" [label="22", penwidth=3];
+    "web/composer" -> "web" [label="4"];
+    "web/composer" -> "web/blobs" [label="5"];
+    "web/composer" -> "web/catalog" [label="4"];
+    "web/composer" -> "web/composer/skills" [label="2"];
+    "web/composer" -> "web/sessions" [label="5"];
+    "web/execution" -> "." [label="3"];
+    "web/execution" -> "plugins/infrastructure" [label="4"];
+    "web/execution" -> "telemetry" [style="dotted", label="cond"];
+    "web/execution" -> "web" [label="15", penwidth=3];
+    "web/execution" -> "web/auth" [label="6"];
+    "web/execution" -> "web/blobs" [label="5"];
+    "web/execution" -> "web/composer" [label="9"];
+    "web/execution" -> "web/sessions" [label="7"];
+    "web/secrets" -> "web" [label="6"];
+    "web/secrets" -> "web/auth" [label="2"];
+    "web/secrets" -> "web/sessions" [label="1"];
+    "web/sessions" -> "web" [label="3"];
+    "web/sessions" -> "web/auth" [label="2"];
+    "web/sessions" -> "web/blobs" [label="2"];
+    "web/sessions" -> "web/composer" [label="15", penwidth=3];
+    "web/sessions" -> "web/execution" [label="2"];
+    "web/sessions" -> "web/middleware" [label="2"];
+}

@@ -122,8 +122,13 @@ class TestContractBuilderInference:
         ts_field = updated.fields[0]
         assert ts_field.python_type is datetime
 
-    def test_infer_none_type(self) -> None:
-        """None values infer as type(None)."""
+    def test_infer_none_as_object_nullable(self) -> None:
+        """None values on first row infer as object+nullable, not NoneType.
+
+        Bug fix: elspeth-f537ef891a. When the first row has None for a field,
+        the type is unknown (not "always None"). Locking to NoneType causes
+        false contract violations when subsequent rows have real values.
+        """
         from elspeth.contracts.contract_builder import ContractBuilder
 
         contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
@@ -135,10 +140,15 @@ class TestContractBuilderInference:
         updated = builder.process_first_row(first_row, field_resolution)
 
         field = updated.fields[0]
-        assert field.python_type is type(None)
+        assert field.python_type is object, "None should infer as object (unknown type), not NoneType"
+        assert field.nullable is True, "None observation should mark field as nullable"
 
-    def test_infer_pandas_na_type(self) -> None:
-        """pd.NA values infer as type(None) (missing sentinel)."""
+    def test_infer_pandas_na_as_object_nullable(self) -> None:
+        """pd.NA values on first row infer as object+nullable, not NoneType.
+
+        Bug fix: elspeth-f537ef891a. pd.NA is a missing sentinel that should
+        infer the same way as None — type unknown, field is nullable.
+        """
         from elspeth.contracts.contract_builder import ContractBuilder
 
         contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
@@ -150,7 +160,44 @@ class TestContractBuilderInference:
         updated = builder.process_first_row(first_row, field_resolution)
 
         field = updated.fields[0]
-        assert field.python_type is type(None)
+        assert field.python_type is object, "pd.NA should infer as object (unknown type), not NoneType"
+        assert field.nullable is True, "pd.NA observation should mark field as nullable"
+
+    def test_none_inferred_field_accepts_real_values(self) -> None:
+        """Field inferred from None on first row accepts real values on subsequent rows.
+
+        This is the user-facing symptom of elspeth-f537ef891a: sparse first rows
+        cause valid subsequent rows to be quarantined as type violations.
+        """
+        from elspeth.contracts.contract_builder import ContractBuilder
+
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        builder = ContractBuilder(contract)
+
+        # First row has None for 'score' — type unknown
+        first_row = {"id": 1, "score": None}
+        field_resolution = {"id": "id", "score": "score"}
+        locked = builder.process_first_row(first_row, field_resolution)
+
+        # Second row has real float for 'score' — must NOT be a violation
+        violations = locked.validate({"id": 2, "score": 95.5})
+        assert violations == [], f"Real value should not violate contract inferred from None: {violations}"
+
+    def test_pandas_nat_infers_as_object_nullable(self) -> None:
+        """pd.NaT on first row infers as object+nullable, not NoneType."""
+        from elspeth.contracts.contract_builder import ContractBuilder
+
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        builder = ContractBuilder(contract)
+
+        first_row = {"ts": pd.NaT}
+        field_resolution = {"ts": "ts"}
+
+        updated = builder.process_first_row(first_row, field_resolution)
+
+        field = updated.fields[0]
+        assert field.python_type is object
+        assert field.nullable is True
 
 
 class TestContractBuilderValidation:
@@ -456,6 +503,25 @@ class TestContractBuilderEdgeCases:
 
         items_field = updated.fields[0]
         assert items_field.python_type is object
+
+    def test_colliding_normalized_names_rejected(self) -> None:
+        """field_resolution with duplicate normalized values raises ValueError.
+
+        If multiple original names map to the same normalized name, the reverse
+        lookup would silently lose entries. Upstream normalization should prevent
+        this, but ContractBuilder must self-protect.
+        """
+        from elspeth.contracts.contract_builder import ContractBuilder
+
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        builder = ContractBuilder(contract)
+
+        first_row = {"amount_usd": 100}
+        # Two originals map to same normalized name
+        field_resolution = {"Amount USD": "amount_usd", "Amount_USD": "amount_usd"}
+
+        with pytest.raises(ValueError, match="amount_usd"):
+            builder.process_first_row(first_row, field_resolution)
 
     def test_field_in_row_not_in_resolution_crashes(self) -> None:
         """Field in row but not in resolution raises KeyError (Tier 1 integrity).

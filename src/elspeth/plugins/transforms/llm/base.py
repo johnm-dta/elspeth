@@ -106,6 +106,16 @@ class LLMConfig(TransformDataConfig):
             max_capacity_retry_seconds=self.max_capacity_retry_seconds,
         )
 
+    @field_validator("response_field")
+    @classmethod
+    def validate_response_field(cls, v: str) -> str:
+        """Validate response_field is a valid Python identifier."""
+        if not v or not v.strip():
+            raise ValueError("response_field must be non-empty")
+        if not v.isidentifier():
+            raise ValueError(f"response_field must be a valid Python identifier, got {v!r}")
+        return v
+
     @field_validator("template")
     @classmethod
     def validate_template(cls, v: str) -> str:
@@ -126,6 +136,10 @@ class LLMConfig(TransformDataConfig):
         This enforces the "explicit contracts" pattern from ELSPETH's audit philosophy.
         If a template accesses row.field, the user MUST declare what fields are required.
 
+        In multi-query mode, required fields are derived from the union of all
+        query specs' input_fields values (the row column names), plus any row
+        references in the top-level template and per-query template overrides.
+
         Opt-out mechanism:
         - required_input_fields: [field_a, field_b]  # Declare specific requirements
         - required_input_fields: []                   # Explicit opt-out (accept runtime risk)
@@ -138,11 +152,32 @@ class LLMConfig(TransformDataConfig):
         fields_not_declared = self.required_input_fields is None
 
         if fields_not_declared:
-            # Use AST parser to detect row references - catches ALL Jinja2 patterns
-            # including {% if row.x %}, {{ filter(row.y) }}, row['field'], etc.
             from elspeth.core.templates import extract_jinja2_fields
 
-            extracted = extract_jinja2_fields(self.template)
+            if self.queries is not None:
+                # Multi-query mode: required row fields are the union of all
+                # query specs' input_fields values (row column names), plus
+                # any row.* references in the top-level and per-query templates.
+                extracted: set[str] = set()
+                # Collect row column names from input_fields mappings
+                if isinstance(self.queries, dict):
+                    for defn in self.queries.values():
+                        if isinstance(defn, dict) and "input_fields" in defn:
+                            extracted.update(defn["input_fields"].values())
+                            if "template" in defn and defn["template"]:
+                                extracted.update(extract_jinja2_fields(defn["template"]))
+                elif isinstance(self.queries, list):
+                    for item in self.queries:
+                        if isinstance(item, dict) and "input_fields" in item:
+                            extracted.update(item["input_fields"].values())
+                            if "template" in item and item["template"]:
+                                extracted.update(extract_jinja2_fields(item["template"]))
+                # Also check the top-level template for row references
+                extracted.update(extract_jinja2_fields(self.template))
+            else:
+                # Single-query mode: detect row references in the template
+                extracted = set(extract_jinja2_fields(self.template))
+
             if extracted:
                 raise ValueError(
                     f"LLM template references row fields {sorted(extracted)} but "

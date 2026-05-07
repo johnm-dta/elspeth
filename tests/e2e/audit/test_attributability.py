@@ -18,8 +18,8 @@ from typing import Any
 
 from elspeth.contracts import PipelineRow, RunStatus
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -104,12 +104,12 @@ class TestAttributability:
 
         assert len(sink.results) == 10
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 10
 
         for row in rows:
-            lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+            lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
             assert lineage is not None, f"Row {row.row_id} (index={row.row_index}) has no lineage"
 
             # Attributability Test from CLAUDE.md
@@ -133,12 +133,12 @@ class TestAttributability:
 
         assert len(sink.results) == 5
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 5
 
         for row in rows:
-            lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+            lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
             assert lineage is not None
             assert lineage.source_row is not None
 
@@ -158,8 +158,8 @@ class TestAttributability:
         source_data = [{"id": f"hash_{i}", "value": i * 100} for i in range(5)]
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, source_data, transforms=[PassTransform()])
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 5
 
         for row in rows:
@@ -174,7 +174,7 @@ class TestAttributability:
             assert payload_store.exists(row.source_data_ref), f"Row {row.row_id}: payload {row.source_data_ref} not in store"
 
             # Lineage must also reflect the hash
-            lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+            lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
             assert lineage is not None
             assert lineage.source_row.source_data_hash == row.source_data_hash
 

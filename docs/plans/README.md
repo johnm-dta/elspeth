@@ -1,58 +1,52 @@
-# ELSPETH Implementation Plans
+# ELSPETH Plans and Design Notes
 
-This directory tracks active implementation plans. Completed, superseded, and cancelled plans have been removed from the working tree (preserved in git history).
+This directory is a curated set of design and implementation plans that are
+still useful in-tree. It is **not** the system of record for day-to-day work:
+active execution tracking lives in Filigree.
 
-## Active Plans
+Most completed, superseded, or abandoned plans are removed from the working tree
+and preserved in git history. A small number of completed plans remain because
+code, ADRs, or later plans still cite them.
 
-### Essential
+## What Lives Here
 
-| Plan | Description | Status |
-|------|-------------|--------|
-| `RC4-initiation.md` | RC4 scope — last maintenance release before feature work | Active |
-| `ARCH-15-design.md` | Per-branch fork transforms architecture (reviewed, ready for implementation) | Approved |
+### Release and program framing
 
-### High Value
+- `RC4-initiation.md` — RC4 scoping and sequencing snapshot retained for release-history context
 
-| Plan | Description | Status |
-|------|-------------|--------|
-| `2026-02-01-nodeinfo-typed-config.md` | Type NodeInfo.config with discriminated union (big refactor, schedule before Engine API) | Queued |
-| `2026-02-02-whitelist-reduction.md` | Tier model whitelist reduction (488 entries expire 2026-05-02) | Phase 1.1 done |
+### Architecture and design references
 
-### Nice to Have
+- `ARCH-15-design.md` — per-branch fork transform architecture
+- `2026-02-26-t17-plugincontext-protocol-split-design.md` — PluginContext split design retained as architectural reference
+- `2026-03-30-transport-primitive-composition-spec.md` — composition primitives design reference
+- `2026-03-30-primitive-plugin-pack.md` — primitive plugin pack planning/design note
 
-| Plan | Description | Status |
-|------|-------------|--------|
-| `2026-02-13-contract-propagation-complex-fields.md` | Preserve dict/list fields in propagated contracts as `python_type=object` | Queued |
-| `2026-02-13-documentation-audit-report.md` | Documentation freshness and cross-reference audit (errors fixed, gaps remain) | Reference |
+### Implementation plans still relevant for follow-up work
 
-### LLM Consolidation (Future)
+- `2026-02-01-nodeinfo-typed-config.md`
+- `2026-02-02-whitelist-reduction.md`
+- `2026-02-13-contract-propagation-complex-fields.md`
+- `2026-02-25-llm-plugin-consolidation.md`
+- `2026-03-09-display-header-mixin-extraction.md`
+- `2026-03-09-purge-query-deduplication.md`
 
-| Plan | Description | Status |
-|------|-------------|--------|
-| `2026-02-25-llm-plugin-consolidation.md` | Collapse 6 LLM classes into Strategy pattern — approved design | Approved |
-| `05-quality-assessment-t10-llm-consolidation.md` | Architecture quality review of LLM consolidation design | Reference |
+### Review companions and audit artifacts
 
-### Architecture Reference
+- `*.review.json` files are plan-review outputs that belong next to the plan they assess
+- `05-quality-assessment-t10-llm-consolidation.md` is an architecture quality review, not an executable plan
+- `2026-02-13-documentation-audit-report.md` is a documentation audit report retained as reference material
 
-| Plan | Description | Status |
-|------|-------------|--------|
-| `2026-02-26-t17-plugincontext-protocol-split-design.md` | PluginContext protocol split design (referenced from `contracts/contexts.py`) | Implemented — kept as architecture doc |
+## Historical Plans
 
-## Historical Plans (Git History)
-
-179+ completed plans and 18+ superseded plans were removed from this directory (148 on 2026-02-14, 31 on 2026-03-07). To recover any historical plan:
+Large batches of completed and superseded plans have already been removed from
+this directory and kept in git history. To recover one:
 
 ```bash
-# Find a specific plan by name
+# Find a specific deleted plan by name
 git log --all --diff-filter=D -- "docs/plans/*field-collision*"
 
 # Restore a deleted plan
 git show <commit>:docs/plans/<filename>.md
 ```
 
-## Plan Lifecycle
-
-```
-Created → In Progress → Completed (deleted from tree, kept in git)
-                      → Superseded (deleted from tree, kept in git)
-```
+Additional assistant-driven plans and specs live under `docs/superpowers/`.

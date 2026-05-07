@@ -40,20 +40,18 @@ def deep_freeze(value: Any) -> Any:
 
         >>> from types import MappingProxyType
         >>> already = MappingProxyType({"k": "v"})
-        >>> deep_freeze(already) is already  # no-op on frozen input
+        >>> deep_freeze(already) == already  # detached copy, same content
         True
     """
     if isinstance(value, dict):
         return MappingProxyType({k: deep_freeze(v) for k, v in value.items()})
     if isinstance(value, list):
         return tuple(deep_freeze(item) for item in value)
-    # Already-immutable containers — recurse into contents, but return
-    # the original object when nothing changed (idempotency optimisation).
+    # MappingProxyType is a READ-ONLY VIEW, not a detached copy. The
+    # underlying dict may still be mutable through other references.
+    # Always create a fresh dict from the proxy's items to detach.
     if isinstance(value, MappingProxyType):
-        frozen_map = {k: deep_freeze(v) for k, v in value.items()}
-        if all(frozen_map[k] is value[k] for k in frozen_map):
-            return value
-        return MappingProxyType(frozen_map)
+        return MappingProxyType({k: deep_freeze(v) for k, v in value.items()})
     if isinstance(value, tuple):
         frozen_tup = tuple(deep_freeze(item) for item in value)
         if all(a is b for a, b in zip(frozen_tup, value, strict=True)):
@@ -94,7 +92,16 @@ def freeze_fields(instance: object, *field_names: str) -> None:
 
             def __post_init__(self) -> None:
                 freeze_fields(self, "data", "items")
+
+    Raises:
+        AttributeError: If any field_name is not a declared dataclass field.
     """
+    import dataclasses
+
+    declared = {f.name for f in dataclasses.fields(instance)}  # type: ignore[arg-type]
+    unknown = set(field_names) - declared
+    if unknown:
+        raise AttributeError(f"freeze_fields: {sorted(unknown)} not declared on {type(instance).__name__}. Declared: {sorted(declared)}")
     for name in field_names:
         value = getattr(instance, name)
         frozen = deep_freeze(value)

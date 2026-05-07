@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, ClassVar
 
 from elspeth.contracts.call_data import CallPayload
 from elspeth.contracts.enums import (
@@ -20,10 +20,11 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
-from elspeth.contracts.freeze import require_int
+from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.token_usage import TokenUsage
 
 
@@ -126,8 +127,10 @@ class RunSummary:
     routing breakdown.
 
     Routing breakdown:
-    - routed: Total rows routed to non-default sinks (gates or error routing)
-    - routed_destinations: Count per destination sink {sink_name: count}
+    - routed_success: Rows routed via gate route_to_sink (intentional MOVE — success-side routing)
+    - routed_failure: Rows routed via transform on_error (DIVERT — failure-side routing)
+    - routed_destinations: Count per destination sink {sink_name: count}; the per-sink
+      breakdown is not split by routing intent — see ADR-004 for rationale.
     """
 
     run_id: str
@@ -138,7 +141,8 @@ class RunSummary:
     quarantined: int
     duration_seconds: float
     exit_code: int  # 0=success, 1=partial failure, 2=total failure
-    routed: int = 0  # Rows routed to non-default sinks
+    routed_success: int = 0  # Rows routed via gate route_to_sink (intentional MOVE)
+    routed_failure: int = 0  # Rows routed via transform on_error (DIVERT)
     routed_destinations: tuple[tuple[str, int], ...] = ()  # (sink_name, count) pairs
 
     def __post_init__(self) -> None:
@@ -147,7 +151,8 @@ class RunSummary:
         require_int(self.failed, "failed", min_value=0)
         require_int(self.quarantined, "quarantined", min_value=0)
         require_int(self.exit_code, "exit_code", min_value=0)
-        require_int(self.routed, "routed", min_value=0)
+        require_int(self.routed_success, "routed_success", min_value=0)
+        require_int(self.routed_failure, "routed_failure", min_value=0)
 
 
 # =============================================================================
@@ -237,11 +242,12 @@ class GateEvaluated(TelemetryEvent):
 
 @dataclass(frozen=True, slots=True)
 class TokenCompleted(TelemetryEvent):
-    """Emitted when a token reaches its terminal state."""
+    """Emitted when a token reaches its terminal state (ADR-019 two-axis)."""
 
     row_id: str
     token_id: str
-    outcome: RowOutcome
+    outcome: TerminalOutcome | None
+    path: TerminalPath
     sink_name: str | None
 
 
@@ -323,7 +329,7 @@ class FieldResolutionApplied(TelemetryEvent):
     def __post_init__(self) -> None:
         """Snapshot + freeze: always copy to decouple from caller's dict."""
         require_int(self.field_count, "field_count", min_value=0)
-        object.__setattr__(self, "resolution_mapping", MappingProxyType(dict(self.resolution_mapping)))
+        freeze_fields(self, "resolution_mapping")
 
 
 # =============================================================================
@@ -407,6 +413,10 @@ class ExternalCallCompleted(TelemetryEvent):
                 f"Got state_id={self.state_id!r}, operation_id={self.operation_id!r}"
             )
 
+    # Fields that have their own to_dict() — skip in the generic recursive walk
+    # to avoid O(payload-size) double-serialization.
+    _DTO_FIELDS: ClassVar[frozenset[str]] = frozenset({"request_payload", "response_payload", "token_usage"})
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize event, using DTO-aware serialization for payloads.
 
@@ -415,15 +425,17 @@ class ExternalCallCompleted(TelemetryEvent):
         that omit None fields or spread extra_kwargs). Calling .to_dict() on each
         payload produces the correct audit-stable dict representation.
 
-        Note: calls _event_field_to_serializable directly instead of super().to_dict()
-        because super() fails with slots=True dataclass inheritance (CPython bug —
-        __class__ cell not set correctly for dynamically created slot classes).
+        Excludes DTO fields from the initial recursive walk to avoid
+        double-serialization (O(payload-size) CPU/memory amplification).
         """
-        d: dict[str, Any] = _event_field_to_serializable(self)
-        if self.request_payload is not None:
-            d["request_payload"] = self.request_payload.to_dict()
-        if self.response_payload is not None:
-            d["response_payload"] = self.response_payload.to_dict()
-        if self.token_usage is not None:
-            d["token_usage"] = self.token_usage.to_dict()
+        d: dict[str, Any] = {}
+        for f in dataclasses.fields(self):
+            if f.name in self._DTO_FIELDS:
+                continue
+            d[f.name] = _event_field_to_serializable(getattr(self, f.name))
+        # Serialize DTO fields via their own to_dict() (correct shape),
+        # or None if not set. Always present in output for shape stability.
+        d["request_payload"] = self.request_payload.to_dict() if self.request_payload is not None else None
+        d["response_payload"] = self.response_payload.to_dict() if self.response_payload is not None else None
+        d["token_usage"] = self.token_usage.to_dict() if self.token_usage is not None else None
         return d

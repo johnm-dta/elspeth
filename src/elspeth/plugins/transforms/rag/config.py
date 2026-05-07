@@ -32,8 +32,8 @@ def _get_providers() -> dict[str, _ProviderEntry]:
         )
 
         providers["azure_search"] = (AzureSearchProviderConfig, AzureSearchProvider)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # azure SDK not installed — azure_search provider unavailable
 
     try:
         from elspeth.plugins.infrastructure.clients.retrieval.chroma import (
@@ -41,18 +41,18 @@ def _get_providers() -> dict[str, _ProviderEntry]:
             ChromaSearchProviderConfig,
         )
 
-        def _chroma_factory(config: ChromaSearchProviderConfig, *, recorder: Any, run_id: Any, **_kwargs: Any) -> ChromaSearchProvider:
-            """Chroma uses the SDK directly — passes recorder and run_id for audit trail.
+        def _chroma_factory(config: ChromaSearchProviderConfig, *, execution: Any, run_id: Any, **_kwargs: Any) -> ChromaSearchProvider:
+            """Chroma uses the SDK directly — passes execution repo and run_id for audit trail.
 
-            recorder and run_id are mandatory (not defaulted to None) because Chroma
+            execution and run_id are mandatory (not defaulted to None) because Chroma
             search calls must be recorded in the audit trail (B1 fix). If the engine
-            ever calls this factory without recorder, it should crash at startup, not
+            ever calls this factory without execution, it should crash at startup, not
             silently skip audit recording at query time.
             """
-            return ChromaSearchProvider(config=config, recorder=recorder, run_id=run_id)
+            return ChromaSearchProvider(config=config, execution=execution, run_id=run_id)
 
         providers["chroma"] = (ChromaSearchProviderConfig, _chroma_factory)
-    except ImportError:
+    except ModuleNotFoundError:
         pass  # chromadb not installed — chroma provider unavailable
 
     return providers

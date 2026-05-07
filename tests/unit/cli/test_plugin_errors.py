@@ -117,12 +117,13 @@ sinks:
         assert result.exit_code != 0
         # Should show clear error from plugin instantiation
         output_lower = result.output.lower()
-        assert "error" in output_lower, f"Expected 'error' in output, got: {result.output}"
+        assert "plugin instantiation failed" in output_lower, f"Expected plugin instantiation failure panel, got: {result.output}"
         # Error should mention the plugin type or config issue
         # (missing path and on_validation_failure for csv source)
-        assert "path" in output_lower or "csv" in output_lower or "source" in output_lower, (
+        assert "path" in output_lower or "csvsourceconfig" in output_lower or "source" in output_lower, (
             f"Expected error to mention plugin/config issue, got: {result.output}"
         )
+        assert "on_validation_failure" in output_lower, f"Expected missing required source option to be reported, got: {result.output}"
         # Ensure it's NOT reporting as valid
         assert "pipeline configuration valid" not in output_lower, "Should not report as valid when config has missing required fields"
 

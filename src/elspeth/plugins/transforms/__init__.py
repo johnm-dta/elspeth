@@ -8,3 +8,11 @@ Plugins are accessed via PluginManager, not direct imports:
     manager.register_builtin_plugins()
     transform = manager.get_transform_by_name("field_mapper")
 """
+
+from elspeth.plugins.transforms.type_coerce import TypeCoerce
+from elspeth.plugins.transforms.value_transform import ValueTransform
+
+__all__ = [
+    "TypeCoerce",
+    "ValueTransform",
+]

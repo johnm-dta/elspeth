@@ -341,7 +341,8 @@ class TestJSONSourceConfigValidation:
         from elspeth.plugins.infrastructure.config_base import PluginConfigError
         from elspeth.plugins.sources.json_source import JSONSource
 
-        with pytest.raises(PluginConfigError, match=r"schema_config[\s\S]*Field required"):
+        # Error message uses alias "schema" not field name "schema_config"
+        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
             JSONSource({"path": "/tmp/test.json", "on_validation_failure": QUARANTINE_SINK})
 
     def test_missing_on_validation_failure_raises_error(self) -> None:
@@ -1073,13 +1074,23 @@ class TestJSONSourceDataKeyStructuralErrors:
         # No rows yielded - structural error discarded
         assert len(results) == 0
 
-    def test_data_key_structural_error_records_validation_error(self, tmp_path: Path, ctx: PluginContext) -> None:
+    def test_data_key_structural_error_records_validation_error(self, tmp_path: Path) -> None:
         """Structural errors are recorded via ctx.record_validation_error().
 
         With a real Landscape recorder, the validation error is persisted
         to the database. This test verifies the recording path succeeds.
         """
+        from elspeth.contracts.plugin_context import PluginContext
         from elspeth.plugins.sources.json_source import JSONSource
+        from tests.fixtures.landscape import make_recorder_with_run
+
+        setup = make_recorder_with_run(source_plugin_name="json")
+        ctx = PluginContext(
+            run_id=setup.run_id,
+            node_id=setup.source_node_id,
+            config={},
+            landscape=setup.factory.plugin_audit_writer(),
+        )
 
         json_file = tmp_path / "data.json"
         json_file.write_text('{"wrong_key": [{"id": 1}]}')
@@ -1102,17 +1113,10 @@ class TestJSONSourceDataKeyStructuralErrors:
         assert results[0].quarantine_error is not None
         assert "results" in results[0].quarantine_error  # The missing data_key
 
-        # Verify validation error was recorded to Landscape
-        from sqlalchemy import select
-
-        from elspeth.core.landscape.schema import validation_errors_table
-
-        assert ctx.landscape is not None
-        with ctx.landscape._db.engine.connect() as conn:
-            rows = conn.execute(select(validation_errors_table).where(validation_errors_table.c.run_id == ctx.run_id)).fetchall()
-
-        assert len(rows) == 1
-        assert "results" in rows[0].error  # The missing data_key
+        # Verify validation error was recorded to Landscape via factory's data_flow repo
+        errors = setup.factory.data_flow.get_validation_errors_for_run(ctx.run_id)
+        assert len(errors) == 1
+        assert "results" in errors[0].error  # The missing data_key
 
     def test_data_key_structural_error_uses_parse_schema_mode(self, tmp_path: Path) -> None:
         """Structural data_key errors record contract-valid schema_mode='parse'."""
@@ -1295,3 +1299,277 @@ class TestJSONSourceArrayModeUnicodeDecodeError:
         assert len(results) == 1
         assert results[0].is_quarantined is True
         assert results[0].quarantine_error is not None
+
+
+class TestJSONSourceRowShapeBoundaryErrors:
+    """Regression tests for malformed JSON row shapes at the source boundary."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a plugin context with proper FK records for validation error recording."""
+        return make_source_context(plugin_name="json")
+
+    def test_jsonl_scalar_row_quarantined_and_later_rows_continue(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """JSONL scalar rows are quarantined instead of crashing the source."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "scalar-first.jsonl"
+        jsonl_file.write_text('1\n{"id": 2}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 2
+        assert results[0].is_quarantined is True
+        assert results[0].quarantine_error is not None
+        assert "expected json object" in results[0].quarantine_error.lower()
+        assert "int" in results[0].quarantine_error.lower()
+        assert results[1].is_quarantined is False
+        assert results[1].row == {"id": 2}
+
+    def test_json_array_scalar_element_quarantined_and_later_rows_continue(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Array-mode scalar elements are quarantined instead of aborting the file."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "mixed.json"
+        json_file.write_text('[1, {"id": 2}]')
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "format": "json",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 2
+        assert results[0].is_quarantined is True
+        assert results[0].quarantine_error is not None
+        assert "expected json object" in results[0].quarantine_error.lower()
+        assert "int" in results[0].quarantine_error.lower()
+        assert results[1].is_quarantined is False
+        assert results[1].row == {"id": 2}
+
+    def test_later_row_normalization_collision_quarantined_and_later_rows_continue(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Normalization collisions quarantine the offending row instead of crashing."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "colliding-keys.jsonl"
+        jsonl_file.write_text('{"id": 1}\n{"A B": 2, "a_b": 3}\n{"id": 4}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 3
+        assert results[0].is_quarantined is False
+        assert results[0].row == {"id": 1}
+        assert results[1].is_quarantined is True
+        assert results[1].quarantine_error is not None
+        assert "collision after normalization" in results[1].quarantine_error.lower()
+        assert results[1].row == {"A B": 2, "a_b": 3}
+        assert results[2].is_quarantined is False
+        assert results[2].row == {"id": 4}
+
+    def test_row_key_normalizing_to_empty_identifier_quarantined(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Keys that normalize to an empty identifier are quarantined, not fatal."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "empty-normalized-key.jsonl"
+        jsonl_file.write_text('{"id": 1}\n{"!!!": 2}\n{"id": 4}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 3
+        assert results[0].is_quarantined is False
+        assert results[1].is_quarantined is True
+        assert results[1].quarantine_error is not None
+        assert "normalizes to empty string" in results[1].quarantine_error.lower()
+        assert results[1].row == {"!!!": 2}
+        assert results[2].is_quarantined is False
+        assert results[2].row == {"id": 4}
+
+
+class TestJSONSourceKeyNormalization:
+    """Tests for JSON source field name normalization and resolution.
+
+    JSON keys may contain spaces, mixed case, or other characters that
+    are not valid Python identifiers. The source normalizes these at
+    the Tier 3 boundary.
+    """
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a plugin context with proper FK records for validation error recording."""
+        return make_source_context(plugin_name="json")
+
+    def test_nontrivial_key_normalization(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """JSON keys with spaces and mixed case are normalized to snake_case identifiers."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        data = [
+            {"Customer Name": "Alice", "Order ID": 101},
+            {"Customer Name": "Bob", "Order ID": 102},
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert all(not r.is_quarantined for r in rows)
+        # Keys should be normalized to snake_case
+        assert rows[0].row == {"customer_name": "Alice", "order_id": 101}
+        assert rows[1].row == {"customer_name": "Bob", "order_id": 102}
+
+    def test_field_mapping_override(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """field_mapping config overrides default normalization for specified keys."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        data = [
+            {"Customer Name": "Alice", "Order ID": 101},
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+                "field_mapping": {"customer_name": "client_name"},
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert not rows[0].is_quarantined
+        # "Customer Name" uses field_mapping override, "Order ID" uses default normalization
+        assert rows[0].row["client_name"] == "Alice"
+        assert rows[0].row["order_id"] == 101
+
+    def test_get_field_resolution_returns_mapping(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """get_field_resolution() returns the resolution mapping after load()."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        data = [{"Customer Name": "Alice", "Order ID": 101}]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        # Before load, field resolution is None
+        assert source.get_field_resolution() is None
+
+        list(source.load(ctx))
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, version = resolution
+        # Mapping contains original->normalized entries
+        assert mapping["Customer Name"] == "customer_name"
+        assert mapping["Order ID"] == "order_id"
+        assert version is not None
+
+    def test_first_row_quarantined_key_rebuild(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """When first row is quarantined and second row has different keys, resolution rebuilds.
+
+        If the first row's keys produce a stale resolution mapping, subsequent rows
+        with different keys should trigger a rebuild so normalization is correct.
+        """
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        # First object fails FIXED schema validation (missing required 'score' field),
+        # second object succeeds but has an extra key not in the first row.
+        json_file = tmp_path / "data.json"
+        data = [
+            {"id": 1, "name": "alice"},  # Missing 'score' -- quarantined by FLEXIBLE schema
+            {"id": 2, "name": "bob", "score": 95, "Extra Field": "bonus"},  # Valid + extra key
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["id: int", "name: str", "score: int"],
+                },
+                "on_validation_failure": "quarantine",
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        # First row quarantined (missing required 'score')
+        assert rows[0].is_quarantined is True
+        # Second row valid -- "Extra Field" should be normalized
+        assert rows[1].is_quarantined is False
+        assert rows[1].row["extra_field"] == "bonus"
+        assert rows[1].row["score"] == 95
+
+    def test_fixed_schema_fast_path_sets_contract_in_init(self, tmp_path: Path) -> None:
+        """FIXED schema sets contract immediately in __init__ without waiting for first row."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text("[]")  # Empty -- we only test __init__ behavior
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {
+                    "mode": "fixed",
+                    "fields": ["id: int", "name: str"],
+                },
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        # Contract should be set immediately (fast path), not deferred
+        contract = source.get_schema_contract()
+        assert contract is not None
+        assert contract.locked is True
+        assert contract.mode == "FIXED"
+        # ContractBuilder should be None (not needed for FIXED)
+        assert source._contract_builder is None

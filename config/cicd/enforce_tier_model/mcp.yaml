@@ -14,7 +14,7 @@ per_file_rules:
   - R5
   reason: Tier 3 MCP protocol argument validation
   expires: null
-  max_hits: 7
+  max_hits: 8
 allow_hits:
 - key: mcp/server.py:R6:_find_audit_databases:fp=d1b9da6750fcbc5b
   owner: architecture

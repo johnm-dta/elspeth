@@ -129,7 +129,7 @@ class EdgeInfo:
 | Edge Type | Label Format | Example |
 |-----------|-------------|---------|
 | Sequential flow | `"continue"` | source → transform_0 |
-| Gate route | Sink name or `"continue"` | gate → high_values_sink |
+| Gate route | Sink name, downstream connection name, `"continue"`, or virtual `"discard"` | gate → high_values_sink |
 | Fork branch | Branch name | gate → sentiment_path |
 | Error divert | `"__error_{transform_seq}__"` | transform_2 → error_sink |
 | Quarantine divert | `"__quarantine__"` | source → quarantine_sink |
@@ -141,6 +141,11 @@ class EdgeInfo:
 From the same source node, no two outgoing edges may share the same label. This prevents routing ambiguity — if a gate has two edges labeled `"high_values"`, the engine cannot determine which to follow.
 
 Enforced at: `ExecutionGraph.validate()`, unique edge labels check.
+
+The virtual gate route target `"discard"` is terminal and does not create an
+edge to a node or sink named `discard`. The builder records it in the route
+resolution map as `RouteDestination.discard()`, and the processor records
+`(SUCCESS, GATE_DISCARDED)` for the token.
 
 ---
 

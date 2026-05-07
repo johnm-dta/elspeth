@@ -218,6 +218,36 @@ class TestCheckpointTopologyValidation:
         assert result.can_resume is False
 
 
+class TestTopologyHashSensitivity:
+    """Tests that topology hash is sensitive to all structural properties."""
+
+    def test_different_node_types_produce_different_hashes(self) -> None:
+        """Changing only node_type must produce a different topology hash.
+
+        Regression: If node_type is excluded from the hash input, swapping
+        a TRANSFORM for a GATE (or vice versa) would not be detected during
+        resume, silently corrupting the audit trail.
+        """
+        graph_transform = ExecutionGraph()
+        graph_transform.add_node("source", node_type=NodeType.SOURCE, config={}, plugin_name="csv")
+        graph_transform.add_node("middle", node_type=NodeType.TRANSFORM, config={"op": "x"}, plugin_name="passthrough")
+        graph_transform.add_node("sink", node_type=NodeType.SINK, config={}, plugin_name="csv")
+        graph_transform.add_edge("source", "middle", label="continue", mode=RoutingMode.MOVE)
+        graph_transform.add_edge("middle", "sink", label="continue", mode=RoutingMode.MOVE)
+
+        graph_gate = ExecutionGraph()
+        graph_gate.add_node("source", node_type=NodeType.SOURCE, config={}, plugin_name="csv")
+        graph_gate.add_node("middle", node_type=NodeType.GATE, config={"op": "x"}, plugin_name="passthrough")
+        graph_gate.add_node("sink", node_type=NodeType.SINK, config={}, plugin_name="csv")
+        graph_gate.add_edge("source", "middle", label="continue", mode=RoutingMode.MOVE)
+        graph_gate.add_edge("middle", "sink", label="continue", mode=RoutingMode.MOVE)
+
+        hash_transform = compute_full_topology_hash(graph_transform)
+        hash_gate = compute_full_topology_hash(graph_gate)
+
+        assert hash_transform != hash_gate, "Different node_types (TRANSFORM vs GATE) should produce different hashes"
+
+
 class TestTopologyHashDeterminism:
     """Tests for topology hash determinism and edge cases."""
 

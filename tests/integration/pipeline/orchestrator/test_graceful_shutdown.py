@@ -15,12 +15,16 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from elspeth.contracts import PipelineRow, RunStatus
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.results import SourceRow
+from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.contracts.types import AggregationName
+from elspeth.core.canonical import canonical_json
 from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
-from elspeth.engine.orchestrator import PipelineConfig
+from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from tests.fixtures.base_classes import (
@@ -35,6 +39,12 @@ from tests.fixtures.plugins import CollectSink, ListSource
 
 if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
+
+
+def _runtime_val_manifest_json() -> str:
+    """Mirror the run-header manifest production begin_run() stores."""
+    prepare_for_run()
+    return canonical_json(build_runtime_val_manifest())
 
 
 class InterruptAfterN(BaseTransform):
@@ -204,7 +214,7 @@ def _build_interruptible_aggregation_config(
         gates=[],
     )
 
-    agg_node_id = graph.get_aggregation_id_map()["sum_agg"]
+    agg_node_id = graph.get_aggregation_id_map()[AggregationName("sum_agg")]
     transform.node_id = agg_node_id
 
     config = PipelineConfig(
@@ -268,7 +278,7 @@ def _build_interruptible_coalesce_config(
         coalesce_settings=[coalesce],
     )
 
-    agg_node_id = graph.get_aggregation_id_map()["agg_branch_hold"]
+    agg_node_id = graph.get_aggregation_id_map()[AggregationName("agg_branch_hold")]
     batch_transform.node_id = agg_node_id
 
     config = PipelineConfig(
@@ -485,7 +495,8 @@ class TestShutdownBreaksLoop:
         assert exc_info.value.rows_succeeded == 0
         assert exc_info.value.rows_failed == 0
         assert exc_info.value.rows_quarantined == 0
-        assert exc_info.value.rows_routed == 0
+        assert exc_info.value.rows_routed_success == 0
+        assert exc_info.value.rows_routed_failure == 0
         assert output_sink.results == []
 
 
@@ -766,9 +777,9 @@ class TestInterruptAndResume:
 
         from sqlalchemy import insert
 
-        from elspeth.contracts import NodeType, RowOutcome
+        from elspeth.contracts import NodeType
         from elspeth.contracts.contract_records import ContractAuditRecord
-        from elspeth.contracts.enums import Determinism, RoutingMode
+        from elspeth.contracts.enums import Determinism, RoutingMode, TerminalOutcome, TerminalPath
         from elspeth.contracts.schema_contract import FieldContract, SchemaContract
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.landscape.schema import (
@@ -778,7 +789,7 @@ class TestInterruptAndResume:
             runs_table,
             tokens_table,
         )
-        from tests.fixtures.landscape import make_recorder
+        from tests.fixtures.landscape import make_factory
         from tests.fixtures.plugins import PassTransform
 
         now = datetime.now(UTC)
@@ -827,6 +838,7 @@ class TestInterruptAndResume:
                     source_schema_json=source_schema_json,
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -889,12 +901,12 @@ class TestInterruptAndResume:
                 )
 
         # Mark first N rows as completed
-        recorder = make_recorder(db)
+        factory = make_factory(db)
         for i in range(processed_count):
-            recorder.record_token_outcome(
-                run_id=run_id,
-                token_id=f"t{i}",
-                outcome=RowOutcome.COMPLETED,
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 
@@ -1004,6 +1016,7 @@ class TestInterruptAndResume:
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape.schema import (
+            batch_members_table,
             batches_table,
             edges_table,
             nodes_table,
@@ -1042,6 +1055,7 @@ class TestInterruptAndResume:
                     source_schema_json=source_schema_json,
                     schema_contract_json=audit_record.to_json(),
                     schema_contract_hash=contract.version_hash(),
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
                 )
             )
 
@@ -1107,6 +1121,15 @@ class TestInterruptAndResume:
                     created_at=now,
                 )
             )
+            for ordinal, token_id in enumerate(("t0", "t1")):
+                conn.execute(
+                    insert(batch_members_table).values(
+                        batch_id="batch-001",
+                        run_id=run_id,
+                        token_id=token_id,
+                        ordinal=ordinal,
+                    )
+                )
 
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
@@ -1115,7 +1138,7 @@ class TestInterruptAndResume:
             sequence_number=1,
             graph=graph,
             aggregation_state=AggregationCheckpointState(
-                version="3.0",
+                version="4.0",
                 nodes={
                     agg_node_id: AggregationNodeCheckpoint(
                         tokens=(
@@ -1128,6 +1151,7 @@ class TestInterruptAndResume:
                                 expand_group_id=None,
                                 row_data=rows[0],
                                 contract_version=contract.version_hash(),
+                                contract=contract.to_checkpoint_format(),
                             ),
                             AggregationTokenCheckpoint(
                                 token_id="t1",
@@ -1138,13 +1162,13 @@ class TestInterruptAndResume:
                                 expand_group_id=None,
                                 row_data=rows[1],
                                 contract_version=contract.version_hash(),
+                                contract=contract.to_checkpoint_format(),
                             ),
                         ),
                         batch_id="batch-001",
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
-                        contract=contract.to_checkpoint_format(),
                     )
                 },
             ),

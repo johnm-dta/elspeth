@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "scope": {
+    "cluster": "core",
+    "scope_path": "src/elspeth/core/",
+    "filter_rule": "L3 import-graph oracle (temp/l3-import-graph.json) edges where BOTH endpoints lie under src/elspeth/core/ subtree",
+    "filter_method": "Python set-membership on edge.from / edge.to vs nodes whose id starts with 'core'"
+  },
+  "intra_node_count": 0,
+  "intra_edge_count": 0,
+  "inbound_cross_cluster_edges": [],
+  "outbound_cross_cluster_edges": [],
+  "edges": [],
+  "rationale": "core/ is L1 (per scripts/cicd/enforce_tier_model.py:238 \"core\": 1, also KNOW-C47). The Phase 0 oracle (temp/l3-import-graph.json) is scoped to L3 only (root='src/elspeth', layers_included=['L3/application'] per the scope object in that JSON). Filtering it for core/ paths therefore yields zero nodes and zero edges by construction, not by absence of coupling. This empty file is the audit evidence that the cluster's intra-graph was filtered (not hand-derived) and that L3-graph contamination did not creep into the L2-cluster catalog. core's actual outbound edges (downward to contracts/) and inbound edges (from engine/, plugins/, web/, mcp/, composer_mcp/, telemetry/, tui/, testing/, cli) are layer-permitted by construction (per the layer model in scripts/cicd/enforce_tier_model.py:237-248) and recorded at sub-subsystem granularity in 02-cluster-catalog.md from per-file imports rather than from this oracle.",
+  "byte_equality_assertion": {
+    "applicable": false,
+    "reason": "Layer is L1, not L3 — Δ L2-6 dump-edges sub-clause N/A per specialisation"
+  }
+}

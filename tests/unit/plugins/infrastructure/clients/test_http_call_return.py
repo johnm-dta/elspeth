@@ -44,7 +44,7 @@ class TestGetSsrfSafeCallReturn:
         mock_recorder.allocate_call_index.return_value = 0
 
         client = AuditedHTTPClient(
-            recorder=mock_recorder,
+            execution=mock_recorder,
             state_id="state-1",
             run_id="run-1",
             telemetry_emit=lambda event: None,
@@ -73,6 +73,7 @@ class TestGetSsrfSafeCallReturn:
             port=80,
             path="/",
             scheme="http",
+            bare_hostname="example.com",
         )
 
         with patch("httpx.Client") as mock_client_class:

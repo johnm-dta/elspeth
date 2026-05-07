@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 import urllib.parse
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
 
 import httpx
-import structlog
 from pydantic import BaseModel, field_validator, model_validator
 
 from elspeth.contracts.probes import CollectionReadinessResult
@@ -17,7 +15,7 @@ from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 
 if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.core.landscape.execution_repository import ExecutionRepository
     from elspeth.core.rate_limit.limiter import RateLimiter
     from elspeth.core.rate_limit.registry import NoOpLimiter
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
@@ -104,26 +102,51 @@ _SCORE_RANGES: dict[str, tuple[float, float]] = {
 class AzureSearchProvider:
     """Azure AI Search implementation of RetrievalProvider.
 
-    Constructs a per-call AuditedHTTPClient scoped to each row's state_id.
+    Uses a single AuditedHTTPClient for connection pooling across searches.
+    The client's state_id and token_id are updated per-call for correct
+    audit scoping. This is safe because row processing is serial within
+    a transform — no concurrent calls to search().
     """
 
     def __init__(
         self,
         config: AzureSearchProviderConfig,
         *,
-        recorder: LandscapeRecorder,
+        execution: ExecutionRepository,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: RateLimiter | NoOpLimiter | None = None,
     ) -> None:
+        from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+
         self._config = config
-        self._recorder = recorder
+        self._execution = execution
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
         self._limiter = limiter
 
         self._search_url = f"{config.endpoint.rstrip('/')}/indexes/{config.index}/docs/search?api-version={config.api_version}"
         self._score_range = _SCORE_RANGES[config.search_mode]
+
+        # Per-search skipped item tracking — allows callers to include
+        # skip counts in audit records without changing the protocol.
+        self.last_skipped_count: int = 0
+        self.last_skipped_reasons: list[dict[str, Any]] = []
+
+        # Shared HTTP client for connection pooling. Created once, reused
+        # across all search() calls. state_id is updated per-call.
+        headers = {"Content-Type": "application/json"}
+        if self._config.api_key:
+            headers["api-key"] = self._config.api_key
+        self._http_client = AuditedHTTPClient(
+            execution=self._execution,
+            state_id="__init__",  # Updated per-call in _execute_search
+            run_id=self._run_id,
+            telemetry_emit=self._telemetry_emit,
+            timeout=self._config.request_timeout,
+            limiter=self._limiter,
+            headers=headers,
+        )
 
     def search(
         self,
@@ -136,14 +159,17 @@ class AzureSearchProvider:
     ) -> list[RetrievalChunk]:
         response_data = self._execute_search(query, top_k, state_id=state_id, token_id=token_id)
         chunks, skipped_items = self._parse_response(response_data, min_score)
-        # "Record what we didn't get" — skipped items are audit evidence
-        if skipped_items:
-            structlog.get_logger(__name__).debug(
-                "azure_search_skipped_items",
-                state_id=state_id,
-                skipped=skipped_items,
-                skipped_count=len(skipped_items),
-            )
+        # "Record what we didn't get" — skipped items are audit evidence.
+        # Store on instance so callers (RAGRetrievalTransform) can include
+        # skip counts in their audit success_reason metadata, which flows
+        # into the Landscape audit trail.
+        # "Record what we didn't get" — skipped items are audit evidence.
+        # Stored on instance for the caller (RAGRetrievalTransform) to include
+        # in the Landscape audit trail via success_reason metadata.
+        # No logger.debug — per logging policy, pipeline activity belongs
+        # in the Landscape, not in logs.
+        self.last_skipped_count = len(skipped_items)
+        self.last_skipped_reasons = skipped_items
         return chunks
 
     def _execute_search(
@@ -154,26 +180,13 @@ class AzureSearchProvider:
         state_id: str,
         token_id: str | None,
     ) -> dict[str, Any]:
-        from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
-
-        headers = {"Content-Type": "application/json"}
-        if self._config.api_key:
-            headers["api-key"] = self._config.api_key
-
         body = self._build_request_body(query, top_k)
 
-        http_client = AuditedHTTPClient(
-            recorder=self._recorder,
-            state_id=state_id,
-            run_id=self._run_id,
-            telemetry_emit=self._telemetry_emit,
-            timeout=self._config.request_timeout,
-            limiter=self._limiter,
-            token_id=token_id,
-            headers=headers,
-        )
+        # Update per-call audit scoping on the shared client.
+        self._http_client.update_call_context(state_id, token_id)
+
         try:
-            response = http_client.post(self._search_url, json=body)
+            response = self._http_client.post(self._search_url, json=body)
 
             status_code = response.status_code
             if status_code in (401, 403):
@@ -189,16 +202,23 @@ class AzureSearchProvider:
             if status_code >= 400:
                 raise RetrievalError(f"Azure AI Search client error: HTTP {status_code}", retryable=False, status_code=status_code)
 
-            try:
-                return cast(dict[str, Any], response.json())
-            except (json.JSONDecodeError, ValueError) as exc:
-                raise RetrievalError(f"Malformed JSON response from Azure AI Search: {exc}", retryable=False) from exc
+            from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict
+
+            parsed, error = parse_json_strict(response.text)
+            if error is not None:
+                raise RetrievalError(
+                    f"Malformed JSON response from Azure AI Search: {error}",
+                    retryable=False,
+                )
+            return cast(dict[str, Any], parsed)
         except RetrievalError:
             raise
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
+            raise RetrievalError(f"Search request failed: {exc}", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise RetrievalError(f"HTTP error during search: {exc}", retryable=True) from exc
         except (ConnectionError, TimeoutError, OSError) as exc:
             raise RetrievalError(f"Search request failed: {exc}", retryable=True) from exc
-        finally:
-            http_client.close()
 
     def _build_request_body(self, query: str, top_k: int) -> dict[str, Any]:
         body: dict[str, Any] = {"top": top_k}
@@ -251,6 +271,9 @@ class AzureSearchProvider:
             content = item.get("content")
             if content is None:
                 skipped_items.append({"reason": "missing_content", "id": item.get("id")})
+                continue
+            if not isinstance(content, str):
+                skipped_items.append({"reason": "invalid_content_type", "id": item.get("id"), "type": type(content).__name__})
                 continue
             if not content:
                 skipped_items.append({"reason": "empty_content", "id": item.get("id")})
@@ -305,14 +328,34 @@ class AzureSearchProvider:
         probe, not a row-level operation. There is no state_id or token_id
         available during on_start().
 
+        SSRF protection: validates the endpoint URL resolves to a public IP
+        before making the request, preventing DNS rebinding attacks where
+        a config-authored hostname resolves to an internal IP.
+
         Auth modes:
         - api_key: sends api-key header
         - use_managed_identity: acquires a Bearer token via DefaultAzureCredential
         """
+        from elspeth.core.security.web import NetworkError, SSRFBlockedError, validate_url_for_ssrf
+
         index_name = self._config.index
 
         try:
             count_url = f"{self._config.endpoint.rstrip('/')}/indexes/{index_name}/docs/$count?api-version={self._config.api_version}"
+
+            # SSRF validation: resolve DNS and reject internal IPs before
+            # making the request. We validate then use the original URL (not the
+            # IP-pinned URL) to preserve TLS certificate verification.
+            try:
+                validate_url_for_ssrf(count_url)
+            except (SSRFBlockedError, NetworkError) as exc:
+                return CollectionReadinessResult(
+                    collection=index_name,
+                    reachable=False,
+                    count=None,
+                    message=f"Index '{index_name}' endpoint blocked by SSRF validation: {exc}",
+                )
+
             headers: dict[str, str] = {}
             if self._config.api_key:
                 headers["api-key"] = self._config.api_key
@@ -326,10 +369,11 @@ class AzureSearchProvider:
             response = httpx.get(count_url, headers=headers, timeout=10.0)
 
             if response.status_code == 404:
+                # Index absent — count is unknown, not zero.
                 return CollectionReadinessResult(
                     collection=index_name,
                     reachable=True,
-                    count=0,
+                    count=None,
                     message=f"Index '{index_name}' not found",
                 )
 
@@ -341,10 +385,11 @@ class AzureSearchProvider:
             try:
                 count = int(response.text.strip())
             except ValueError:
+                # Malformed $count response — count is unknown, not zero.
                 return CollectionReadinessResult(
                     collection=index_name,
                     reachable=True,
-                    count=0,
+                    count=None,
                     message=f"Index '{index_name}' returned non-integer $count body: {response.text!r}",
                 )
 
@@ -358,9 +403,10 @@ class AzureSearchProvider:
             return CollectionReadinessResult(
                 collection=index_name,
                 reachable=False,
-                count=0,
+                count=None,
                 message=f"Index '{index_name}' unreachable: {type(exc).__name__}: {exc}",
             )
 
     def close(self) -> None:
-        pass
+        """Release the shared HTTP client and its connection pool."""
+        self._http_client.close()

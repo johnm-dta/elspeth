@@ -9,46 +9,74 @@ tests (name, schema, determinism) are now included in BatchTransformContractTest
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
-from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts import TransformResult
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+from elspeth.testing import make_pipeline_row
 
-from .test_batch_transform_protocol import BatchTransformContractTestBase
+from .test_batch_transform_protocol import BatchTransformContractTestBase, CollectingOutputPort
+
+_HTTPX_CLIENT_CLASS = httpx.Client
 
 
-def _make_safe_response() -> dict[str, Any]:
+def _make_content_safety_response(
+    *,
+    hate: int = 0,
+    violence: int = 0,
+    sexual: int = 0,
+    self_harm: int = 0,
+) -> dict[str, Any]:
     return {
         "categoriesAnalysis": [
-            {"category": "Hate", "severity": 0},
-            {"category": "Violence", "severity": 0},
-            {"category": "Sexual", "severity": 0},
-            {"category": "SelfHarm", "severity": 0},
+            {"category": "Hate", "severity": hate},
+            {"category": "Violence", "severity": violence},
+            {"category": "Sexual", "severity": sexual},
+            {"category": "SelfHarm", "severity": self_harm},
         ]
     }
 
 
-def _create_mock_http_response(response_data: dict[str, Any]) -> Mock:
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = response_data
-    response.raise_for_status = Mock()
-    response.headers = {"content-type": "application/json"}
-    response.content = b"{}"
-    response.text = "{}"
-    return response
+def _create_http_response(response_data: dict[str, Any], *, url: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json=response_data,
+        request=httpx.Request("POST", url),
+    )
 
 
-def _make_mock_context() -> Mock:
-    ctx = Mock(spec=PluginContext)
-    ctx.run_id = "test-run-001"
-    ctx.state_id = "state-001"
-    ctx.landscape = Mock()
-    ctx.landscape.record_call = Mock()
-    return ctx
+def _set_content_safety_response(
+    mock_client_class: MagicMock,
+    response_data: dict[str, Any],
+) -> None:
+    mock_client_instance = mock_client_class.return_value
+
+    def _mocked_post(url: str, **_: object) -> httpx.Response:
+        return _create_http_response(response_data, url=url)
+
+    mock_client_instance.post.side_effect = _mocked_post
+
+
+def _submit_and_collect_single_result(
+    started_transform: BatchTransformMixin,
+    row_data: dict[str, Any],
+    ctx: Any,
+    output_port: CollectingOutputPort,
+) -> TransformResult:
+    started_transform.accept(make_pipeline_row(row_data), ctx)
+
+    arrived = output_port.wait_for_results(1, timeout=10.0)
+    assert arrived, "Result did not arrive via OutputPort within timeout"
+
+    results = output_port.get_results()
+    assert len(results) == 1
+    _token, result, _state_id = results[0]
+    assert isinstance(result, TransformResult)
+    return result
 
 
 class TestAzureContentSafetyBatchContract(BatchTransformContractTestBase):
@@ -64,12 +92,13 @@ class TestAzureContentSafetyBatchContract(BatchTransformContractTestBase):
     @pytest.fixture(autouse=True)
     def mock_httpx_for_batch(self):
         """Mock httpx.Client for all batch contract tests."""
-        with patch("httpx.Client") as mock_client_class:
-            mock_response = _create_mock_http_response(_make_safe_response())
-            mock_client_instance = Mock()
-            mock_client_instance.post.return_value = mock_response
-            mock_client_instance.__enter__ = Mock(return_value=mock_client_instance)
-            mock_client_instance.__exit__ = Mock(return_value=False)
+        with patch("httpx.Client", autospec=True) as mock_client_class:
+            mock_client_instance = MagicMock(spec_set=_HTTPX_CLIENT_CLASS)
+
+            def _mocked_post(url: str, **_: object) -> httpx.Response:
+                return _create_http_response(_make_content_safety_response(), url=url)
+
+            mock_client_instance.post.side_effect = _mocked_post
             mock_client_class.return_value = mock_client_instance
             yield mock_client_class
 
@@ -91,3 +120,59 @@ class TestAzureContentSafetyBatchContract(BatchTransformContractTestBase):
     @pytest.fixture
     def valid_input(self) -> dict[str, Any]:
         return {"content": "Hello world", "id": 1}
+
+    def test_severity_equal_to_threshold_emits_success(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_httpx_for_batch: MagicMock,
+    ) -> None:
+        """Contract: threshold comparison is strictly greater-than, not greater-or-equal."""
+        _set_content_safety_response(
+            mock_httpx_for_batch,
+            _make_content_safety_response(hate=2, violence=2, sexual=2, self_harm=2),
+        )
+
+        result = _submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row.to_dict() == valid_input
+
+    def test_severity_above_threshold_emits_content_safety_error(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_httpx_for_batch: MagicMock,
+    ) -> None:
+        """Contract: harmful content produces a structured error for on_error routing."""
+        _set_content_safety_response(
+            mock_httpx_for_batch,
+            _make_content_safety_response(hate=3, violence=1, sexual=0, self_harm=0),
+        )
+
+        result = _submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "content_safety_violation"
+        assert result.reason["field"] == "content"
+
+        categories = result.reason["categories"]
+        assert isinstance(categories, dict)
+        assert categories["hate"] == {"severity": 3, "threshold": 2, "exceeded": True}
+        assert categories["violence"] == {"severity": 1, "threshold": 2, "exceeded": False}

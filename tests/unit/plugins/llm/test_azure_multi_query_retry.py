@@ -131,7 +131,7 @@ class TestRetryBehavior:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -324,7 +324,7 @@ class TestConcurrentRowProcessing:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -512,7 +512,7 @@ class TestSequentialFallback:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -584,7 +584,7 @@ class TestProviderClientLifecycle:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -646,7 +646,7 @@ class TestLLMErrorRetry:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder

@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.testing import make_field, make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
 class TestPluginSystemIntegration:
@@ -70,6 +70,7 @@ class TestPluginSystemIntegration:
         class MemorySink(BaseSink):
             name = "memory"
             input_schema = EnrichedSchema
+            _on_write_failure: str | None = "discard"
             collected: ClassVar[list[dict[str, Any]]] = []
 
             def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
@@ -105,8 +106,8 @@ class TestPluginSystemIntegration:
         assert len(manager.get_sinks()) == 1
 
         # Create instances and process
-        recorder = make_recorder()
-        ctx = make_context(run_id="test-001", landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(run_id="test-001", landscape=factory.plugin_audit_writer())
 
         source_cls = manager.get_source_by_name("list")
         transform_cls = manager.get_transform_by_name("double")

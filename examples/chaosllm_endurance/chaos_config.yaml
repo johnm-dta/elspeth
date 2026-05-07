@@ -36,7 +36,7 @@ error_injection:
   internal_error_pct: 1.0
   bad_gateway_pct: 0.5
   gateway_timeout_pct: 0.5
-  retry_after_sec: [0.5, 1]
+  retry_after_sec: [1, 2]
 
   # Malformed responses (~3%) - non-retryable, routes to quarantine
   invalid_json_pct: 1.0

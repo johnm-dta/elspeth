@@ -1,0 +1,45 @@
+source:
+  plugin: csv
+  on_success: quality_in
+  options:
+    path: examples/statistical_batch_plugins/data_quality_rows.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'source: str'
+      - 'score_text: str'
+      - 'label: str'
+    on_validation_failure: discard
+aggregations:
+- name: data_quality_report
+  plugin: batch_data_quality_report
+  input: quality_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'source: str'
+      - 'score_text: str'
+      - 'label: str'
+    inspect_fields:
+    - source
+    - score_text
+    - label
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/data_quality_report.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/data_quality_report.db

@@ -7,10 +7,11 @@ objects to JSON-serializable structures.
 
 import json
 import math
-from dataclasses import is_dataclass
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from elspeth.contracts.errors import AuditIntegrityError
 
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
 
 @overload
 def serialize_datetime(obj: dict[str, object]) -> dict[str, object]: ...
+
+
+@overload
+def serialize_datetime(obj: Mapping[str, object]) -> dict[str, object]: ...
 
 
 @overload
@@ -39,13 +44,14 @@ def serialize_datetime(obj: Any) -> Any: ...
 
 
 def serialize_datetime(obj: Any) -> Any:
-    """Convert datetime objects to ISO format strings for JSON serialization.
+    """Convert audit values to JSON-serializable structures.
 
-    Recursively processes dicts and lists to convert all datetime values.
+    Recursively processes mappings and sequences to convert all datetime values.
+    Frozen mapping containers are thawed to plain dicts for JSON output.
     Rejects NaN and Infinity per CLAUDE.md audit integrity requirements.
 
     Args:
-        obj: Any value - datetime, dict, list, or other
+        obj: Any value - datetime, mapping, list, or other
 
     Returns:
         The same structure with datetime objects replaced by ISO strings
@@ -62,7 +68,7 @@ def serialize_datetime(obj: Any) -> Any:
 
     if isinstance(obj, datetime):
         return obj.isoformat()
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
         return {k: serialize_datetime(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [serialize_datetime(item) for item in obj]
@@ -74,7 +80,7 @@ def dataclass_to_dict(obj: Any) -> Any:
 
     Handles:
     - Nested dataclasses (recursive conversion)
-    - Lists of dataclasses
+    - Mappings and lists of dataclasses
     - Enum values (converted to .value)
     - Datetime values (converted to ISO strings)
     - None (returns None — preserves absence semantics)
@@ -91,33 +97,23 @@ def dataclass_to_dict(obj: Any) -> Any:
     """
     if obj is None:
         return None
-    if isinstance(obj, list):
-        return [dataclass_to_dict(item) for item in obj]
+    if isinstance(obj, Enum):
+        # Explicit Enum check instead of hasattr(value, "value")
+        return obj.value
     if is_dataclass(obj) and not isinstance(obj, type):
         # is_dataclass returns True for both instances and classes
         # We only want instances, not the class itself
         result: dict[str, Any] = {}
-        for field_name in obj.__dataclass_fields__:
+        for dataclass_field in fields(obj):
+            field_name = dataclass_field.name
             value = getattr(obj, field_name)
-            if is_dataclass(value) and not isinstance(value, type):
-                result[field_name] = dataclass_to_dict(value)
-            elif isinstance(value, (list, tuple)):
-                result[field_name] = [dataclass_to_dict(item) for item in value]
-            elif isinstance(value, Enum):
-                # Explicit Enum check instead of hasattr(value, "value")
-                result[field_name] = value.value
-            else:
-                result[field_name] = serialize_datetime(value)
+            result[field_name] = dataclass_to_dict(value)
         return result
-    return obj
-
-
-class ExportFormatter(Protocol):
-    """Protocol for export formatters."""
-
-    def format(self, record: dict[str, Any]) -> str | dict[str, Any]:
-        """Format a record for output."""
-        ...
+    if isinstance(obj, Mapping):
+        return {k: dataclass_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [dataclass_to_dict(item) for item in obj]
+    return serialize_datetime(obj)
 
 
 class JSONFormatter:
@@ -162,8 +158,8 @@ class LineageTextFormatter:
         lines.append(f"Row Index: {result.source_row.row_index}")
         lines.append(f"Source Data Hash: {result.source_row.source_data_hash}")
         lines.append(f"Payload Available: {result.source_row.payload_available}")
-        if result.source_row.source_data:
-            lines.append(f"Source Data: {result.source_row.source_data}")
+        if result.source_row.source_data is not None:
+            lines.append(f"Source Data: {serialize_datetime(result.source_row.source_data)}")
         lines.append("")
 
         # Outcome
@@ -171,11 +167,13 @@ class LineageTextFormatter:
             lines.append("--- Outcome ---")
             # Direct access to .name - Tier 1 trust (our audit data)
             # If outcome.outcome is not an Enum, that's a bug we want to crash on
-            # Using .name gives uppercase (COMPLETED) which is more readable in CLI output
-            lines.append(f"Outcome: {result.outcome.outcome.name}")
+            # Using .name gives uppercase values that are more readable in CLI output.
+            outcome_name = result.outcome.outcome.name if result.outcome.outcome else "NULL"
+            lines.append(f"Outcome: {outcome_name}")
+            lines.append(f"Path: {result.outcome.path.name}")
             if result.outcome.sink_name:
                 lines.append(f"Sink: {result.outcome.sink_name}")
-            lines.append(f"Terminal: {result.outcome.is_terminal}")
+            lines.append(f"Completed: {result.outcome.completed}")
             lines.append("")
 
         # Node states
@@ -185,6 +183,22 @@ class LineageTextFormatter:
                 # Direct access to .value - Tier 1 trust (our audit data)
                 # No defensive hasattr - if status isn't an Enum, crash
                 lines.append(f"  [{state.step_index}] {state.node_id}: {state.status.value}")
+            lines.append("")
+
+        # Routing events
+        if result.routing_events:
+            lines.append("--- Routing Events ---")
+            for event in result.routing_events:
+                # Direct access to .value - Tier 1 trust (our audit data)
+                parts = [
+                    f"[{event.ordinal}]",
+                    event.mode.value,
+                    f"edge={event.edge_id}",
+                    f"group={event.routing_group_id}",
+                ]
+                if event.reason_hash is not None:
+                    parts.append(f"reason_hash={event.reason_hash}")
+                lines.append(f"  {' '.join(parts)}")
             lines.append("")
 
         # Calls
@@ -241,6 +255,14 @@ class CSVFormatter:
             full_key = f"{prefix}.{key}" if prefix else key
 
             if isinstance(value, dict):
+                if not value:
+                    # Preserve empty dicts as JSON "{}" — an empty object is a
+                    # distinct datum from absence. Auditors must be able to tell
+                    # "config was explicitly empty" from "config was not present".
+                    if full_key in result:
+                        raise ValueError(f"CSV flatten key collision: '{full_key}' already exists. Audit export would lose data.")
+                    result[full_key] = "{}"
+                    continue
                 nested = self.flatten(value, full_key)
                 for nested_key, nested_val in nested.items():
                     if nested_key in result:

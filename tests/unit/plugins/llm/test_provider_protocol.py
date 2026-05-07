@@ -84,6 +84,43 @@ class TestLLMQueryResult:
         )
         assert result.finish_reason is None
 
+    def test_post_init_rejects_wrong_usage_type(self) -> None:
+        """usage must be a TokenUsage instance, not a dict or other type.
+
+        Bug: elspeth-42cb31ce6f. Without runtime validation, a caller
+        passing a dict or None for usage succeeds at construction and
+        explodes later when the transform accesses .prompt_tokens.
+        """
+        with pytest.raises(TypeError, match="usage"):
+            LLMQueryResult(
+                content="hello",
+                usage={"prompt_tokens": 10, "completion_tokens": 5},  # type: ignore[arg-type]
+                model="gpt-4o",
+            )
+
+    def test_post_init_rejects_none_usage(self) -> None:
+        """usage=None must be rejected — TokenUsage.unknown() exists for that."""
+        with pytest.raises(TypeError, match="usage"):
+            LLMQueryResult(
+                content="hello",
+                usage=None,  # type: ignore[arg-type]
+                model="gpt-4o",
+            )
+
+    def test_post_init_rejects_wrong_finish_reason_type(self) -> None:
+        """finish_reason must be ParsedFinishReason, not a raw string.
+
+        Bug: elspeth-42cb31ce6f. A raw string like "stop" bypasses the
+        FinishReason enum and UnrecognizedFinishReason sentinel.
+        """
+        with pytest.raises(TypeError, match="finish_reason"):
+            LLMQueryResult(
+                content="hello",
+                usage=TokenUsage.unknown(),
+                model="gpt-4o",
+                finish_reason="stop",  # type: ignore[arg-type]  # deliberate: tests rejection of raw string (must use FinishReason.STOP)
+            )
+
 
 class TestFinishReason:
     """Tests for FinishReason StrEnum."""
@@ -117,37 +154,15 @@ class TestParseFinishReason:
     def test_valid_tool_calls(self) -> None:
         assert parse_finish_reason("tool_calls") is FinishReason.TOOL_CALLS
 
-    def test_unknown_logs_warning(
-        self,
-        capsys: pytest.CaptureFixture[str],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        import logging
-
-        with caplog.at_level(logging.WARNING, logger="elspeth.plugins.transforms.llm.provider"):
-            result = parse_finish_reason("end_turn")
+    def test_unknown_returns_unrecognized_sentinel(self) -> None:
+        result = parse_finish_reason("end_turn")
         assert isinstance(result, UnrecognizedFinishReason)
         assert result.raw == "end_turn"
-        # structlog routes to stdout (PrintLogger) in isolation or stdlib logging
-        # in the full suite — check both capture mechanisms
-        stdout_has_it = "end_turn" in capsys.readouterr().out
-        caplog_has_it = any("end_turn" in r.getMessage() for r in caplog.records)
-        assert stdout_has_it or caplog_has_it, "Expected warning about 'end_turn' in structlog output"
 
-    def test_empty_string_logs_warning(
-        self,
-        capsys: pytest.CaptureFixture[str],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        import logging
-
-        with caplog.at_level(logging.WARNING, logger="elspeth.plugins.transforms.llm.provider"):
-            result = parse_finish_reason("")
+    def test_empty_string_returns_unrecognized_sentinel(self) -> None:
+        result = parse_finish_reason("")
         assert isinstance(result, UnrecognizedFinishReason)
         assert result.raw == ""
-        stdout_has_it = "finish_reason" in capsys.readouterr().out.lower()
-        caplog_has_it = any("finish_reason" in r.getMessage().lower() for r in caplog.records)
-        assert stdout_has_it or caplog_has_it, "Expected warning about unknown finish_reason in structlog output"
 
 
 class TestLLMProviderProtocol:

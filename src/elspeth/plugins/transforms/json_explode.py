@@ -19,17 +19,51 @@ Therefore, JSONExplode inherits from DataPluginConfig (NOT TransformDataConfig)
 and has no on_error configuration.
 """
 
+from __future__ import annotations
+
 import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
+from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig, PluginConfigError
 from elspeth.plugins.infrastructure.results import TransformResult
+
+if TYPE_CHECKING:
+    from elspeth.contracts.plugin_assistance import PluginAssistance
+    from elspeth.contracts.plugin_semantics import InputSemanticRequirements
+
+
+def _build_json_explode_input_requirements(
+    *,
+    array_field: str,
+) -> InputSemanticRequirements:
+    from elspeth.contracts.plugin_semantics import (
+        FieldSemanticRequirement,
+        InputSemanticRequirements,
+        SemanticValueType,
+        UnknownSemanticPolicy,
+    )
+
+    return InputSemanticRequirements(
+        fields=(
+            FieldSemanticRequirement(
+                field_name=array_field,
+                accepted_content_kinds=frozenset(),
+                accepted_text_framings=frozenset(),
+                requirement_code="json_explode.array_field.list",
+                accepted_value_types=frozenset({SemanticValueType.LIST}),
+                severity="high",
+                unknown_policy=UnknownSemanticPolicy.FAIL,
+                configured_by=("array_field",),
+            ),
+        ),
+    )
 
 
 class JSONExplodeConfig(DataPluginConfig):
@@ -43,27 +77,69 @@ class JSONExplodeConfig(DataPluginConfig):
     Routing fields such as on_success are owned by TransformSettings at the
     pipeline settings layer, not plugin options.
 
+    _plugin_component_type overrides DataPluginConfig (None) because this
+    config extends DataPluginConfig directly, bypassing TransformDataConfig.
+
     Attributes:
         array_field: Name of the array field to explode (required)
         output_field: Name for the exploded element (default: "item")
         include_index: Whether to include item_index field (default: True)
     """
 
+    _plugin_component_type: ClassVar[str | None] = "transform"
+
     array_field: str = Field(..., description="Name of the array field to explode")
     output_field: str = Field(default="item", description="Name for the exploded element")
     include_index: bool = Field(default=True, description="Whether to include item_index field")
 
-    @field_validator("array_field", "output_field")
+    @field_validator("array_field")
     @classmethod
-    def _reject_empty(cls, v: str, info: Any) -> str:
-        if not v:
-            raise ValueError(f"{info.field_name} must not be empty")
+    def _validate_array_field(cls, v: str, info: Any) -> str:
+        if not v or not v.strip():
+            raise ValueError(f"{info.field_name} must be non-empty")
+        return v
+
+    @field_validator("output_field")
+    @classmethod
+    def _validate_output_field(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("output_field must be non-empty")
+        if not v.isidentifier():
+            raise ValueError(f"output_field must be a valid Python identifier, got {v!r}")
         return v
 
     @model_validator(mode="after")
-    def _reject_field_collision(self) -> "JSONExplodeConfig":
+    def _reject_field_collision(self) -> JSONExplodeConfig:
         if self.output_field == self.array_field:
             raise ValueError(f"output_field and array_field must differ, both are '{self.output_field}'")
+        if self.include_index and self.output_field == "item_index":
+            raise ValueError(
+                "output_field='item_index' conflicts with the auto-generated index field "
+                "when include_index=True — the index would overwrite the exploded item"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_statically_resolvable_array_field_when_output_contract_depends_on_it(self) -> JSONExplodeConfig:
+        """Fail closed when static output-contract derivation cannot resolve aliases.
+
+        Runtime row access can resolve original headers through ``PipelineRow.contract``,
+        but constructor-time contract propagation only sees normalized schema metadata.
+        When guaranteed fields or explicit schema fields participate in output-contract
+        derivation, the consumed array field must already be expressed in that same
+        normalized namespace.
+        """
+        static_output_inputs: set[str] = set(self.schema_config.guaranteed_fields or ())
+        if self.schema_config.fields is not None:
+            static_output_inputs.update(field.name for field in self.schema_config.fields)
+
+        if static_output_inputs and self.array_field not in static_output_inputs:
+            raise ValueError(
+                "array_field must use the normalized field name when schema declares "
+                "guaranteed_fields or explicit fields for output-contract propagation. "
+                f"Got {self.array_field!r}; known normalized fields are {sorted(static_output_inputs)!r}."
+            )
+
         return self
 
 
@@ -99,7 +175,17 @@ class JSONExplode(BaseTransform):
 
     name = "json_explode"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:fba11b274580fc9a"
+    config_model = JSONExplodeConfig
     creates_tokens = True  # CRITICAL: enables new token creation for deaggregation
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Minimal config for the ADR-009 backward invariant."""
+        return {
+            "schema": {"mode": "observed"},
+            "array_field": "json_explode_items",
+        }
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize the JSONExplode transform.
@@ -113,10 +199,12 @@ class JSONExplode(BaseTransform):
         if "on_success" in config:
             raise PluginConfigError(
                 "JSONExplode does not accept 'on_success' in plugin options. "
-                "Set routing at the settings layer with transforms[].on_success."
+                "Set routing at the settings layer with transforms[].on_success.",
+                plugin_class="JSONExplodeConfig",
+                component_type="transform",
             )
         super().__init__(config)
-        cfg = JSONExplodeConfig.from_dict(config)
+        cfg = JSONExplodeConfig.from_dict(config, plugin_name=self.name)
         self._array_field = cfg.array_field
         self._output_field = cfg.output_field
         self._include_index = cfg.include_index
@@ -127,12 +215,107 @@ class JSONExplode(BaseTransform):
             fields.append("item_index")
         self.declared_output_fields = frozenset(fields)
 
+        self._schema_config = cfg.schema_config
+
         self.input_schema, self.output_schema = self._create_schemas(
             cfg.schema_config,
             "JSONExplode",
             adds_fields=True,
         )
-        self._output_schema_config = self._build_output_schema_config(cfg.schema_config)
+        self._output_schema_config = self._build_json_explode_output_schema_config(cfg)
+
+    def input_semantic_requirements(self) -> InputSemanticRequirements:
+        return _build_json_explode_input_requirements(array_field=self._array_field)
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        from elspeth.contracts.plugin_assistance import PluginAssistance
+
+        if issue_code != "json_explode.array_field.list":
+            return None
+        return PluginAssistance(
+            plugin_name="json_explode",
+            issue_code="json_explode.array_field.list",
+            summary=(
+                "json_explode expands a field that is already a real list-shaped "
+                "pipeline value. A string is not a valid array_field, even when it "
+                "contains JSON-looking text."
+            ),
+            suggested_fixes=(
+                "Point array_field at a source or transform output that declares value_type=list.",
+                "If the upstream value is JSON text, insert an explicit parser/validator transform that emits a real list before json_explode.",
+                "For single-query llm output, do not wire response_field directly to json_explode; the response_field is a string.",
+            ),
+        )
+
+    def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Exercise the real array-consumption path for the backward invariant."""
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name=self._array_field,
+                value=["only-item"],
+            )
+        ]
+
+    def _build_json_explode_output_schema_config(self, cfg: JSONExplodeConfig) -> SchemaConfig:
+        """Build output schema config excluding array_field.
+
+        JSONExplode removes array_field from output and adds output_field
+        (and optionally item_index). The base _build_output_schema_config()
+        incorrectly retains array_field in guaranteed_fields.
+        """
+        base_guaranteed = set(cfg.schema_config.guaranteed_fields or ())
+        output_field_defs = cfg.schema_config.fields
+
+        # Remove array_field from output guarantees (it's consumed at runtime)
+        base_guaranteed.discard(cfg.array_field)
+
+        if cfg.schema_config.fields is not None:
+            kept_fields = tuple(field for field in cfg.schema_config.fields if field.name != cfg.array_field)
+            extra_fields: list[FieldDefinition] = []
+            if all(field.name != cfg.output_field for field in kept_fields):
+                extra_fields.append(
+                    FieldDefinition(
+                        name=cfg.output_field,
+                        field_type="any",
+                        required=True,
+                        nullable=False,
+                    )
+                )
+            if cfg.include_index and all(field.name != "item_index" for field in kept_fields):
+                extra_fields.append(
+                    FieldDefinition(
+                        name="item_index",
+                        field_type="int",
+                        required=True,
+                        nullable=False,
+                    )
+                )
+            output_field_defs = (*kept_fields, *extra_fields)
+
+        # Add declared output fields (output_field + optionally item_index)
+        output_fields = base_guaranteed | self.declared_output_fields
+
+        # Preserve None-vs-empty-tuple semantics: None = abstain, () = explicitly empty.
+        # If upstream declared guarantees or we computed non-empty output, declare explicitly.
+        upstream_declared = cfg.schema_config.guaranteed_fields is not None
+        if upstream_declared or output_fields:
+            guaranteed_fields_result = tuple(sorted(output_fields))
+        else:
+            guaranteed_fields_result = None
+
+        return SchemaConfig(
+            mode=cfg.schema_config.mode,
+            fields=output_field_defs,
+            guaranteed_fields=guaranteed_fields_result,
+            audit_fields=cfg.schema_config.audit_fields,
+            required_fields=cfg.schema_config.required_fields,
+        )
 
     def process(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
         """Explode array field into multiple rows.
@@ -153,9 +336,10 @@ class JSONExplode(BaseTransform):
         # KeyError here = upstream bug (source didn't validate field exists)
         array_value = row[self._array_field]
 
-        # Contract enforcement: array_field must be list
-        # Strings/dicts are iterable but would produce garbage - fail explicitly
-        if not isinstance(array_value, list):
+        # Contract enforcement: array_field must be list or tuple.
+        # PipelineRow deep-freezes data (list→tuple), so both are valid.
+        # Strings/dicts are iterable but would produce garbage - fail explicitly.
+        if not isinstance(array_value, (list, tuple)):
             raise TypeError(
                 f"Field '{self._array_field}' must be a list, got {type(array_value).__name__}. "
                 f"This indicates an upstream validation bug - check source schema or prior transforms."
@@ -251,6 +435,7 @@ class JSONExplode(BaseTransform):
                 fields=patched_fields,
                 locked=True,
             )
+        output_contract = self._align_output_contract(output_contract)
 
         return TransformResult.success_multi(
             [PipelineRow(r, output_contract) for r in output_rows],

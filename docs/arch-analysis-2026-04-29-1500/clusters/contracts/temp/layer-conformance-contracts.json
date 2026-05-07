@@ -1,0 +1,34 @@
+{
+  "L0_leaf_invariant": {
+    "claim": "contracts/ has zero outbound dependencies on core/, engine/, or any L3 package",
+    "evidence": [
+      "[ORACLE: clusters/contracts/temp/intra-cluster-edges.json stats.outbound_edge_count = 0]",
+      "[ORACLE: temp/l3-import-graph.json \u2014 contracts is layer L0 by enforce_tier_model.py:237 \"contracts\": 0]",
+      "[ORACLE: whole-tree layer-check exit 0]"
+    ],
+    "verdict": "CONFIRMED"
+  },
+  "cluster": "contracts",
+  "cluster_scoped_findings_by_rule": {
+    "R1": 12,
+    "R2": 20,
+    "R5": 184,
+    "R6": 9
+  },
+  "cluster_scoped_findings_total": 225,
+  "cluster_scoped_interpretation": "The 225 cluster-scoped findings are R-rule defensive-pattern findings (R1=dict.get, R2=getattr, R5=isinstance, R6=silent-except). They are NOT layer-import violations. They appear here only because the allowlist YAML keys are full-path prefixed against the whole src/elspeth tree; --root src/elspeth/contracts breaks the prefix match and re-surfaces already-allowlisted entries. The whole-tree check ran clean (exit 0), confirming both the layer-import L0 invariant and the R-rule allowlisting are in place. Mirrors the engine cluster pass's framing.",
+  "derivation": {
+    "cluster_scoped_check": ".venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth/contracts --allowlist config/cicd/enforce_tier_model",
+    "whole_tree_check": ".venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model"
+  },
+  "layer_import_violations_L1": [],
+  "observations_for_synthesis": [
+    "The 225 R-rule findings are an artefact of cluster-scoped allowlist prefix mismatch; the engine cluster pass identified the same artefact. Future cluster-scoped checks should expect this and not interpret R-rule counts as cluster-specific debt.",
+    "Whole-tree layer-check produces \"No bug-hiding patterns detected. Check passed.\" \u2014 this is the authoritative artefact for both the L0 leaf invariant and the codebase-wide R-rule conformance."
+  ],
+  "scope": "src/elspeth/contracts/",
+  "type_checking_layer_warnings_TC": [],
+  "whole_tree_exit_code": 0,
+  "whole_tree_message": "No bug-hiding patterns detected. Check passed.",
+  "whole_tree_verdict_authoritative": "CLEAN"
+}

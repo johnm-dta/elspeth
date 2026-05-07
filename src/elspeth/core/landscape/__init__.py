@@ -1,10 +1,10 @@
 """Landscape: The audit backbone for complete traceability.
 
 This module provides the audit infrastructure for ELSPETH's SDA pipelines.
-Every decision is traceable to its source through the LandscapeRecorder API.
+Every decision is traceable to its source through the RecorderFactory API.
 
 Primary API:
-    LandscapeRecorder - High-level API for recording audit trails
+    RecorderFactory - Constructs domain repositories from LandscapeDB
     LandscapeDB - Database connection management
 
 Model Classes:
@@ -55,9 +55,9 @@ from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.formatters import (
     CSVFormatter,
-    ExportFormatter,
     JSONFormatter,
     LineageTextFormatter,
     dataclass_to_dict,
@@ -65,7 +65,6 @@ from elspeth.core.landscape.formatters import (
 )
 from elspeth.core.landscape.lineage import LineageResult, explain
 from elspeth.core.landscape.query_repository import QueryRepository
-from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.core.landscape.reproducibility import (
     compute_grade,
     update_grade_after_purge,
@@ -105,12 +104,10 @@ __all__ = [
     "DataFlowRepository",
     "Edge",
     "ExecutionRepository",
-    "ExportFormatter",
     "FieldAuditRecord",
     "JSONFormatter",
     "LandscapeDB",
     "LandscapeExporter",
-    "LandscapeRecorder",
     "LineageResult",
     "LineageTextFormatter",
     "Node",
@@ -120,6 +117,7 @@ __all__ = [
     "NodeStateOpen",
     "NodeStateStatus",
     "QueryRepository",
+    "RecorderFactory",
     "ReproducibilityGrade",
     "RoutingEvent",
     "RoutingSpec",

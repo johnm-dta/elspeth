@@ -3,8 +3,9 @@
 
 import base64
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
@@ -217,6 +218,98 @@ class TestSpecialTypeConversion:
         assert result == "123.456789012345"
         assert type(result) is str
 
+    def test_date_to_iso_string(self) -> None:
+        """date objects convert to ISO 8601 date strings."""
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(date(2024, 1, 15))
+        assert result == "2024-01-15"
+        assert type(result) is str
+
+    def test_time_to_iso_string(self) -> None:
+        """time objects convert to ISO 8601 time strings."""
+        from elspeth.core.canonical import _normalize_value
+
+        # Without microseconds
+        result = _normalize_value(time(14, 30, 0))
+        assert result == "14:30:00"
+        assert type(result) is str
+
+        # With microseconds
+        result_micro = _normalize_value(time(14, 30, 0, 123456))
+        assert result_micro == "14:30:00.123456"
+
+    def test_uuid_to_string(self) -> None:
+        """UUID objects convert to their string representation."""
+        from elspeth.core.canonical import _normalize_value
+
+        u = UUID("12345678-1234-5678-1234-567812345678")
+        result = _normalize_value(u)
+        assert result == "12345678-1234-5678-1234-567812345678"
+        assert type(result) is str
+
+
+class TestDateTimeUuidCanonicalJson:
+    """Regression tests for date, time, and UUID canonical JSON serialization.
+
+    Bug fix: These types were not handled by _normalize_value, causing
+    CanonicalizationError when they appeared in coalesce collision values.
+    """
+
+    def test_canonical_json_handles_date(self) -> None:
+        """date objects serialize correctly in canonical JSON."""
+        from elspeth.core.canonical import canonical_json
+
+        result = canonical_json({"d": date(2024, 1, 15)})
+        assert result == '{"d":"2024-01-15"}'
+
+    def test_canonical_json_handles_time(self) -> None:
+        """time objects serialize correctly in canonical JSON."""
+        from elspeth.core.canonical import canonical_json
+
+        result = canonical_json({"t": time(14, 30, 0)})
+        assert '"t":"14:30:00"' in result
+
+    def test_canonical_json_handles_time_with_microseconds(self) -> None:
+        """time objects with microseconds serialize correctly."""
+        from elspeth.core.canonical import canonical_json
+
+        result = canonical_json({"t": time(14, 30, 0, 123456)})
+        assert '"t":"14:30:00.123456"' in result
+
+    def test_canonical_json_handles_uuid(self) -> None:
+        """UUID objects serialize correctly in canonical JSON."""
+        from elspeth.core.canonical import canonical_json
+
+        u = UUID("12345678-1234-5678-1234-567812345678")
+        result = canonical_json({"id": u})
+        assert result == '{"id":"12345678-1234-5678-1234-567812345678"}'
+
+    def test_stable_hash_date_deterministic(self) -> None:
+        """date values produce deterministic hashes."""
+        from elspeth.core.canonical import stable_hash
+
+        hash1 = stable_hash({"d": date(2024, 1, 15)})
+        hash2 = stable_hash({"d": date(2024, 1, 15)})
+        assert hash1 == hash2
+
+    def test_stable_hash_time_deterministic(self) -> None:
+        """time values produce deterministic hashes."""
+        from elspeth.core.canonical import stable_hash
+
+        hash1 = stable_hash({"t": time(14, 30, 0)})
+        hash2 = stable_hash({"t": time(14, 30, 0)})
+        assert hash1 == hash2
+
+    def test_stable_hash_uuid_deterministic(self) -> None:
+        """UUID values produce deterministic hashes."""
+        from elspeth.core.canonical import stable_hash
+
+        u = UUID("12345678-1234-5678-1234-567812345678")
+        hash1 = stable_hash({"id": u})
+        hash2 = stable_hash({"id": u})
+        assert hash1 == hash2
+
 
 class TestUnsupportedTypeRejection:
     """Unsupported types must be rejected during canonical serialization.
@@ -226,19 +319,18 @@ class TestUnsupportedTypeRejection:
     This is defense-in-depth - external system data must be validated at ingress.
     """
 
-    def test_uuid_rejected_during_serialization(self) -> None:
-        """UUID objects are not JSON-serializable and must fail at serialization boundary."""
-        from uuid import UUID
+    def test_uuid_now_serializable(self) -> None:
+        """UUID objects are now normalized to strings and serialize correctly.
 
-        import rfc8785
-
+        NOTE: This test was updated when UUID support was added. Previously,
+        UUIDs would pass through _normalize_value unchanged and fail at
+        rfc8785.dumps(). Now they are converted to strings during normalization.
+        """
         from elspeth.core.canonical import canonical_json
 
         obj = {"id": UUID("550e8400-e29b-41d4-a716-446655440000")}
-
-        # UUID passes through _normalize_value but fails at rfc8785.dumps()
-        with pytest.raises(rfc8785.CanonicalizationError, match="unsupported type"):
-            canonical_json(obj)
+        result = canonical_json(obj)
+        assert result == '{"id":"550e8400-e29b-41d4-a716-446655440000"}'
 
     def test_custom_class_instance_rejected(self) -> None:
         """Custom class instances must fail canonical serialization.
@@ -539,6 +631,105 @@ class TestSanitizeForCanonical:
 
         result = sanitize_for_canonical({"x": np.longdouble(3.14)})
         assert result == {"x": np.longdouble(3.14)}
+
+    def test_sanitize_numpy_longdouble_large_finite_unchanged(self) -> None:
+        """Finite np.longdouble values that overflow float64 must NOT be replaced with None.
+
+        Bug fix: sanitize_for_canonical used math.isfinite(float(obj)) which
+        falsely treats large-but-finite np.longdouble values as non-finite
+        because float() overflows to inf for values outside IEEE 754 double range.
+        """
+        from elspeth.core.canonical import sanitize_for_canonical
+
+        # 2^1024 is finite in np.longdouble (max_exp=16384) but overflows float64
+        large_val = np.longdouble(2.0) ** np.longdouble(1024)
+        assert np.isfinite(large_val), "Test precondition: value must be finite in longdouble"
+
+        result = sanitize_for_canonical({"x": large_val})
+        # Sanitizer only replaces truly non-finite values — this is finite
+        assert result["x"] is not None
+        assert np.isfinite(result["x"])
+
+
+class TestSanitizeNumpyArrays:
+    """Regression tests for elspeth-4122ad82e0: np.ndarray was missing from
+    sanitize_for_canonical(), causing quarantine hashing to fail on arrays
+    containing NaN/Inf.
+    """
+
+    def test_sanitize_ndarray_with_nan(self) -> None:
+        """np.ndarray containing NaN is converted to list with None."""
+        from elspeth.core.canonical import sanitize_for_canonical
+
+        arr = np.array([1.0, float("nan"), 3.0])
+        result = sanitize_for_canonical({"x": arr})
+        assert result == {"x": [1.0, None, 3.0]}
+
+    def test_sanitize_ndarray_with_inf(self) -> None:
+        """np.ndarray containing Inf is converted to list with None."""
+        from elspeth.core.canonical import sanitize_for_canonical
+
+        arr = np.array([float("inf"), 2.0, float("-inf")])
+        result = sanitize_for_canonical({"x": arr})
+        assert result == {"x": [None, 2.0, None]}
+
+    def test_sanitize_ndarray_finite_unchanged(self) -> None:
+        """np.ndarray with all-finite values is converted to list, values preserved."""
+        from elspeth.core.canonical import sanitize_for_canonical
+
+        arr = np.array([1.0, 2.0, 3.0])
+        result = sanitize_for_canonical({"x": arr})
+        assert result == {"x": [1.0, 2.0, 3.0]}
+
+    def test_sanitize_ndarray_2d(self) -> None:
+        """Multi-dimensional np.ndarray is recursively sanitized."""
+        from elspeth.core.canonical import sanitize_for_canonical
+
+        arr = np.array([[1.0, float("nan")], [float("inf"), 4.0]])
+        result = sanitize_for_canonical({"x": arr})
+        assert result == {"x": [[1.0, None], [None, 4.0]]}
+
+
+class TestNumpyLongdoubleCanonicalOverflow:
+    """np.longdouble values that are finite but overflow IEEE 754 double.
+
+    Bug fix for elspeth-7ab03de217: _normalize_value used math.isnan/isinf
+    which implicitly downcast np.longdouble through float(), causing:
+    - Finite values falsely rejected as non-finite
+    - Distinct high-precision values collapsing onto the same hash
+    """
+
+    def test_normalize_longdouble_overflow_raises_clear_error(self) -> None:
+        """Finite longdouble that overflows float64 must raise a clear error, not misreport as non-finite."""
+        from elspeth.core.canonical import _normalize_value
+
+        large_val = np.longdouble(2.0) ** np.longdouble(1024)
+        assert np.isfinite(large_val), "Test precondition"
+
+        with pytest.raises(ValueError, match="exceeds IEEE 754 double range"):
+            _normalize_value(large_val)
+
+    def test_normalize_longdouble_nan_rejected_correctly(self) -> None:
+        """np.longdouble NaN must still be rejected as non-finite."""
+        from elspeth.core.canonical import _normalize_value
+
+        with pytest.raises(ValueError, match="non-finite"):
+            _normalize_value(np.longdouble("nan"))
+
+    def test_normalize_longdouble_inf_rejected_correctly(self) -> None:
+        """np.longdouble Infinity must still be rejected as non-finite."""
+        from elspeth.core.canonical import _normalize_value
+
+        with pytest.raises(ValueError, match="non-finite"):
+            _normalize_value(np.longdouble("inf"))
+
+    def test_normalize_longdouble_representable_value_works(self) -> None:
+        """np.longdouble values within float64 range convert normally."""
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(np.longdouble(3.14))
+        assert result == 3.14
+        assert type(result) is float
 
 
 class TestNumpyDatetime64Normalization:

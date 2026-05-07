@@ -18,7 +18,7 @@ repos:
       - id: debug-statements
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.0
+    rev: v0.15.4
     hooks:
       # Linter - scans full codebase, check only (no --fix)
       - id: ruff
@@ -31,6 +31,28 @@ repos:
 
   - repo: local
     hooks:
+      # Secret-pattern scan — refuses the commit if a credential-shaped string
+      # slips into the staged content of THIS commit. Lives at scripts/git-hooks/
+      # so it's also runnable as a standalone .git/hooks/pre-commit if desired.
+      # Per-line bypass: append "# secret-scan: allow-this-line" to a matched line
+      # if it's a documented placeholder the script can't tell apart from the real thing.
+      - id: secret-scan
+        name: Secret-pattern scan (refuses commit if credential-shaped strings detected)
+        entry: scripts/git-hooks/pre-commit-secret-scan.sh
+        language: system
+        # pass_filenames: false because the local .git/hooks/pre-commit invokes
+        # `pre-commit run --all-files` (see header in that file: avoids the
+        # stash/unstash mechanism that has caused unstaged-work loss).  All
+        # other hooks compensate via pass_filenames: false + fixed-directory
+        # scanning.  This script is designed for staged-files-only operation;
+        # with no args it falls back to
+        # `git diff --cached --name-only --diff-filter=AM`, which is exactly
+        # the scope we want — newly-added/modified content per commit, not the
+        # whole repo (which would force per-line allow markers on every
+        # documented placeholder URL).
+        pass_filenames: false
+        always_run: true
+
       - id: mypy
         name: mypy
         entry: .venv/bin/mypy src/elspeth
@@ -40,7 +62,7 @@ repos:
 
       - id: enforce-tier-model
         name: Enforce Tier Model
-        entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*"
+        entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"
         language: system
         types: [python]
         pass_filenames: false
@@ -58,3 +80,34 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+
+      - id: enforce-plugin-hashes
+        name: Enforce Plugin Hashes
+        entry: .venv/bin/python -m scripts.cicd.enforce_plugin_hashes check --root src/elspeth
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: enforce-composer-exception-channel
+        name: Composer exception-channel discipline
+        entry: .venv/bin/python scripts/cicd/enforce_composer_exception_channel.py check --root src/elspeth --allowlist config/cicd/enforce_composer_exception_channel
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^src/elspeth/web/composer/tools\.py$
+
+      - id: enforce-composer-catch-order
+        name: Composer catch-order discipline
+        entry: .venv/bin/python scripts/cicd/enforce_composer_catch_order.py check --root src/elspeth --allowlist config/cicd/enforce_composer_catch_order
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^src/elspeth/web/.*\.py$
+
+      - id: enforce-contract-manifest
+        name: Enforce Declaration Contract Manifest
+        entry: .venv/bin/python scripts/cicd/enforce_contract_manifest.py check --allowlist config/cicd/enforce_contract_manifest
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/)

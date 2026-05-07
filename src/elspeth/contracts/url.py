@@ -57,6 +57,29 @@ def _extract_raw_port(netloc: str) -> str:
 
 # Sensitive query parameter names that should be stripped from webhook URLs.
 # Expanded list per code review to cover OAuth, API keys, signed URLs, etc.
+def _base_param_name(key: str) -> str:
+    """Extract base parameter name, stripping bracket/dot suffixes.
+
+    parse_qs preserves bracket notation (api_key[0] -> "api_key[0]") and
+    dot notation (token.value -> "token.value") as literal key strings.
+    This function extracts the base name for matching against SENSITIVE_PARAMS.
+
+    Examples:
+        _base_param_name("api_key[0]") -> "api_key"
+        _base_param_name("token.value") -> "token"
+        _base_param_name("api_key") -> "api_key"
+    """
+    # Bracket notation: take everything before first '['
+    bracket = key.find("[")
+    if bracket != -1:
+        key = key[:bracket]
+    # Dot notation: take everything before first '.'
+    dot = key.find(".")
+    if dot != -1:
+        key = key[:dot]
+    return key
+
+
 SENSITIVE_PARAMS = frozenset(
     {
         # Common API authentication
@@ -102,7 +125,7 @@ class SanitizedDatabaseUrl:
     def __post_init__(self) -> None:
         """Enforce invariant: sanitized_url must not contain credentials."""
         parsed = urlparse(self.sanitized_url)
-        if parsed.password:
+        if parsed.password is not None:
             raise ValueError(
                 "SanitizedDatabaseUrl cannot contain a password in the URL. Use SanitizedDatabaseUrl.from_raw_url() to sanitize first."
             )
@@ -210,14 +233,17 @@ class SanitizedWebhookUrl:
     def __post_init__(self) -> None:
         """Enforce invariant: sanitized_url must not contain credentials."""
         parsed = urlparse(self.sanitized_url)
-        # Check for password in netloc (Basic Auth)
-        if parsed.password:
+        # Check for ANY userinfo in netloc (username, password, or both).
+        # Must match the sanitizer's rule: username OR password = sensitive.
+        # Many services use username for bearer tokens (e.g., https://token@host).
+        if parsed.username is not None or parsed.password is not None:
             raise ValueError(
-                "SanitizedWebhookUrl cannot contain a password in the URL. Use SanitizedWebhookUrl.from_raw_url() to sanitize first."
+                "SanitizedWebhookUrl cannot contain userinfo (username/password) in the URL. "
+                "Use SanitizedWebhookUrl.from_raw_url() to sanitize first."
             )
         # Check for sensitive query parameters
         query_params = parse_qs(parsed.query, keep_blank_values=True)
-        sensitive_in_query = [k for k in query_params if k.lower() in SENSITIVE_PARAMS]
+        sensitive_in_query = [k for k in query_params if _base_param_name(k.lower()) in SENSITIVE_PARAMS]
         if sensitive_in_query:
             raise ValueError(
                 f"SanitizedWebhookUrl cannot contain sensitive query parameters: "
@@ -226,7 +252,7 @@ class SanitizedWebhookUrl:
             )
         # Check for sensitive fragment parameters
         fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
-        sensitive_in_fragment = [k for k in fragment_params if k.lower() in SENSITIVE_PARAMS]
+        sensitive_in_fragment = [k for k in fragment_params if _base_param_name(k.lower()) in SENSITIVE_PARAMS]
         if sensitive_in_fragment:
             raise ValueError(
                 f"SanitizedWebhookUrl cannot contain sensitive fragment parameters: "
@@ -272,21 +298,21 @@ class SanitizedWebhookUrl:
         fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
 
         # Track which sensitive keys are present (even if empty)
-        has_sensitive_query_keys = any(k.lower() in SENSITIVE_PARAMS for k in query_params)
-        has_sensitive_fragment_keys = any(k.lower() in SENSITIVE_PARAMS for k in fragment_params)
+        has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params)
+        has_sensitive_fragment_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in fragment_params)
 
         # Collect only non-empty sensitive values for fingerprinting
         sensitive_values: list[str] = []
 
         # Check query params for sensitive keys
         for key, values in query_params.items():
-            if key.lower() in SENSITIVE_PARAMS:
+            if _base_param_name(key.lower()) in SENSITIVE_PARAMS:
                 # Only add non-empty values to fingerprint
                 sensitive_values.extend(v for v in values if v)
 
         # Check fragment params for sensitive keys
         for key, values in fragment_params.items():
-            if key.lower() in SENSITIVE_PARAMS:
+            if _base_param_name(key.lower()) in SENSITIVE_PARAMS:
                 # Only add non-empty values to fingerprint
                 sensitive_values.extend(v for v in values if v)
 
@@ -333,10 +359,10 @@ class SanitizedWebhookUrl:
         # else: only empty values (e.g., ?token=) - no fingerprint needed
 
         # Remove sensitive query params
-        sanitized_params = {k: v for k, v in query_params.items() if k.lower() not in SENSITIVE_PARAMS}
+        sanitized_params = {k: v for k, v in query_params.items() if _base_param_name(k.lower()) not in SENSITIVE_PARAMS}
 
         # Remove sensitive fragment params
-        sanitized_fragment_params = {k: v for k, v in fragment_params.items() if k.lower() not in SENSITIVE_PARAMS}
+        sanitized_fragment_params = {k: v for k, v in fragment_params.items() if _base_param_name(k.lower()) not in SENSITIVE_PARAMS}
 
         # Reconstruct netloc without ANY Basic Auth credentials
         # SECURITY: Strip entire userinfo section when credentials present

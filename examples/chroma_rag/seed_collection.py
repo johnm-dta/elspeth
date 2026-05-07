@@ -9,9 +9,12 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
+from pathlib import Path
+
 import chromadb
 
-PERSIST_DIR = "examples/chroma_rag/chroma_data"
+PERSIST_DIR = str(Path(__file__).resolve().parent / "chroma_data")
 COLLECTION_NAME = "science-facts"
 
 DOCUMENTS = [
@@ -132,8 +135,7 @@ def main() -> None:
     client = chromadb.PersistentClient(path=PERSIST_DIR)
 
     # Delete collection if it exists (clean seed)
-    existing = [c.name for c in client.list_collections()]
-    if COLLECTION_NAME in existing:
+    with contextlib.suppress(ValueError, chromadb.errors.NotFoundError):
         client.delete_collection(COLLECTION_NAME)
 
     collection = client.get_or_create_collection(

@@ -54,6 +54,21 @@ class LineageData(TypedDict):
     tokens: list[TokenDisplayInfo]
 
 
+class TreeNodeDict(TypedDict):
+    """Flattened tree node for rendering.
+
+    Output of LineageTree.get_tree_nodes(). All fields are required
+    since they're generated internally by _flatten_tree().
+    """
+
+    label: str
+    node_id: str | None
+    node_type: str
+    depth: int
+    has_children: bool
+    expanded: bool
+
+
 class NodeStateInfo(TypedDict, total=False):
     """Node state information for detail panel display.
 

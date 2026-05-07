@@ -24,6 +24,45 @@ class TestResolveDatabaseUrl:
 
         assert url == f"sqlite:///{db_path.resolve()}"
 
+    def test_explicit_database_still_rejects_missing_explicit_settings(self, tmp_path: Path) -> None:
+        """--database does not silently discard an explicit missing --settings path."""
+        from elspeth.cli_helpers import resolve_database_url
+
+        db_path = tmp_path / "explicit.db"
+        db_path.touch()
+
+        with pytest.raises(ValueError, match="Settings file not found"):
+            resolve_database_url(database=str(db_path), settings_path=tmp_path / "missing.yaml")
+
+    def test_explicit_database_existing_settings_defers_secret_loading_to_cli(self, tmp_path: Path) -> None:
+        """--database validates --settings exists but leaves secret loading to explain."""
+        from elspeth.cli_helpers import resolve_database_url
+
+        db_path = tmp_path / "explicit.db"
+        db_path.touch()
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text("""
+landscape:
+  url: sqlite:///./ignored-settings.db
+source:
+  plugin: csv
+  on_success: output
+  options:
+    path: input.csv
+    on_validation_failure: discard
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: output.csv
+""")
+
+        url, config = resolve_database_url(database=str(db_path), settings_path=settings_file)
+
+        assert url == f"sqlite:///{db_path.resolve()}"
+        assert config is None
+
     def test_raises_when_database_file_not_found(self, tmp_path: Path) -> None:
         """Raises ValueError when --database points to nonexistent file."""
         from elspeth.cli_helpers import resolve_database_url

@@ -21,7 +21,7 @@ Module structure:
 - outcomes.py: Row outcome accumulation and coalesce handling
 """
 
-from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.core import Orchestrator, prepare_for_run
 from elspeth.engine.orchestrator.types import (
     AggregationFlushResult,
     ExecutionCounters,
@@ -39,4 +39,5 @@ __all__ = [
     "RouteValidationError",
     "RowPlugin",
     "RunResult",
+    "prepare_for_run",
 ]

@@ -49,13 +49,20 @@ transforms:
       allowed_hosts:
         - "127.0.0.0/8"
     schema:
-      mode: observed
+      mode: fixed
+      # Declare the input fields this transform consumes — required so the
+      # static output schema (WebScrapeOutput) carries id/url/label through to
+      # downstream consumers (the CSV sinks below declare those fields).
+      fields:
+      - 'id: int'
+      - 'url: str'
+      - 'label: str'
 
 gates:
 # Gate: Route short or suspicious content to review
 - name: content_check
   input: scraped
-  condition: len(str(row.get('page_content', ''))) >= 50
+  condition: len(row['page_content']) >= 50
   routes:
     'true': output
     'false': review
@@ -74,7 +81,7 @@ sinks:
         - 'label: str'
         - 'page_content: str'
         - 'page_fingerprint: str'
-        - 'fetch_status: str'
+        - 'fetch_status: int'
         - 'fetch_url_final: str'
         - 'fetch_url_final_ip: str'
   review:
@@ -90,7 +97,7 @@ sinks:
         - 'label: str'
         - 'page_content: str'
         - 'page_fingerprint: str'
-        - 'fetch_status: str'
+        - 'fetch_status: int'
         - 'fetch_url_final: str'
         - 'fetch_url_final_ip: str'
   scrape_failures:

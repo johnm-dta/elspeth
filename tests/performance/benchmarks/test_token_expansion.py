@@ -11,11 +11,12 @@ Related: P2-2026-01-21-expand-token-shared-row-data
 from __future__ import annotations
 
 import copy
-import sys
 import time
 from typing import Any
 
 import pytest
+
+from tests.performance.benchmarks._deep_size import deep_sizeof
 
 
 class TestExpandTokenDeepCopyPerformance:
@@ -245,33 +246,18 @@ class TestMemoryAmplification:
         becomes N * sizeof(row). This test documents that cost.
         """
 
-        def get_deep_size(obj: Any, seen: set[int] | None = None) -> int:
-            """Recursively calculate object memory usage."""
-            if seen is None:
-                seen = set()
-            obj_id = id(obj)
-            if obj_id in seen:
-                return 0
-            seen.add(obj_id)
-            size = sys.getsizeof(obj)
-            if isinstance(obj, dict):
-                size += sum(get_deep_size(k, seen) + get_deep_size(v, seen) for k, v in obj.items())
-            elif isinstance(obj, list | tuple | set | frozenset):
-                size += sum(get_deep_size(item, seen) for item in obj)
-            return size
-
         # Create a medium-sized row
         row: dict[str, Any] = {
             "id": 12345,
             "data": [{"value": i, "label": f"item_{i}"} for i in range(100)],
         }
 
-        single_size = get_deep_size(row)
+        single_size = deep_sizeof(row)
         expansion_count = 10
 
         # Create expanded copies
         expanded = [copy.deepcopy(row) for _ in range(expansion_count)]
-        total_size = sum(get_deep_size(r) for r in expanded)
+        total_size = sum(deep_sizeof(r) for r in expanded)
 
         amplification = total_size / single_size
 

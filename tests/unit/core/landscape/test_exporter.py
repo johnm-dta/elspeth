@@ -36,6 +36,8 @@ from elspeth.contracts.audit import (
     Token,
     TokenOutcome,
     TokenParent,
+    TransformErrorRecord,
+    ValidationErrorRecord,
 )
 from elspeth.contracts.enums import (
     BatchStatus,
@@ -46,8 +48,9 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.core.landscape.exporter import LandscapeExporter
@@ -270,6 +273,7 @@ _BATCH = Batch(
 
 _BATCH_MEMBER = BatchMember(
     batch_id="batch-1",
+    run_id="run-1",
     token_id="tok-1",
     ordinal=0,
 )
@@ -278,8 +282,9 @@ _TOKEN_OUTCOME = TokenOutcome(
     outcome_id="outcome-1",
     run_id="run-1",
     token_id="tok-1",
-    outcome=RowOutcome.COMPLETED,
-    is_terminal=True,
+    outcome=TerminalOutcome.SUCCESS,
+    path=TerminalPath.DEFAULT_FLOW,
+    completed=True,
     recorded_at=_DT2,
     sink_name="output",
 )
@@ -296,6 +301,36 @@ _ARTIFACT = Artifact(
     created_at=_DT,
 )
 
+_VALIDATION_ERROR = ValidationErrorRecord(
+    error_id="verr-1",
+    run_id="run-1",
+    node_id="node-1",
+    row_id="row-1",
+    row_hash="validation-row-hash",
+    row_data_json='{"amount": "oops"}',
+    error="Missing required field amount",
+    schema_mode="fixed",
+    destination="quarantine",
+    created_at=_DT,
+    violation_type="missing_field",
+    original_field_name="Amount USD",
+    normalized_field_name="amount_usd",
+    expected_type="int",
+    actual_type="missing",
+)
+
+_TRANSFORM_ERROR = TransformErrorRecord(
+    error_id="terr-1",
+    run_id="run-1",
+    token_id="tok-1",
+    transform_id="node-2",
+    row_hash="transform-row-hash",
+    row_data_json='{"amount": "oops"}',
+    error_details_json='{"reason": "test_error", "message": "boom"}',
+    destination="discard",
+    created_at=_DT2,
+)
+
 
 def _make_exporter(
     *,
@@ -304,6 +339,8 @@ def _make_exporter(
     secret_resolutions: list[Any] | None = None,
     nodes: list[Any] | None = None,
     edges: list[Any] | None = None,
+    validation_errors: list[Any] | None = None,
+    transform_errors: list[Any] | None = None,
     operations: list[Any] | None = None,
     operation_calls: list[Any] | None = None,
     rows: list[Any] | None = None,
@@ -317,28 +354,38 @@ def _make_exporter(
     batch_members: list[Any] | None = None,
     artifacts: list[Any] | None = None,
 ) -> LandscapeExporter:
-    """Create an exporter with mocked database and recorder."""
+    """Create an exporter with mocked database and factory."""
     mock_db = Mock()
     exporter = LandscapeExporter(mock_db, signing_key=signing_key)
 
-    # Mock all recorder methods used by _iter_records
-    recorder = exporter._recorder
-    object.__setattr__(recorder, "get_run", Mock(return_value=run if run is not None else _RUN))
-    object.__setattr__(recorder, "get_secret_resolutions_for_run", Mock(return_value=secret_resolutions or []))
-    object.__setattr__(recorder, "get_nodes", Mock(return_value=nodes or []))
-    object.__setattr__(recorder, "get_edges", Mock(return_value=edges or []))
-    object.__setattr__(recorder, "get_operations_for_run", Mock(return_value=operations or []))
-    object.__setattr__(recorder, "get_all_operation_calls_for_run", Mock(return_value=operation_calls or []))
-    object.__setattr__(recorder, "get_rows", Mock(return_value=rows or []))
-    object.__setattr__(recorder, "get_all_tokens_for_run", Mock(return_value=tokens or []))
-    object.__setattr__(recorder, "get_all_token_parents_for_run", Mock(return_value=token_parents or []))
-    object.__setattr__(recorder, "get_all_token_outcomes_for_run", Mock(return_value=token_outcomes or []))
-    object.__setattr__(recorder, "get_all_node_states_for_run", Mock(return_value=node_states or []))
-    object.__setattr__(recorder, "get_all_routing_events_for_run", Mock(return_value=routing_events or []))
-    object.__setattr__(recorder, "get_all_calls_for_run", Mock(return_value=state_calls or []))
-    object.__setattr__(recorder, "get_batches", Mock(return_value=batches or []))
-    object.__setattr__(recorder, "get_all_batch_members_for_run", Mock(return_value=batch_members or []))
-    object.__setattr__(recorder, "get_artifacts", Mock(return_value=artifacts or []))
+    # Mock all factory sub-repository methods used by _iter_records
+    factory = exporter._factory
+
+    # run_lifecycle repository
+    object.__setattr__(factory.run_lifecycle, "get_run", Mock(return_value=run if run is not None else _RUN))
+    object.__setattr__(factory.run_lifecycle, "get_secret_resolutions_for_run", Mock(return_value=secret_resolutions or []))
+
+    # data_flow repository
+    object.__setattr__(factory.data_flow, "get_nodes", Mock(return_value=nodes or []))
+    object.__setattr__(factory.data_flow, "get_edges", Mock(return_value=edges or []))
+    object.__setattr__(factory.data_flow, "get_validation_errors_for_run", Mock(return_value=validation_errors or []))
+    object.__setattr__(factory.data_flow, "get_transform_errors_for_run", Mock(return_value=transform_errors or []))
+
+    # execution repository
+    object.__setattr__(factory.execution, "get_operations_for_run", Mock(return_value=operations or []))
+    object.__setattr__(factory.execution, "get_all_operation_calls_for_run", Mock(return_value=operation_calls or []))
+    object.__setattr__(factory.execution, "get_batches", Mock(return_value=batches or []))
+    object.__setattr__(factory.execution, "get_all_batch_members_for_run", Mock(return_value=batch_members or []))
+    object.__setattr__(factory.execution, "get_artifacts", Mock(return_value=artifacts or []))
+
+    # query repository
+    object.__setattr__(factory.query, "get_rows", Mock(return_value=rows or []))
+    object.__setattr__(factory.query, "get_all_tokens_for_run", Mock(return_value=tokens or []))
+    object.__setattr__(factory.query, "get_all_token_parents_for_run", Mock(return_value=token_parents or []))
+    object.__setattr__(factory.query, "get_all_token_outcomes_for_run", Mock(return_value=token_outcomes or []))
+    object.__setattr__(factory.query, "get_all_node_states_for_run", Mock(return_value=node_states or []))
+    object.__setattr__(factory.query, "get_all_routing_events_for_run", Mock(return_value=routing_events or []))
+    object.__setattr__(factory.query, "get_all_calls_for_run", Mock(return_value=state_calls or []))
 
     return exporter
 
@@ -351,7 +398,7 @@ def _make_exporter(
 class TestConstructor:
     """Tests for exporter initialization."""
 
-    def test_creates_recorder_from_db(self) -> None:
+    def test_creates_factory_from_db(self) -> None:
         db = Mock()
         exporter = LandscapeExporter(db)
         assert exporter._db is db
@@ -409,7 +456,7 @@ class TestExportRunUnsigned:
 
     def test_unknown_run_raises(self) -> None:
         exporter = _make_exporter(run=None)
-        object.__setattr__(exporter._recorder, "get_run", Mock(return_value=None))
+        object.__setattr__(exporter._factory.run_lifecycle, "get_run", Mock(return_value=None))
         with pytest.raises(ValueError, match="Run not found"):
             list(exporter.export_run("unknown-run"))
 
@@ -547,6 +594,33 @@ class TestNodeRecords:
         assert n["config"] == {"path": "data.csv"}
         assert n["schema_mode"] == "observed"
         assert n["sequence_in_pipeline"] == 0
+        assert n["registered_at"] is not None
+        assert isinstance(n["registered_at"], str)
+        assert n["registered_at"] == _DT.isoformat()
+        assert n["source_file_hash"] is None
+
+    def test_node_source_file_hash_propagated(self) -> None:
+        node_with_hash = Node(
+            node_id="node-hash",
+            run_id="run-1",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            determinism=Determinism.DETERMINISTIC,
+            config_hash="node-cfg-hash",
+            config_json='{"path": "data.csv"}',
+            registered_at=_DT,
+            schema_hash="schema-hash",
+            sequence_in_pipeline=0,
+            schema_mode="observed",
+            schema_fields=[{"name": "id", "type": "int"}],
+            source_file_hash="sha256:abcdef0123456789",
+        )
+        exporter = _make_exporter(nodes=[node_with_hash])
+        records = list(exporter.export_run("run-1"))
+        nodes = [r for r in records if r["record_type"] == "node"]
+        assert len(nodes) == 1
+        assert nodes[0]["source_file_hash"] == "sha256:abcdef0123456789"
 
 
 class TestEdgeRecords:
@@ -563,6 +637,9 @@ class TestEdgeRecords:
         assert e["to_node_id"] == "node-2"
         assert e["label"] == "continue"
         assert e["default_mode"] == "move"
+        assert e["created_at"] is not None
+        assert isinstance(e["created_at"], str)
+        assert e["created_at"] == _DT.isoformat()
 
 
 class TestOperationRecords:
@@ -610,6 +687,9 @@ class TestRowRecords:
         assert r["row_index"] == 0
         assert r["source_node_id"] == "node-1"
         assert r["source_data_hash"] == "data-hash"
+        assert r["created_at"] is not None
+        assert isinstance(r["created_at"], str)
+        assert r["created_at"] == _DT.isoformat()
 
 
 class TestTokenRecords:
@@ -624,6 +704,9 @@ class TestTokenRecords:
         assert t["token_id"] == "tok-1"
         assert t["row_id"] == "row-1"
         assert t["step_in_pipeline"] == 0
+        assert t["created_at"] is not None
+        assert isinstance(t["created_at"], str)
+        assert t["created_at"] == _DT.isoformat()
 
     def test_token_parent_fields(self) -> None:
         exporter = _make_exporter(
@@ -660,8 +743,9 @@ class TestTokenOutcomeRecords:
         assert o["outcome_id"] == "outcome-1"
         assert o["run_id"] == "run-1"
         assert o["token_id"] == "tok-1"
-        assert o["outcome"] == "completed"
-        assert o["is_terminal"] is True
+        assert o["outcome"] == "success"
+        assert o["path"] == "default_flow"
+        assert o["completed"] is True
         assert o["recorded_at"] == _DT2.isoformat()
         assert o["sink_name"] == "output"
         assert o["batch_id"] is None
@@ -860,6 +944,58 @@ class TestArtifactRecords:
         assert a["artifact_type"] == "csv"
         assert a["content_hash"] == "content-hash"
         assert a["size_bytes"] == 1024
+        assert a["created_at"] is not None
+        assert isinstance(a["created_at"], str)
+        assert a["created_at"] == _DT.isoformat()
+
+
+# ===========================================================================
+# Error records
+# ===========================================================================
+
+
+class TestErrorRecords:
+    """Tests for source validation and transform error audit records."""
+
+    def test_validation_error_fields(self) -> None:
+        exporter = _make_exporter(validation_errors=[_VALIDATION_ERROR])
+        records = list(exporter.export_run("run-1"))
+        errors = [r for r in records if r["record_type"] == "validation_error"]
+
+        assert len(errors) == 1
+        err = errors[0]
+        assert err["error_id"] == "verr-1"
+        assert err["run_id"] == "run-1"
+        assert err["node_id"] == "node-1"
+        assert err["row_id"] == "row-1"
+        assert err["row_hash"] == "validation-row-hash"
+        assert err["row_data_json"] == '{"amount": "oops"}'
+        assert err["error"] == "Missing required field amount"
+        assert err["schema_mode"] == "fixed"
+        assert err["destination"] == "quarantine"
+        assert err["created_at"] == _DT.isoformat()
+        assert err["violation_type"] == "missing_field"
+        assert err["original_field_name"] == "Amount USD"
+        assert err["normalized_field_name"] == "amount_usd"
+        assert err["expected_type"] == "int"
+        assert err["actual_type"] == "missing"
+
+    def test_transform_error_fields(self) -> None:
+        exporter = _make_exporter(transform_errors=[_TRANSFORM_ERROR])
+        records = list(exporter.export_run("run-1"))
+        errors = [r for r in records if r["record_type"] == "transform_error"]
+
+        assert len(errors) == 1
+        err = errors[0]
+        assert err["error_id"] == "terr-1"
+        assert err["run_id"] == "run-1"
+        assert err["token_id"] == "tok-1"
+        assert err["transform_id"] == "node-2"
+        assert err["row_hash"] == "transform-row-hash"
+        assert err["row_data_json"] == '{"amount": "oops"}'
+        assert err["error_details_json"] == '{"reason": "test_error", "message": "boom"}'
+        assert err["destination"] == "discard"
+        assert err["created_at"] == _DT2.isoformat()
 
 
 # ===========================================================================
@@ -877,6 +1013,8 @@ class TestRecordOrder:
             nodes=[_NODE],
             edges=[_EDGE],
             operations=[_OPERATION],
+            validation_errors=[_VALIDATION_ERROR],
+            transform_errors=[_TRANSFORM_ERROR],
             rows=[_ROW],
             tokens=[_TOKEN],
             node_states=[_NODE_STATE_COMPLETED],
@@ -893,11 +1031,13 @@ class TestRecordOrder:
         node_idx = types.index("node")
         edge_idx = types.index("edge")
         op_idx = types.index("operation")
+        validation_error_idx = types.index("validation_error")
+        transform_error_idx = types.index("transform_error")
         row_idx = types.index("row")
         batch_idx = types.index("batch")
         art_idx = types.index("artifact")
 
-        assert run_idx < sec_idx < node_idx < edge_idx < op_idx < row_idx < batch_idx < art_idx
+        assert run_idx < sec_idx < node_idx < edge_idx < op_idx < validation_error_idx < transform_error_idx < row_idx < batch_idx < art_idx
 
 
 # ===========================================================================
@@ -931,6 +1071,28 @@ class TestExportRunGrouped:
         groups = exporter.export_run_grouped("run-1", sign=True)
         assert "manifest" in groups
         assert len(groups["manifest"]) == 1
+
+    def test_groups_error_records_by_record_type(self) -> None:
+        exporter = _make_exporter(
+            validation_errors=[_VALIDATION_ERROR],
+            transform_errors=[_TRANSFORM_ERROR],
+        )
+        groups = exporter.export_run_grouped("run-1")
+
+        assert len(groups["validation_error"]) == 1
+        assert len(groups["transform_error"]) == 1
+
+    def test_signed_error_records_are_counted_in_manifest(self) -> None:
+        exporter = _make_exporter(
+            signing_key=b"key",
+            validation_errors=[_VALIDATION_ERROR],
+            transform_errors=[_TRANSFORM_ERROR],
+        )
+        groups = exporter.export_run_grouped("run-1", sign=True)
+
+        assert groups["manifest"][0]["record_count"] == 3
+        assert "signature" in groups["validation_error"][0]
+        assert "signature" in groups["transform_error"][0]
 
 
 # ===========================================================================
@@ -1055,6 +1217,8 @@ class TestTimestampPreservation:
             edges=[_EDGE],
             operations=[_OPERATION],
             operation_calls=[_OP_CALL],
+            validation_errors=[_VALIDATION_ERROR],
+            transform_errors=[_TRANSFORM_ERROR],
             rows=[_ROW],
             tokens=[_TOKEN],
             token_parents=[_TOKEN_PARENT],
@@ -1071,9 +1235,14 @@ class TestTimestampPreservation:
         # Map of record_type -> timestamp fields that must be non-None
         expected_timestamps: dict[str, list[str]] = {
             "run": ["started_at", "completed_at"],
+            "node": ["registered_at"],
+            "edge": ["created_at"],
             "operation": ["started_at", "completed_at"],
+            "row": ["created_at"],
+            "token": ["created_at"],
             "routing_event": ["created_at"],
             "batch": ["created_at", "completed_at"],
+            "artifact": ["created_at"],
         }
         # Both call records (operation-parented and state-parented) have created_at
         call_records = [r for r in records if r["record_type"] == "call"]
@@ -1102,6 +1271,8 @@ class TestFullPipelineExport:
             edges=[_EDGE],
             operations=[_OPERATION],
             operation_calls=[_OP_CALL],
+            validation_errors=[_VALIDATION_ERROR],
+            transform_errors=[_TRANSFORM_ERROR],
             rows=[_ROW],
             tokens=[_TOKEN],
             token_parents=[_TOKEN_PARENT],
@@ -1126,6 +1297,8 @@ class TestFullPipelineExport:
             "node": 1,
             "edge": 1,
             "operation": 1,
+            "validation_error": 1,
+            "transform_error": 1,
             "call": 2,  # 1 operation call + 1 state call
             "row": 1,
             "token": 1,

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from elspeth.contracts import CallStatus
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.plugins.infrastructure.clients.llm import (
     AuditedLLMClient,
     ContentPolicyError,
@@ -127,10 +127,10 @@ class TestLLMClientExceptionTypes:
     """Test that correct exception types are raised."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create a mock LandscapeRecorder."""
-        recorder = Mock(spec=LandscapeRecorder)
-        return recorder
+    def mock_execution(self) -> Mock:
+        """Create a mock ExecutionRepository."""
+        execution = Mock(spec=ExecutionRepository)
+        return execution
 
     @pytest.fixture
     def mock_openai_client(self) -> Mock:
@@ -139,7 +139,7 @@ class TestLLMClientExceptionTypes:
 
     def test_rate_limit_raises_rate_limit_error(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Rate limit error (429) should raise RateLimitError."""
@@ -147,7 +147,7 @@ class TestLLMClientExceptionTypes:
         mock_openai_client.chat.completions.create.side_effect = Exception("429 Rate limit exceeded")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -165,14 +165,14 @@ class TestLLMClientExceptionTypes:
 
     def test_non_rate_substring_error_raises_non_retryable_llm_client_error(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Non-rate errors containing 'rate' substrings should not raise RateLimitError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("400 Bad Request: enumerate at least one item")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -189,21 +189,21 @@ class TestLLMClientExceptionTypes:
         assert exc_info.value.retryable is False
         assert "enumerate" in str(exc_info.value)
 
-        mock_recorder.record_call.assert_called_once()
-        call_args = mock_recorder.record_call.call_args
+        mock_execution.record_call.assert_called_once()
+        call_args = mock_execution.record_call.call_args
         assert call_args.kwargs["status"] == CallStatus.ERROR
         assert call_args.kwargs["error"].retryable is False
 
     def test_server_error_raises_server_error(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Server error (503) should raise ServerError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("503 Service Unavailable")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -221,14 +221,14 @@ class TestLLMClientExceptionTypes:
 
     def test_network_error_raises_network_error(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Network timeout should raise NetworkError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("Connection timeout")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -246,14 +246,14 @@ class TestLLMClientExceptionTypes:
 
     def test_content_policy_raises_content_policy_error(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Content policy violation should raise ContentPolicyError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("Your request was rejected by our safety system")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -271,14 +271,14 @@ class TestLLMClientExceptionTypes:
 
     def test_context_length_raises_context_length_error(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Context length exceeded should raise ContextLengthError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("This model's maximum context length is 8192 tokens")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -296,14 +296,14 @@ class TestLLMClientExceptionTypes:
 
     def test_client_error_raises_llm_client_error_non_retryable(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Client error (401) should raise non-retryable LLMClientError."""
         mock_openai_client.chat.completions.create.side_effect = Exception("401 Unauthorized: Invalid API key")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -321,7 +321,7 @@ class TestLLMClientExceptionTypes:
 
     def test_audit_trail_records_retryable_flag(
         self,
-        mock_recorder: Mock,
+        mock_execution: Mock,
         mock_openai_client: Mock,
     ) -> None:
         """Audit trail should record correct retryable flag."""
@@ -329,7 +329,7 @@ class TestLLMClientExceptionTypes:
         mock_openai_client.chat.completions.create.side_effect = Exception("503 Service Unavailable")
 
         client = AuditedLLMClient(
-            recorder=mock_recorder,
+            execution=mock_execution,
             state_id="test-state",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -343,13 +343,13 @@ class TestLLMClientExceptionTypes:
             )
 
         # Verify recorder was called with retryable=True
-        mock_recorder.record_call.assert_called_once()
-        call_args = mock_recorder.record_call.call_args
+        mock_execution.record_call.assert_called_once()
+        call_args = mock_execution.record_call.call_args
         assert call_args.kwargs["status"] == CallStatus.ERROR
         assert call_args.kwargs["error"].retryable is True
 
         # Reset and test non-retryable error
-        mock_recorder.reset_mock()
+        mock_execution.reset_mock()
         mock_openai_client.chat.completions.create.side_effect = Exception("401 Unauthorized")
 
         with pytest.raises(LLMClientError):
@@ -359,8 +359,8 @@ class TestLLMClientExceptionTypes:
             )
 
         # Verify recorder was called with retryable=False
-        mock_recorder.record_call.assert_called_once()
-        call_args = mock_recorder.record_call.call_args
+        mock_execution.record_call.assert_called_once()
+        call_args = mock_execution.record_call.call_args
         assert call_args.kwargs["status"] == CallStatus.ERROR
         assert call_args.kwargs["error"].retryable is False
 

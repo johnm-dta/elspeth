@@ -122,6 +122,158 @@ class TestR1DictGet:
         assert findings[0].symbol_context == ("DataProcessor", "process")
 
 
+class TestR1FalsePositiveFiltering:
+    """Tests for R1 false positive filtering.
+
+    The R1 rule flags .get() calls, but many are false positives:
+    - FastAPI router decorators (@router.get('/path'))
+    - HTTP client methods (client.get('http://...'))
+    - ChromaDB SDK calls (collection.get(ids=[...]))
+
+    Tests 1-4 and 6 document filtering that SHOULD happen (TDD red phase).
+    Tests 5, 7-10 are regression guards that must continue to pass.
+    """
+
+    def test_fastapi_router_decorator_not_flagged(self) -> None:
+        """@router.get('/path') on sync def should NOT be flagged."""
+        source = dedent("""
+            from fastapi import APIRouter
+            router = APIRouter()
+
+            @router.get('/users')
+            def list_users():
+                return []
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "FastAPI router.get() decorator should not be flagged"
+
+    def test_async_router_decorator_not_flagged(self) -> None:
+        """@router.get('/path') on async def should NOT be flagged."""
+        source = dedent("""
+            from fastapi import APIRouter
+            router = APIRouter()
+
+            @router.get('/items/{item_id}')
+            async def get_item(item_id: int):
+                return {"item_id": item_id}
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "FastAPI router.get() decorator should not be flagged"
+
+    def test_httpx_client_get_not_flagged(self) -> None:
+        """client.get('http://...') should NOT be flagged."""
+        source = dedent("""
+            import httpx
+
+            def fetch_data():
+                client = httpx.Client()
+                response = client.get('https://api.example.com/data')
+                return response.json()
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "HTTP client.get() with URL should not be flagged"
+
+    def test_get_with_url_path_not_flagged(self) -> None:
+        """client.get('/api/path') should NOT be flagged."""
+        source = dedent("""
+            def make_request(client):
+                return client.get('/api/v1/users')
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "client.get() with URL path should not be flagged"
+
+    def test_fstring_url_still_flagged(self) -> None:
+        """client.get(f"/api/{id}") SHOULD still be flagged (documents limitation).
+
+        This test documents a known limitation: f-strings are not string literals
+        in the AST, so we cannot determine if the argument is a URL. The heuristic
+        errs on the side of flagging, requiring an allowlist entry if needed.
+        """
+        source = dedent("""
+            def fetch_user(client, user_id):
+                return client.get(f'/api/users/{user_id}')
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 1, "f-string URLs cannot be detected as URLs - must be flagged"
+
+    def test_collection_get_with_ids_kwarg_not_flagged(self) -> None:
+        """collection.get(ids=[...]) should NOT be flagged.
+
+        ChromaDB and similar SDK patterns use .get(ids=[...]) which is clearly
+        not a dict.get() call.
+        """
+        source = dedent("""
+            def fetch_documents(collection):
+                return collection.get(ids=['doc1', 'doc2', 'doc3'])
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "collection.get(ids=[...]) should not be flagged"
+
+    def test_limit_kwarg_still_flagged(self) -> None:
+        """session.get(key, limit=10) SHOULD still be flagged (regression guard).
+
+        The 'ids' kwarg is special-cased for ChromaDB SDK patterns. Other kwargs
+        like 'limit' do not indicate non-dict usage and should still be flagged.
+        """
+        source = dedent("""
+            def get_cached(session, key):
+                return session.get(key, limit=10)
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 1, "get() with arbitrary kwargs should still be flagged"
+
+    def test_real_dict_get_still_flagged(self) -> None:
+        """data.get("key", "default") SHOULD be flagged."""
+        source = dedent("""
+            def process(data):
+                return data.get("key", "default")
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 1, "Standard dict.get() must be flagged"
+
+    def test_dict_get_without_default_still_flagged(self) -> None:
+        """config.get("setting") SHOULD be flagged."""
+        source = dedent("""
+            def read_config(config):
+                return config.get("setting")
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 1, "dict.get() without default must be flagged"
+
+    def test_ambiguous_get_still_flagged(self) -> None:
+        """obj.get("field") SHOULD be flagged.
+
+        Ambiguous .get() calls with string arguments that don't look like URLs
+        should be flagged. The allowlist mechanism exists for justified exceptions.
+        """
+        source = dedent("""
+            def extract(obj):
+                return obj.get("field")
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 1, "Ambiguous get() must be flagged"
+
+
 # =============================================================================
 # R2: getattr() detection
 # =============================================================================

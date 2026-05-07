@@ -1,6 +1,6 @@
 # Data Trust Model & Error Handling Guide
 
-**MANDATORY READING** when working on: Sources, Transforms, Sinks, Gates, Aggregations, external API integrations, Landscape recording, or any code that handles data crossing system boundaries.
+**MANDATORY READING** when working on: Sources, Transforms, Sinks, Aggregations, external API integrations, Landscape recording, or any code that handles data crossing system boundaries. (Gates are config-driven operations, not plugins — see CLAUDE.md.)
 
 ## Overview
 
@@ -269,7 +269,7 @@ From this point forward, `parsed` is treated as Tier 2 pipeline data. No more va
 
 ## Plugin Ownership: System Code, Not User Code
 
-**CRITICAL DISTINCTION:** All plugins (Sources, Transforms, Gates, Aggregations, Sinks) are **system-owned code**, not user-provided extensions.
+**CRITICAL DISTINCTION:** All plugins (Sources, Transforms, Aggregations, Sinks) are **system-owned code**, not user-provided extensions. Gates are config-driven operations, not plugins.
 
 ### What This Means
 

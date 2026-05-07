@@ -11,13 +11,14 @@ state, the audit trail is incomplete and ELSPETH's core value proposition
 These tests use Hypothesis to generate thousands of random pipeline inputs
 and verify that the terminal state invariant holds for ALL of them.
 
-Terminal states (from RowOutcome):
+Terminal states (from ADR-019 terminal pairs):
 - COMPLETED: Reached output sink successfully
 - ROUTED: Sent to named sink by gate
 - FORKED: Split into multiple parallel paths (parent token)
 - FAILED: Processing failed, not recoverable
 - QUARANTINED: Failed validation, stored for investigation
 - CONSUMED_IN_BATCH: Absorbed into aggregate
+- DROPPED_BY_FILTER: Transform intentionally emitted zero rows
 - COALESCED: Merged in join from parallel paths
 - EXPANDED: Deaggregated into child tokens
 
@@ -33,7 +34,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -74,7 +75,7 @@ def count_tokens_missing_terminal(db: LandscapeDB, run_id: str) -> int:
                 FROM tokens t
                 JOIN rows r ON r.row_id = t.row_id
                 LEFT JOIN token_outcomes o
-                  ON o.token_id = t.token_id AND o.is_terminal = 1
+                  ON o.token_id = t.token_id AND o.completed = 1
                 WHERE r.run_id = :run_id
                   AND o.token_id IS NULL
             """),
@@ -97,7 +98,7 @@ def count_duplicate_terminal_outcomes(db: LandscapeDB, run_id: str) -> int:
                     FROM token_outcomes o
                     JOIN tokens t ON t.token_id = o.token_id
                     JOIN rows r ON r.row_id = t.row_id
-                    WHERE o.is_terminal = 1 AND r.run_id = :run_id
+                    WHERE o.completed = 1 AND r.run_id = :run_id
                     GROUP BY o.token_id
                     HAVING COUNT(*) > 1
                 ) duplicates
@@ -107,16 +108,16 @@ def count_duplicate_terminal_outcomes(db: LandscapeDB, run_id: str) -> int:
         return result or 0
 
 
-def get_all_token_outcomes(db: LandscapeDB, run_id: str) -> list[tuple[str, str, bool]]:
+def get_all_token_outcomes(db: LandscapeDB, run_id: str) -> list[tuple[str, str | None, str, bool]]:
     """Get all token outcomes for a run.
 
-    Returns list of (token_id, outcome, is_terminal) tuples.
+    Returns list of (token_id, outcome, path, completed) tuples.
     Used for detailed debugging when invariants fail.
     """
     with db.connection() as conn:
         results = conn.execute(
             text("""
-                SELECT o.token_id, o.outcome, o.is_terminal
+                SELECT o.token_id, o.outcome, o.path, o.completed
                 FROM token_outcomes o
                 JOIN tokens t ON t.token_id = o.token_id
                 JOIN rows r ON r.row_id = t.row_id
@@ -125,7 +126,7 @@ def get_all_token_outcomes(db: LandscapeDB, run_id: str) -> list[tuple[str, str,
             """),
             {"run_id": run_id},
         ).fetchall()
-        return [(r[0], r[1], bool(r[2])) for r in results]
+        return [(r[0], r[1], r[2], bool(r[3])) for r in results]
 
 
 # =============================================================================
@@ -284,7 +285,7 @@ class TestTerminalStateProperty:
     @given(rows=st.lists(single_row, min_size=0, max_size=20))
     @settings(max_examples=50, deadline=None)
     def test_terminal_outcomes_have_correct_type(self, rows: list[dict[str, Any]]) -> None:
-        """Property: All terminal outcomes are valid RowOutcome enum values."""
+        """Property: All terminal outcomes use valid ADR-019 enum values."""
         db = make_landscape_db()
         payload_store = MockPayloadStore()
         source = ListSource(rows)
@@ -302,17 +303,18 @@ class TestTerminalStateProperty:
 
         # Get all outcomes and verify they're valid enum values
         outcomes = get_all_token_outcomes(db, run.run_id)
-        valid_outcomes = {o.value for o in RowOutcome}
+        valid_outcomes = {o.value for o in TerminalOutcome}
+        valid_paths = {p.value for p in TerminalPath}
 
-        for token_id, outcome, is_terminal in outcomes:
-            assert outcome in valid_outcomes, f"Invalid outcome '{outcome}' for token {token_id}. Valid outcomes: {valid_outcomes}"
+        for token_id, outcome, path, completed in outcomes:
+            if completed:
+                assert outcome in valid_outcomes, f"Invalid outcome '{outcome}' for token {token_id}. Valid outcomes: {valid_outcomes}"
+            else:
+                assert outcome is None, f"Non-terminal token {token_id} must have NULL outcome, got {outcome!r}"
+            assert path in valid_paths, f"Invalid path '{path}' for token {token_id}. Valid paths: {valid_paths}"
 
-            # Verify is_terminal flag matches the outcome
-            expected_terminal = RowOutcome(outcome).is_terminal
-            assert is_terminal == expected_terminal, (
-                f"is_terminal mismatch for token {token_id}: "
-                f"outcome={outcome}, is_terminal={is_terminal}, "
-                f"expected is_terminal={expected_terminal}"
+            assert completed == (outcome is not None), (
+                f"completed mismatch for token {token_id}: outcome={outcome}, path={path}, completed={completed}"
             )
 
 
@@ -392,32 +394,135 @@ class TestTerminalStateEdgeCases:
         assert missing == 0
 
 
-class TestRowOutcomeEnumProperties:
-    """Property tests for the RowOutcome enum itself."""
+class TestTerminalStateAggregation:
+    """Property tests: BUFFERED tokens in aggregation pipelines reach terminal state.
 
-    def test_all_outcomes_have_is_terminal_defined(self) -> None:
-        """Property: Every RowOutcome has is_terminal property defined."""
-        for outcome in RowOutcome:
-            # Should not raise
-            _ = outcome.is_terminal
+    These tests exercise the BUFFERED → terminal transition that only occurs
+    in pipelines with aggregation. The BUFFERED outcome is the only non-terminal
+    terminal pair — if a token is BUFFERED but never reaches terminal
+    state, the audit trail is incomplete.
 
-    def test_only_buffered_is_non_terminal(self) -> None:
-        """Property: BUFFERED is the only non-terminal outcome."""
-        non_terminal = [o for o in RowOutcome if not o.is_terminal]
-        assert non_terminal == [RowOutcome.BUFFERED], f"Expected only BUFFERED to be non-terminal, but found: {non_terminal}"
+    Fix for elspeth-27b9cd6f6c: existing terminal state property tests only
+    covered simple (source → transform → sink) pipelines, never exercising
+    the BUFFERED path at all.
+    """
 
-    def test_terminal_outcomes_count(self) -> None:
-        """Property: There are exactly 9 terminal outcomes."""
-        terminal = [o for o in RowOutcome if o.is_terminal]
-        expected = [
-            RowOutcome.COMPLETED,
-            RowOutcome.ROUTED,
-            RowOutcome.FORKED,
-            RowOutcome.FAILED,
-            RowOutcome.QUARANTINED,
-            RowOutcome.DIVERTED,
-            RowOutcome.CONSUMED_IN_BATCH,
-            RowOutcome.COALESCED,
-            RowOutcome.EXPANDED,
-        ]
-        assert set(terminal) == set(expected), f"Terminal outcomes mismatch. Got: {terminal}, Expected: {expected}"
+    @given(n=st.integers(min_value=1, max_value=30))
+    @settings(max_examples=50, deadline=None)
+    def test_aggregation_buffered_tokens_reach_terminal(self, n: int) -> None:
+        """Property: All tokens BUFFERED during aggregation reach terminal state.
+
+        Transform-mode aggregation: N input tokens → BUFFERED → CONSUMED_IN_BATCH.
+        Count trigger set unreachably high so all tokens flush at end-of-source.
+        """
+        from elspeth.contracts import PipelineRow
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+        from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
+        from elspeth.plugins.infrastructure.results import TransformResult
+        from elspeth.testing import make_pipeline_row
+        from tests.fixtures.base_classes import _TestSchema, _TestTransformBase
+        from tests.fixtures.factories import wire_transforms
+
+        class SumBatchTransform(_TestTransformBase):
+            """Batch transform that sums values."""
+
+            name = "sum_batch"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            on_success: str | None = "default"
+
+            def process(self, row: PipelineRow | list[PipelineRow], ctx: object) -> TransformResult:
+                if isinstance(row, list):
+                    total = sum(r.get("value", 0) for r in row)
+                    output = {"value": total, "count": len(row)}
+                    contract = SchemaContract(
+                        mode="OBSERVED",
+                        fields=(
+                            FieldContract(
+                                normalized_name="value", original_name="value", python_type=int, required=False, source="inferred"
+                            ),
+                            FieldContract(
+                                normalized_name="count", original_name="count", python_type=int, required=False, source="inferred"
+                            ),
+                        ),
+                        locked=True,
+                    )
+                    return TransformResult.success(
+                        PipelineRow(output, contract),
+                        success_reason={"action": "batch_sum"},
+                    )
+                return TransformResult.success(make_pipeline_row(row.to_dict()), success_reason={"action": "buffer"})
+
+        rows = [{"id": i, "value": i * 10} for i in range(n)]
+        source = as_source(ListSource(rows, name="agg_source", on_success="source_out"))
+        transform = as_transform(SumBatchTransform())
+        sink = as_sink(CollectSink())
+
+        # Build graph via production path (same as T18 characterization tests)
+        graph = ExecutionGraph.from_plugin_instances(
+            source=source,
+            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            transforms=wire_transforms([transform], source_connection="source_out", final_sink="default"),
+            sinks={"default": sink},
+            aggregations={},
+            gates=[],
+            coalesce_settings=None,
+        )
+
+        # Map transform's node ID to aggregation settings
+        transform_id_map = graph.get_transform_id_map()
+        transform_node_id = transform_id_map[0]
+
+        agg_settings = AggregationSettings(
+            name="test_agg",
+            plugin="sum_batch",
+            input="source_out",
+            on_success="default",
+            on_error="discard",
+            trigger=TriggerConfig(count=9999),  # Never triggers mid-stream
+            output_mode="transform",
+        )
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+            aggregation_settings={transform_node_id: agg_settings},
+        )
+
+        db = make_landscape_db()
+        orchestrator = Orchestrator(db)
+        payload_store = MockPayloadStore()
+        run = orchestrator.run(config, graph=graph, payload_store=payload_store)
+
+        # THE INVARIANT: No tokens missing terminal outcome
+        missing = count_tokens_missing_terminal(db, run.run_id)
+        assert missing == 0, (
+            f"AUDIT INTEGRITY VIOLATION: {missing} tokens missing terminal outcome "
+            f"in aggregation pipeline. Rows: {n}. "
+            f"BUFFERED tokens must reach terminal state at end-of-source flush."
+        )
+
+        # No duplicate terminals
+        duplicates = count_duplicate_terminal_outcomes(db, run.run_id)
+        assert duplicates == 0, f"AUDIT INTEGRITY VIOLATION: {duplicates} tokens have multiple terminal outcomes in aggregation pipeline."
+
+        # Counter sanity: all rows should have been buffered
+        assert run.rows_buffered == n, f"Expected {n} rows_buffered, got {run.rows_buffered}"
+
+
+class TestTerminalPairEnumProperties:
+    """Property tests for the ADR-019 terminal enum split."""
+
+    def test_outcome_values_are_closed(self) -> None:
+        """Property: TerminalOutcome exposes the lifecycle axis values."""
+        assert {outcome.value for outcome in TerminalOutcome} == {"success", "failure", "transient"}
+
+    def test_only_buffered_path_is_non_terminal(self) -> None:
+        """Property: BUFFERED is the only non-terminal path."""
+        assert TerminalPath.BUFFERED.value == "buffered"
+
+    def test_terminal_paths_count(self) -> None:
+        """Property: There are exactly 13 terminal paths plus BUFFERED."""
+        assert len(TerminalPath) == 14

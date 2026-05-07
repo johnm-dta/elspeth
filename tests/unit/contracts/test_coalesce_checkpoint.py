@@ -6,6 +6,10 @@ Covers __post_init__ invariant enforcement and from_dict error paths.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from types import MappingProxyType
+from typing import Any
+
 import pytest
 
 from elspeth.contracts.coalesce_checkpoint import (
@@ -16,7 +20,7 @@ from elspeth.contracts.coalesce_checkpoint import (
 from elspeth.contracts.errors import AuditIntegrityError
 
 
-def _valid_token_kwargs() -> dict:
+def _valid_token_kwargs() -> dict[str, Any]:
     """Minimal valid kwargs for CoalesceTokenCheckpoint."""
     return {
         "token_id": "tok-1",
@@ -57,7 +61,7 @@ class TestCoalesceTokenCheckpointPostInit:
         """Required string fields reject non-string types (e.g. corrupted JSON with int)."""
         kwargs = _valid_token_kwargs()
         kwargs[field] = 42
-        with pytest.raises(ValueError, match=field):
+        with pytest.raises(TypeError, match=field):
             CoalesceTokenCheckpoint(**kwargs)
 
     def test_rejects_negative_arrival_offset(self) -> None:
@@ -81,18 +85,27 @@ class TestCoalesceTokenCheckpointPostInit:
         with pytest.raises(ValueError, match="arrival_offset_seconds"):
             CoalesceTokenCheckpoint(**kwargs)
 
+    def test_accepts_ordered_dict_mapping(self) -> None:
+        """OrderedDict is a Mapping subtype — must be accepted (not just dict)."""
+        kwargs = _valid_token_kwargs()
+        kwargs["row_data"] = OrderedDict({"x": 1})
+        kwargs["contract"] = OrderedDict({"mode": "observed"})
+        token = CoalesceTokenCheckpoint(**kwargs)
+        assert isinstance(token.row_data, MappingProxyType)
+        assert token.row_data["x"] == 1
+
     def test_rejects_non_dict_row_data(self) -> None:
-        """row_data must be a dict or MappingProxyType."""
+        """row_data must be a Mapping."""
         kwargs = _valid_token_kwargs()
         kwargs["row_data"] = "not a dict"
-        with pytest.raises(TypeError, match="row_data must be dict or MappingProxyType"):
+        with pytest.raises(TypeError, match="row_data must be a Mapping"):
             CoalesceTokenCheckpoint(**kwargs)
 
     def test_rejects_non_dict_contract(self) -> None:
-        """contract must be a dict or MappingProxyType."""
+        """contract must be a Mapping."""
         kwargs = _valid_token_kwargs()
         kwargs["contract"] = ["not", "a", "dict"]
-        with pytest.raises(TypeError, match="contract must be dict or MappingProxyType"):
+        with pytest.raises(TypeError, match="contract must be a Mapping"):
             CoalesceTokenCheckpoint(**kwargs)
 
 
@@ -113,7 +126,7 @@ class TestCoalescePendingCheckpointPostInit:
     @pytest.mark.parametrize("field", ["coalesce_name", "row_id"])
     def test_rejects_empty_string(self, field: str) -> None:
         """Required string fields must be non-empty."""
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "coalesce_name": "merge_1",
             "row_id": "row-1",
             "elapsed_age_seconds": 1.5,
@@ -167,6 +180,33 @@ class TestCoalescePendingCheckpointPostInit:
                 elapsed_age_seconds=1.0,
                 branches={"path_a": token},
                 lost_branches={"path_a": "timed_out"},
+            )
+
+    def test_rejects_branch_key_mismatch(self) -> None:
+        """Branch key must match embedded token's branch_name.
+
+        Regression: elspeth-1d5cc9c4a2 — dual-encoded branch identity must agree.
+        """
+        token = _valid_token()  # branch_name="path_a"
+        with pytest.raises(AuditIntegrityError, match="does not match"):
+            CoalescePendingCheckpoint(
+                coalesce_name="merge_1",
+                row_id="row-1",
+                elapsed_age_seconds=1.0,
+                branches={"WRONG_KEY": token},  # key != token.branch_name
+                lost_branches={},
+            )
+
+    def test_rejects_empty_lost_branches_value(self) -> None:
+        """lost_branches values must be non-empty strings."""
+        valid = _valid_token()
+        with pytest.raises(ValueError, match=r"lost_branches.*non-empty"):
+            CoalescePendingCheckpoint(
+                coalesce_name="merge_1",
+                row_id="row-1",
+                elapsed_age_seconds=1.0,
+                branches={"path_a": valid},
+                lost_branches={"path_b": ""},
             )
 
 
@@ -223,7 +263,7 @@ class TestCoalesceCheckpointStatePostInit:
             CoalesceCheckpointState(version="", pending=(), completed_keys=())
 
     def test_rejects_non_string_version(self) -> None:
-        with pytest.raises(ValueError, match="version"):
+        with pytest.raises(TypeError, match="version"):
             CoalesceCheckpointState(version=42, pending=(), completed_keys=())  # type: ignore[arg-type]
 
     def test_rejects_wrong_length_completed_key(self) -> None:

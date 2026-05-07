@@ -2,13 +2,13 @@
 
 Functions: get_run_contract, explain_field, list_contract_violations.
 
-All functions accept (db, recorder) as their first two parameters.
+All functions accept (db, factory) as their first two parameters.
 """
 
 from __future__ import annotations
 
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.types import (
     ContractViolationsReport,
     ErrorResult,
@@ -18,7 +18,7 @@ from elspeth.mcp.types import (
 )
 
 
-def get_run_contract(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) -> RunContractReport | ErrorResult:
+def get_run_contract(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunContractReport | ErrorResult:
     """Get schema contract for a run.
 
     Shows the source schema contract with field resolution:
@@ -28,17 +28,17 @@ def get_run_contract(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) 
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to query
 
     Returns:
         Contract details or {"error": "..."} if not found
     """
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
-    contract = recorder.get_run_contract(run_id)
+    contract = factory.run_lifecycle.get_run_contract(run_id)
     if contract is None:
         return {"error": f"Run '{run_id}' has no contract stored"}
 
@@ -49,6 +49,7 @@ def get_run_contract(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) 
             "original_name": f.original_name,
             "python_type": f.python_type.__name__,
             "required": f.required,
+            "nullable": f.nullable,
             "source": f.source,
         }
         for f in contract.fields
@@ -65,7 +66,7 @@ def get_run_contract(db: LandscapeDB, recorder: LandscapeRecorder, run_id: str) 
 
 
 def explain_field(
-    db: LandscapeDB, recorder: LandscapeRecorder, run_id: str, field_name: str
+    db: LandscapeDB, factory: RecorderFactory, run_id: str, field_name: str
 ) -> FieldExplanation | ErrorResult | FieldNotFoundError:
     """Trace a field's provenance through the pipeline.
 
@@ -76,18 +77,18 @@ def explain_field(
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to query
         field_name: Either normalized or original name
 
     Returns:
         Field provenance details or {"error": "..."} if not found
     """
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
-    contract = recorder.get_run_contract(run_id)
+    contract = factory.run_lifecycle.get_run_contract(run_id)
     if contract is None:
         return {"error": f"Run '{run_id}' has no contract stored"}
 
@@ -111,13 +112,14 @@ def explain_field(
         "original_name": field_contract.original_name,
         "python_type": field_contract.python_type.__name__,
         "required": field_contract.required,
+        "nullable": field_contract.nullable,
         "source": field_contract.source,
         "contract_mode": contract.mode,
     }
 
 
 def list_contract_violations(
-    db: LandscapeDB, recorder: LandscapeRecorder, run_id: str, limit: int = 100
+    db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int = 100
 ) -> ContractViolationsReport | ErrorResult:
     """List contract violations for a run.
 
@@ -128,7 +130,7 @@ def list_contract_violations(
 
     Args:
         db: Database connection
-        recorder: Landscape recorder
+        factory: Recorder factory
         run_id: Run ID to query
         limit: Maximum violations to return (default 100)
 
@@ -139,7 +141,7 @@ def list_contract_violations(
 
     from elspeth.core.landscape.schema import validation_errors_table
 
-    run = recorder.get_run(run_id)
+    run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 

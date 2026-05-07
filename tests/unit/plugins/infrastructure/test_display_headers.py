@@ -13,6 +13,13 @@ from elspeth.contracts.header_modes import HeaderMode
 class _StubSink:
     """Minimal sink that satisfies DisplayHeaderHost protocol for testing."""
 
+    _headers_mode: HeaderMode
+    _headers_custom_mapping: dict[str, str] | None
+    _resolved_display_headers: dict[str, str] | None
+    _display_headers_resolved: bool
+    _needs_resume_field_resolution: bool
+    _output_contract: Any
+
     def __init__(
         self,
         headers_mode: HeaderMode,
@@ -50,14 +57,10 @@ class TestGetEffectiveDisplayHeaders:
         sink = _StubSink(HeaderMode.CUSTOM, mapping)
         assert get_effective_display_headers(sink) == mapping
 
-    def test_custom_mode_with_none_mapping_returns_none(self) -> None:
-        """CUSTOM mode with None mapping is a no-op — returns None, same as NORMALIZED."""
-        from elspeth.plugins.infrastructure.display_headers import (
-            get_effective_display_headers,
-        )
-
-        sink = _StubSink(HeaderMode.CUSTOM, None)
-        assert get_effective_display_headers(sink) is None
+    def test_custom_mode_with_none_mapping_raises(self) -> None:
+        """CUSTOM mode with None mapping crashes at init — not a silent fallback."""
+        with pytest.raises(ValueError, match="CUSTOM header mode requires an explicit headers_custom_mapping"):
+            _StubSink(HeaderMode.CUSTOM, None)
 
     def test_original_mode_with_contract(self) -> None:
         from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -293,15 +296,16 @@ class TestApplyDisplayHeaders:
         result = apply_display_headers(sink, rows)
         assert result == [{"Alpha": 1, "Beta": 2}]
 
-    def test_unmapped_keys_pass_through(self) -> None:
+    def test_custom_mode_rejects_unmapped_keys(self) -> None:
+        """CUSTOM mode must map every field — unmapped keys are a config error."""
         from elspeth.plugins.infrastructure.display_headers import (
             apply_display_headers,
         )
 
         sink = _StubSink(HeaderMode.CUSTOM, {"a": "Alpha"})
         rows = [{"a": 1, "extra": 99}]
-        result = apply_display_headers(sink, rows)
-        assert result == [{"Alpha": 1, "extra": 99}]
+        with pytest.raises(ValueError, match="CUSTOM header mode has no mapping for field 'extra'"):
+            apply_display_headers(sink, rows)
 
     def test_collision_raises(self) -> None:
         from elspeth.plugins.infrastructure.display_headers import (
@@ -330,26 +334,47 @@ class TestApplyDisplayHeaders:
         result = apply_display_headers(sink, [])
         assert result == []
 
-    def test_empty_mapping_passes_through(self) -> None:
-        """CUSTOM mode with empty mapping dict — all keys pass through unchanged."""
+    def test_custom_mode_empty_mapping_rejects_any_field(self) -> None:
+        """CUSTOM mode with empty mapping dict rejects all fields."""
         from elspeth.plugins.infrastructure.display_headers import (
             apply_display_headers,
         )
 
         sink = _StubSink(HeaderMode.CUSTOM, {})
         rows = [{"a": 1, "b": 2}]
-        result = apply_display_headers(sink, rows)
-        assert result == [{"a": 1, "b": 2}]
+        with pytest.raises(ValueError, match="CUSTOM header mode has no mapping for field"):
+            apply_display_headers(sink, rows)
 
-    def test_passthrough_collides_with_mapped_name(self) -> None:
-        """Row has field 'Alpha' and mapping maps 'a' → 'Alpha' — collision detected."""
+    def test_custom_mode_unmapped_detected_before_collision(self) -> None:
+        """CUSTOM mode detects unmapped field even if it would also collide."""
         from elspeth.plugins.infrastructure.display_headers import (
             apply_display_headers,
         )
 
         sink = _StubSink(HeaderMode.CUSTOM, {"a": "Alpha"})
-        with pytest.raises(ValueError, match="Header collision"):
+        with pytest.raises(ValueError, match="CUSTOM header mode has no mapping for field"):
             apply_display_headers(sink, [{"a": 1, "Alpha": 2}])
+
+    def test_original_mode_unmapped_keys_pass_through(self) -> None:
+        """ORIGINAL mode allows unmapped keys (transform-added fields)."""
+        from elspeth.plugins.infrastructure.display_headers import (
+            apply_display_headers,
+        )
+
+        sink = _StubSink(HeaderMode.ORIGINAL)
+        sink._resolved_display_headers = {"a": "Amount"}
+        rows = [{"a": 1, "extra": 99}]
+        result = apply_display_headers(sink, rows)
+        assert result == [{"Amount": 1, "extra": 99}]
+
+    def test_custom_mode_empty_rows_no_error(self) -> None:
+        """CUSTOM mode with empty rows doesn't raise — nothing to validate."""
+        from elspeth.plugins.infrastructure.display_headers import (
+            apply_display_headers,
+        )
+
+        sink = _StubSink(HeaderMode.CUSTOM, {"a": "Alpha"})
+        assert apply_display_headers(sink, []) == []
 
 
 class TestInitDisplayHeaders:
@@ -368,4 +393,4 @@ class TestInitDisplayHeaders:
             pass  # No _output_contract — forgot super().__init__()
 
         with pytest.raises(AttributeError):
-            init_display_headers(_BadSink(), HeaderMode.NORMALIZED)
+            init_display_headers(_BadSink(), HeaderMode.NORMALIZED)  # type: ignore[arg-type]

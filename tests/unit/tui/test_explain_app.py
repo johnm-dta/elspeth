@@ -12,12 +12,6 @@ import pytest
 class TestExplainApp:
     """Tests for ExplainApp."""
 
-    def test_app_exists(self) -> None:
-        """ExplainApp can be imported."""
-        from elspeth.tui.explain_app import ExplainApp
-
-        assert ExplainApp is not None
-
     @pytest.mark.asyncio
     async def test_app_starts(self) -> None:
         """App can start and stop."""

@@ -237,17 +237,17 @@ class TestSignedExportDeterminism:
         directly (not via CLI, which creates new runs each time).
         """
         from elspeth.core.landscape.exporter import LandscapeExporter
-        from tests.fixtures.landscape import make_landscape_db, make_recorder
+        from tests.fixtures.landscape import make_factory, make_landscape_db
 
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Create a run with multiple records of each type
-        run = recorder.begin_run(config={"test": True}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={"test": True}, canonical_version="v1")
 
         # Multiple nodes
         for i in range(3):
-            recorder.register_node(
+            factory.data_flow.register_node(
                 run_id=run.run_id,
                 node_id=f"node_{i}",
                 plugin_name="test",
@@ -259,7 +259,7 @@ class TestSignedExportDeterminism:
 
         # Multiple edges
         for i in range(2):
-            recorder.register_edge(
+            factory.data_flow.register_edge(
                 run_id=run.run_id,
                 from_node_id=f"node_{i}",
                 to_node_id=f"node_{i + 1}",
@@ -269,28 +269,28 @@ class TestSignedExportDeterminism:
 
         # Multiple rows with tokens
         for i in range(3):
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id="node_0",
                 row_index=i,
                 data={"value": i * 10},
             )
-            token = recorder.create_token(row_id=row.row_id)
-            state = recorder.begin_node_state(
+            token = factory.data_flow.create_token(row_id=row.row_id)
+            state = factory.execution.begin_node_state(
                 token_id=token.token_id,
                 node_id="node_0",
                 run_id=run.run_id,
                 step_index=0,
                 input_data={"x": i},
             )
-            recorder.complete_node_state(
+            factory.execution.complete_node_state(
                 state.state_id,
                 status=NodeStateStatus.COMPLETED,
                 output_data={"result": i * 20},
                 duration_ms=5.0,
             )
 
-        recorder.complete_run(run.run_id, status=RunStatus.COMPLETED)
+        factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.COMPLETED)
 
         # Export the SAME run twice with signing
         signing_key = b"test-determinism-key-12345"

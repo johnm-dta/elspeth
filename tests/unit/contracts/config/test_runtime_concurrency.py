@@ -5,6 +5,8 @@ Concurrency-specific tests only. Common tests (frozen, slots, protocol, orphan f
 are in test_runtime_common.py.
 """
 
+from types import MappingProxyType
+
 import pytest
 
 # NOTE: Protocol compliance, orphan detection, frozen/slots tests are in test_runtime_common.py
@@ -42,7 +44,7 @@ class TestConcurrencyFieldNameMapping:
 
         # ConcurrencySettings should not have any field mappings
         # because all field names are the same between Settings and Runtime
-        mappings = FIELD_MAPPINGS.get("ConcurrencySettings", {})
+        mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get("ConcurrencySettings", {})
 
         assert mappings == {}, f"ConcurrencySettings should have no field mappings (same names), but found: {mappings}"
 
@@ -111,4 +113,4 @@ class TestRuntimeConcurrencyValidation:
         from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
 
         with pytest.raises(TypeError, match="max_workers must be int"):
-            RuntimeConcurrencyConfig(max_workers=True)  # type: ignore[arg-type]  # Intentional: testing bool rejection
+            RuntimeConcurrencyConfig(max_workers=True)

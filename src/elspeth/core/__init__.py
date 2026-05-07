@@ -33,6 +33,7 @@ from elspeth.core.config import (
 from elspeth.core.dag import (
     ExecutionGraph,
     GraphValidationError,
+    GraphValidationWarning,
     NodeConfig,
     NodeInfo,
     WiredTransform,
@@ -70,6 +71,7 @@ __all__ = [
     "ExpressionSyntaxError",
     "FilesystemPayloadStore",
     "GraphValidationError",
+    "GraphValidationWarning",
     "IntegrityError",
     "LandscapeExportSettings",
     "LandscapeSettings",

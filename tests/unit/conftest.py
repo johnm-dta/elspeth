@@ -1,7 +1,11 @@
 # tests/unit/conftest.py
 """Unit test configuration.
 
-No database fixtures. No I/O. Pure logic tests only.
+Unit tests verify component logic in isolation from external services.
+In-memory SQLite (LandscapeDB.in_memory()) is permitted for audit-trail
+verification — it is fast, deterministic, requires no external service,
+and avoids the anti-pattern of testing mocks instead of behavior.
+
 Provides shared in-memory fixtures (payload store, plugin manager).
 """
 

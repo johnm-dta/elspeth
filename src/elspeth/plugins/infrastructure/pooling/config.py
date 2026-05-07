@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.plugins.infrastructure.pooling.throttle import ThrottleConfig
 
@@ -29,6 +30,13 @@ class PoolConfig(BaseModel):
     backoff_multiplier: float = Field(2.0, gt=1.0, description="Backoff multiplier on capacity error")
     recovery_step_ms: int = Field(50, ge=0, description="Recovery step in milliseconds")
     max_capacity_retry_seconds: int = Field(3600, gt=0, description="Max seconds to retry capacity errors")
+
+    @field_validator("backoff_multiplier")
+    @classmethod
+    def _validate_backoff_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"backoff_multiplier must be finite, got {v}")
+        return v
 
     @model_validator(mode="after")
     def _validate_delay_invariants(self) -> Self:

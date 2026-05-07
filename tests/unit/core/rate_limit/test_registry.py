@@ -249,6 +249,57 @@ class TestRateLimitRegistryThreadSafety:
         registry.close()
 
 
+class TestRateLimitRegistryHostnameServiceNames:
+    """Verify registry handles hostname-style service names.
+
+    Bug: elspeth-a485c2b464. RateLimitRegistry passes raw service names
+    to RateLimiter which requires ^[A-Za-z][A-Za-z0-9_]*$. Hostname-style
+    keys like 'api.example.com' crash at runtime.
+    """
+
+    def test_hostname_service_name_accepted(self) -> None:
+        """Hostname-style service names should work (registry sanitizes)."""
+        settings = RateLimitSettings(
+            enabled=True,
+            default_requests_per_minute=10,
+        )
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+
+        # This should NOT crash — registry should sanitize the name
+        limiter = registry.get_limiter("api.example.com")
+        assert isinstance(limiter, RateLimiter)
+        registry.close()
+
+    def test_hostname_service_names_cached_correctly(self) -> None:
+        """Same hostname returns same limiter instance."""
+        settings = RateLimitSettings(
+            enabled=True,
+            default_requests_per_minute=10,
+        )
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+
+        limiter1 = registry.get_limiter("api.example.com")
+        limiter2 = registry.get_limiter("api.example.com")
+        assert limiter1 is limiter2
+        registry.close()
+
+    def test_different_hostnames_get_different_limiters(self) -> None:
+        """Different hostnames should map to different limiters."""
+        settings = RateLimitSettings(
+            enabled=True,
+            default_requests_per_minute=10,
+        )
+        config = RuntimeRateLimitConfig.from_settings(settings)
+        registry = RateLimitRegistry(config)
+
+        limiter1 = registry.get_limiter("api.example.com")
+        limiter2 = registry.get_limiter("api.other.com")
+        assert limiter1 is not limiter2
+        registry.close()
+
+
 class TestRateLimitRegistryCleanup:
     """Tests for RateLimitRegistry cleanup methods."""
 

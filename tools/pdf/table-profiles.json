@@ -1,0 +1,4 @@
+{
+  "_comment": "Table column-width profiles for the ELSPETH arch-pack PDF pipeline. Each profile matches a table by exact column count + header-cell prefix or substring match, and applies hand-tuned widths summing to 1.0 for A4 layout. Add a profile only when Pandoc's auto-sizing produces a table that demonstrably reads poorly in the rendered PDF.",
+  "profiles": []
+}

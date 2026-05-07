@@ -73,12 +73,15 @@ def _create_transform_with_lifecycle(**config_overrides):
     }
     config.update(config_overrides)
     transform = RAGRetrievalTransform(config)
-    # Mock httpx.get for the readiness probe — no real Azure endpoint available
+    # Mock readiness I/O; no real Azure endpoint or DNS is available in tests.
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.text = "10"
     mock_resp.raise_for_status = MagicMock()
-    with patch("httpx.get", return_value=mock_resp):
+    with (
+        patch("elspeth.core.security.web.validate_url_for_ssrf"),
+        patch("httpx.get", return_value=mock_resp),
+    ):
         transform.on_start(_mock_lifecycle_ctx())
     return transform
 
@@ -166,7 +169,10 @@ class TestRAGPipelineIntegration:
         mock_resp.status_code = 200
         mock_resp.text = "10"
         mock_resp.raise_for_status = MagicMock()
-        with patch("httpx.get", return_value=mock_resp):
+        with (
+            patch("elspeth.core.security.web.validate_url_for_ssrf"),
+            patch("httpx.get", return_value=mock_resp),
+        ):
             transform.on_start(lifecycle_ctx)
         transform.on_complete(lifecycle_ctx)
         lifecycle_ctx.telemetry_emit.assert_called_once()
@@ -199,9 +205,9 @@ class TestRAGPipelineWithChromaProvider:
         }
         config.update(config_overrides)
 
-        # Pre-populate the collection BEFORE on_start() so check_readiness()
-        # sees documents. Chroma ephemeral mode shares a global in-memory
-        # backend — get_or_create_collection in __init__ will find this data.
+        # Pre-populate the collection BEFORE on_start() so ChromaSearchProvider's
+        # __init__ finds it via get_collection(). Chroma ephemeral mode shares a
+        # global in-memory backend — the collection must exist before provider init.
         client = chromadb.Client()
         collection = client.get_or_create_collection(
             name=collection_name,

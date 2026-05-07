@@ -5,14 +5,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from elspeth.contracts import NodeType, RowOutcome, RunStatus
+from elspeth.contracts import NodeType, RunStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import runs_table
 from elspeth.mcp.analyzers.diagnostics import diagnose
 from elspeth.mcp.types import DiagnosticProblem, DiagnosticReport
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
@@ -22,8 +23,8 @@ def _set_run_started_at(db: LandscapeDB, run_id: str, started_at: datetime) -> N
         conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(started_at=started_at))
 
 
-def _create_running_run(recorder: LandscapeRecorder) -> str:
-    run = recorder.begin_run(
+def _create_running_run(factory: RecorderFactory) -> str:
+    run = factory.run_lifecycle.begin_run(
         config={"source": {"plugin": "csv"}},
         canonical_version="v1",
         status=RunStatus.RUNNING,
@@ -33,14 +34,14 @@ def _create_running_run(recorder: LandscapeRecorder) -> str:
 
 def _create_completed_run_with_quarantine(
     db: LandscapeDB,
-    recorder: LandscapeRecorder,
+    factory: RecorderFactory,
     *,
     run_id: str,
     started_at: datetime | None = None,
 ) -> str:
     """Create a completed run with one quarantined token."""
-    recorder.begin_run(config={}, canonical_version="v1", run_id=run_id)
-    recorder.register_node(
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    factory.data_flow.register_node(
         run_id=run_id,
         plugin_name="csv",
         node_type=NodeType.SOURCE,
@@ -49,20 +50,20 @@ def _create_completed_run_with_quarantine(
         node_id=f"source-{run_id}",
         schema_config=_DYNAMIC_SCHEMA,
     )
-    row = recorder.create_row(
+    row = factory.data_flow.create_row(
         run_id=run_id,
         source_node_id=f"source-{run_id}",
         row_index=0,
         data={"col": "bad-value"},
     )
-    token = recorder.create_token(row.row_id)
-    recorder.record_token_outcome(
-        run_id=run_id,
-        token_id=token.token_id,
-        outcome=RowOutcome.QUARANTINED,
+    token = factory.data_flow.create_token(row.row_id)
+    factory.data_flow.record_token_outcome(
+        ref=TokenRef(token_id=token.token_id, run_id=run_id),
+        outcome=TerminalOutcome.FAILURE,
+        path=TerminalPath.QUARANTINED_AT_SOURCE,
         error_hash="deadbeef" * 8,
     )
-    recorder.complete_run(run_id, RunStatus.COMPLETED)
+    factory.run_lifecycle.complete_run(run_id, RunStatus.COMPLETED)
     if started_at is not None:
         _set_run_started_at(db, run_id, started_at)
     return run_id
@@ -78,10 +79,10 @@ def _get_problem(report: DiagnosticReport, problem_type: str) -> DiagnosticProbl
 def test_diagnose_does_not_flag_recent_running_run_as_stuck() -> None:
     """A newly started run should not appear in stuck_runs."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
-    _create_running_run(recorder)
+    factory = make_factory(db)
+    _create_running_run(factory)
 
-    report = diagnose(db, recorder)
+    report = diagnose(db, factory)
 
     assert _get_problem(report, "stuck_runs") is None
 
@@ -89,11 +90,11 @@ def test_diagnose_does_not_flag_recent_running_run_as_stuck() -> None:
 def test_diagnose_flags_old_running_run_as_stuck() -> None:
     """A running run older than one hour should appear in stuck_runs."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
-    run_id = _create_running_run(recorder)
+    factory = make_factory(db)
+    run_id = _create_running_run(factory)
 
     _set_run_started_at(db, run_id, datetime.now(UTC) - timedelta(hours=2))
-    report = diagnose(db, recorder)
+    report = diagnose(db, factory)
 
     stuck_runs = _get_problem(report, "stuck_runs")
     assert stuck_runs is not None
@@ -104,12 +105,12 @@ def test_diagnose_flags_old_running_run_as_stuck() -> None:
 def test_diagnose_reports_only_old_runs_in_mixed_running_set() -> None:
     """Only runs beyond the stuck threshold should be reported."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
-    recent_run_id = _create_running_run(recorder)
-    old_run_id = _create_running_run(recorder)
+    factory = make_factory(db)
+    recent_run_id = _create_running_run(factory)
+    old_run_id = _create_running_run(factory)
 
     _set_run_started_at(db, old_run_id, datetime.now(UTC) - timedelta(hours=2))
-    report = diagnose(db, recorder)
+    report = diagnose(db, factory)
 
     stuck_runs = _get_problem(report, "stuck_runs")
     assert stuck_runs is not None
@@ -124,20 +125,20 @@ def test_diagnose_reports_only_old_runs_in_mixed_running_set() -> None:
 def test_diagnose_quarantine_count_excludes_old_runs() -> None:
     """Quarantine count should only reflect recent runs, not all history."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
+    factory = make_factory(db)
 
     # Old run (30 days ago) with quarantined row
     _create_completed_run_with_quarantine(
         db,
-        recorder,
+        factory,
         run_id="old-run",
         started_at=datetime.now(UTC) - timedelta(days=30),
     )
     # Recent run (1 hour ago) — no quarantines
-    recorder.begin_run(config={}, canonical_version="v1", run_id="recent-run")
-    recorder.complete_run("recent-run", RunStatus.COMPLETED)
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="recent-run")
+    factory.run_lifecycle.complete_run("recent-run", RunStatus.COMPLETED)
 
-    report = diagnose(db, recorder)
+    report = diagnose(db, factory)
 
     # Old quarantines should NOT appear in the report
     quarantined = _get_problem(report, "quarantined_rows")
@@ -149,16 +150,16 @@ def test_diagnose_quarantine_count_excludes_old_runs() -> None:
 def test_diagnose_quarantine_count_includes_recent_runs() -> None:
     """Quarantine count should include quarantines from recent runs."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
+    factory = make_factory(db)
 
     # Recent run with quarantined row
     _create_completed_run_with_quarantine(
         db,
-        recorder,
+        factory,
         run_id="recent-run",
     )
 
-    report = diagnose(db, recorder)
+    report = diagnose(db, factory)
 
     quarantined = _get_problem(report, "quarantined_rows")
     assert quarantined is not None
@@ -168,23 +169,23 @@ def test_diagnose_quarantine_count_includes_recent_runs() -> None:
 def test_diagnose_quarantine_count_scoped_to_recent_runs_only() -> None:
     """With both old and recent quarantines, only recent ones counted."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
+    factory = make_factory(db)
 
     # Old run with 1 quarantine
     _create_completed_run_with_quarantine(
         db,
-        recorder,
+        factory,
         run_id="old-run",
         started_at=datetime.now(UTC) - timedelta(days=30),
     )
     # Recent run with 1 quarantine
     _create_completed_run_with_quarantine(
         db,
-        recorder,
+        factory,
         run_id="recent-run",
     )
 
-    report = diagnose(db, recorder)
+    report = diagnose(db, factory)
 
     quarantined = _get_problem(report, "quarantined_rows")
     assert quarantined is not None

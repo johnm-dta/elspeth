@@ -54,15 +54,23 @@ class TestMakeContext:
         ctx = make_context(config={"key": "value"})
         assert ctx.config == {"key": "value"}
 
-    def test_mock_landscape_has_record_methods(self) -> None:
-        """Default mock landscape must have record_external_call and record_call."""
+    def test_mock_landscape_is_specced(self) -> None:
+        """Default mock landscape must be specced to PluginAuditWriter."""
+        from unittest.mock import Mock
+
+        from elspeth.contracts.audit_protocols import PluginAuditWriter
         from tests.fixtures.factories import make_context
 
         ctx = make_context()
-        # These must be callable without raising (landscape is a MagicMock)
         assert ctx.landscape is not None
-        ctx.landscape.record_external_call()  # type: ignore[attr-defined]  # MagicMock
-        ctx.landscape.record_call()  # type: ignore[call-arg]  # MagicMock accepts any args
+        assert isinstance(ctx.landscape, Mock)
+        # spec= ensures only real PluginAuditWriter methods are accessible
+        assert isinstance(ctx.landscape, PluginAuditWriter)
+        # get_node_state must return a mock with token_id matching the token
+        node_state = ctx.landscape.get_node_state("any-state-id")
+        assert node_state is not None
+        assert ctx.token is not None
+        assert node_state.token_id == ctx.token.token_id
 
     def test_explicit_landscape_replaces_mock(self) -> None:
         from unittest.mock import Mock
@@ -96,24 +104,26 @@ class TestMakeSourceContext:
         # Should not raise — plugin registered successfully
         assert ctx.run_id == "test-run"
 
-    def test_landscape_is_real_recorder(self) -> None:
-        """Verify delegated factory produces a real LandscapeRecorder, not a Mock."""
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+    def test_landscape_is_real_adapter(self) -> None:
+        """Verify delegated factory produces a real PluginAuditWriter, not a Mock."""
+        from elspeth.contracts.audit_protocols import PluginAuditWriter
         from tests.fixtures.factories import make_source_context
 
         ctx = make_source_context()
-        assert isinstance(ctx.landscape, LandscapeRecorder)
+        assert isinstance(ctx.landscape, PluginAuditWriter)
 
     def test_create_row_round_trip(self) -> None:
         """Prove FK chain is intact: run -> node -> row."""
-        from tests.fixtures.factories import make_source_context
+        from tests.fixtures.landscape import make_recorder_with_run
 
-        ctx = make_source_context()
-        assert ctx.landscape is not None
-        assert ctx.node_id is not None
-        row = ctx.landscape.create_row(
-            run_id=ctx.run_id,
-            source_node_id=ctx.node_id,
+        setup = make_recorder_with_run(
+            run_id="test-run",
+            source_node_id="source",
+            source_plugin_name="csv",
+        )
+        row = setup.data_flow.create_row(
+            run_id=setup.run_id,
+            source_node_id=setup.source_node_id,
             row_index=0,
             data={"field": "value"},
         )
@@ -199,7 +209,7 @@ class TestMakeRecorderWithRun:
         assert setup.run_id is not None
         assert setup.source_node_id is not None
         assert setup.db is not None
-        assert setup.recorder is not None
+        assert setup.factory is not None
 
     def test_explicit_run_id(self) -> None:
         from tests.fixtures.landscape import make_recorder_with_run
@@ -214,16 +224,15 @@ class TestMakeRecorderWithRun:
         assert setup.source_node_id == "my-source-node"
 
     def test_source_node_exists_in_db(self) -> None:
-        """Source node must be queryable via recorder (plan item 3b)."""
+        """Source node must be queryable via data_flow repository."""
         from tests.fixtures.landscape import make_recorder_with_run
 
         setup = make_recorder_with_run(
             run_id="db-check-run",
             source_node_id="db-check-source",
         )
-        # Query node via recorder — LandscapeDB is a connection manager,
-        # query methods live on the recorder (delegates to repositories).
-        node = setup.recorder.get_node(setup.source_node_id, setup.run_id)
+        # Query node via data_flow repository.
+        node = setup.data_flow.get_node(setup.source_node_id, setup.run_id)
         assert node is not None
         assert node.node_id == "db-check-source"
         assert node.plugin_name == "source"
@@ -233,8 +242,8 @@ class TestMakeRecorderWithRun:
         from tests.fixtures.landscape import make_recorder_with_run
 
         setup = make_recorder_with_run(canonical_version="sha256-rfc8785-v1")
-        # Query run via recorder
-        run = setup.recorder.get_run(setup.run_id)
+        # Query run via run_lifecycle repository
+        run = setup.run_lifecycle.get_run(setup.run_id)
         assert run is not None
         assert run.canonical_version == "sha256-rfc8785-v1"
 
@@ -245,7 +254,7 @@ class TestMakeRecorderWithRun:
             source_plugin_name="csv_source",
             source_node_id="csv-node",
         )
-        node = setup.recorder.get_node(setup.source_node_id, setup.run_id)
+        node = setup.data_flow.get_node(setup.source_node_id, setup.run_id)
         assert node is not None
         assert node.plugin_name == "csv_source"
 
@@ -259,18 +268,18 @@ class TestMakeRecorderWithRun:
         assert setup1.db is not setup2.db
         assert setup1.run_id != setup2.run_id
 
-        # run-1 must not appear in db2's recorder
-        run_in_db2 = setup2.recorder.get_run("run-1")
+        # run-1 must not appear in db2's run_lifecycle
+        run_in_db2 = setup2.run_lifecycle.get_run("run-1")
         assert run_in_db2 is None
 
     def test_register_additional_node_succeeds(self) -> None:
-        """RecorderSetup.recorder supports adding more nodes (plan item 3c)."""
+        """RecorderSetup.data_flow supports adding more nodes."""
         from elspeth.contracts.schema import SchemaConfig
         from tests.fixtures.landscape import make_recorder_with_run
 
         setup = make_recorder_with_run(run_id="multi-node-run")
-        # register_node must succeed on the returned recorder
-        node = setup.recorder.register_node(
+        # register_node must succeed on the data_flow repository
+        node = setup.data_flow.register_node(
             run_id=setup.run_id,
             plugin_name="enricher",
             node_type=NodeType.TRANSFORM,
@@ -294,10 +303,10 @@ class TestRegisterTestNode:
         from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
         setup = make_recorder_with_run(run_id="reg-test-run")
-        node_id = register_test_node(setup.recorder, setup.run_id, "transform-1")
+        node_id = register_test_node(setup.data_flow, setup.run_id, "transform-1")
         assert node_id == "transform-1"
 
-        node = setup.recorder.get_node(node_id, setup.run_id)
+        node = setup.data_flow.get_node(node_id, setup.run_id)
         assert node is not None
         assert node.plugin_name == "transform"
 
@@ -306,14 +315,14 @@ class TestRegisterTestNode:
 
         setup = make_recorder_with_run(run_id="custom-node-run")
         node_id = register_test_node(
-            setup.recorder,
+            setup.data_flow,
             setup.run_id,
             "my-sink",
             node_type=NodeType.SINK,
             plugin_name="csv_sink",
         )
         assert node_id == "my-sink"
-        node = setup.recorder.get_node(node_id, setup.run_id)
+        node = setup.data_flow.get_node(node_id, setup.run_id)
         assert node is not None
         assert node.plugin_name == "csv_sink"
 
@@ -321,20 +330,20 @@ class TestRegisterTestNode:
         from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
         setup = make_recorder_with_run(run_id="multi-run")
-        register_test_node(setup.recorder, setup.run_id, "t1")
-        register_test_node(setup.recorder, setup.run_id, "t2")
+        register_test_node(setup.data_flow, setup.run_id, "t1")
+        register_test_node(setup.data_flow, setup.run_id, "t2")
         register_test_node(
-            setup.recorder,
+            setup.data_flow,
             setup.run_id,
             "sink-1",
             node_type=NodeType.SINK,
             plugin_name="output",
         )
 
-        # All three must be queryable via recorder
-        assert setup.recorder.get_node("t1", setup.run_id) is not None
-        assert setup.recorder.get_node("t2", setup.run_id) is not None
-        assert setup.recorder.get_node("sink-1", setup.run_id) is not None
+        # All three must be queryable via data_flow repository
+        assert setup.data_flow.get_node("t1", setup.run_id) is not None
+        assert setup.data_flow.get_node("t2", setup.run_id) is not None
+        assert setup.data_flow.get_node("sink-1", setup.run_id) is not None
 
 
 # =============================================================================
@@ -421,15 +430,15 @@ class TestRunAuditPipeline:
         assert result.payload_store is not None
 
     def test_run_exists_in_db(self, tmp_path: Any) -> None:
-        """Run must be queryable via a recorder built from the returned DB."""
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        """Run must be queryable via a factory built from the returned DB."""
+        from elspeth.core.landscape.factory import RecorderFactory
         from tests.fixtures.pipeline import run_audit_pipeline
 
         result = run_audit_pipeline(tmp_path, [{"x": 1}])
-        # result.db is a LandscapeDB (connection manager), not a recorder.
-        # Build a recorder to query it.
-        recorder = LandscapeRecorder(result.db)
-        run = recorder.get_run(result.run_id)
+        # result.db is a LandscapeDB (connection manager), not a factory.
+        # Build a factory to query it.
+        factory = RecorderFactory(result.db)
+        run = factory.run_lifecycle.get_run(result.run_id)
         assert run is not None
 
     def test_single_row(self, tmp_path: Any) -> None:

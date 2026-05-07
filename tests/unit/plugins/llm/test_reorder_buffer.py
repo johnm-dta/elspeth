@@ -143,6 +143,52 @@ class TestReorderBufferTiming:
         assert ready[1].buffer_wait_ms >= 15  # At least 20ms minus some tolerance
 
 
+class TestReorderBufferCounterReset:
+    """Test that counters reset after full drain."""
+
+    def test_counters_reset_after_full_drain(self) -> None:
+        """After draining all entries, counters should reset for next batch.
+
+        Bug: _next_submit, _next_emit, and _complete_counter incremented
+        monotonically and never reset. A reused buffer's second batch got
+        wrong indices (e.g. submit_index starting at 3 instead of 0).
+        """
+        buffer = ReorderBuffer[str]()
+
+        # Batch 1: submit and drain 3 items
+        for i in range(3):
+            idx = buffer.submit()
+            buffer.complete(idx, f"batch1_{i}")
+
+        batch1 = buffer.get_ready_results()
+        assert len(batch1) == 3
+        assert buffer.pending_count == 0
+
+        # Batch 2: submit and drain 2 items
+        idx0 = buffer.submit()
+        idx1 = buffer.submit()
+
+        # submit_index should start at 0 again
+        assert idx0 == 0, f"Expected submit index 0 after reset, got {idx0}"
+        assert idx1 == 1, f"Expected submit index 1 after reset, got {idx1}"
+
+        buffer.complete(idx1, "batch2_1")
+        buffer.complete(idx0, "batch2_0")
+
+        batch2 = buffer.get_ready_results()
+        assert len(batch2) == 2
+
+        # Verify submission order is preserved
+        assert batch2[0].result == "batch2_0"
+        assert batch2[1].result == "batch2_1"
+
+        # Verify indices reset
+        assert batch2[0].submit_index == 0
+        assert batch2[1].submit_index == 1
+        assert batch2[0].complete_index == 1  # completed second
+        assert batch2[1].complete_index == 0  # completed first
+
+
 class TestReorderBufferProperties:
     """Property-based tests for reorder buffer invariants."""
 

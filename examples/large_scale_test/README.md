@@ -132,7 +132,7 @@ row_plugins:
   - plugin: your_transform
     options:
       schema:
-        fields: dynamic
+        mode: observed
       # transform-specific options
 ```
 

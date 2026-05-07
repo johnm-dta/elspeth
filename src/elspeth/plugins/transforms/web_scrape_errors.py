@@ -10,7 +10,7 @@ from elspeth.contracts.errors import PluginRetryableError
 class WebScrapeError(PluginRetryableError):
     """Base error for web scrape transform."""
 
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message, retryable=retryable)
 
 

@@ -22,11 +22,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
-import structlog
-
 from elspeth.contracts.token_usage import TokenUsage
-
-logger = structlog.get_logger(__name__)
 
 
 class FinishReason(StrEnum):
@@ -80,13 +76,6 @@ def parse_finish_reason(raw: str | None) -> ParsedFinishReason:
     try:
         return FinishReason(raw)
     except ValueError:
-        logger.warning(
-            "Unknown LLM finish_reason — will be rejected by transform (fail-closed)",
-            finish_reason=raw,
-            known_values=[e.value for e in FinishReason],
-            action="Add to FinishReason enum if this is a known-good completion reason. "
-            "Unrecognized finish reasons are rejected as errors by LLMTransform.",
-        )
         return UnrecognizedFinishReason(raw)
 
 
@@ -114,6 +103,13 @@ class LLMQueryResult:
             raise ValueError("LLMQueryResult.content must be non-empty (whitespace-only rejected)")
         if not self.model or not self.model.strip():
             raise ValueError("LLMQueryResult.model must be non-empty")
+        if not isinstance(self.usage, TokenUsage):
+            raise TypeError(f"LLMQueryResult.usage must be a TokenUsage instance, got {type(self.usage).__name__}")
+        if self.finish_reason is not None and not isinstance(self.finish_reason, (FinishReason, UnrecognizedFinishReason)):
+            raise TypeError(
+                f"LLMQueryResult.finish_reason must be FinishReason, UnrecognizedFinishReason, or None, "
+                f"got {type(self.finish_reason).__name__}: {self.finish_reason!r}"
+            )
 
 
 @runtime_checkable

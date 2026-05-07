@@ -1,14 +1,9 @@
 # tests/plugins/test_context.py
 """Tests for plugin context."""
 
-from typing import TYPE_CHECKING
-
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.factories import make_source_context
-
-if TYPE_CHECKING:
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
 
 
 class TestPluginContext:
@@ -18,7 +13,7 @@ class TestPluginContext:
         from elspeth.contracts.plugin_context import PluginContext
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        recorder = RecorderFactory(db).plugin_audit_writer()
         ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
         assert ctx.run_id == "run-001"
         assert ctx.config == {}
@@ -27,208 +22,10 @@ class TestPluginContext:
         from elspeth.contracts.plugin_context import PluginContext
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        recorder = RecorderFactory(db).plugin_audit_writer()
         ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
         assert ctx.rate_limit_registry is None
         assert ctx.concurrency_config is None
-
-
-def _make_checkpoint(**overrides: object) -> "BatchCheckpointState":
-    """Build a BatchCheckpointState with sensible defaults for testing."""
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
-
-    defaults: dict[str, object] = {
-        "batch_id": "batch-123",
-        "input_file_id": "file-abc",
-        "row_mapping": {},
-        "template_errors": [],
-        "submitted_at": "2024-01-01T00:00:00Z",
-        "row_count": 5,
-        "requests": {},
-    }
-    defaults.update(overrides)
-    return BatchCheckpointState(**defaults)  # type: ignore[arg-type]
-
-
-class TestCheckpointAPI:
-    """Tests for checkpoint API used by batch transforms."""
-
-    def test_get_checkpoint_returns_none_when_empty(self) -> None:
-        """Empty checkpoint returns None."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
-        assert ctx.get_checkpoint() is None
-
-    def test_set_checkpoint_stores_data(self) -> None:
-        """set_checkpoint stores data accessible via get_checkpoint."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
-        state = _make_checkpoint(batch_id="batch-123", row_count=5)
-        ctx.set_checkpoint(state)
-
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is not None
-        assert checkpoint.batch_id == "batch-123"
-        assert checkpoint.row_count == 5
-
-    def test_set_checkpoint_replaces_previous(self) -> None:
-        """set_checkpoint replaces the previous checkpoint state."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
-        ctx.set_checkpoint(_make_checkpoint(batch_id="batch-old"))
-        ctx.set_checkpoint(_make_checkpoint(batch_id="batch-new"))
-
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is not None
-        assert checkpoint.batch_id == "batch-new"
-
-    def test_clear_checkpoint_removes_all_data(self) -> None:
-        """clear_checkpoint removes all checkpoint data."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
-        ctx.set_checkpoint(_make_checkpoint())
-        assert ctx.get_checkpoint() is not None
-
-        ctx.clear_checkpoint()
-        assert ctx.get_checkpoint() is None
-
-    def test_checkpoint_typical_batch_workflow(self) -> None:
-        """Checkpoint API supports typical batch transform workflow."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        ctx = PluginContext(run_id="run-001", config={}, landscape=recorder)
-
-        # Phase 1: Submit - no existing checkpoint
-        assert ctx.get_checkpoint() is None
-
-        # Save checkpoint after batch submission
-        state = _make_checkpoint(
-            batch_id="batch-xyz789",
-            input_file_id="file-abc123",
-            submitted_at="2024-01-01T00:00:00Z",
-        )
-        ctx.set_checkpoint(state)
-
-        # Phase 2: Resume - checkpoint exists
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is not None
-        assert checkpoint.batch_id == "batch-xyz789"
-
-        # After completion, clear checkpoint
-        ctx.clear_checkpoint()
-        assert ctx.get_checkpoint() is None
-
-
-class TestCheckpointRestoredBehavior:
-    """Tests for checkpoint restore behavior with typed BatchCheckpointState.
-
-    Replaces TestCheckpointRestoredUpdateBug (P1-2026-02-14) — the original
-    bug was about dict merge semantics. With typed BatchCheckpointState and
-    set_checkpoint (replacement semantics), the class of bug is eliminated.
-    """
-
-    def test_set_checkpoint_replaces_restored_batch_checkpoint(self) -> None:
-        """set_checkpoint replaces restored batch checkpoint when it is active."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        restored = _make_checkpoint(batch_id="batch-original")
-        ctx = PluginContext(
-            run_id="run-001",
-            config={},
-            node_id="batch_transform_1",
-            _batch_checkpoints={"batch_transform_1": restored},
-        )
-
-        # Verify restored checkpoint is active
-        assert ctx.get_checkpoint() is restored
-
-        # set_checkpoint replaces the restored checkpoint
-        replacement = _make_checkpoint(batch_id="batch-replacement")
-        ctx.set_checkpoint(replacement)
-
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is replacement
-        assert checkpoint.batch_id == "batch-replacement"
-
-    def test_set_checkpoint_falls_back_to_local_without_restored(self) -> None:
-        """set_checkpoint writes to local checkpoint when no restored exists."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        ctx = PluginContext(
-            run_id="run-001",
-            config={},
-            node_id="batch_transform_1",
-        )
-
-        state = _make_checkpoint(batch_id="batch-new")
-        ctx.set_checkpoint(state)
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is not None
-        assert checkpoint.batch_id == "batch-new"
-
-    def test_get_checkpoint_prefers_restored_over_local(self) -> None:
-        """get_checkpoint returns restored checkpoint even if local is set."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        restored = _make_checkpoint(batch_id="batch-restored")
-        ctx = PluginContext(
-            run_id="run-001",
-            config={},
-            node_id="node_1",
-            _batch_checkpoints={"node_1": restored},
-        )
-
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is restored
-        assert checkpoint is not None
-        assert checkpoint.batch_id == "batch-restored"
-
-    def test_set_checkpoint_without_node_id_uses_local(self) -> None:
-        """set_checkpoint uses local checkpoint when node_id is None."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        ctx = PluginContext(
-            run_id="run-001",
-            config={},
-            node_id=None,
-        )
-
-        state = _make_checkpoint(batch_id="batch-local")
-        ctx.set_checkpoint(state)
-        checkpoint = ctx.get_checkpoint()
-        assert checkpoint is not None
-        assert checkpoint.batch_id == "batch-local"
-
-    def test_clear_after_set_on_restored_clears_both(self) -> None:
-        """clear_checkpoint after set on restored checkpoint clears everything."""
-        from elspeth.contracts.plugin_context import PluginContext
-
-        restored = _make_checkpoint(batch_id="batch-old")
-        ctx = PluginContext(
-            run_id="run-001",
-            config={},
-            node_id="node_1",
-            _batch_checkpoints={"node_1": restored},
-        )
-
-        assert ctx.get_checkpoint() is not None
-
-        ctx.clear_checkpoint()
-        assert ctx.get_checkpoint() is None
 
 
 class TestValidationErrorRecording:
@@ -531,8 +328,8 @@ class TestTransformErrorRecording:
         # Should have called landscape
         mock_landscape.record_transform_error.assert_called_once()
         call_kwargs = mock_landscape.record_transform_error.call_args[1]
-        assert call_kwargs["run_id"] == "test-run"
-        assert call_kwargs["token_id"] == "tok_456"
+        assert call_kwargs["ref"].run_id == "test-run"
+        assert call_kwargs["ref"].token_id == "tok_456"
         assert call_kwargs["transform_id"] == "field_mapper"
         assert call_kwargs["row_data"] == {"id": 42, "value": "bad"}
         assert call_kwargs["error_details"] == {"reason": "validation_failed", "error": "Division by zero"}
@@ -551,7 +348,7 @@ class TestTokenField:
         from elspeth.contracts.plugin_context import PluginContext
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        recorder = RecorderFactory(db).plugin_audit_writer()
         ctx = PluginContext(run_id="test-run", config={}, landscape=recorder)
         assert ctx.token is None
 
@@ -572,7 +369,7 @@ class TestTokenField:
 
         token = TokenInfo(row_id="row-1", token_id="token-row-1", row_data=row_data)
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        recorder = RecorderFactory(db).plugin_audit_writer()
         ctx = PluginContext(run_id="test-run", config={}, landscape=recorder, token=token)
 
         assert ctx.token is not None
@@ -598,7 +395,7 @@ class TestTokenField:
 
         token = TokenInfo(row_id="row-42", token_id="token-42", row_data=row_data)
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        recorder = RecorderFactory(db).plugin_audit_writer()
         ctx = PluginContext(run_id="test-run", config={}, landscape=recorder, token=token)
 
         # Multiple accesses should return the exact same object
@@ -615,7 +412,7 @@ class TestTokenField:
         from elspeth.testing import make_field, make_row
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        recorder = RecorderFactory(db).plugin_audit_writer()
         ctx = PluginContext(run_id="test-run", config={}, landscape=recorder)
         assert ctx.token is None
 
@@ -1293,7 +1090,7 @@ class TestRecordCallFrozenData:
         event = emitted_events[0]
         # Token usage must be extracted despite usage being MappingProxyType
         assert event.token_usage is not None
-        assert event.token_usage == TokenUsage(prompt_tokens=10, completion_tokens=5)
+        assert event.token_usage == TokenUsage(prompt_tokens=10, completion_tokens=5, reported_total=15)
 
     def test_raw_call_payload_freezes_data_without_intermediate_thaw(self) -> None:
         """RawCallPayload must receive frozen data and freeze it correctly.

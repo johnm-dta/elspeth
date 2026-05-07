@@ -17,10 +17,12 @@ timeout continuations (lines 2124, 2139-2143 in the original).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import hashlib
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap
@@ -48,37 +50,203 @@ def _route_to_sink(
     sink_name: str,
     pending_tokens: PendingTokenMap,
     token: TokenInfo,
-    pending_outcome: RowOutcome,
+    *,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
+    error_hash: str | None = None,
 ) -> None:
     """Validate sink exists in pending_tokens and append the token.
 
-    Extracted from accumulate_row_outcomes where three outcome branches
-    (COMPLETED, ROUTED, COALESCED) had identical validate+append logic.
+    Extracted from accumulate_row_outcomes where multiple outcome branches
+    (DEFAULT_FLOW, GATE_ROUTED, ON_ERROR_ROUTED, COALESCED) had identical
+    validate+append logic.
 
     Args:
         sink_name: Target sink name from result.sink_name
         pending_tokens: Sink-keyed accumulator to append to
         token: The token to route
-        pending_outcome: The RowOutcome variant for the PendingOutcome
-            (note: COALESCED tokens use COMPLETED here since they're
-            finished from the sink's perspective)
+        outcome: Terminal lifecycle answer to persist after sink durability
+        path: Terminal provenance path to persist after sink durability
+        error_hash: 16-char sha256 prefix capturing the originating error;
+            required by PendingOutcome for failure/error paths.
     """
     if sink_name not in pending_tokens:
         raise OrchestrationInvariantError(
             f"Sink '{sink_name}' not in configured sinks. Available: {sorted(pending_tokens.keys())}. Token: {token}"
         )
-    pending_tokens[sink_name].append((token, PendingOutcome(pending_outcome)))
+    pending_tokens[sink_name].append((token, PendingOutcome(outcome=outcome, path=path, error_hash=error_hash)))
+
+
+def reconcile_sink_write_diversions(
+    counters: ExecutionCounters,
+    *,
+    sink_name: str,
+    pending_outcome: PendingOutcome | None,
+    diversion_count: int,
+) -> None:
+    """Reconcile provisional counters after sink write reveals diversions.
+
+    The processing loop counts sink-bound outcomes before durability is known so
+    progress can remain responsive. Once SinkExecutor.write() partitions the
+    batch into primary vs diverted rows, the final counters must remove the
+    diverted rows from any provisional success/routing/quarantine totals.
+    """
+    if diversion_count == 0 or pending_outcome is None:
+        return
+
+    pair = (pending_outcome.outcome, pending_outcome.path)
+
+    if pair == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW):
+        if counters.rows_succeeded < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_succeeded={counters.rows_succeeded} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        counters.rows_succeeded -= diversion_count
+        return
+
+    if pair == (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
+        if counters.rows_succeeded < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_succeeded={counters.rows_succeeded} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        if counters.rows_routed_success < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_routed_success={counters.rows_routed_success} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        counters.rows_succeeded -= diversion_count
+        counters.rows_routed_success -= diversion_count
+        current_destination_count = counters.routed_destinations[sink_name]
+        if current_destination_count < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted routed rows from "
+                f"routed_destinations[{sink_name!r}]={current_destination_count} "
+                f"(pending_pair={pair!r}). "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        remaining = current_destination_count - diversion_count
+        if remaining == 0:
+            del counters.routed_destinations[sink_name]
+        else:
+            counters.routed_destinations[sink_name] = remaining
+        return
+
+    if pair == (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
+        if counters.rows_failed < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_failed={counters.rows_failed} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        if counters.rows_routed_failure < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_routed_failure={counters.rows_routed_failure} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        counters.rows_failed -= diversion_count
+        counters.rows_routed_failure -= diversion_count
+        current_destination_count = counters.routed_destinations[sink_name]
+        if current_destination_count < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted routed rows from "
+                f"routed_destinations[{sink_name!r}]={current_destination_count} "
+                f"(pending_pair={pair!r}). "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        remaining = current_destination_count - diversion_count
+        if remaining == 0:
+            del counters.routed_destinations[sink_name]
+        else:
+            counters.routed_destinations[sink_name] = remaining
+        return
+
+    if pair == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
+        if counters.rows_failed < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_failed={counters.rows_failed} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        if counters.rows_quarantined < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_quarantined={counters.rows_quarantined} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        counters.rows_failed -= diversion_count
+        counters.rows_quarantined -= diversion_count
+        return
+
+    if pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
+        if counters.rows_succeeded < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_succeeded={counters.rows_succeeded} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        if counters.rows_coalesced < diversion_count:
+            raise OrchestrationInvariantError(
+                f"Cannot subtract {diversion_count} diverted rows from "
+                f"rows_coalesced={counters.rows_coalesced} for sink "
+                f"{sink_name!r} and pending pair {pair!r}. "
+                "This indicates counter drift between processing and sink-write phases."
+            )
+        counters.rows_succeeded -= diversion_count
+        counters.rows_coalesced -= diversion_count
+        return
+
+    raise OrchestrationInvariantError(
+        f"Unexpected sink-bound pending pair {pair!r} for diversion reconciliation. Sink={sink_name!r}, diversions={diversion_count}."
+    )
+
+
+def _emit_failed_token_completed(ctx: PluginContext, token: TokenInfo) -> None:
+    """Emit TokenCompleted(FAILED) after audit recording succeeds."""
+    from datetime import UTC, datetime
+
+    from elspeth.contracts import TokenCompleted
+
+    ctx.telemetry_emit(
+        TokenCompleted(
+            timestamp=datetime.now(UTC),
+            run_id=ctx.run_id,
+            row_id=token.row_id,
+            token_id=token.token_id,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            sink_name=None,
+        )
+    )
+
+
+def _emit_failed_coalesce_telemetry(ctx: PluginContext, tokens: tuple[TokenInfo, ...]) -> None:
+    """Emit failure telemetry for coalesce branches already failed in audit."""
+    for token in tokens:
+        _emit_failed_token_completed(ctx, token)
 
 
 def accumulate_row_outcomes(
     results: Iterable[RowResult],
     counters: ExecutionCounters,
-    config_sinks: Mapping[str, object],
     pending_tokens: PendingTokenMap,
 ) -> None:
     """Accumulate row processing outcomes into counters and pending_tokens.
 
-    Replaces the RowOutcome switch block that was duplicated 4 times in
+    Replaces the legacy outcome switch block that was duplicated 4 times in
     _execute_run() and _process_resumed_rows() (main loop, coalesce timeout
     continuations, coalesce flush continuations).
 
@@ -92,48 +260,95 @@ def accumulate_row_outcomes(
     Args:
         results: Iterable of RowProcessingResult from processor.process_row/process_token
         counters: Mutable ExecutionCounters to update
-        config_sinks: Dict of sink_name -> sink plugin (for sink validation)
         pending_tokens: Dict of sink_name -> list of (token, pending_outcome) pairs
     """
     for result in results:
-        if result.outcome == RowOutcome.COMPLETED:
+        pair = (result.outcome, result.path)
+        if pair == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW):
             counters.rows_succeeded += 1
             sink_name = _require_sink_name(result)
-            _route_to_sink(sink_name, pending_tokens, result.token, RowOutcome.COMPLETED)
-        elif result.outcome == RowOutcome.ROUTED:
-            counters.rows_routed += 1
+            _route_to_sink(
+                sink_name,
+                pending_tokens,
+                result.token,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+            )
+        elif pair == (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
+            counters.rows_succeeded += 1
+            counters.rows_routed_success += 1
             sink_name = _require_sink_name(result)
             counters.routed_destinations[sink_name] += 1
-            _route_to_sink(sink_name, pending_tokens, result.token, RowOutcome.ROUTED)
-        elif result.outcome == RowOutcome.FAILED:
+            _route_to_sink(
+                sink_name,
+                pending_tokens,
+                result.token,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
+            )
+        elif pair == (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
+            if result.error is None:
+                raise OrchestrationInvariantError(f"ON_ERROR_ROUTED result missing error (FailureInfo). Token: {result.token}")
+            sink_name = _require_sink_name(result)
+            error_hash = hashlib.sha256(result.error.message.encode()).hexdigest()[:16]
             counters.rows_failed += 1
-        elif result.outcome == RowOutcome.QUARANTINED:
+            counters.rows_routed_failure += 1
+            counters.routed_destinations[sink_name] += 1
+            _route_to_sink(
+                sink_name,
+                pending_tokens,
+                result.token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
+                error_hash=error_hash,
+            )
+        elif pair == (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
+            counters.rows_failed += 1
+        elif pair == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
             counters.rows_quarantined += 1
-        elif result.outcome == RowOutcome.DIVERTED:
+            counters.rows_failed += 1
+        elif pair[1] in (TerminalPath.SINK_FALLBACK_TO_FAILSINK, TerminalPath.SINK_DISCARDED):
             raise OrchestrationInvariantError(
-                f"DIVERTED outcome should not appear in processing results — "
+                f"Diversion path {pair!r} should not appear in processing results — "
                 f"diversions are counted in SinkExecutor, not the processing loop. "
                 f"Token: {result.token}"
             )
-        elif result.outcome == RowOutcome.FORKED:
+        elif pair == (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT):
             counters.rows_forked += 1
             # Children are counted separately when they reach terminal state
-        elif result.outcome == RowOutcome.CONSUMED_IN_BATCH:
+        elif pair == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED):
             # Aggregated - will be counted when batch flushes
             pass
-        elif result.outcome == RowOutcome.COALESCED:
+        elif pair in {
+            (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
+            (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED),
+        }:
+            counters.rows_succeeded += 1
+        elif pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
+            if result.token.join_group_id is None:
+                raise OrchestrationInvariantError(f"(SUCCESS, COALESCED) result missing token.join_group_id. Token: {result.token}")
             sink_name = _require_sink_name(result)
             counters.rows_coalesced += 1
             counters.rows_succeeded += 1
-            _route_to_sink(sink_name, pending_tokens, result.token, RowOutcome.COMPLETED)
-        elif result.outcome == RowOutcome.EXPANDED:
+            _route_to_sink(
+                sink_name,
+                pending_tokens,
+                result.token,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+            )
+        elif pair == (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT):
             # Deaggregation parent token - children counted separately
             counters.rows_expanded += 1
-        elif result.outcome == RowOutcome.BUFFERED:
-            # Passthrough mode buffered token
+        elif pair == (None, TerminalPath.BUFFERED):
+            # Non-terminal: token held in aggregation buffer (passthrough or transform mode).
+            # Terminal outcome deferred to flush time (count trigger, timeout, or end-of-source).
+            # Post-flush assertion in _post_source_iteration_work verifies no tokens remain buffered.
             counters.rows_buffered += 1
         else:
-            raise OrchestrationInvariantError(f"Unhandled RowOutcome variant: {result.outcome!r}. Token: {result.token}")
+            raise OrchestrationInvariantError(
+                f"Unhandled (outcome, path) pair: {pair!r}. Token: {result.token}. Add an explicit case above; see ADR-019 mapping table."
+            )
 
 
 def _validate_coalesce_outcome(outcome: CoalesceOutcome) -> bool:
@@ -161,7 +376,6 @@ def _process_merged_coalesce_outcome(
     coalesce_name: CoalesceName,
     coalesce_node_map: dict[CoalesceName, NodeID],
     processor: RowProcessor,
-    config_sinks: Mapping[str, object],
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -173,7 +387,7 @@ def _process_merged_coalesce_outcome(
 
     Does NOT increment rows_coalesced. Counting ownership belongs exclusively
     to accumulate_row_outcomes (COALESCED branch). Terminal coalesces produce
-    RowOutcome.COALESCED which accumulate_row_outcomes counts. Non-terminal
+    the terminal COALESCED path which accumulate_row_outcomes counts. Non-terminal
     coalesces produce COMPLETED — the row's terminal state is "completed after
     coalesce", not "coalesced", so rows_coalesced is correctly not incremented.
     """
@@ -193,7 +407,6 @@ def _process_merged_coalesce_outcome(
     accumulate_row_outcomes(
         continuation_results,
         counters,
-        config_sinks,
         pending_tokens,
     )
 
@@ -202,7 +415,6 @@ def handle_coalesce_timeouts(
     coalesce_executor: CoalesceExecutor,
     coalesce_node_map: dict[CoalesceName, NodeID],
     processor: RowProcessor,
-    config_sinks: Mapping[str, object],
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -220,7 +432,6 @@ def handle_coalesce_timeouts(
         coalesce_executor: CoalesceExecutor managing join barriers
         coalesce_node_map: Maps CoalesceName -> coalesce node ID in graph
         processor: RowProcessor for downstream processing
-        config_sinks: Dict of sink_name -> sink plugin (for sink validation)
         ctx: Plugin context for transform execution
         counters: Mutable ExecutionCounters to update
         pending_tokens: Dict of sink_name -> tokens to append results to
@@ -237,20 +448,20 @@ def handle_coalesce_timeouts(
                     coalesce_name,
                     coalesce_node_map,
                     processor,
-                    config_sinks,
                     ctx,
                     counters,
                     pending_tokens,
                 )
             else:
                 counters.rows_coalesce_failed += 1
+                counters.rows_failed += len(outcome.consumed_tokens)
+                _emit_failed_coalesce_telemetry(ctx, outcome.consumed_tokens)
 
 
 def flush_coalesce_pending(
     coalesce_executor: CoalesceExecutor,
     coalesce_node_map: dict[CoalesceName, NodeID],
     processor: RowProcessor,
-    config_sinks: Mapping[str, object],
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -266,7 +477,6 @@ def flush_coalesce_pending(
         coalesce_executor: CoalesceExecutor managing join barriers
         coalesce_node_map: Maps CoalesceName -> coalesce node ID in graph
         processor: RowProcessor for downstream processing
-        config_sinks: Dict of sink_name -> sink plugin (for sink validation)
         ctx: Plugin context for transform execution
         counters: Mutable ExecutionCounters to update
         pending_tokens: Dict of sink_name -> tokens to append results to
@@ -286,10 +496,11 @@ def flush_coalesce_pending(
                 coalesce_name,
                 coalesce_node_map,
                 processor,
-                config_sinks,
                 ctx,
                 counters,
                 pending_tokens,
             )
         else:
             counters.rows_coalesce_failed += 1
+            counters.rows_failed += len(outcome.consumed_tokens)
+            _emit_failed_coalesce_telemetry(ctx, outcome.consumed_tokens)

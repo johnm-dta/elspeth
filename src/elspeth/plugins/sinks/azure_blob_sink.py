@@ -19,7 +19,7 @@ import io
 import json
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 from jinja2 import StrictUndefined, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
@@ -81,6 +81,9 @@ class AzureBlobSinkConfig(DataPluginConfig):
     Extends DataPluginConfig which requires schema configuration.
     Unlike file-based sinks, does not extend PathConfig (no local file path).
 
+    _plugin_component_type overrides DataPluginConfig (None) because this
+    config extends DataPluginConfig directly, bypassing SinkPathConfig.
+
     Supports four authentication methods (mutually exclusive):
     1. connection_string - Simple connection string auth (default)
     2. sas_token + account_url - Shared Access Signature token
@@ -114,6 +117,8 @@ class AzureBlobSinkConfig(DataPluginConfig):
         container: "my-container"
         blob_path: "results/{{ run_id }}/output.csv"
     """
+
+    _plugin_component_type: ClassVar[str | None] = "sink"
 
     # Auth Option 1: Connection string
     connection_string: str | None = Field(
@@ -246,6 +251,20 @@ class AzureBlobSinkConfig(DataPluginConfig):
             raise ValueError("blob_path cannot be empty")
         return v
 
+    @model_validator(mode="after")
+    def validate_blob_path_template(self) -> Self:
+        """Pre-compile blob_path as Jinja2 template to catch syntax errors.
+
+        Moved from AzureBlobSink.__init__ so from_dict() catches it
+        (pre-validation / engine-validation agreement).
+        """
+        env = SandboxedEnvironment(undefined=StrictUndefined)
+        try:
+            env.from_string(self.blob_path)
+        except TemplateSyntaxError as e:
+            raise ValueError(f"Invalid blob_path template: {e}") from e
+        return self
+
 
 # Rebuild model to resolve forward references for dynamic module loading
 AzureBlobSinkConfig.model_rebuild()
@@ -283,6 +302,8 @@ class AzureBlobSink(BaseSink):
 
     name = "azure_blob"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:1816d1d5730f7f52"
+    config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Resume capability: Azure Blobs are immutable - cannot append
@@ -307,7 +328,7 @@ class AzureBlobSink(BaseSink):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = AzureBlobSinkConfig.from_dict(config)
+        cfg = AzureBlobSinkConfig.from_dict(config, plugin_name=self.name)
 
         # Store auth config for creating clients
         self._auth_config = cfg.get_auth_config()
@@ -316,14 +337,11 @@ class AzureBlobSink(BaseSink):
         self._format = cfg.format
         self._overwrite = cfg.overwrite
 
-        # Pre-compile blob path template at init — structural validation.
-        # A TemplateSyntaxError here is a config error that should stop the run
-        # at setup, not be deferred to the first write() call.
+        # Pre-compile blob path template at init for runtime use.
+        # Syntax validation is now handled by AzureBlobSinkConfig.validate_blob_path_template
+        # model_validator — from_dict() above already proved the template is valid.
         env = SandboxedEnvironment(undefined=StrictUndefined)
-        try:
-            self._blob_path_compiled = env.from_string(self._blob_path_template)
-        except TemplateSyntaxError as e:
-            raise ValueError(f"Invalid blob_path template: {e}") from e
+        self._blob_path_compiled = env.from_string(self._blob_path_template)
 
         # CSV options are already validated Pydantic model
         self._csv_options = cfg.csv_options
@@ -476,7 +494,7 @@ class AzureBlobSink(BaseSink):
         if display_map is None:
             return data_fields, data_fields
 
-        display_fields = [display_map[field] if field in display_map else field for field in data_fields]  # noqa: SIM401
+        display_fields = [display_map[field] if field in display_map else field for field in data_fields]
         return data_fields, display_fields
 
     def _serialize_csv(self, rows: list[dict[str, Any]]) -> bytes:
@@ -522,11 +540,11 @@ class AzureBlobSink(BaseSink):
 
     def _serialize_json(self, rows: list[dict[str, Any]]) -> bytes:
         """Serialize rows to JSON array bytes."""
-        return json.dumps(rows, indent=2).encode("utf-8")
+        return json.dumps(rows, indent=2, allow_nan=False).encode("utf-8")
 
     def _serialize_jsonl(self, rows: list[dict[str, Any]]) -> bytes:
         """Serialize rows to JSONL bytes (newline-delimited JSON)."""
-        lines = [json.dumps(row) for row in rows]
+        lines = [json.dumps(row, allow_nan=False) for row in rows]
         return "\n".join(lines).encode("utf-8")
 
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
@@ -547,6 +565,9 @@ class AzureBlobSink(BaseSink):
             ValueError: If overwrite=False and blob exists.
             azure.core.exceptions.*: On Azure SDK errors.
         """
+        resolve_contract_from_context_if_needed(self, ctx)
+        resolve_display_headers_if_needed(self, ctx)
+
         if not rows:
             # Still render the path for consistent audit trail
             rendered_path = self._get_or_init_blob_path(ctx)
@@ -558,9 +579,6 @@ class AzureBlobSink(BaseSink):
                     size_bytes=0,
                 )
             )
-
-        resolve_contract_from_context_if_needed(self, ctx)
-        resolve_display_headers_if_needed(self, ctx)
 
         output_rows = rows
         if self._format in {"json", "jsonl"}:
@@ -695,6 +713,8 @@ class AzureBlobSink(BaseSink):
 
     def close(self) -> None:
         """Release resources."""
+        if self._container_client is not None:
+            self._container_client.close()
         self._container_client = None
         self._buffered_rows = []
         self._resolved_blob_path = None

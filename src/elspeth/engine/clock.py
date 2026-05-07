@@ -79,7 +79,7 @@ class MockClock:
         """
         if not math.isfinite(start):
             raise ValueError(f"MockClock start must be finite, got {start}")
-        self._current = start
+        self._current = float(start)
 
     def monotonic(self) -> float:
         """Return current mock time."""
@@ -98,7 +98,7 @@ class MockClock:
             raise ValueError(f"Cannot advance time by non-finite amount: {seconds}")
         if seconds < 0:
             raise ValueError(f"Cannot advance time by negative amount: {seconds}")
-        self._current += seconds
+        self._current += float(seconds)
 
     def set(self, value: float) -> None:
         """Set mock time to an absolute value.
@@ -114,7 +114,7 @@ class MockClock:
             raise ValueError(f"MockClock.set() requires a finite value, got {value}")
         if value < self._current:
             raise ValueError(f"MockClock.set() requires monotonic time: value={value} < current={self._current}")
-        self._current = value
+        self._current = float(value)
 
 
 # Default clock for production use

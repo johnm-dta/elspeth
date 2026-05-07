@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from elspeth.contracts.freeze import freeze_fields
+
 
 @dataclass(frozen=True)
 class RetrievalChunk:
@@ -38,10 +40,11 @@ class RetrievalChunk:
                 f"Provider score normalization bug — check the provider implementation."
             )
         try:
-            json.dumps(self.metadata)
+            json.dumps(self.metadata, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 f"metadata must be JSON-serializable (got {type(exc).__name__}: {exc}). "
                 f"Provider must coerce non-primitive types (datetime -> ISO 8601 str, "
                 f"UUID -> str, etc.) at the Tier 3 boundary before constructing RetrievalChunk."
             ) from exc
+        freeze_fields(self, "metadata")

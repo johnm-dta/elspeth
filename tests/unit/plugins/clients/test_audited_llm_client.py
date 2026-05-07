@@ -1,6 +1,7 @@
 # tests/plugins/clients/test_audited_llm_client.py
 """Tests for AuditedLLMClient."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.contracts.token_usage import TokenUsage
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.plugins.infrastructure.clients.llm import (
     AuditedLLMClient,
     ContentPolicyError,
@@ -90,15 +92,15 @@ class TestLLMClientErrors:
 class TestAuditedLLMClient:
     """Tests for AuditedLLMClient."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder."""
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository."""
         import itertools
 
-        recorder = MagicMock()
-        recorder.record_call = MagicMock()
+        execution = MagicMock(spec=ExecutionRepository)
+        execution.record_call = MagicMock()
         counter = itertools.count()
-        recorder.allocate_call_index.side_effect = lambda _: next(counter)
-        return recorder
+        execution.allocate_call_index.side_effect = lambda _: next(counter)
+        return execution
 
     def _create_mock_openai_client(
         self,
@@ -133,11 +135,11 @@ class TestAuditedLLMClient:
 
     def test_successful_call_records_to_audit_trail(self) -> None:
         """Successful LLM call is recorded to audit trail."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -157,8 +159,8 @@ class TestAuditedLLMClient:
         assert response.latency_ms > 0
 
         # Verify audit record
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["state_id"] == "state_123"
         assert call_kwargs["call_index"] == 0
         assert call_kwargs["call_type"] == CallType.LLM
@@ -170,12 +172,12 @@ class TestAuditedLLMClient:
 
     def test_telemetry_emits_token_id_when_configured(self) -> None:
         """Telemetry event should carry token_id when provided."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
         emitted_events: list[ExternalCallCompleted] = []
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: emitted_events.append(event),
@@ -193,12 +195,12 @@ class TestAuditedLLMClient:
 
     def test_telemetry_uses_none_token_id_when_unset(self) -> None:
         """Telemetry event should allow token_id=None when not provided."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
         emitted_events: list[ExternalCallCompleted] = []
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: emitted_events.append(event),
@@ -215,11 +217,11 @@ class TestAuditedLLMClient:
 
     def test_call_index_increments(self) -> None:
         """Each call gets a unique, incrementing call index."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -237,19 +239,19 @@ class TestAuditedLLMClient:
         )
 
         # Check call indices
-        calls = recorder.record_call.call_args_list
+        calls = execution.record_call.call_args_list
         assert len(calls) == 2
         assert calls[0][1]["call_index"] == 0
         assert calls[1][1]["call_index"] == 1
 
     def test_failed_call_records_error(self) -> None:
         """Failed LLM call records error details."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = MagicMock()
         openai_client.chat.completions.create.side_effect = Exception("API connection failed")
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -263,8 +265,8 @@ class TestAuditedLLMClient:
             )
 
         # Verify error was recorded
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "Exception"
         assert "API connection failed" in call_kwargs["error"].message
@@ -272,12 +274,12 @@ class TestAuditedLLMClient:
 
     def test_rate_limit_error_marked_retryable(self) -> None:
         """Rate limit errors are marked as retryable."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = MagicMock()
         openai_client.chat.completions.create.side_effect = Exception("Rate limit exceeded (429)")
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -291,17 +293,17 @@ class TestAuditedLLMClient:
             )
 
         # Verify error was recorded with retryable=True
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["error"].retryable is True
 
     def test_rate_limit_detected_by_keyword(self) -> None:
         """Rate limit is detected by 'rate' keyword in error."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = MagicMock()
         openai_client.chat.completions.create.side_effect = Exception("You have exceeded your rate limit")
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -316,12 +318,12 @@ class TestAuditedLLMClient:
 
     def test_non_rate_substring_does_not_raise_rate_limit_error(self) -> None:
         """Errors like 'enumerate' should not be misclassified as rate limit."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = MagicMock()
         openai_client.chat.completions.create.side_effect = Exception("400 Bad Request: enumerate at least one item")
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -336,16 +338,16 @@ class TestAuditedLLMClient:
 
         assert type(exc_info.value) is LLMClientError
         assert exc_info.value.retryable is False
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["error"].retryable is False
 
     def test_temperature_and_max_tokens_recorded(self) -> None:
         """Temperature and max_tokens are recorded in request."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -359,17 +361,17 @@ class TestAuditedLLMClient:
             max_tokens=100,
         )
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["temperature"] == 0.7
         assert call_kwargs["request_data"].to_dict()["max_tokens"] == 100
 
     def test_provider_recorded_in_request(self) -> None:
         """Provider name is recorded in request data."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -382,16 +384,16 @@ class TestAuditedLLMClient:
             messages=[{"role": "user", "content": "Hello"}],
         )
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["provider"] == "azure"
 
     def test_extra_kwargs_passed_to_client(self) -> None:
         """Extra kwargs are passed to underlying client and recorded."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -412,7 +414,7 @@ class TestAuditedLLMClient:
         assert create_kwargs["presence_penalty"] == 0.5
 
         # Verify extra kwargs were recorded
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["top_p"] == 0.9
         assert call_kwargs["request_data"].to_dict()["presence_penalty"] == 0.5
 
@@ -427,7 +429,7 @@ class TestAuditedLLMClient:
         filtering). Previously this was fabricated to "" via `or ""`, hiding
         the refusal from the audit trail.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = None  # Content-filtered response
@@ -450,7 +452,7 @@ class TestAuditedLLMClient:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -469,7 +471,7 @@ class TestAuditedLLMClient:
         This ensures audit completeness per CLAUDE.md:
         "External calls - Full request AND response recorded"
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # Create a realistic OpenAI response with all fields
         full_response = {
@@ -517,7 +519,7 @@ class TestAuditedLLMClient:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -530,7 +532,7 @@ class TestAuditedLLMClient:
         )
 
         # Verify raw_response is recorded in audit trail
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         response_data = call_kwargs["response_data"].to_dict()
 
         # Summary fields still present for convenience
@@ -546,7 +548,7 @@ class TestAuditedLLMClient:
 
     def test_multiple_choices_preserved_in_raw_response(self) -> None:
         """Multiple choices (n>1) are preserved in raw_response."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # Response with multiple choices
         full_response = {
@@ -592,7 +594,7 @@ class TestAuditedLLMClient:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -605,7 +607,7 @@ class TestAuditedLLMClient:
         )
 
         # Verify all choices are preserved in raw_response
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = execution.record_call.call_args[1]
         raw_response = call_kwargs["response_data"].to_dict()["raw_response"]
 
         assert len(raw_response["choices"]) == 3
@@ -614,11 +616,16 @@ class TestAuditedLLMClient:
         assert raw_response["choices"][2]["message"]["content"] == "Option C"
         assert raw_response["choices"][2]["finish_reason"] == "length"
 
-    def test_tool_calls_preserved_in_raw_response(self) -> None:
-        """Tool calls are preserved in raw_response for function calling."""
-        recorder = self._create_mock_recorder()
+    def test_tool_calls_raises_error_and_records_audit(self) -> None:
+        """Tool calls response raises LLMClientError and records ERROR in audit trail.
 
-        # Response with tool calls
+        ELSPETH does not support tool_calls — a provider returning tool_calls
+        must be recorded as ERROR (not fabricated to SUCCESS with content="").
+        The raw response is preserved so the audit trail shows what the provider
+        actually returned.
+        """
+        execution = self._create_mock_execution()
+
         full_response = {
             "id": "chatcmpl-tools",
             "choices": [
@@ -626,7 +633,7 @@ class TestAuditedLLMClient:
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": None,  # No text content when tool calls
+                        "content": None,
                         "tool_calls": [
                             {
                                 "id": "call_abc123",
@@ -634,14 +641,6 @@ class TestAuditedLLMClient:
                                 "function": {
                                     "name": "get_weather",
                                     "arguments": '{"location": "London"}',
-                                },
-                            },
-                            {
-                                "id": "call_def456",
-                                "type": "function",
-                                "function": {
-                                    "name": "get_time",
-                                    "arguments": '{"timezone": "UTC"}',
                                 },
                             },
                         ],
@@ -654,7 +653,7 @@ class TestAuditedLLMClient:
         }
 
         message = Mock()
-        message.content = None  # Tool call responses have no text content
+        message.content = None
 
         choice = Mock()
         choice.message = message
@@ -674,27 +673,30 @@ class TestAuditedLLMClient:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
             underlying_client=openai_client,
         )
 
-        client.chat_completion(
-            model="gpt-4",
-            messages=[{"role": "user", "content": "What's the weather?"}],
-        )
+        with pytest.raises(LLMClientError, match=r"tool_calls response.*not supported"):
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "What's the weather?"}],
+            )
 
-        # Verify tool calls are preserved in raw_response
-        call_kwargs = recorder.record_call.call_args[1]
+        # Verify ERROR call recorded in audit trail (not dropped)
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"].type == "UnsupportedResponseError"
+
+        # Verify raw response preserved for audit
         raw_response = call_kwargs["response_data"].to_dict()["raw_response"]
-
         assert raw_response["choices"][0]["finish_reason"] == "tool_calls"
         tool_calls = raw_response["choices"][0]["message"]["tool_calls"]
-        assert len(tool_calls) == 2
+        assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "get_weather"
-        assert tool_calls[1]["function"]["name"] == "get_time"
 
     # NOTE: test_raw_response_none_when_model_dump_unavailable was removed because
     # we require openai>=2.15 which guarantees model_dump() exists on all responses.
@@ -707,7 +709,7 @@ class TestAuditedLLMClient:
         usage data entirely. The client should record this as SUCCESS
         with an empty usage dict, not crash with AttributeError.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = "Hello, I'm working!"
@@ -725,7 +727,7 @@ class TestAuditedLLMClient:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             run_id="run_abc",
             telemetry_emit=lambda event: None,
@@ -743,11 +745,181 @@ class TestAuditedLLMClient:
         assert result.usage == TokenUsage.unknown()  # Unknown, not crash
 
         # Audit trail should record SUCCESS with empty usage
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.SUCCESS
         assert call_kwargs["response_data"].to_dict()["content"] == "Hello, I'm working!"
         assert call_kwargs["response_data"].to_dict()["usage"] == {}
+
+    def test_success_path_preserves_aggregate_only_usage(self) -> None:
+        """Aggregate-only provider usage must not crash before audit recording."""
+        execution = self._create_mock_execution()
+
+        message = Mock()
+        message.content = "Hello, aggregate usage!"
+
+        choice = Mock()
+        choice.message = message
+        choice.finish_reason = "stop"
+
+        response = Mock()
+        response.choices = [choice]
+        response.model = "gpt-4"
+        response.usage = SimpleNamespace(total_tokens=15)
+        response.model_dump = Mock(return_value={"id": "resp_total_only", "usage": {"total_tokens": 15}})
+
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_aggregate",
+            run_id="run_aggregate",
+            telemetry_emit=lambda event: None,
+            underlying_client=openai_client,
+        )
+
+        result = client.chat_completion(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+
+        assert result.content == "Hello, aggregate usage!"
+        assert result.usage.prompt_tokens is None
+        assert result.usage.completion_tokens is None
+        assert result.usage.total_tokens == 15
+
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.SUCCESS
+        assert call_kwargs["response_data"].to_dict()["usage"] == {"total_tokens": 15}
+
+    def test_empty_choices_preserves_aggregate_only_usage_in_error_record(self) -> None:
+        """Malformed responses with total-only usage must still record the call."""
+        execution = self._create_mock_execution()
+
+        response = Mock()
+        response.choices = []
+        response.model = "gpt-4"
+        response.usage = SimpleNamespace(total_tokens=15)
+        response.model_dump = Mock(return_value={"id": "resp_empty_total_only", "usage": {"total_tokens": 15}})
+
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_empty_choices",
+            run_id="run_empty_choices",
+            telemetry_emit=lambda event: None,
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError, match="empty choices"):
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["response_data"].to_dict()["usage"] == {"total_tokens": 15}
+
+    def test_invalid_provider_model_records_error_with_raw_response(self) -> None:
+        """Missing provider model must be rejected before success is recorded."""
+        execution = self._create_mock_execution()
+
+        message = Mock()
+        message.content = "Hello!"
+
+        choice = Mock()
+        choice.message = message
+        choice.finish_reason = "stop"
+
+        usage = Mock()
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+
+        response = Mock()
+        response.choices = [choice]
+        response.model = None
+        response.usage = usage
+        response.model_dump = Mock(return_value={"id": "resp_bad_model", "model": None})
+
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        emitted_events: list[ExternalCallCompleted] = []
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_bad_model",
+            run_id="run_bad_model",
+            telemetry_emit=lambda event: emitted_events.append(event),
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError, match="model"):
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"].type == "MalformedResponseError"
+        assert "model" in call_kwargs["error"].message.lower()
+        assert call_kwargs["response_data"].to_dict()["model"] is None
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].status == CallStatus.ERROR
+        assert emitted_events[0].response_payload is not None
+
+    def test_non_string_content_records_raw_response_payload(self) -> None:
+        """Non-string content must preserve the provider payload for audit."""
+        execution = self._create_mock_execution()
+
+        message = Mock()
+        message.content = ["part1", "part2"]
+
+        choice = Mock()
+        choice.message = message
+        choice.finish_reason = "stop"
+
+        usage = Mock()
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+
+        raw_response = {
+            "id": "resp_non_string_content",
+            "choices": [{"message": {"content": ["part1", "part2"]}, "finish_reason": "stop"}],
+        }
+
+        response = Mock()
+        response.choices = [choice]
+        response.model = "gpt-4"
+        response.usage = usage
+        response.model_dump = Mock(return_value=raw_response)
+
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = response
+
+        client = AuditedLLMClient(
+            execution=execution,
+            state_id="state_non_string_content",
+            run_id="run_non_string_content",
+            telemetry_emit=lambda event: None,
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError, match="expected str"):
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["response_data"] is not None
+        assert call_kwargs["response_data"].to_dict()["choices"][0]["message"]["content"] == ["part1", "part2"]
 
 
 class TestBug4_6_SuccessPathOutsideTryExcept:
@@ -760,11 +932,11 @@ class TestBug4_6_SuccessPathOutsideTryExcept:
     """
 
     @staticmethod
-    def _create_mock_recorder() -> Mock:
-        recorder = Mock()
-        recorder.allocate_call_index = Mock(return_value=0)
-        recorder.record_call = Mock()
-        return recorder
+    def _create_mock_execution() -> Mock:
+        execution = Mock(spec=ExecutionRepository)
+        execution.allocate_call_index = Mock(return_value=0)
+        execution.record_call = Mock()
+        return execution
 
     def test_internal_error_in_success_path_crashes_directly(self) -> None:
         """Bug in success processing crashes as AttributeError, not LLMClientError.
@@ -773,7 +945,7 @@ class TestBug4_6_SuccessPathOutsideTryExcept:
         an internal processing bug), it should raise AttributeError directly,
         NOT get caught and wrapped as LLMClientError.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # Create a response where .choices[0].message.content raises AttributeError
         # This simulates a bug in our success path processing
@@ -793,7 +965,7 @@ class TestBug4_6_SuccessPathOutsideTryExcept:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_bug46",
             run_id="run_bug46",
             telemetry_emit=lambda event: None,
@@ -817,16 +989,16 @@ class TestContentFabrication:
     """
 
     @staticmethod
-    def _create_mock_recorder() -> Mock:
-        recorder = Mock()
-        recorder.allocate_call_index = Mock(return_value=0)
-        recorder.record_call = Mock()
-        return recorder
+    def _create_mock_execution() -> Mock:
+        execution = Mock(spec=ExecutionRepository)
+        execution.allocate_call_index = Mock(return_value=0)
+        execution.record_call = Mock()
+        return execution
 
     @staticmethod
-    def _create_client(recorder: Mock, openai_client: MagicMock) -> AuditedLLMClient:
+    def _create_client(execution: Mock, openai_client: MagicMock) -> AuditedLLMClient:
         return AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_fab",
             run_id="run_fab",
             telemetry_emit=lambda event: None,
@@ -835,7 +1007,7 @@ class TestContentFabrication:
 
     def test_null_content_raises_content_policy_error(self) -> None:
         """content=None from LLM must raise ContentPolicyError, not fabricate ""."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = None  # Content-filtered response
@@ -857,7 +1029,7 @@ class TestContentFabrication:
         openai_client = MagicMock()
         openai_client.chat.completions.create.return_value = response
 
-        client = self._create_client(recorder, openai_client)
+        client = self._create_client(execution, openai_client)
 
         with pytest.raises(ContentPolicyError):
             client.chat_completion(
@@ -872,7 +1044,7 @@ class TestContentFabrication:
         (content-filtered). The audit trail must record this call so operators can
         see why the call failed and there are no unexplained call-index gaps.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = None
@@ -894,7 +1066,7 @@ class TestContentFabrication:
         openai_client = MagicMock()
         openai_client.chat.completions.create.return_value = response
 
-        client = self._create_client(recorder, openai_client)
+        client = self._create_client(execution, openai_client)
 
         with pytest.raises(ContentPolicyError):
             client.chat_completion(
@@ -903,8 +1075,8 @@ class TestContentFabrication:
             )
 
         # The call MUST be recorded despite raising ContentPolicyError
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["state_id"] == "state_fab"
         assert call_kwargs["call_type"] == CallType.LLM
@@ -921,7 +1093,7 @@ class TestContentFabrication:
         The audit trail records the call, but telemetry dashboards also need
         the event to avoid undercounting content-filtered failures.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = None
@@ -945,7 +1117,7 @@ class TestContentFabrication:
 
         emitted_events: list[ExternalCallCompleted] = []
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_fab",
             run_id="run_fab",
             telemetry_emit=lambda event: emitted_events.append(event),
@@ -969,9 +1141,14 @@ class TestContentFabrication:
         assert event.response_payload is not None
         assert event.token_usage is not None
 
-    def test_empty_choices_raises_error(self) -> None:
-        """Empty choices array must raise, not IndexError."""
-        recorder = self._create_mock_recorder()
+    def test_empty_choices_raises_error_and_records_audit(self) -> None:
+        """Empty choices array must raise AND record ERROR in audit trail.
+
+        The LLM call happened (consuming call_index and tokens), so the
+        audit trail must reflect it — raising without recording creates
+        an unexplained audit gap.
+        """
+        execution = self._create_mock_execution()
 
         response = Mock()
         response.choices = []  # No choices at all
@@ -982,7 +1159,7 @@ class TestContentFabrication:
         openai_client = MagicMock()
         openai_client.chat.completions.create.return_value = response
 
-        client = self._create_client(recorder, openai_client)
+        client = self._create_client(execution, openai_client)
 
         with pytest.raises(LLMClientError, match="empty choices"):
             client.chat_completion(
@@ -990,9 +1167,14 @@ class TestContentFabrication:
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
+        # Verify ERROR call recorded in audit trail (not dropped)
+        call_kwargs = execution.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"].type == "EmptyChoicesError"
+
     def test_empty_string_content_is_valid(self) -> None:
         """content="" is a legitimate response — must NOT raise."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = ""  # Legitimately empty, not None
@@ -1013,7 +1195,7 @@ class TestContentFabrication:
         openai_client = MagicMock()
         openai_client.chat.completions.create.return_value = response
 
-        client = self._create_client(recorder, openai_client)
+        client = self._create_client(execution, openai_client)
 
         result = client.chat_completion(
             model="gpt-4",
@@ -1031,15 +1213,15 @@ class TestModelDumpFailureRecordsCall:
     """
 
     @staticmethod
-    def _create_mock_recorder() -> Mock:
-        recorder = Mock()
-        recorder.allocate_call_index = Mock(return_value=0)
-        recorder.record_call = Mock()
-        return recorder
+    def _create_mock_execution() -> Mock:
+        execution = Mock(spec=ExecutionRepository)
+        execution.allocate_call_index = Mock(return_value=0)
+        execution.record_call = Mock()
+        return execution
 
     def test_model_dump_failure_records_error_call(self) -> None:
         """When model_dump() raises, an ERROR call must be recorded."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = "Hello!"
@@ -1061,7 +1243,7 @@ class TestModelDumpFailureRecordsCall:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_dump_fail",
             run_id="run_dump_fail",
             telemetry_emit=lambda event: None,
@@ -1075,8 +1257,8 @@ class TestModelDumpFailureRecordsCall:
             )
 
         # The critical assertion: record_call was invoked despite the failure
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args
         assert call_kwargs.kwargs["status"] == CallStatus.ERROR
 
 
@@ -1090,15 +1272,15 @@ class TestTier3UsageBoundary:
     """
 
     @staticmethod
-    def _create_mock_recorder() -> Mock:
-        recorder = Mock()
-        recorder.allocate_call_index = Mock(return_value=0)
-        recorder.record_call = Mock()
-        return recorder
+    def _create_mock_execution() -> Mock:
+        execution = Mock(spec=ExecutionRepository)
+        execution.allocate_call_index = Mock(return_value=0)
+        execution.record_call = Mock()
+        return execution
 
     def test_float_usage_values_coerced_via_from_dict(self) -> None:
         """Float token counts from provider must be coerced to None, not crash."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = "Response text"
@@ -1121,7 +1303,7 @@ class TestTier3UsageBoundary:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_float",
             run_id="run_float",
             telemetry_emit=lambda event: None,
@@ -1139,7 +1321,7 @@ class TestTier3UsageBoundary:
 
     def test_bool_usage_values_rejected_as_invalid_by_from_dict(self) -> None:
         """Bool token counts must be rejected as invalid (bool is subclass of int but not a valid count)."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         message = Mock()
         message.content = "Response text"
@@ -1162,7 +1344,7 @@ class TestTier3UsageBoundary:
         openai_client.chat.completions.create.return_value = response
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_bool",
             run_id="run_bool",
             telemetry_emit=lambda event: None,

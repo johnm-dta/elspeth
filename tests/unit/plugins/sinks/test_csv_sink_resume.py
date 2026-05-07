@@ -6,8 +6,9 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.sinks.csv_sink import CSVSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 # Strict schema for tests - CSVSink requires fixed columns
 STRICT_SCHEMA = {"mode": "fixed", "fields": ["id: int"]}
@@ -17,8 +18,8 @@ STRICT_SCHEMA = {"mode": "fixed", "fields": ["id: int"]}
 def ctx() -> PluginContext:
     """Create test context."""
     db = make_landscape_db()
-    recorder = make_recorder(db)
-    return make_context(landscape=recorder)
+    factory = make_factory(db)
+    return make_context(landscape=factory.plugin_audit_writer())
 
 
 class TestCSVSinkResumeContract:
@@ -37,11 +38,13 @@ class TestCSVSinkResumeEndToEnd:
         output_path = tmp_path / "output.csv"
 
         # Phase 1: Initial write (simulating partial run before crash)
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "value: str"]},
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "value: str"]},
+                }
+            )
         )
         sink1.write([{"id": 1, "value": "first"}, {"id": 2, "value": "second"}], ctx)
         sink1.flush()
@@ -54,11 +57,13 @@ class TestCSVSinkResumeEndToEnd:
         assert "id" in lines_partial[0] and "value" in lines_partial[0]
 
         # Phase 2: Resume write (simulating resumed run)
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "value: str"]},
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "value: str"]},
+                }
+            )
         )
         sink2.configure_for_resume()  # CRITICAL: Switch to append mode
         sink2.write([{"id": 3, "value": "third"}, {"id": 4, "value": "fourth"}], ctx)
@@ -85,11 +90,13 @@ class TestCSVSinkResumeEndToEnd:
         output_path = tmp_path / "output.csv"
 
         # Phase 1: Initial write with multiple batches
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink1.write([{"id": 1}], ctx)
         sink1.write([{"id": 2}, {"id": 3}], ctx)  # Second batch
@@ -97,11 +104,13 @@ class TestCSVSinkResumeEndToEnd:
         sink1.close()
 
         # Phase 2: Resume with multiple batches
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink2.configure_for_resume()
         sink2.write([{"id": 4}], ctx)
@@ -126,11 +135,13 @@ class TestCSVSinkResumeEndToEnd:
         output_path.touch()
 
         # Resume write to empty file
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
         sink.configure_for_resume()
         sink.write([{"id": 1, "name": "Alice"}], ctx)
@@ -151,11 +162,13 @@ class TestCSVSinkResumeEndToEnd:
         assert not output_path.exists()
 
         # Resume write to nonexistent file
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "fixed", "fields": ["id: int"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int"]},
+                }
+            )
         )
         sink.configure_for_resume()
         sink.write([{"id": 1}, {"id": 2}], ctx)
@@ -174,11 +187,13 @@ class TestCSVSinkResumeEndToEnd:
         output_path = tmp_path / "output.csv"
 
         # Phase 1: Write with specific column order
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "fixed", "fields": ["name: str", "age: int", "city: str"]},
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "fixed", "fields": ["name: str", "age: int", "city: str"]},
+                }
+            )
         )
         sink1.write([{"name": "Alice", "age": 30, "city": "NYC"}], ctx)
         sink1.flush()
@@ -189,11 +204,13 @@ class TestCSVSinkResumeEndToEnd:
         original_header = content1.strip().split("\n")[0]
 
         # Phase 2: Resume (dict order might differ)
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "fixed", "fields": ["name: str", "age: int", "city: str"]},
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "fixed", "fields": ["name: str", "age: int", "city: str"]},
+                }
+            )
         )
         sink2.configure_for_resume()
         # Write with different dict key order
@@ -211,22 +228,26 @@ class TestCSVSinkResumeEndToEnd:
         output_path = tmp_path / "output.csv"
 
         # Phase 1: Initial write
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink1.write([{"id": 1}, {"id": 2}], ctx)
         sink1.flush()
         sink1.close()
 
         # Phase 2: Write without configure_for_resume (default mode="write")
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         # NO configure_for_resume() call - should truncate
         sink2.write([{"id": 3}], ctx)

@@ -17,7 +17,7 @@ from elspeth.plugins.transforms.llm.providers.azure import AzureOpenAIConfig
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 from .conftest import chaosllm_azure_openai_client
 
@@ -238,8 +238,8 @@ class TestLLMTransformAzureInit:
     def test_process_raises_not_implemented(self) -> None:
         """process() raises NotImplementedError directing to accept()."""
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         with pytest.raises(NotImplementedError, match="row-level pipelining"):
             transform.process(make_pipeline_row({"text": "hello"}), ctx)
@@ -267,11 +267,11 @@ class TestLLMTransformAzurePipelining:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -279,17 +279,17 @@ class TestLLMTransformAzurePipelining:
         return CollectorOutputPort()
 
     @pytest.fixture
-    def ctx(self, mock_recorder: Mock) -> PluginContext:
+    def ctx(self, mock_factory: Mock) -> PluginContext:
         """Create plugin context with landscape, state_id, and token."""
         token = make_token("row-1")
-        return make_context(state_id="test-state-id", token=token, landscape=mock_recorder)
+        return make_context(state_id="test-state-id", token=token, landscape=mock_factory)
 
     @pytest.fixture
-    def transform(self, collector: CollectorOutputPort, mock_recorder: Mock) -> Generator[LLMTransform, None, None]:
+    def transform(self, collector: CollectorOutputPort, mock_factory: Mock) -> Generator[LLMTransform, None, None]:
         """Create and initialize LLMTransform with Azure provider and pipelining."""
         t = LLMTransform(_make_azure_config(template="Analyze: {{ row.text }}"))
-        # Initialize with recorder reference
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        # Initialize with factory reference
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         t.on_start(init_ctx)
         # Connect output port
         t.connect_output(collector, max_pending=10)
@@ -422,7 +422,7 @@ class TestLLMTransformAzurePipelining:
         assert "429" in str(result.exception)
 
     def test_missing_state_id_propagates_exception(
-        self, mock_recorder: Mock, transform: LLMTransform, collector: CollectorOutputPort
+        self, mock_factory: Mock, transform: LLMTransform, collector: CollectorOutputPort
     ) -> None:
         """Missing state_id causes exception propagation, not error result.
 
@@ -439,7 +439,7 @@ class TestLLMTransformAzurePipelining:
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_recorder,
+            landscape=mock_factory,
             state_id=None,  # Missing state_id - calling code bug
             token=token,
         )
@@ -455,12 +455,12 @@ class TestLLMTransformAzurePipelining:
         assert isinstance(result.exception, RuntimeError)
         assert "state_id" in str(result.exception)
 
-    def test_process_row_missing_token_raises_runtime_error(self, mock_recorder: Mock, transform: LLMTransform) -> None:
+    def test_process_row_missing_token_raises_runtime_error(self, mock_factory: Mock, transform: LLMTransform) -> None:
         """Direct _process_row call with missing token must crash explicitly."""
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_recorder,
+            landscape=mock_factory,
             state_id="test-state-id",
             token=None,
         )
@@ -470,7 +470,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_system_prompt_included_in_messages(
         self,
-        mock_recorder: Mock,
+        mock_factory: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -481,12 +481,12 @@ class TestLLMTransformAzurePipelining:
                 system_prompt="You are a helpful assistant.",
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_recorder)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server) as mock_client:
@@ -505,7 +505,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_temperature_and_max_tokens_passed_to_client(
         self,
-        mock_recorder: Mock,
+        mock_factory: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -517,12 +517,12 @@ class TestLLMTransformAzurePipelining:
                 max_tokens=500,
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_recorder)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server) as mock_client:
@@ -538,7 +538,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_custom_response_field(
         self,
-        mock_recorder: Mock,
+        mock_factory: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -549,12 +549,12 @@ class TestLLMTransformAzurePipelining:
                 response_field="analysis",
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_recorder)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
 
         try:
             with chaosllm_azure_openai_client(
@@ -585,9 +585,9 @@ class TestLLMTransformAzurePipelining:
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
 
         token = make_token("row-1")
-        recorder = make_recorder()
+        factory = make_factory()
         ctx = make_context(
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),
             state_id="test-state-id",
             token=token,
         )
@@ -595,10 +595,10 @@ class TestLLMTransformAzurePipelining:
         with pytest.raises(RuntimeError, match="connect_output"):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
 
-    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_recorder: Mock) -> None:
+    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_factory: Mock) -> None:
         """connect_output() raises if called more than once."""
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -644,11 +644,11 @@ class TestLLMTransformAzureIntegration:
     """Integration-style tests for Azure-specific edge cases via LLMTransform."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -663,7 +663,7 @@ class TestLLMTransformAzureIntegration:
 
     def test_complex_template_with_multiple_variables(
         self,
-        mock_recorder: Mock,
+        mock_factory: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
@@ -680,12 +680,12 @@ class TestLLMTransformAzureIntegration:
                 """,
             )
         )
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_recorder)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server) as mock_client:
@@ -712,18 +712,18 @@ class TestLLMTransformAzureIntegration:
 
     def test_calls_are_recorded_to_landscape(
         self,
-        mock_recorder: Mock,
+        mock_factory: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
         """LLM calls are recorded via AuditedLLMClient."""
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
         token = make_token("row-1")
-        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_recorder)
+        ctx = make_context(state_id="test-state-id", token=token, landscape=mock_factory)
 
         try:
             with chaosllm_azure_openai_client(chaosllm_server):
@@ -733,18 +733,18 @@ class TestLLMTransformAzureIntegration:
             transform.close()
 
         # Verify record_call was called (by AuditedLLMClient)
-        assert mock_recorder.record_call.called
+        assert mock_factory.record_call.called
 
 
 class TestLLMTransformAzureConcurrency:
     """Tests for concurrent row processing via BatchTransformMixin with Azure provider."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -753,13 +753,13 @@ class TestLLMTransformAzureConcurrency:
 
     def test_multiple_rows_processed_in_fifo_order(
         self,
-        mock_recorder: Mock,
+        mock_factory: Mock,
         collector: CollectorOutputPort,
         chaosllm_server,
     ) -> None:
         """Multiple rows are emitted in submission order (FIFO)."""
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -777,7 +777,7 @@ class TestLLMTransformAzureConcurrency:
                         run_id="test-run",
                         state_id=f"state-{i}",
                         token=token,
-                        landscape=mock_recorder,
+                        landscape=mock_factory,
                     )
                     transform.accept(make_pipeline_row(row), ctx)
 
@@ -793,23 +793,23 @@ class TestLLMTransformAzureConcurrency:
             assert result.row is not None
             assert result.row["text"] == rows[i]["text"]
 
-    def test_on_start_captures_recorder(self, mock_recorder: Mock) -> None:
-        """on_start() captures recorder reference for provider creation."""
+    def test_on_start_captures_recorder(self, mock_factory: Mock) -> None:
+        """on_start() captures factory reference for provider creation."""
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
 
         # Verify _recorder starts as None
         assert transform._recorder is None
 
-        ctx = make_context(state_id="test-state-id", landscape=mock_recorder)
+        ctx = make_context(state_id="test-state-id", landscape=mock_factory)
         transform.on_start(ctx)
 
-        # Verify recorder was captured
-        assert transform._recorder is mock_recorder
+        # Verify factory was captured
+        assert transform._recorder is mock_factory
 
-    def test_close_clears_recorder(self, mock_recorder: Mock, collector: CollectorOutputPort) -> None:
-        """close() clears recorder reference."""
+    def test_close_clears_recorder(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
+        """close() clears factory reference."""
         transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
-        init_ctx = make_context(run_id="test", landscape=mock_recorder)
+        init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 

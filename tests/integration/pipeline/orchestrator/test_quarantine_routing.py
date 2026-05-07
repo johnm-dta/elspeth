@@ -27,9 +27,10 @@ from sqlalchemy import select
 from elspeth.contracts import (
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     SourceRow,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.core.landscape.schema import (
@@ -299,7 +300,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_quarantined == 1
 
         # Query node_states for the quarantined token
@@ -335,7 +337,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
 
         # Query routing events
         with db.engine.connect() as conn:
@@ -378,7 +381,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_quarantined == 1
 
         # Verify the quarantine sink received the row
@@ -388,12 +392,14 @@ class TestQuarantineHappyPath:
         with db.engine.connect() as conn:
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == result.run_id)).fetchall()
 
-        quarantined_outcomes = [o for o in outcomes if o.outcome == RowOutcome.QUARANTINED]
+        quarantined_outcomes = [
+            o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.FAILURE.value, TerminalPath.QUARANTINED_AT_SOURCE.value)
+        ]
         assert len(quarantined_outcomes) == 1, f"Expected 1 QUARANTINED outcome, got {len(quarantined_outcomes)}"
 
         outcome = quarantined_outcomes[0]
-        assert outcome.is_terminal == 1, "QUARANTINED must be a terminal outcome"
-        assert outcome.sink_name == "quarantine", f"Expected sink_name='quarantine', got {outcome.sink_name}"
+        assert outcome.completed == 1, "QUARANTINED must be a terminal outcome"
+        assert outcome.sink_name == "quarantine", "QUARANTINED_AT_SOURCE preserves the durable quarantine sink witness"
         assert outcome.error_hash is not None, "QUARANTINED outcome must have error_hash"
 
     def test_mixed_valid_and_quarantined_rows_full_audit(self, payload_store) -> None:
@@ -420,7 +426,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_processed == 4
         assert result.rows_quarantined == 2
 
@@ -451,11 +458,15 @@ class TestQuarantineHappyPath:
             outcomes = conn.execute(
                 select(token_outcomes_table)
                 .where(token_outcomes_table.c.run_id == result.run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchall()
 
-        completed_outcomes = [o for o in outcomes if o.outcome == RowOutcome.COMPLETED]
-        quarantined_outcomes = [o for o in outcomes if o.outcome == RowOutcome.QUARANTINED]
+        completed_outcomes = [
+            o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value)
+        ]
+        quarantined_outcomes = [
+            o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.FAILURE.value, TerminalPath.QUARANTINED_AT_SOURCE.value)
+        ]
 
         assert len(completed_outcomes) == 2, f"Expected 2 COMPLETED outcomes, got {len(completed_outcomes)}"
         assert len(quarantined_outcomes) == 2, f"Expected 2 QUARANTINED outcomes, got {len(quarantined_outcomes)}"
@@ -463,7 +474,7 @@ class TestQuarantineHappyPath:
         # QUARANTINED outcomes have error_hash, COMPLETED do not
         for qo in quarantined_outcomes:
             assert qo.error_hash is not None, "QUARANTINED must have error_hash"
-            assert qo.sink_name == "quarantine"
+            assert qo.sink_name == "quarantine", "QUARANTINED_AT_SOURCE preserves the durable quarantine sink witness"
         for co in completed_outcomes:
             assert co.sink_name == "default"
 
@@ -492,7 +503,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 2
         assert len(quarantine_sink.results) == 2
         assert len(default_sink.results) == 1
@@ -528,7 +540,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_processed == 8
         assert result.rows_quarantined == 3
         assert result.rows_succeeded == 5
@@ -568,7 +581,8 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
         assert len(quarantine_sink.results) == 1
         assert len(default_sink.results) == 1
@@ -597,7 +611,8 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_quarantined == 2
         assert len(quarantine_sink.results) == 2
 
@@ -627,7 +642,8 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
         assert result.rows_succeeded == 1
 

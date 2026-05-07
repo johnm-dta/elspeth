@@ -6,6 +6,8 @@ for that invariant.  These tests verify all four methods against a real
 in-memory SQLite database; no mocks.
 """
 
+from pathlib import Path
+
 import pytest
 import sqlalchemy as sa
 
@@ -58,13 +60,11 @@ class TestExecuteFetchone:
         row = ops.execute_fetchone(test_table.select().where(test_table.c.id == "missing"))
         assert row is None
 
-    def test_returns_first_row_only(self, ops: DatabaseOps, test_table: sa.Table) -> None:
+    def test_raises_on_multiple_rows(self, ops: DatabaseOps, test_table: sa.Table) -> None:
         ops.execute_insert(test_table.insert().values(id="a", value="first"))
         ops.execute_insert(test_table.insert().values(id="b", value="second"))
-        # fetchone on an unfiltered query returns only one row
-        row = ops.execute_fetchone(test_table.select().order_by(test_table.c.id))
-        assert row is not None
-        assert row.id == "a"
+        with pytest.raises(AuditIntegrityError, match=r"multiple rows|ambiguous"):
+            ops.execute_fetchone(test_table.select().order_by(test_table.c.id))
 
 
 class TestExecuteFetchall:
@@ -85,6 +85,29 @@ class TestExecuteFetchall:
     def test_returns_list_type(self, ops: DatabaseOps, test_table: sa.Table) -> None:
         rows = ops.execute_fetchall(test_table.select())
         assert isinstance(rows, list)
+
+    def test_rejects_write_statement_even_with_returning(self, tmp_path: Path) -> None:
+        """Fetch helpers must execute on a read-only connection."""
+        db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'test.db'}")
+        metadata = sa.MetaData()
+        table = sa.Table(
+            "test_rows",
+            metadata,
+            sa.Column("id", sa.String, primary_key=True),
+            sa.Column("value", sa.String),
+        )
+        with db.connection() as conn:
+            metadata.create_all(conn.engine)
+        ops = DatabaseOps(db)
+        ops.execute_insert(table.insert().values(id="a", value="before"))
+
+        with pytest.raises(AuditIntegrityError, match=r"read.?only|execute_fetchall failed|database rejected"):
+            ops.execute_fetchall(table.update().where(table.c.id == "a").values(value="after").returning(table.c.id, table.c.value))
+
+        row = ops.execute_fetchone(table.select().where(table.c.id == "a"))
+        assert row is not None
+        assert row.value == "before"
+        db.close()
 
 
 class TestExecuteInsert:

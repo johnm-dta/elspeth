@@ -93,6 +93,7 @@ def create_contract_from_config(
                 python_type=_FIELD_TYPE_MAP[fd.field_type],
                 required=fd.required,
                 source="declared",
+                nullable=fd.nullable,
             )
             field_contracts.append(fc)
         fields = tuple(field_contracts)

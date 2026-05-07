@@ -338,6 +338,6 @@ class TestFrozenRoundTripContracts:
     def test_empty_containers_round_trip(self) -> None:
         from elspeth.contracts.freeze import deep_freeze
 
-        original = {"empty_dict": {}, "empty_list": []}
+        original: dict[str, dict[str, object] | list[object]] = {"empty_dict": {}, "empty_list": []}
         frozen = deep_freeze(original)
         assert canonical_json(original) == canonical_json(frozen)

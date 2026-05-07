@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import (
-    BatchPendingError,
     BatchTransformProtocol,
     ExecutionError,
     PipelineRow,
     SchemaContract,
     TokenInfo,
+    TransformResult,
 )
 from elspeth.contracts.aggregation_checkpoint import (
     AggregationCheckpointState,
@@ -27,7 +28,6 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import (
     AuditIntegrityError,
-    FrameworkBugError,
     OrchestrationInvariantError,
     PluginContractViolation,
 )
@@ -36,13 +36,13 @@ from elspeth.contracts.node_state_context import AggregationFlushContext
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
+from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.config import AggregationSettings
-from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.triggers import TriggerEvaluator
-from elspeth.plugins.infrastructure.results import TransformResult
 
 if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 slog = structlog.get_logger(__name__)
 
-AGGREGATION_CHECKPOINT_VERSION = "3.0"
+AGGREGATION_CHECKPOINT_VERSION = "4.0"
 
 
 @dataclass(slots=True)
@@ -88,7 +88,7 @@ class AggregationExecutor:
     NOT stored in node_states.status (which is always "completed" for successful accepts).
 
     Example:
-        executor = AggregationExecutor(recorder, span_factory, step_resolver, run_id)
+        executor = AggregationExecutor(execution, span_factory, step_resolver, run_id)
 
         # Accept rows into batch
         result = executor.buffer_row(node_id, token)
@@ -97,7 +97,7 @@ class AggregationExecutor:
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        execution: ExecutionRepository,
         span_factory: SpanFactory,
         step_resolver: StepResolver,
         run_id: str,
@@ -108,7 +108,7 @@ class AggregationExecutor:
         """Initialize executor.
 
         Args:
-            recorder: Landscape recorder for audit trail
+            execution: Execution repository for audit trail
             span_factory: Span factory for tracing
             step_resolver: Resolves NodeID to 1-indexed audit step position
             run_id: Run identifier for batch creation
@@ -116,7 +116,7 @@ class AggregationExecutor:
             clock: Optional clock for time access. Defaults to system clock.
                    Inject MockClock for deterministic testing.
         """
-        self._recorder = recorder
+        self._execution = execution
         self._spans = span_factory
         self._step_resolver = step_resolver
         self._run_id = run_id
@@ -171,7 +171,7 @@ class AggregationExecutor:
 
         # Create batch on first row if needed
         if node.batch_id is None:
-            batch = self._recorder.create_batch(
+            batch = self._execution.create_batch(
                 run_id=self._run_id,
                 aggregation_node_id=node_id,
             )
@@ -189,7 +189,7 @@ class AggregationExecutor:
 
         # Record batch membership for audit trail
         ordinal = node.member_count
-        self._recorder.add_batch_member(
+        self._execution.add_batch_member(
             batch_id=batch_id,
             token_id=token.token_id,
             ordinal=ordinal,
@@ -319,7 +319,7 @@ class AggregationExecutor:
             pipeline_rows.append(PipelineRow(row_dict, contract))
 
         # Step 1: Transition batch to "executing"
-        self._recorder.update_batch_status(
+        self._execution.update_batch_status(
             batch_id=batch_id,
             status=BatchStatus.EXECUTING,
             trigger_type=trigger_type,
@@ -341,7 +341,7 @@ class AggregationExecutor:
         # before the state is explicitly completed, the guard auto-completes
         # it as FAILED.  Batch lifecycle cleanup is handled separately below.
         with NodeStateGuard(
-            self._recorder,
+            self._execution,
             token_id=representative_token.token_id,
             node_id=node_id,
             run_id=ctx.run_id,
@@ -349,11 +349,10 @@ class AggregationExecutor:
             input_data=batch_input,
             attempt=0,
         ) as guard:
-            # Set state_id and node_id on context for external call recording
-            # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
+            # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id
             ctx.node_id = node_id
-            # Note: call_index allocation handled by LandscapeRecorder.allocate_call_index()
+            # Note: call_index allocation handled by ExecutionRepository.allocate_call_index()
 
             # Expose per-row token identity for batch transforms. This allows transforms
             # like OpenRouterBatchLLMTransform to pass the correct token_id to audited
@@ -364,10 +363,6 @@ class AggregationExecutor:
             # Track whether the batch was finalized (COMPLETED or FAILED).
             # Used by the outer except to decide whether to fail the batch.
             batch_finalized = False
-            # Track whether the batch reached PENDING state (submitted to external service).
-            # If True, the outer except must NOT wipe in-memory batch state because the
-            # external batch is already submitted and needs to be polled/reconciled later.
-            batch_pending = False
 
             try:
                 with self._spans.aggregation_span(
@@ -382,35 +377,8 @@ class AggregationExecutor:
                         # Pass reconstructed PipelineRow objects to batch-aware transform
                         result = transform.process(pipeline_rows, ctx)
                         duration_ms = (time.perf_counter() - start) * 1000
-                    except BatchPendingError:
-                        # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-                        # The batch has been submitted but isn't complete yet.
-                        # Complete node_state with PENDING status and link batch for audit trail, then re-raise.
-                        duration_ms = (time.perf_counter() - start) * 1000
-                        batch_pending = True
-
-                        # Close node_state with "pending" status - the submission succeeded
-                        # but the result isn't available yet. This prevents orphaned OPEN states.
-                        guard.complete(
-                            NodeStateStatus.PENDING,
-                            duration_ms=duration_ms,
-                        )
-
-                        # Link batch to the aggregation state for traceability.
-                        # Keep status as "executing" but set aggregation_state_id.
-                        self._recorder.update_batch_status(
-                            batch_id=batch_id,
-                            status=BatchStatus.EXECUTING,
-                            state_id=guard.state_id,
-                        )
-
-                        # Clear batch_token_ids before re-raise to prevent stale IDs
-                        # leaking to subsequent calls (PluginContext is reused).
-                        ctx.batch_token_ids = None
-
-                        # Re-raise for orchestrator to schedule retry.
-                        # The batch remains in "executing" status, checkpoint is preserved.
-                        raise
+                    except contract_errors.TIER_1_ERRORS:
+                        raise  # Tier 1 errors must crash — never record as row FAILED
                     except Exception as e:
                         duration_ms = (time.perf_counter() - start) * 1000
 
@@ -480,7 +448,7 @@ class AggregationExecutor:
                     )
 
                     # Transition batch to completed
-                    self._recorder.complete_batch(
+                    self._execution.complete_batch(
                         batch_id=batch_id,
                         status=BatchStatus.COMPLETED,
                         trigger_type=trigger_type,
@@ -500,7 +468,7 @@ class AggregationExecutor:
                     )
 
                     # Transition batch to failed
-                    self._recorder.complete_batch(
+                    self._execution.complete_batch(
                         batch_id=batch_id,
                         status=BatchStatus.FAILED,
                         trigger_type=trigger_type,
@@ -508,31 +476,22 @@ class AggregationExecutor:
                     )
                     batch_finalized = True
 
-            except BatchPendingError:
-                raise  # Already handled above, just propagate
+            except contract_errors.TIER_1_ERRORS:
+                raise  # Tier 1 errors must crash — skip batch cleanup
             except Exception:
-                if batch_pending:
-                    # Batch was already submitted to external service. Post-submission
-                    # bookkeeping failed (e.g., update_batch_status DB write error), but
-                    # the external batch exists and must be polled/reconciled on retry.
-                    # Do NOT wipe in-memory batch state — it's the only link to the
-                    # externally-submitted batch. Let the exception propagate so the
-                    # orchestrator can schedule a retry that picks up the pending batch.
-                    ctx.batch_token_ids = None
-                    raise
                 # Batch cleanup on ANY failure (guard handles node state).
                 # Only attempt to fail the batch if it wasn't already finalized
                 # (avoids double-write if complete_batch itself raised).
                 if not batch_finalized:
                     try:
-                        self._recorder.complete_batch(
+                        self._execution.complete_batch(
                             batch_id=batch_id,
                             status=BatchStatus.FAILED,
                             trigger_type=trigger_type,
                             state_id=guard.state_id,
                         )
-                    except (FrameworkBugError, AuditIntegrityError, OrchestrationInvariantError):
-                        raise  # System bugs, audit corruption, and invariant violations must crash immediately
+                    except contract_errors.TIER_1_ERRORS:
+                        raise  # Tier 1 errors must crash immediately
                     except (TypeError, AttributeError, KeyError, NameError):
                         raise  # Programming errors in recorder — crash to surface the bug
                     except Exception as cleanup_err:
@@ -609,8 +568,6 @@ class AggregationExecutor:
         Raises:
             RuntimeError: If checkpoint exceeds 10MB size limit
         """
-        from elspeth.core.checkpoint.serialization import checkpoint_dumps
-
         # Build checkpoint state from all nodes
         nodes: dict[str, AggregationNodeCheckpoint] = {}
         for node_id, node in self._nodes.items():
@@ -631,17 +588,6 @@ class AggregationExecutor:
 
             batch_id = node.batch_id
 
-            # Store full TokenInfo as typed checkpoints (not just IDs)
-            # Include all lineage fields to preserve fork/join/expand metadata
-            #
-            # PipelineRow Migration (v2.0), hash-width bump (v2.1):
-            # - row_data is stored as dict via to_dict() for JSON serialization
-            # - contract is stored once per node (not per token) for efficiency
-            # - contract_version links tokens to their contract for restoration
-            #
-            # Get contract from first token (all tokens in buffer share same contract)
-            # Per CLAUDE.md Tier 1: tokens exist, so first token MUST exist
-            first_token_contract = node.tokens[0].row_data.contract
             token_checkpoints = tuple(
                 AggregationTokenCheckpoint(
                     token_id=t.token_id,
@@ -652,6 +598,7 @@ class AggregationExecutor:
                     expand_group_id=t.expand_group_id,
                     row_data=t.row_data.to_dict(),
                     contract_version=t.row_data.contract.version_hash(),
+                    contract=t.row_data.contract.to_checkpoint_format(),
                 )
                 for t in node.tokens
             )
@@ -662,7 +609,6 @@ class AggregationExecutor:
                 elapsed_age_seconds=elapsed_age_seconds,
                 count_fire_offset=count_fire_offset,
                 condition_fire_offset=condition_fire_offset,
-                contract=first_token_contract.to_checkpoint_format(),
             )
 
         checkpoint = AggregationCheckpointState(
@@ -707,13 +653,6 @@ class AggregationExecutor:
         checkpoint_version = AGGREGATION_CHECKPOINT_VERSION
 
         if state.version != checkpoint_version:
-            # Log checkpoint rejection for observability
-            slog.warning(
-                "checkpoint_version_rejected",
-                found_version=state.version,
-                expected_version=checkpoint_version,
-                reason="incompatible_checkpoint_version",
-            )
             raise AuditIntegrityError(
                 f"Incompatible checkpoint version: {state.version!r}. "
                 f"Expected: {checkpoint_version!r}. "
@@ -725,14 +664,11 @@ class AggregationExecutor:
             node_id = NodeID(node_id_str)
             node = self._get_node(node_id, "restore_from_checkpoint")
 
-            # Restore contract from checkpoint (stored once per node)
-            # Per CLAUDE.md Tier 1: contract MUST exist if tokens exist
-            restored_contract = SchemaContract.from_checkpoint(dict(node_checkpoint.contract))
-
             # Reconstruct TokenInfo objects directly from typed checkpoint
             reconstructed_tokens = []
             for t in node_checkpoint.tokens:
-                # Validate contract_version matches restored contract
+                restored_contract = SchemaContract.from_checkpoint(dict(t.contract))
+
                 # Per CLAUDE.md Tier 1: integrity check on our data
                 if t.contract_version != restored_contract.version_hash():
                     raise AuditIntegrityError(
@@ -741,8 +677,7 @@ class AggregationExecutor:
                         f"Checkpoint may be corrupted."
                     )
 
-                # Reconstruct PipelineRow from checkpoint data
-                # deep_thaw() recursively converts MappingProxyType→dict and tuple→list,
+                # deep_thaw() recursively converts MappingProxyType->dict and tuple->list,
                 # preventing frozen nested containers from surviving into restored rows.
                 row_data = PipelineRow(deep_thaw(t.row_data), restored_contract)
 
@@ -758,11 +693,17 @@ class AggregationExecutor:
                     )
                 )
 
+            persisted_member_count = self._reconcile_checkpoint_batch_members(
+                node_id=node_id,
+                batch_id=node_checkpoint.batch_id,
+                checkpoint_tokens=reconstructed_tokens,
+            )
+
             # Restore buffer state on consolidated node
             node.tokens = reconstructed_tokens
             node.buffers = [t.row_data.to_dict() for t in reconstructed_tokens]
             node.batch_id = node_checkpoint.batch_id
-            node.member_count = len(reconstructed_tokens)
+            node.member_count = persisted_member_count
 
             # Restore trigger evaluator state using dedicated API that preserves fire time ordering
             node.trigger.restore_from_checkpoint(
@@ -779,6 +720,45 @@ class AggregationExecutor:
                 token_count=len(reconstructed_tokens),
                 checkpoint_version=checkpoint_version,
             )
+
+    def _reconcile_checkpoint_batch_members(
+        self,
+        *,
+        node_id: NodeID,
+        batch_id: str,
+        checkpoint_tokens: list[TokenInfo],
+    ) -> int:
+        """Ensure persisted batch membership exactly matches the checkpoint snapshot.
+
+        Crash recovery cannot safely continue an in-progress batch when the
+        audit trail already contains members that are absent from the latest
+        checkpoint. Resuming that batch would reuse persisted ordinals and mix
+        replayed tokens with pre-crash membership.
+        """
+        batch = self._execution.get_batch(batch_id)
+        if batch is None:
+            raise AuditIntegrityError(f"Batch not found in audit trail: {batch_id}")
+
+        if batch.aggregation_node_id != node_id:
+            raise AuditIntegrityError(
+                f"Checkpoint batch {batch_id!r} belongs to aggregation node "
+                f"{batch.aggregation_node_id!r}, but restore is running for node "
+                f"{node_id!r}. Checkpoint state or audit trail is corrupted."
+            )
+
+        persisted_members = self._execution.get_batch_members(batch_id)
+        persisted_token_ids = tuple(member.token_id for member in persisted_members)
+        checkpoint_token_ids = tuple(token.token_id for token in checkpoint_tokens)
+
+        if persisted_token_ids != checkpoint_token_ids:
+            raise AuditIntegrityError(
+                f"Aggregation batch {batch_id!r} for node {node_id!r} advanced beyond the latest checkpoint. "
+                f"Checkpoint tokens={list(checkpoint_token_ids)!r}; "
+                f"persisted batch_members={list(persisted_token_ids)!r}. "
+                "Cannot safely resume this batch in place."
+            )
+
+        return len(persisted_members)
 
     def get_batch_id(self, node_id: NodeID) -> str | None:
         """Get current batch ID for an aggregation node.
@@ -892,7 +872,7 @@ class AggregationExecutor:
         Raises:
             AuditIntegrityError: If batch not found in audit trail
         """
-        batch = self._recorder.get_batch(batch_id)
+        batch = self._execution.get_batch(batch_id)
         if batch is None:
             raise AuditIntegrityError(f"Batch not found in audit trail: {batch_id}")
 
@@ -901,5 +881,5 @@ class AggregationExecutor:
         node.batch_id = batch_id
 
         # Restore member count from database
-        members = self._recorder.get_batch_members(batch_id)
+        members = self._execution.get_batch_members(batch_id)
         node.member_count = len(members)

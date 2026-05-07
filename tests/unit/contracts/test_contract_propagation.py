@@ -456,6 +456,33 @@ class TestPropagateContractEdgeCases:
         assert score_field.python_type is float
         assert score_field.original_name == "Risk Score"
 
+    def test_narrow_none_value_infers_as_object_nullable(self) -> None:
+        """narrow_contract_to_output infers None as object+nullable, not NoneType.
+
+        Bug fix: elspeth-a1248f28da. Same fix as propagate_contract — new fields
+        with None values should not lock to NoneType.
+        """
+        from elspeth.contracts.contract_propagation import narrow_contract_to_output
+
+        field_id = make_field("id", int, original_name="ID", required=True, source="declared")
+        input_contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(field_id,),
+            locked=True,
+        )
+
+        # Transform removes fields and adds a None-valued new field
+        output_row = {"id": 1, "new_nullable": None}
+
+        output_contract = narrow_contract_to_output(
+            input_contract=input_contract,
+            output_row=output_row,
+        )
+
+        new_field = next(f for f in output_contract.fields if f.normalized_name == "new_nullable")
+        assert new_field.python_type is object, "None should infer as object (unknown), not NoneType"
+        assert new_field.nullable is True, "None observation should mark field as nullable"
+
     def test_type_conflict_between_contract_and_actual_data(self) -> None:
         """Input contract declares int, but output has string - documents mismatch behavior.
 
@@ -489,8 +516,13 @@ class TestPropagateContractEdgeCases:
 
         # NOTE: This mismatch would be caught later during validation or sink processing
 
-    def test_none_value_included_in_contract(self) -> None:
-        """None values in output rows are included in contract with type(None)."""
+    def test_none_value_infers_as_object_nullable(self) -> None:
+        """None values in output rows infer as object+nullable, not NoneType.
+
+        Bug fix: elspeth-a1248f28da. A transform emitting None for a new field
+        on one row and str/float on another should not lock the field to NoneType.
+        object+nullable allows any type including None.
+        """
         field_id = make_field("id", int, original_name="id", required=True, source="declared")
         input_contract = SchemaContract(
             mode="FLEXIBLE",
@@ -507,13 +539,39 @@ class TestPropagateContractEdgeCases:
             transform_adds_fields=True,
         )
 
-        # None field should be in contract with type(None)
+        # None field should be in contract with object type (unknown), not NoneType
         field_names = {f.normalized_name for f in output_contract.fields}
         assert "optional_field" in field_names
 
         optional_field = next(f for f in output_contract.fields if f.normalized_name == "optional_field")
-        assert optional_field.python_type is type(None)
-        assert optional_field.required is False  # Inferred fields are never required
+        assert optional_field.python_type is object, "None should infer as object (unknown), not NoneType"
+        assert optional_field.nullable is True, "None observation should mark field as nullable"
+        assert optional_field.required is False
+
+    def test_none_inferred_field_accepts_real_values_on_validation(self) -> None:
+        """Contract inferred from None-valued field accepts real values on validation.
+
+        This is the user-facing symptom of elspeth-a1248f28da: transforms like RAG
+        that emit None on some rows and str on others cause false contract conflicts.
+        """
+        field_id = make_field("id", int, original_name="id", required=True, source="declared")
+        input_contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(field_id,),
+            locked=True,
+        )
+
+        # First observation: transform emits None for the field
+        output_row = {"id": 1, "rag_score": None}
+        output_contract = propagate_contract(
+            input_contract=input_contract,
+            output_row=output_row,
+            transform_adds_fields=True,
+        )
+
+        # Second row validation: real float value must not be a violation
+        violations = output_contract.validate({"id": 2, "rag_score": 0.85})
+        assert violations == [], f"Real value should not violate contract inferred from None: {violations}"
 
 
 class TestPropagateContractNonPrimitiveTypes:

@@ -27,16 +27,42 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.config import CoalesceSettings
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor
+from elspeth.engine.spans import SpanFactory
 from tests.strategies.json import row_data
+
+
+class _TestCoalesceExecutor(CoalesceExecutor):
+    """Test wrapper that auto-provides output_schema for union merge.
+
+    Production code computes output_schema via the DAG builder's merge_union_fields().
+    Tests bypass the DAG builder, so this wrapper provides an OBSERVED-mode schema
+    by default, matching the contract mode used by test fixtures.
+    """
+
+    def register_coalesce(
+        self,
+        settings: CoalesceSettings,
+        node_id: NodeID,
+        branch_schemas: dict[str, tuple[str, ...]] | None = None,
+        output_schema: SchemaContract | None = None,
+    ) -> None:
+        if settings.on_success is None:
+            settings = settings.model_copy(update={"on_success": "default"})
+        if output_schema is None and settings.merge == "union":
+            output_schema = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        super().register_coalesce(settings, node_id, branch_schemas, output_schema)
+
 
 # =============================================================================
 # Strategies for generating coalesce configurations
@@ -93,21 +119,24 @@ def make_token(
     )
 
 
-def make_mock_executor(clock: MockClock | None = None) -> CoalesceExecutor:
+def make_mock_executor(clock: MockClock | None = None) -> _TestCoalesceExecutor:
     """Create a CoalesceExecutor with mocked dependencies."""
-    mock_recorder = MagicMock()
-    mock_recorder.begin_node_state.return_value = MagicMock(state_id="state-001")
-    mock_recorder.complete_node_state.return_value = None
-    mock_recorder.record_token_outcome.return_value = None
+    mock_execution = MagicMock()
+    mock_execution.begin_node_state.return_value = MagicMock(state_id="state-001")
+    mock_execution.complete_node_state.return_value = None
+    mock_execution.get_completed_row_ids_for_nodes.return_value = []
 
-    mock_span_factory = MagicMock()
+    mock_data_flow = MagicMock()
+    mock_data_flow.record_token_outcome.return_value = None
+
+    span_factory = SpanFactory()
     mock_token_manager = MagicMock()
 
     # Make coalesce_tokens return a merged token.
     # Production CoalesceExecutor._execute_merge() passes merged_data as a
     # PipelineRow (already wrapped with contract). Match TokenManager.coalesce_tokens
     # behavior: use merged_data directly as row_data, don't re-wrap.
-    def mock_coalesce_tokens(parents, merged_data, node_id):
+    def mock_coalesce_tokens(parents, merged_data, node_id, run_id):
         return TokenInfo(
             token_id=f"merged-{parents[0].row_id}",
             row_id=parents[0].row_id,
@@ -119,13 +148,14 @@ def make_mock_executor(clock: MockClock | None = None) -> CoalesceExecutor:
 
     step_resolver = lambda node_id: 0  # noqa: E731
 
-    return CoalesceExecutor(
-        recorder=mock_recorder,
-        span_factory=mock_span_factory,
+    return _TestCoalesceExecutor(
+        mock_execution,
+        span_factory=span_factory,
         token_manager=mock_token_manager,
         run_id="test-run",
         step_resolver=step_resolver,
         clock=clock or MockClock(start=0.0),
+        data_flow=mock_data_flow,
     )
 
 
@@ -247,6 +277,7 @@ class TestFirstPolicyProperties:
         assert len(outcome.consumed_tokens) == 1
 
 
+@pytest.mark.filterwarnings("ignore:Coalesce.*quorum_count.*equals branch count:UserWarning")
 class TestQuorumPolicyProperties:
     """Property tests for quorum merge policy."""
 
@@ -758,3 +789,165 @@ class TestCoalesceMetadataProperties:
         for i, offset in enumerate(offsets):
             expected_offset = i * 1000  # First is 0, second is 1000, etc.
             assert abs(offset - expected_offset) < 1, f"Offset {i} should be ~{expected_offset}ms"
+
+
+# =============================================================================
+# Schema Contract Merge Invariant Property Tests
+# =============================================================================
+
+
+class TestSchemaMergeInvariantProperties:
+    """Property tests for schema contract invariants after merge.
+
+    The coalesce executor produces both merged data AND a merged contract.
+    These tests verify the contract invariants that TestMergeDataProperties
+    does not cover.
+    """
+
+    @given(
+        data_a=row_data,
+        data_b=row_data,
+    )
+    @settings(max_examples=50)
+    def test_union_merge_contract_contains_all_field_names(self, data_a: dict[str, Any], data_b: dict[str, Any]) -> None:
+        """Property: Union merged contract contains fields from all branches."""
+        executor = make_mock_executor()
+        branches = ["branch_a", "branch_b"]
+        coalesce_settings = CoalesceSettings(
+            name="test_coalesce",
+            branches=branches,
+            policy="require_all",
+            merge="union",
+        )
+        executor.register_coalesce(coalesce_settings, node_id=NodeID("node-001"))
+
+        token_a = make_token("t-a", "row-001", "branch_a", data_a)
+        token_b = make_token("t-b", "row-001", "branch_b", data_b)
+
+        executor.accept(token_a, "test_coalesce")
+        outcome = executor.accept(token_b, "test_coalesce")
+
+        assert outcome.merged_token is not None
+        merged_contract = outcome.merged_token.row_data.contract
+
+        # Contract should have fields for all keys from both branches
+        all_keys = set(data_a.keys()) | set(data_b.keys())
+        contract_fields = {fc.normalized_name for fc in merged_contract.fields}
+        for key in all_keys:
+            assert key in contract_fields, f"Contract missing field '{key}'"
+
+    @given(
+        data_a=row_data,
+        data_b=row_data,
+    )
+    @settings(max_examples=50)
+    def test_nested_merge_contract_has_branch_keys_as_object_fields(self, data_a: dict[str, Any], data_b: dict[str, Any]) -> None:
+        """Property: Nested merged contract has branch names as object-typed fields."""
+        executor = make_mock_executor()
+        branches = ["branch_a", "branch_b"]
+        coalesce_settings = CoalesceSettings(
+            name="test_coalesce",
+            branches=branches,
+            policy="require_all",
+            merge="nested",
+        )
+        executor.register_coalesce(coalesce_settings, node_id=NodeID("node-001"))
+
+        token_a = make_token("t-a", "row-001", "branch_a", data_a)
+        token_b = make_token("t-b", "row-001", "branch_b", data_b)
+
+        executor.accept(token_a, "test_coalesce")
+        outcome = executor.accept(token_b, "test_coalesce")
+
+        assert outcome.merged_token is not None
+        merged_contract = outcome.merged_token.row_data.contract
+
+        # Contract should have branch names as top-level fields
+        assert merged_contract.get_field("branch_a") is not None
+        assert merged_contract.get_field("branch_b") is not None
+
+        # Both fields should be typed as object (dict can hold anything)
+        assert merged_contract.get_field("branch_a").python_type is object
+        assert merged_contract.get_field("branch_b").python_type is object
+
+        # Mode should be FIXED (nested merge produces exact branch structure)
+        assert merged_contract.mode == "FIXED"
+
+    @given(data_selected=row_data, data_other=row_data)
+    @settings(max_examples=50)
+    def test_select_merge_contract_is_selected_branch_contract(self, data_selected: dict[str, Any], data_other: dict[str, Any]) -> None:
+        """Property: Select merged contract is exactly the selected branch's contract."""
+        executor = make_mock_executor()
+        branches = ["selected_branch", "other_branch"]
+        coalesce_settings = CoalesceSettings(
+            name="test_coalesce",
+            branches=branches,
+            policy="require_all",
+            merge="select",
+            select_branch="selected_branch",
+        )
+        executor.register_coalesce(coalesce_settings, node_id=NodeID("node-001"))
+
+        token_selected = make_token("t-sel", "row-001", "selected_branch", data_selected)
+        token_other = make_token("t-oth", "row-001", "other_branch", data_other)
+
+        # Capture selected branch's contract before merge
+        selected_contract = token_selected.row_data.contract
+
+        executor.accept(token_selected, "test_coalesce")
+        outcome = executor.accept(token_other, "test_coalesce")
+
+        assert outcome.merged_token is not None
+        merged_contract = outcome.merged_token.row_data.contract
+
+        # Merged contract should be the selected branch's contract
+        assert merged_contract is selected_contract
+
+    @given(branches=branch_lists(min_size=2, max_size=4))
+    @settings(max_examples=30)
+    def test_merged_contract_is_locked(self, branches: list[str]) -> None:
+        """Property: Merged contract is always locked (types are finalized)."""
+        executor = make_mock_executor()
+        coalesce_settings = CoalesceSettings(
+            name="test_coalesce",
+            branches=branches,
+            policy="require_all",
+            merge="union",
+        )
+        executor.register_coalesce(coalesce_settings, node_id=NodeID("node-001"))
+
+        row_id = "row-001"
+        for i, branch in enumerate(branches):
+            token = make_token(f"token-{i}", row_id, branch, {"field": i})
+            outcome = executor.accept(token, "test_coalesce")
+
+        assert outcome.merged_token is not None
+        merged_contract = outcome.merged_token.row_data.contract
+        assert merged_contract.locked is True, "Merged contract must be locked"
+
+    @given(branches=branch_lists(min_size=3, max_size=4))
+    @settings(max_examples=30)
+    def test_nested_merge_contract_branch_required_reflects_arrival(self, branches: list[str]) -> None:
+        """Property: Nested contract branch fields are required if branch arrived."""
+        executor = make_mock_executor()
+        coalesce_settings = CoalesceSettings(
+            name="test_coalesce",
+            branches=branches,
+            policy="require_all",
+            merge="nested",
+        )
+        executor.register_coalesce(coalesce_settings, node_id=NodeID("node-001"))
+
+        row_id = "row-001"
+        for i, branch in enumerate(branches):
+            token = make_token(f"token-{i}", row_id, branch, {"value": i})
+            outcome = executor.accept(token, "test_coalesce")
+
+        assert outcome.merged_token is not None
+        merged_contract = outcome.merged_token.row_data.contract
+
+        # All declared branches arrived, so all branch fields should be required
+        for branch in branches:
+            field = merged_contract.get_field(branch)
+            assert field is not None, f"Missing field for branch '{branch}'"
+            assert field.required is True, f"Branch '{branch}' field should be required"

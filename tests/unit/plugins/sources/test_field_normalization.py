@@ -379,8 +379,8 @@ class TestFieldResolutionImmutability:
     def test_final_headers_is_tuple(self) -> None:
         """final_headers must be stored as tuple, not list."""
         resolution = FieldResolution(
-            final_headers=["name", "amount"],
-            resolution_mapping={"Name": "name", "Amount": "amount"},
+            final_headers=("name", "amount"),
+            resolution_mapping=MappingProxyType({"Name": "name", "Amount": "amount"}),
             normalization_version="v1",
         )
         assert isinstance(resolution.final_headers, tuple)
@@ -388,8 +388,8 @@ class TestFieldResolutionImmutability:
     def test_resolution_mapping_is_immutable(self) -> None:
         """resolution_mapping must be wrapped in MappingProxyType."""
         resolution = FieldResolution(
-            final_headers=["name", "amount"],
-            resolution_mapping={"Name": "name", "Amount": "amount"},
+            final_headers=("name", "amount"),
+            resolution_mapping=MappingProxyType({"Name": "name", "Amount": "amount"}),
             normalization_version="v1",
         )
         assert isinstance(resolution.resolution_mapping, MappingProxyType)
@@ -400,8 +400,8 @@ class TestFieldResolutionImmutability:
         """Defensive copy: mutating the original list must not affect the frozen instance."""
         original_headers = ["name", "amount"]
         resolution = FieldResolution(
-            final_headers=original_headers,
-            resolution_mapping={"Name": "name", "Amount": "amount"},
+            final_headers=tuple(original_headers),
+            resolution_mapping=MappingProxyType({"Name": "name", "Amount": "amount"}),
             normalization_version="v1",
         )
         original_headers.append("injected")
@@ -411,8 +411,8 @@ class TestFieldResolutionImmutability:
         """Defensive copy: mutating the original dict must not affect the frozen instance."""
         original_mapping = {"Name": "name", "Amount": "amount"}
         resolution = FieldResolution(
-            final_headers=["name", "amount"],
-            resolution_mapping=original_mapping,
+            final_headers=("name", "amount"),
+            resolution_mapping=MappingProxyType(original_mapping),
             normalization_version="v1",
         )
         original_mapping["injected"] = "evil"

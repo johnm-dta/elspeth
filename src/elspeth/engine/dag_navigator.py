@@ -129,7 +129,14 @@ class DAGNavigator:
 
         # Resolve missing node id from name (existing behavior)
         if resolved_coalesce_node_id is None and resolved_coalesce_name is not None:
-            resolved_coalesce_node_id = self._coalesce_node_ids[resolved_coalesce_name]
+            try:
+                resolved_coalesce_node_id = self._coalesce_node_ids[resolved_coalesce_name]
+            except KeyError as exc:
+                raise OrchestrationInvariantError(
+                    f"Unknown coalesce name '{resolved_coalesce_name}' — "
+                    f"not in coalesce_node_ids map. "
+                    f"Known coalesce names: {sorted(self._coalesce_node_ids.keys())}"
+                ) from exc
         # Resolve missing name from node id (symmetric resolution)
         elif resolved_coalesce_node_id is not None and resolved_coalesce_name is None:
             try:
@@ -277,7 +284,14 @@ class DAGNavigator:
                         f"Token '{token.token_id}' has coalesce_name='{coalesce_name}' but branch_name is None. "
                         "Fork children must have branch_name set."
                     )
-                first_node = self._branch_first_node[branch_name]
+                try:
+                    first_node = self._branch_first_node[branch_name]
+                except KeyError as exc:
+                    raise OrchestrationInvariantError(
+                        f"Unknown branch name '{branch_name}' — "
+                        f"not in branch_first_node map. "
+                        f"Known branches: {sorted(self._branch_first_node.keys())}"
+                    ) from exc
                 return self.create_work_item(
                     token=token,
                     current_node_id=first_node,

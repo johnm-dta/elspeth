@@ -18,22 +18,116 @@ from elspeth.plugins.transforms.safety_utils import validate_fields_not_empty as
 # on adversarial input. E.g., (a+)+ on "aaa...!" is O(2^n).
 #
 # Known limitations (defense-in-depth, not comprehensive):
-#   - Does not detect {n,} brace quantifiers inside groups: (a{2,})+
-#   - Cannot see past nested group boundaries: ((a+)b)+
 #   - Does not detect alternation-based attacks: (a|a)+
 #   - Does not detect overlapping character class repetition: [a-z]+[a-z]+
 # These gaps are mitigated by _MAX_PATTERN_LENGTH and the fact that patterns
 # come from operator-authored settings.yaml, not arbitrary user input.
-_NESTED_QUANTIFIER_RE = re.compile(
-    r"[+*]\)["  # quantified group followed by
-    r"+*{]"  # another quantifier
-    r"|"
-    r"\([^)]*[+*][^)]*\)["  # group containing quantifier, followed by
-    r"+*{]"  # another quantifier
-)
 
 # Maximum pattern length — long patterns increase backtracking risk
 _MAX_PATTERN_LENGTH = 1000
+
+
+def _brace_quantifier_end(pattern: str, start: int) -> int | None:
+    """Return the exclusive end offset for a valid brace quantifier."""
+    if start >= len(pattern) or pattern[start] != "{":
+        return None
+
+    i = start + 1
+    digits_start = i
+    while i < len(pattern) and pattern[i].isdigit():
+        i += 1
+    if i == digits_start:
+        return None
+
+    if i < len(pattern) and pattern[i] == "}":
+        return i + 1
+
+    if i >= len(pattern) or pattern[i] != ",":
+        return None
+    i += 1
+
+    while i < len(pattern) and pattern[i].isdigit():
+        i += 1
+    if i < len(pattern) and pattern[i] == "}":
+        return i + 1
+    return None
+
+
+def _nested_repetition_detected(pattern: str) -> bool:
+    """Detect nested repeated groups with escape and character-class awareness."""
+    group_contains_repetition: list[bool] = []
+    ignore_quantifier_positions: set[int] = set()
+    i = 0
+
+    while i < len(pattern):
+        if i in ignore_quantifier_positions:
+            i += 1
+            continue
+
+        ch = pattern[i]
+
+        if ch == "\\":
+            i += 2
+            continue
+
+        if ch == "[":
+            i += 1
+            while i < len(pattern):
+                if pattern[i] == "\\":
+                    i += 2
+                    continue
+                if pattern[i] == "]":
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        if ch == "(":
+            group_contains_repetition.append(False)
+            if i + 1 < len(pattern) and pattern[i + 1] == "?":
+                ignore_quantifier_positions.add(i + 1)
+            i += 1
+            continue
+
+        if ch == ")":
+            if not group_contains_repetition:
+                i += 1
+                continue
+
+            closed_group_contains_repetition = group_contains_repetition.pop()
+            quantifier_end = None
+            if i + 1 < len(pattern):
+                next_ch = pattern[i + 1]
+                if next_ch in {"+", "*"}:
+                    quantifier_end = i + 2
+                elif next_ch == "{":
+                    quantifier_end = _brace_quantifier_end(pattern, i + 1)
+
+            if quantifier_end is not None and closed_group_contains_repetition:
+                return True
+
+            quantified_group = quantifier_end is not None
+            if group_contains_repetition and (closed_group_contains_repetition or quantified_group):
+                group_contains_repetition[-1] = True
+
+            i = quantifier_end if quantifier_end is not None else i + 1
+            continue
+
+        quantifier_end = None
+        if ch in {"+", "*"}:
+            quantifier_end = i + 1
+        elif ch == "{":
+            quantifier_end = _brace_quantifier_end(pattern, i)
+
+        if quantifier_end is not None:
+            if group_contains_repetition:
+                group_contains_repetition[-1] = True
+            i = quantifier_end
+            continue
+
+        i += 1
+
+    return False
 
 
 def _validate_regex_safety(pattern: str) -> None:
@@ -50,7 +144,7 @@ def _validate_regex_safety(pattern: str) -> None:
     """
     if len(pattern) > _MAX_PATTERN_LENGTH:
         raise ValueError(f"Regex pattern exceeds maximum length ({_MAX_PATTERN_LENGTH} chars): {pattern[:50]}...")
-    if _NESTED_QUANTIFIER_RE.search(pattern):
+    if _nested_repetition_detected(pattern):
         raise ValueError(f"Regex pattern contains nested quantifiers (ReDoS risk): {pattern}")
 
 
@@ -123,19 +217,42 @@ class KeywordFilter(BaseTransform):
     name = "keyword_filter"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:77db6f5c05af2cfd"
+    config_model = KeywordFilterConfig
     is_batch_aware = False
     creates_tokens = False
+    passes_through_input = True
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
 
-        cfg = KeywordFilterConfig.from_dict(config)
+        cfg = KeywordFilterConfig.from_dict(config, plugin_name=self.name)
+        self._initialize_declared_input_fields(cfg)
         self._fields = cfg.fields
+        self._schema_config = cfg.schema_config
+        self._output_schema_config = self._build_output_schema_config(cfg.schema_config)
 
         # Patterns already validated (regex syntax + ReDoS safety) by config validator
         self._compiled_patterns: list[tuple[str, re.Pattern[str]]] = [(pattern, re.compile(pattern)) for pattern in cfg.blocked_patterns]
 
         self.input_schema, self.output_schema = self._create_schemas(cfg.schema_config, "KeywordFilter")
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        return {
+            "schema": {"mode": "observed"},
+            "fields": ["keyword_filter_probe_1"],
+            "blocked_patterns": [r"(?!x)x"],
+        }
+
+    def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name="keyword_filter_probe_1",
+                value="safe probe content",
+            )
+        ]
 
     def process(
         self,
@@ -159,7 +276,16 @@ class KeywordFilter(BaseTransform):
             # Use PipelineRow access semantics so configured fields can be either
             # original names or normalized names from the contract.
             if field_name not in row:
-                continue  # Skip fields not present in this row
+                if named_fields:
+                    return TransformResult.error(
+                        {
+                            "reason": "missing_scan_field",
+                            "field": field_name,
+                            "message": f"Configured scan field '{field_name}' not found in row",
+                        },
+                        retryable=False,
+                    )
+                continue
 
             value = row[field_name]
 
@@ -197,7 +323,7 @@ class KeywordFilter(BaseTransform):
 
         # No matches - pass through unchanged
         return TransformResult.success(
-            row,
+            self._align_output_row_contract(row),
             success_reason={"action": "filtered"},
         )
 

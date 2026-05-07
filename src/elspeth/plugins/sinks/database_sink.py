@@ -12,7 +12,7 @@ import os
 import time
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import field_validator
 from sqlalchemy import Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert
@@ -53,10 +53,11 @@ class DatabaseSinkConfig(DataPluginConfig):
     Inherits from DataPluginConfig, which requires schema configuration.
     """
 
+    _plugin_component_type: ClassVar[str | None] = "sink"
+
     url: str
     table: str
     if_exists: Literal["append", "replace"] = "append"
-    validate_input: bool = False  # Optional runtime validation of incoming rows
 
     @field_validator("table")
     @classmethod
@@ -83,7 +84,10 @@ class DatabaseSink(BaseSink):
         table: Table name (required)
         schema: Schema configuration (required, via DataPluginConfig)
         if_exists: "append" or "replace" (default: "append")
-        validate_input: Validate incoming rows against schema (default: False)
+
+    Input validation is always enabled. Incoming rows are validated against
+    the schema before INSERT — wrong types indicate an upstream plugin bug
+    and will crash the pipeline (Tier 2 contract).
 
     The schema can be:
         - Observed: {"mode": "observed"} - accept any fields (columns inferred from first row)
@@ -93,6 +97,8 @@ class DatabaseSink(BaseSink):
 
     name = "database"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:2bb13107950caab9"
+    config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Resume capability: Database can append to existing tables
@@ -108,7 +114,7 @@ class DatabaseSink(BaseSink):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = DatabaseSinkConfig.from_dict(config)
+        cfg = DatabaseSinkConfig.from_dict(config, plugin_name=self.name)
 
         # Honor ELSPETH_ALLOW_RAW_SECRETS for dev environments (consistent with config.py)
         allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
@@ -118,7 +124,6 @@ class DatabaseSink(BaseSink):
         self._sanitized_url = SanitizedDatabaseUrl.from_raw_url(cfg.url, fail_if_no_key=fail_if_no_key)  # For audit trail
         self._table_name = cfg.table
         self._if_exists = cfg.if_exists
-        self.validate_input = cfg.validate_input
 
         # Store schema config for audit trail
         # DataPluginConfig ensures schema_config is not None
@@ -446,8 +451,9 @@ class DatabaseSink(BaseSink):
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write a batch of rows to the database.
 
-        CRITICAL: Hashes the canonical JSON payload BEFORE insert.
-        This proves intent - the database may transform data (add timestamps,
+        CRITICAL: Hashes the canonical JSON payload of the ACTUAL SQL rows
+        (after any-field serialization) BEFORE insert. This proves what was
+        sent — the database may further transform data (add timestamps,
         auto-increment IDs, normalize strings, etc.).
 
         Args:
@@ -458,26 +464,19 @@ class DatabaseSink(BaseSink):
             ArtifactDescriptor with content_hash (SHA-256) and size_bytes
 
         Raises:
-            ValidationError: If validate_input=True and a row fails validation.
+            ValidationError: If a row fails schema validation.
                 This indicates a bug in an upstream transform.
         """
-        # Compute canonical JSON payload ONCE before any database operation.
-        # Uses RFC 8785 canonical JSON for deterministic hashing:
-        # - Normalizes pandas/numpy types to JSON primitives
-        # - Rejects NaN/Infinity (invalid JSON per RFC 8785)
-        # - Deterministic unicode escaping
-        canonical_payload = canonical_json(rows).encode("utf-8")
-        content_hash = hashlib.sha256(canonical_payload).hexdigest()
-        payload_size = len(canonical_payload)
-
         if not rows:
-            # Empty batch - return descriptor without DB operations
+            # Empty batch - hash the empty list for consistent audit trail
+            canonical_payload = canonical_json(rows).encode("utf-8")
+            content_hash = hashlib.sha256(canonical_payload).hexdigest()
             return SinkWriteResult(
                 artifact=ArtifactDescriptor.for_database(
                     url=self._sanitized_url,
                     table=self._table_name,
                     content_hash=content_hash,
-                    payload_size=payload_size,
+                    payload_size=len(canonical_payload),
                     row_count=0,
                 )
             )
@@ -501,6 +500,15 @@ class DatabaseSink(BaseSink):
         # Serialize dict/list values in 'any'-typed fields to JSON strings
         # before INSERT. SQL TEXT columns cannot store Python dicts/lists.
         insert_rows = self._serialize_any_typed_fields(rows)
+
+        # Hash the ACTUAL SQL payload (post-serialization) using RFC 8785
+        # canonical JSON. This proves what was sent to the database, not
+        # the pre-transform Python objects. Critical for auditability when
+        # 'any'-typed or observed-mode fields contain dict/list values that
+        # get serialized to JSON strings before INSERT.
+        canonical_payload = canonical_json(insert_rows).encode("utf-8")
+        content_hash = hashlib.sha256(canonical_payload).hexdigest()
+        payload_size = len(canonical_payload)
 
         # Insert all rows in batch with call recording for audit trail
         # (ctx.operation_id is set by executor)

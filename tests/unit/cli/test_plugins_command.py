@@ -70,10 +70,11 @@ class TestPluginInfo:
 
     def test_build_plugin_registry_includes_all_discovered_plugins(self) -> None:
         """_build_plugin_registry includes all plugins from PluginManager."""
-        from elspeth.cli import _build_plugin_registry, _get_plugin_manager
+        from elspeth.cli import _build_plugin_registry
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
         registry = _build_plugin_registry()
-        manager = _get_plugin_manager()
+        manager = get_shared_plugin_manager()
 
         # All discovered sources should be in registry
         source_names = {p.name for p in registry["source"]}

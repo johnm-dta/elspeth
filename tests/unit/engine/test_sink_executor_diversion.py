@@ -8,18 +8,20 @@ diverted rows to the failsink (or record discard).
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode
+from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
+from elspeth.contracts.errors import AuditIntegrityError, PluginContractViolation, SinkRequiredFieldsViolation
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
 
 
-def _make_token(token_id: str = "tok-1", row_data: dict | None = None) -> MagicMock:
+def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = None) -> MagicMock:
     """Create a minimal TokenInfo mock."""
     token = MagicMock(spec=TokenInfo)
     token.token_id = token_id
@@ -36,6 +38,10 @@ def _make_artifact(path: str = "/tmp/test") -> ArtifactDescriptor:
     return ArtifactDescriptor.for_file(path=path, content_hash="a" * 64, size_bytes=100)
 
 
+def _default_pending() -> PendingOutcome:
+    return PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+
+
 def _make_sink(
     name: str = "primary",
     node_id: str = "node-primary",
@@ -45,7 +51,7 @@ def _make_sink(
     sink = MagicMock()
     sink.name = name
     sink.node_id = node_id
-    sink.validate_input = False
+    sink.declared_guaranteed_fields = frozenset()
     sink.declared_required_fields = frozenset()
     sink.write.return_value = SinkWriteResult(
         artifact=_make_artifact(),
@@ -60,13 +66,16 @@ def _make_failsink(name: str = "csv_failsink", node_id: str = "node-failsink") -
     failsink = MagicMock()
     failsink.name = name
     failsink.node_id = node_id
+    failsink.declared_guaranteed_fields = frozenset()
+    failsink.declared_required_fields = frozenset()
     failsink.write.return_value = SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
     failsink._reset_diversion_log = MagicMock()
     return failsink
 
 
-def _make_executor() -> tuple[SinkExecutor, MagicMock]:
-    recorder = MagicMock()
+def _make_executor() -> tuple[SinkExecutor, MagicMock, MagicMock]:
+    execution = MagicMock()
+    data_flow = MagicMock()
     state_counter = [0]
 
     def _begin_state(**kwargs: Any) -> MagicMock:
@@ -75,124 +84,126 @@ def _make_executor() -> tuple[SinkExecutor, MagicMock]:
         state.state_id = f"state-{state_counter[0]}"
         return state
 
-    recorder.begin_node_state.side_effect = _begin_state
-    recorder.allocate_operation_call_index = MagicMock(return_value=0)
+    execution.begin_node_state.side_effect = _begin_state
     spans = MagicMock()
     spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
     spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
-    executor = SinkExecutor(recorder, spans, "run-1")
-    return executor, recorder
+    executor = SinkExecutor(execution, data_flow, spans, "run-1")
+    return executor, execution, data_flow
 
 
 class TestNoDiversions:
     """Existing behavior preserved when no diversions occur."""
 
     def test_all_tokens_get_completed_outcome(self) -> None:
-        executor, recorder = _make_executor()
+        executor, _execution, data_flow = _make_executor()
         sink = _make_sink()
         tokens = [_make_token("t0"), _make_token("t1"), _make_token("t2")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
-        outcome_calls = recorder.record_token_outcome.call_args_list
+        outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 3
         for c in outcome_calls:
-            assert c.kwargs["outcome"] == RowOutcome.COMPLETED
+            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
+            assert c.kwargs["path"] == TerminalPath.DEFAULT_FLOW
             assert c.kwargs["sink_name"] == "primary"
 
     def test_no_failsink_write_called(self) -> None:
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         sink = _make_sink()
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
         )
         failsink.write.assert_not_called()
 
     def test_returns_artifact_and_zero_diversions(self) -> None:
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         sink = _make_sink()
         tokens = [_make_token("t0")]
-        artifact, diversion_count = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         assert artifact is not None
-        assert diversion_count == 0
+        assert diversion_counts.total == 0
 
 
 class TestDiscardMode:
     """on_write_failure='discard' — diverted rows are dropped with audit record."""
 
     def test_diverted_tokens_get_diverted_outcome(self) -> None:
-        executor, recorder = _make_executor()
+        executor, _execution, data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad metadata", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
-        outcome_calls = recorder.record_token_outcome.call_args_list
+        outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 2
         # Build a lookup by token_id for order-independence
-        outcomes_by_token = {c.kwargs["token_id"]: c.kwargs for c in outcome_calls}
-        # t0 (index 0) → COMPLETED
-        assert outcomes_by_token["t0"]["outcome"] == RowOutcome.COMPLETED
+        outcomes_by_token = {c.kwargs["ref"].token_id: c.kwargs for c in outcome_calls}
+        # t0 (index 0) -> SUCCESS / DEFAULT_FLOW
+        assert outcomes_by_token["t0"]["outcome"] == TerminalOutcome.SUCCESS
+        assert outcomes_by_token["t0"]["path"] == TerminalPath.DEFAULT_FLOW
         assert outcomes_by_token["t0"]["sink_name"] == "primary"
-        # t1 (index 1) → DIVERTED
-        assert outcomes_by_token["t1"]["outcome"] == RowOutcome.DIVERTED
+        # t1 (index 1) -> FAILURE / SINK_DISCARDED
+        assert outcomes_by_token["t1"]["outcome"] == TerminalOutcome.FAILURE
+        assert outcomes_by_token["t1"]["path"] == TerminalPath.SINK_DISCARDED
         assert outcomes_by_token["t1"]["error_hash"] is not None
         assert outcomes_by_token["t1"]["sink_name"] == "__discard__"
 
     def test_discard_mode_opens_primary_state_for_diverted_tokens(self) -> None:
         """Discard-mode diverted tokens get a FAILED node_state at the primary sink."""
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad metadata", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         # Diverted token should get a begin_node_state at the primary sink
-        begin_calls = recorder.begin_node_state.call_args_list
+        begin_calls = execution.begin_node_state.call_args_list
         assert len(begin_calls) == 1
         assert begin_calls[0].kwargs["node_id"] == "node-primary"
         assert begin_calls[0].kwargs["token_id"] == "t0"
         # And a complete_node_state with FAILED status (row didn't reach destination)
-        complete_calls = recorder.complete_node_state.call_args_list
+        complete_calls = execution.complete_node_state.call_args_list
         assert len(complete_calls) == 1
         assert complete_calls[0].kwargs["status"] == NodeStateStatus.FAILED
         assert complete_calls[0].kwargs["output_data"]["discarded"] is True
         assert "bad metadata" in complete_calls[0].kwargs["output_data"]["reason"]
 
     def test_all_diverted_all_get_diverted(self) -> None:
-        executor, recorder = _make_executor()
+        executor, _execution, data_flow = _make_executor()
         diversions = (
             RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),
             RowDiversion(row_index=1, reason="bad", row_data={"x": 2}),
@@ -201,48 +212,113 @@ class TestDiscardMode:
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
-        outcome_calls = recorder.record_token_outcome.call_args_list
-        assert all(c.kwargs["outcome"] == RowOutcome.DIVERTED for c in outcome_calls)
+        outcome_calls = data_flow.record_token_outcome.call_args_list
+        assert all(c.kwargs["outcome"] == TerminalOutcome.FAILURE for c in outcome_calls)
+        assert all(c.kwargs["path"] == TerminalPath.SINK_DISCARDED for c in outcome_calls)
 
     def test_returns_no_artifact_when_all_diverted(self) -> None:
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0")]
-        artifact, diversion_count = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         assert artifact is None
-        assert diversion_count == 1
+        assert diversion_counts.discard_mode == 1
+        assert diversion_counts.total == 1
 
 
 class TestFailsinkMode:
     """on_write_failure=<sink_name> — diverted rows are written to failsink."""
 
+    def test_failsink_missing_required_field_raises_layer1_violation(self) -> None:
+        executor, _execution, data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="invalid metadata", row_data={"doc": "hello"}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        failsink.declared_required_fields = frozenset({"__diversion_reason", "missing_field"})
+        tokens = [_make_token("t0")]
+
+        def _raise_failsink_required_fields(
+            *,
+            sink: Any,
+            rows: list[dict[str, object]],
+            tokens: list[TokenInfo],
+            run_id: str,
+            node_id: str,
+            row_contracts: Any,
+        ) -> None:
+            del rows, row_contracts
+            if sink.name != "csv_failsink":
+                return
+            violation = SinkRequiredFieldsViolation(
+                plugin=sink.name,
+                node_id=node_id,
+                run_id=run_id,
+                row_id=tokens[0].row_id,
+                token_id=tokens[0].token_id,
+                payload={
+                    "declared": ["__diversion_reason", "missing_field"],
+                    "runtime_observed": ["__diversion_reason"],
+                    "missing": ["missing_field"],
+                },
+                message=(
+                    "Sink 'csv_failsink' declared required fields "
+                    "['__diversion_reason', 'missing_field'] but row is missing ['missing_field']"
+                ),
+            )
+            _attach_contract_name_from_dispatcher(violation, "sink_required_fields")
+            raise violation
+
+        with (
+            patch.object(SinkExecutor, "_run_sink_boundary_checks", autospec=True, side_effect=_raise_failsink_required_fields),
+            pytest.raises(SinkRequiredFieldsViolation, match=r"declared required fields.*missing.*missing_field"),
+        ):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-failsink-1",
+            )
+
+        failsink.write.assert_not_called()
+        data_flow.record_token_outcome.assert_called_once()
+        kwargs = data_flow.record_token_outcome.call_args.kwargs
+        assert kwargs["ref"].token_id == "t0"
+        assert kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert kwargs["path"] == TerminalPath.UNROUTED
+        assert kwargs["context"]["exception_type"] == "SinkRequiredFieldsViolation"
+
     def test_failsink_write_called_with_enriched_rows(self) -> None:
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="invalid metadata", row_data={"doc": "hello"}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -257,18 +333,18 @@ class TestFailsinkMode:
         assert "__diversion_timestamp" in failsink_rows[0]
 
     def test_failsink_flush_called(self) -> None:
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -276,55 +352,55 @@ class TestFailsinkMode:
         failsink.flush.assert_called_once()
 
     def test_no_diversions_no_failsink_call(self) -> None:
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         sink = _make_sink(diversions=(), on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
         )
         failsink.write.assert_not_called()
 
     def test_diverted_tokens_get_failsink_sink_name(self) -> None:
-        executor, recorder = _make_executor()
+        executor, _execution, data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
-        outcome_calls = recorder.record_token_outcome.call_args_list
+        outcome_calls = data_flow.record_token_outcome.call_args_list
         assert outcome_calls[0].kwargs["sink_name"] == "csv_failsink"
 
     def test_routing_event_recorded_for_diverted_tokens(self) -> None:
         """Failsink mode must record routing_event linking primary -> failsink."""
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad metadata", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -332,8 +408,8 @@ class TestFailsinkMode:
         # routing_event must be anchored to the PRIMARY sink state (the routing
         # decision point), NOT the failsink state. This is the critical invariant:
         # routing events live at the node that made the routing decision.
-        recorder.record_routing_event.assert_called_once()
-        call_kwargs = recorder.record_routing_event.call_args.kwargs
+        execution.record_routing_event.assert_called_once()
+        call_kwargs = execution.record_routing_event.call_args.kwargs
         assert call_kwargs["edge_id"] == "edge-failsink-1"
         assert call_kwargs["mode"] == RoutingMode.DIVERT
         assert "bad metadata" in call_kwargs["reason"]["diversion_reason"]
@@ -343,44 +419,44 @@ class TestFailsinkMode:
 
     def test_both_artifacts_registered_in_mixed_batch(self) -> None:
         """Mixed batch: primary artifact + failsink artifact both registered."""
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
         # Both primary and failsink artifacts should be registered
-        assert recorder.register_artifact.call_count == 2
+        assert execution.register_artifact.call_count == 2
 
     def test_node_states_opened_at_correct_nodes(self) -> None:
         """Primary tokens get states at primary node, diverted at failsink node."""
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
-        begin_calls = recorder.begin_node_state.call_args_list
+        begin_calls = execution.begin_node_state.call_args_list
         # 3 states: t0 at primary, t1 at primary (divert anchor), t1 at failsink
         assert len(begin_calls) == 3
         primary_calls = [c for c in begin_calls if c.kwargs["node_id"] == "node-primary"]
@@ -392,7 +468,7 @@ class TestFailsinkMode:
 class TestFailsinkErrorHandling:
     def test_failsink_write_failure_crashes(self) -> None:
         """If failsink write fails, crash — it's the last resort."""
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
@@ -401,11 +477,11 @@ class TestFailsinkErrorHandling:
         with pytest.raises(OSError, match="disk full"):
             executor.write(
                 sink=sink,
-                tokens=tokens,
+                tokens=tokens,  # type: ignore[arg-type]
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -422,7 +498,7 @@ class TestFailsinkCleanup:
         begin_node_state is called for failsink states, so complete_node_state
         is never called with FAILED for the failsink node.
         """
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
@@ -431,24 +507,24 @@ class TestFailsinkCleanup:
         with pytest.raises(OSError):
             executor.write(
                 sink=sink,
-                tokens=tokens,
+                tokens=tokens,  # type: ignore[arg-type]
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
             )
         # t0's primary divert state was opened (divert anchor), then failsink
         # write crashed. The cleanup marks the primary divert state as FAILED.
-        complete_calls = recorder.complete_node_state.call_args_list
+        complete_calls = execution.complete_node_state.call_args_list
         failed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED]
         completed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
         assert len(failed_calls) == 1  # primary divert anchor cleaned up
         assert len(completed_calls) == 0
         # Primary divert state opened, but no failsink states (write crashed first)
-        begin_calls = recorder.begin_node_state.call_args_list
+        begin_calls = execution.begin_node_state.call_args_list
         primary_begins = [c for c in begin_calls if c.kwargs.get("node_id") == sink.node_id]
         failsink_begins = [c for c in begin_calls if c.kwargs.get("node_id") == failsink.node_id]
         assert len(primary_begins) == 1  # divert anchor
@@ -460,7 +536,7 @@ class TestFailsinkCleanup:
         Batch: 2 tokens, 1 diversion at index 1.
         Expect: t0 COMPLETED at primary, t1 gets no failsink state (write crashes).
         """
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
@@ -469,16 +545,16 @@ class TestFailsinkCleanup:
         with pytest.raises(OSError):
             executor.write(
                 sink=sink,
-                tokens=tokens,
+                tokens=tokens,  # type: ignore[arg-type]
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
             )
-        complete_calls = recorder.complete_node_state.call_args_list
+        complete_calls = execution.complete_node_state.call_args_list
         # t0: COMPLETED at primary (Phase 2)
         # t1: FAILED at primary (divert anchor — failsink write crashed)
         completed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
@@ -486,7 +562,7 @@ class TestFailsinkCleanup:
         assert len(completed_calls) == 1  # t0
         assert len(failed_calls) == 1  # t1 primary divert state cleaned up
         # Verify: 2 primary states opened (t0 + t1 divert anchor), 0 failsink states
-        begin_calls = recorder.begin_node_state.call_args_list
+        begin_calls = execution.begin_node_state.call_args_list
         primary_begins = [c for c in begin_calls if c.kwargs.get("node_id") == sink.node_id]
         failsink_begins = [c for c in begin_calls if c.kwargs.get("node_id") == failsink.node_id]
         assert len(primary_begins) == 2  # t0 + t1 divert anchor
@@ -494,7 +570,7 @@ class TestFailsinkCleanup:
 
     def test_failsink_flush_failure_crashes(self) -> None:
         """If failsink.flush() raises, crash — it's the last resort."""
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
@@ -503,15 +579,105 @@ class TestFailsinkCleanup:
         with pytest.raises(OSError, match="disk full"):
             executor.write(
                 sink=sink,
-                tokens=tokens,
+                tokens=tokens,  # type: ignore[arg-type]
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
             )
+
+
+class TestFailsinkCleanupEnvelope:
+    """Regression: cleanup must cover all failsink-mode raises after states exist."""
+
+    def test_failsink_reset_diversion_log_failure_cleans_primary_divert_states(self) -> None:
+        """Failsink setup errors must terminalize pre-opened primary divert states."""
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        failsink._reset_diversion_log.side_effect = RuntimeError("failsink reset boom")
+        tokens = [_make_token("t0")]
+
+        with pytest.raises(RuntimeError, match="failsink reset boom"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-failsink-1",
+            )
+
+        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
+        assert len(failed_calls) == 1
+
+    def test_invalid_failsink_result_type_cleans_primary_divert_states(self) -> None:
+        """Malformed failsink return values must fail loudly after cleanup."""
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        failsink.write.return_value = object()
+        tokens = [_make_token("t0")]
+
+        with pytest.raises(PluginContractViolation, match=r"returned object, expected SinkWriteResult"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-failsink-1",
+            )
+
+        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
+        assert len(failed_calls) == 1
+
+
+class TestFailsinkOperationAndSpanRecording:
+    """Failsink writes are real sink I/O and need their own operation/span records."""
+
+    def test_failsink_write_records_separate_operation_and_sink_span(self) -> None:
+        """Diverted writes should produce primary and failsink operation/span pairs."""
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        tokens = [_make_token("t0")]
+        ctx = MagicMock(run_id="run-1")
+        ctx.operation_id = None
+
+        executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=ctx,
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+            failsink=failsink,
+            failsink_name="csv_failsink",
+            failsink_edge_id="edge-failsink-1",
+        )
+
+        assert execution.begin_operation.call_count == 2
+        operation_node_ids = [call.kwargs["node_id"] for call in execution.begin_operation.call_args_list]
+        assert operation_node_ids == ["node-primary", "node-failsink"]
+
+        assert executor._spans.sink_span.call_count == 2
+        span_names = [call.args[0] for call in executor._spans.sink_span.call_args_list]
+        span_node_ids = [call.kwargs["node_id"] for call in executor._spans.sink_span.call_args_list]
+        assert span_names == ["primary", "csv_failsink"]
+        assert span_node_ids == ["node-primary", "node-failsink"]
 
 
 class TestNonContiguousDiversions:
@@ -523,7 +689,7 @@ class TestNonContiguousDiversions:
         Uses token_id keying, not call ordering -- the executor may process
         primary tokens before diverted tokens.
         """
-        executor, recorder = _make_executor()
+        executor, _execution, data_flow = _make_executor()
         diversions = (
             RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),
             RowDiversion(row_index=2, reason="bad", row_data={"x": 3}),
@@ -532,17 +698,20 @@ class TestNonContiguousDiversions:
         tokens = [_make_token("t0"), _make_token("t1"), _make_token("t2")]
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
-        outcome_calls = recorder.record_token_outcome.call_args_list
-        outcomes_by_token = {c.kwargs["token_id"]: c.kwargs["outcome"] for c in outcome_calls}
-        assert outcomes_by_token["t0"] == RowOutcome.DIVERTED
-        assert outcomes_by_token["t1"] == RowOutcome.COMPLETED
-        assert outcomes_by_token["t2"] == RowOutcome.DIVERTED
+        outcome_calls = data_flow.record_token_outcome.call_args_list
+        outcomes_by_token = {c.kwargs["ref"].token_id: c.kwargs for c in outcome_calls}
+        assert outcomes_by_token["t0"]["outcome"] == TerminalOutcome.FAILURE
+        assert outcomes_by_token["t0"]["path"] == TerminalPath.SINK_DISCARDED
+        assert outcomes_by_token["t1"]["outcome"] == TerminalOutcome.SUCCESS
+        assert outcomes_by_token["t1"]["path"] == TerminalPath.DEFAULT_FLOW
+        assert outcomes_by_token["t2"]["outcome"] == TerminalOutcome.FAILURE
+        assert outcomes_by_token["t2"]["path"] == TerminalPath.SINK_DISCARDED
 
 
 class TestEmptyBatch:
@@ -550,23 +719,24 @@ class TestEmptyBatch:
 
     def test_empty_batch_with_failsink_configured(self) -> None:
         """Empty token list with failsink configured -- no-op, no crash."""
-        executor, recorder = _make_executor()
+        executor, _execution, data_flow = _make_executor()
         sink = _make_sink(on_write_failure="csv_failsink")
         failsink = _make_failsink()
-        result = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=[],
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
-        assert result == (None, 0)
+        assert artifact is None
+        assert diversion_counts.total == 0
         failsink.write.assert_not_called()
-        recorder.record_token_outcome.assert_not_called()
+        data_flow.record_token_outcome.assert_not_called()
 
 
 class TestOnTokenWrittenWithDiversions:
@@ -579,18 +749,18 @@ class TestOnTokenWrittenWithDiversions:
 
     def test_on_token_written_called_for_all_tokens_discard_mode(self) -> None:
         """Both primary and diverted tokens must be checkpointed (discard mode)."""
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
         callback = MagicMock()
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             on_token_written=callback,
         )
         # Both tokens checkpointed: t0 after primary write, t1 after discard
@@ -600,7 +770,7 @@ class TestOnTokenWrittenWithDiversions:
 
     def test_on_token_written_called_for_all_tokens_failsink_mode(self) -> None:
         """Both primary and diverted tokens must be checkpointed (failsink mode)."""
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
@@ -608,11 +778,11 @@ class TestOnTokenWrittenWithDiversions:
         callback = MagicMock()
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -625,18 +795,18 @@ class TestOnTokenWrittenWithDiversions:
 
     def test_primary_tokens_checkpointed_before_diverted(self) -> None:
         """Primary tokens are checkpointed in Phase 2, diverted in Phase 3."""
-        executor, _recorder = _make_executor()
+        executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0"), _make_token("t1")]
         callback = MagicMock()
         executor.write(
             sink=sink,
-            tokens=tokens,
+            tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             on_token_written=callback,
         )
         # t0 (primary) checkpointed first, t1 (diverted) checkpointed second
@@ -659,7 +829,7 @@ class TestMidLoopAuditRecordingCleanup:
         failsink COMPLETED, the recorder fails on token 1's routing_event.
         Token 1's primary and failsink states must be completed as FAILED.
         """
-        executor, recorder = _make_executor()
+        executor, execution, _data_flow = _make_executor()
 
         diversions = (
             RowDiversion(row_index=0, reason="bad0", row_data={"x": 0}),
@@ -677,16 +847,16 @@ class TestMidLoopAuditRecordingCleanup:
             if call_count[0] == 2:
                 raise RuntimeError("DB connection lost mid-loop")
 
-        recorder.record_routing_event.side_effect = routing_event_side_effect
+        execution.record_routing_event.side_effect = routing_event_side_effect
 
         with pytest.raises(RuntimeError, match="DB connection lost"):
             executor.write(
                 sink=sink,
-                tokens=tokens,
+                tokens=tokens,  # type: ignore[arg-type]
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -694,7 +864,7 @@ class TestMidLoopAuditRecordingCleanup:
 
         # Token 0: fully recorded (primary FAILED + failsink COMPLETED)
         # Token 1: cleanup marked both states as FAILED
-        complete_calls = recorder.complete_node_state.call_args_list
+        complete_calls = execution.complete_node_state.call_args_list
         failed_state_ids = {c.kwargs["state_id"] for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED}
         completed_state_ids = {c.kwargs["state_id"] for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED}
 
@@ -707,3 +877,153 @@ class TestMidLoopAuditRecordingCleanup:
         assert len(completed_state_ids) == 1
         # No overlap between FAILED and COMPLETED
         assert failed_state_ids & completed_state_ids == set()
+
+
+class TestSystemErrorStateCleanup:
+    """Regression: FrameworkBugError/AuditIntegrityError paths must close OPEN states.
+
+    Bug: The `except (FrameworkBugError, AuditIntegrityError): raise` handlers
+    in SinkExecutor.write() skipped cleanup, leaving node_states permanently
+    OPEN in the audit trail — a Tier 1 integrity violation. The non-system
+    exception handlers RIGHT BELOW each site show correct cleanup, but system
+    error paths just re-raised.
+
+    Fix: Best-effort cleanup before re-raising system errors. If cleanup itself
+    fails, log and preserve the original error.
+    """
+
+    def test_failsink_begin_node_state_system_error_cleans_up_open_states(self) -> None:
+        """When failsink begin_node_state raises AuditIntegrityError, all OPEN states close.
+
+        Setup: 2 diverted tokens. Failsink begin_node_state succeeds for token 0
+        then raises AuditIntegrityError for token 1. At that point:
+        - 2 primary divert states are OPEN (from Phase 3 begin_node_state)
+        - 1 failsink state is OPEN (token 0)
+        All 3 must be closed as FAILED before the error propagates.
+        """
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(
+            diversions=(
+                RowDiversion(row_index=0, reason="bad-0", row_data={"field": "v0"}),
+                RowDiversion(row_index=1, reason="bad-1", row_data={"field": "v1"}),
+            ),
+        )
+        failsink = _make_failsink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        # begin_node_state: 2 primary divert states succeed, then 1 failsink
+        # state succeeds, then the 2nd failsink state raises AuditIntegrityError.
+        call_count = [0]
+        original_side_effect = execution.begin_node_state.side_effect
+
+        def begin_state_with_error(**kwargs: Any) -> MagicMock:
+            call_count[0] += 1
+            # Calls 1-2: primary divert states (OK)
+            # Call 3: first failsink state (OK)
+            # Call 4: second failsink state (BOOM)
+            if call_count[0] == 4:
+                raise AuditIntegrityError("FK violation on failsink begin_node_state")
+            return original_side_effect(**kwargs)  # type: ignore[no-any-return]
+
+        execution.begin_node_state.side_effect = begin_state_with_error
+
+        with pytest.raises(AuditIntegrityError, match="FK violation"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-divert-1",
+            )
+
+        # All opened states (2 primary-divert + 1 failsink) must be closed as FAILED.
+        complete_calls = execution.complete_node_state.call_args_list
+        failed_ids = {c.kwargs["state_id"] for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED}
+        assert len(failed_ids) == 3, (
+            f"Expected 3 states closed as FAILED (2 primary-divert + 1 failsink), got {len(failed_ids)}: {failed_ids}"
+        )
+
+    def test_failsink_mid_loop_system_error_cleans_up_remaining_states(self) -> None:
+        """When the failsink completion loop raises AuditIntegrityError, remaining states close.
+
+        Setup: 2 diverted tokens. complete_node_state succeeds for token 0's
+        primary state, then raises AuditIntegrityError for token 0's failsink
+        state. At that point:
+        - Token 0: primary FAILED (completed), failsink OPEN (failed mid-loop)
+        - Token 1: primary OPEN, failsink OPEN (not yet processed)
+        The 3 remaining OPEN states must be closed as FAILED.
+        """
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(
+            diversions=(
+                RowDiversion(row_index=0, reason="bad-0", row_data={"field": "v0"}),
+                RowDiversion(row_index=1, reason="bad-1", row_data={"field": "v1"}),
+            ),
+        )
+        failsink = _make_failsink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        # complete_node_state: let the first call succeed (token 0 primary → FAILED),
+        # then raise on the second call (token 0 failsink → AuditIntegrityError).
+        complete_count = [0]
+
+        def complete_with_error(**kwargs: Any) -> None:
+            complete_count[0] += 1
+            if complete_count[0] == 2:
+                raise AuditIntegrityError("DB error completing failsink state")
+
+        execution.complete_node_state.side_effect = complete_with_error
+
+        with pytest.raises(AuditIntegrityError, match="DB error completing"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-divert-1",
+            )
+
+        # After the error at call 2, the handler should attempt to close
+        # remaining OPEN states. Total complete_node_state calls should be > 2
+        # (the original 2 + cleanup calls for remaining states).
+        total_complete_calls = len(execution.complete_node_state.call_args_list)
+        assert total_complete_calls > 2, (
+            f"Expected cleanup calls after mid-loop AuditIntegrityError, got only {total_complete_calls} complete_node_state calls"
+        )
+
+
+class TestDiversionIndexValidation:
+    """Regression: SinkExecutor must reject out-of-range diversion indices."""
+
+    def test_out_of_range_diversion_index_crashes(self) -> None:
+        """row_index >= batch size is a plugin bug — crash before audit recording."""
+        executor, execution, _data_flow = _make_executor()
+        tokens = [_make_token("t1"), _make_token("t2")]
+        # row_index=5 is out of range for a 2-token batch
+        sink = _make_sink(
+            diversions=(RowDiversion(row_index=5, reason="bad", row_data={"x": 1}),),
+        )
+        pending = _default_pending()
+
+        with pytest.raises(PluginContractViolation, match=r"row_index=5.*batch has only 2 rows"):
+            executor.write(
+                sink,
+                tokens,  # type: ignore[arg-type]  # MagicMock(spec=TokenInfo) satisfies runtime checks
+                MagicMock(),
+                step_in_pipeline=0,
+                sink_name="out",
+                pending_outcome=pending,
+            )
+
+        # Pre-opened states should be completed as FAILED (Phase 1 error path)
+        assert execution.begin_node_state.call_count == 2
+        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
+        assert len(failed_calls) == 2

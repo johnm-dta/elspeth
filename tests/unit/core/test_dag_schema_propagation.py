@@ -11,7 +11,7 @@ contracts from upstream transforms, so audit records reflect actual data contrac
 (P1-2026-02-05: pass-through nodes drop computed schema contracts)
 """
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
@@ -27,9 +27,6 @@ from elspeth.core.config import (
 )
 from elspeth.core.dag import ExecutionGraph, WiredTransform
 
-if TYPE_CHECKING:
-    pass
-
 
 class MockTransformWithSchemaConfig:
     """Mock transform with computed _output_schema_config attribute."""
@@ -41,6 +38,7 @@ class MockTransformWithSchemaConfig:
     on_error: str | None = None
     on_success: str | None = "output"
     declared_output_fields: frozenset[str] = frozenset()
+    passes_through_input: bool = False
 
     def __init__(self) -> None:
         # Computed schema config with guaranteed and audit fields
@@ -62,6 +60,7 @@ class MockTransformWithoutSchemaConfig:
     on_error: str | None = None
     on_success: str | None = "output"
     declared_output_fields: frozenset[str] = frozenset()
+    passes_through_input: bool = False
     _output_schema_config: SchemaConfig | None = None
 
 
@@ -70,7 +69,7 @@ class MockSource:
 
     name = "mock_source"
     output_schema = None
-    config: ClassVar[dict[str, Any]] = {"schema": {"mode": "observed"}}
+    config: ClassVar[dict[str, Any]] = {"schema": {"mode": "observed", "guaranteed_fields": ["source_field"]}}
     _on_validation_failure = "discard"
     on_success = "output"
 
@@ -82,6 +81,20 @@ class MockSink:
     input_schema = None
     config: ClassVar[dict[str, Any]] = {}
     _on_write_failure: str = "discard"
+    declared_required_fields: ClassVar[frozenset[str]] = frozenset()
+
+    def _reset_diversion_log(self) -> None:
+        pass
+
+
+class MockSinkWithSchema:
+    """Mock sink plugin with schema config."""
+
+    name = "mock_sink_schema"
+    input_schema = None
+    config: ClassVar[dict[str, Any]] = {"schema": {"mode": "observed"}}
+    _on_write_failure: str = "discard"
+    declared_required_fields: ClassVar[frozenset[str]] = frozenset()
 
     def _reset_diversion_log(self) -> None:
         pass
@@ -127,8 +140,9 @@ class TestOutputSchemaConfigPropagation:
         assert node_info.output_schema_config.audit_fields == ("field_c", "field_d")
         assert node_info.output_schema_config.is_observed is True
 
-    def test_transform_without_schema_config_has_none(self) -> None:
-        """Verify transforms without _output_schema_config have None in NodeInfo."""
+    def test_shape_preserving_transform_has_output_schema_config(self) -> None:
+        """Transforms without _output_schema_config should still get output_schema_config
+        populated from config['schema'] at construction time."""
         transform = MockTransformWithoutSchemaConfig()
         source = MockSource()
         wired = WiredTransform(
@@ -152,14 +166,55 @@ class TestOutputSchemaConfigPropagation:
             gates=[],
         )
 
-        # Find the transform node
         transform_nodes = [n for n in graph.get_nodes() if n.plugin_name == "mock_transform_no_schema"]
         assert len(transform_nodes) == 1
 
         node_info = transform_nodes[0]
+        # Previously None — now populated from config["schema"]
+        assert node_info.output_schema_config is not None
+        assert node_info.output_schema_config.mode == "observed"
+        assert node_info.output_schema_config.guaranteed_fields == ("config_field",)
 
-        # output_schema_config should be None since transform doesn't have the attribute
-        assert node_info.output_schema_config is None
+    def test_source_node_has_output_schema_config(self) -> None:
+        """Source nodes should have output_schema_config populated from config['schema']."""
+        source = MockSource()
+
+        graph = ExecutionGraph.from_plugin_instances(
+            source=source,  # type: ignore[arg-type]
+            source_settings=SourceSettings(plugin=source.name, on_success="output", options={}),
+            transforms=[],
+            sinks={"output": MockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[],
+        )
+
+        source_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.SOURCE]
+        assert len(source_nodes) == 1
+
+        node_info = source_nodes[0]
+        assert node_info.output_schema_config is not None
+        assert node_info.output_schema_config.mode == "observed"
+        assert node_info.output_schema_config.guaranteed_fields == ("source_field",)
+
+    def test_sink_node_has_output_schema_config(self) -> None:
+        """Sink nodes should have output_schema_config populated from config['schema']."""
+        source = MockSource()
+
+        graph = ExecutionGraph.from_plugin_instances(
+            source=source,  # type: ignore[arg-type]
+            source_settings=SourceSettings(plugin=source.name, on_success="output", options={}),
+            transforms=[],
+            sinks={"output": MockSinkWithSchema()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[],
+        )
+
+        sink_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.SINK]
+        assert len(sink_nodes) == 1
+
+        node_info = sink_nodes[0]
+        assert node_info.output_schema_config is not None
+        assert node_info.output_schema_config.mode == "observed"
 
 
 class TestGetSchemaConfigFromNodePriority:
@@ -195,26 +250,28 @@ class TestGetSchemaConfigFromNodePriority:
         assert result.guaranteed_fields == ("from_nodeinfo",)
         assert result.audit_fields == ("audit_from_nodeinfo",)
 
-    def test_falls_back_to_config_dict_when_no_nodeinfo_schema(self) -> None:
-        """Falls back to config dict when NodeInfo.output_schema_config is None."""
+    def test_returns_output_schema_config_directly(self) -> None:
+        """get_schema_config_from_node returns output_schema_config without parsing config dict."""
         graph = ExecutionGraph()
 
-        # Add node with only config dict schema (no output_schema_config)
+        schema = SchemaConfig(
+            mode="observed",
+            fields=None,
+            guaranteed_fields=("field_a",),
+        )
+
         graph.add_node(
             "test_node",
             node_type=NodeType.TRANSFORM,
             plugin_name="test",
-            config={"schema": {"mode": "observed", "guaranteed_fields": ["from_config"]}},
-            # No output_schema_config - should fall back to config dict
+            config={"schema": {"mode": "observed", "guaranteed_fields": ["different_field"]}},
+            output_schema_config=schema,
         )
 
-        # Get schema config from node
         result = graph.get_schema_config_from_node("test_node")
-
-        # Should parse from config dict
-        assert result is not None
-        assert result.guaranteed_fields == ("from_config",)
-        assert result.audit_fields is None
+        # Returns the typed object, ignores config dict
+        assert result is schema
+        assert result.guaranteed_fields == ("field_a",)
 
     def test_returns_none_when_no_schema_anywhere(self) -> None:
         """Returns None when neither NodeInfo nor config dict has schema."""
@@ -296,11 +353,17 @@ class TestGuaranteedFieldsWithSchemaConfig:
         )
 
         # Sink requires result_usage (guaranteed by transform)
+        sink_schema = SchemaConfig(
+            mode="observed",
+            fields=None,
+            required_fields=("result_usage",),
+        )
         graph.add_node(
             "sink",
             node_type=NodeType.SINK,
             plugin_name="csv",
-            config={"schema": {"mode": "observed", "required_fields": ["result_usage"]}},
+            config={},
+            output_schema_config=sink_schema,
         )
 
         graph.add_edge("source", "transform", label="continue")
@@ -336,11 +399,17 @@ class TestGuaranteedFieldsWithSchemaConfig:
         )
 
         # Sink requires result_template_hash (audit field - NOT guaranteed)
+        sink_schema = SchemaConfig(
+            mode="observed",
+            fields=None,
+            required_fields=("result_template_hash",),
+        )
         graph.add_node(
             "sink",
             node_type=NodeType.SINK,
             plugin_name="csv",
             config={"schema": {"mode": "observed", "required_fields": ["result_template_hash"]}},
+            output_schema_config=sink_schema,
         )
 
         graph.add_edge("source", "transform", label="continue")
@@ -361,6 +430,7 @@ class MockAggregationTransform:
     on_error: str | None = None
     on_success: str | None = "output"
     declared_output_fields: frozenset[str] = frozenset()
+    passes_through_input: bool = False
 
     def __init__(self) -> None:
         self._output_schema_config = SchemaConfig(
@@ -372,10 +442,22 @@ class MockAggregationTransform:
 
 
 class TestAggregationSchemaConfigPropagation:
-    """Tests for _output_schema_config propagation from aggregation transforms."""
+    """Tests for aggregation node schema handling.
 
-    def test_aggregation_schema_config_propagates(self) -> None:
-        """Verify aggregation transform's _output_schema_config is stored in NodeInfo."""
+    Aggregations have dynamic output by design (e.g., BatchStats produces
+    count/sum/mean rather than the input fields). The builder propagates
+    the aggregation's _output_schema_config to NodeInfo so:
+    1. Downstream pass-through nodes (gates, coalesce branches) can inherit
+       the schema via _best_schema_config()
+    2. Derived input requirements (like group_by → required_fields) are
+       preserved for DAG validation
+
+    The _output_schema_config IS correct for output: _build_output_schema_config()
+    merges declared_output_fields into guaranteed_fields, not input fields.
+    """
+
+    def test_aggregation_output_schema_config_propagates(self) -> None:
+        """Verify aggregation nodes have output_schema_config from transform."""
         transform = MockAggregationTransform()
         trigger = TriggerConfig(count=10)
         agg_settings = AggregationSettings(
@@ -400,12 +482,14 @@ class TestAggregationSchemaConfigPropagation:
         )
 
         # Find the aggregation node
-        agg_nodes = [n for n in graph.get_nodes() if n.node_type == "aggregation"]
+        agg_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.AGGREGATION]
         assert len(agg_nodes) == 1
 
         node_info = agg_nodes[0]
 
-        # Verify schema config was propagated
+        # Aggregation's output_schema_config is propagated from the transform.
+        # This enables downstream pass-through nodes to inherit via _best_schema_config()
+        # and preserves derived input requirements for DAG validation.
         assert node_info.output_schema_config is not None
         assert node_info.output_schema_config.guaranteed_fields == ("batch_result",)
         assert node_info.output_schema_config.audit_fields == ("batch_hash",)
@@ -418,16 +502,13 @@ class TestGateSchemaConfigInheritance:
     instead of walking upstream to find computed guarantees from output_schema_config.
     """
 
-    def test_gate_inherits_output_schema_config_from_upstream(self) -> None:
-        """Gate should inherit computed output_schema_config guarantees from upstream.
+    def test_gate_uses_full_propagated_schema_from_upstream(self) -> None:
+        """Gate uses full computed schema propagated by builder from upstream.
 
-        Scenario:
-        - Transform has output_schema_config with computed guaranteed_fields
-          (e.g., LLM transforms with ["result", "result_usage", "result_model"])
-        - Transform's raw config["schema"] only has a SUBSET of these fields
-          (e.g., ["result"]) because others are computed dynamically
-        - Gate copies raw config["schema"] from transform (only gets ["result"])
-        - Gate should still inherit ALL guarantees from upstream's output_schema_config
+        In production, the builder calls _best_schema_dict() which prefers
+        output_schema_config over raw config["schema"]. This means gates get
+        the FULL computed guarantees (including dynamically added fields like
+        LLM usage/model fields), not just the raw config subset.
         """
         graph = ExecutionGraph()
 
@@ -440,7 +521,6 @@ class TestGateSchemaConfigInheritance:
         )
 
         # Transform with COMPUTED output_schema_config
-        # Raw config only declares "result", but computed schema adds more
         transform_computed_schema = SchemaConfig(
             mode="observed",
             fields=None,
@@ -455,14 +535,19 @@ class TestGateSchemaConfigInheritance:
             output_schema_config=transform_computed_schema,
         )
 
-        # Gate that would copy raw schema from transform (simulates from_plugin_instances)
-        # The gate gets raw schema: {"mode": "observed", "guaranteed_fields": ["result"]}
+        # Gate with full computed schema (as the builder would propagate via _assign_schema)
+        gate_schema = SchemaConfig(
+            mode="observed",
+            fields=None,
+            guaranteed_fields=("result", "result_usage", "result_model"),
+            audit_fields=None,
+        )
         graph.add_node(
             "gate",
             node_type=NodeType.GATE,
             plugin_name="config_gate",
-            config={"schema": {"mode": "observed", "guaranteed_fields": ["result"]}},
-            # NO output_schema_config - gate doesn't compute schema
+            config={},
+            output_schema_config=gate_schema,
         )
 
         graph.add_edge("source", "llm_transform", label="continue")
@@ -472,14 +557,18 @@ class TestGateSchemaConfigInheritance:
         transform_guarantees = graph.get_effective_guaranteed_fields("llm_transform")
         assert "result_usage" in transform_guarantees
 
-        # Gate should inherit computed guarantees from upstream
+        # Gate has the full propagated schema
         gate_guarantees = graph.get_effective_guaranteed_fields("gate")
-        assert "result_usage" in gate_guarantees, f"Gate should inherit result_usage from upstream transform, has: {gate_guarantees}"
+        assert "result_usage" in gate_guarantees
         assert "result_model" in gate_guarantees
         assert "result" in gate_guarantees
 
-    def test_chained_gates_inherit_through_all(self) -> None:
-        """Multiple chained gates should all inherit from original transform."""
+    def test_chained_gates_use_propagated_schema(self) -> None:
+        """Multiple chained gates each use their propagated schema.
+
+        In production, the builder propagates the full computed schema to
+        each gate via _best_schema_dict(). Both gates get the same schema.
+        """
         graph = ExecutionGraph()
 
         graph.add_node(
@@ -503,25 +592,33 @@ class TestGateSchemaConfigInheritance:
             output_schema_config=transform_schema,
         )
 
-        # Two gates in sequence
+        # Two gates in sequence — builder propagates computed schema to each
+        gate_schema = SchemaConfig(
+            mode="observed",
+            fields=None,
+            guaranteed_fields=("computed_a", "computed_b"),
+            audit_fields=None,
+        )
         graph.add_node(
             "gate1",
             node_type=NodeType.GATE,
             plugin_name="config_gate",
-            config={"schema": {"mode": "observed"}},
+            config={},
+            output_schema_config=gate_schema,
         )
         graph.add_node(
             "gate2",
             node_type=NodeType.GATE,
             plugin_name="config_gate",
-            config={"schema": {"mode": "observed"}},
+            config={},
+            output_schema_config=gate_schema,
         )
 
         graph.add_edge("source", "transform", label="continue")
         graph.add_edge("transform", "gate1", label="continue")
         graph.add_edge("gate1", "gate2", label="continue")
 
-        # Both gates should inherit computed guarantees
+        # Both gates have computed guarantees from propagation
         gate1_guarantees = graph.get_effective_guaranteed_fields("gate1")
         gate2_guarantees = graph.get_effective_guaranteed_fields("gate2")
 
@@ -537,9 +634,9 @@ class TestPassThroughNodesInheritComputedSchema:
     These tests exercise from_plugin_instances() — the production code path.
     """
 
-    def test_gate_config_schema_includes_computed_guaranteed_fields(self) -> None:
-        """Gate's config["schema"] should include guaranteed_fields from
-        upstream transform's computed output_schema_config.
+    def test_gate_inherits_computed_schema_config(self) -> None:
+        """Gate inherits output_schema_config with guaranteed_fields and
+        audit_fields from upstream transform's computed schema.
         """
         transform = MockTransformWithSchemaConfig()
         source = MockSource()
@@ -571,23 +668,19 @@ class TestPassThroughNodesInheritComputedSchema:
             gates=[gate],
         )
 
-        # Find gate node
         gate_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.GATE]
         assert len(gate_nodes) == 1
 
-        gate_schema_dict = gate_nodes[0].config["schema"]
+        gate_schema = gate_nodes[0].output_schema_config
+        assert gate_schema is not None
+        assert gate_schema.guaranteed_fields is not None
+        assert set(gate_schema.guaranteed_fields) == {"field_a", "field_b"}
+        assert gate_schema.audit_fields is not None
+        assert set(gate_schema.audit_fields) == {"field_c", "field_d"}
 
-        # Gate's config["schema"] must include computed guaranteed_fields
-        assert "guaranteed_fields" in gate_schema_dict
-        assert set(gate_schema_dict["guaranteed_fields"]) == {"field_a", "field_b"}
-
-        # Gate's config["schema"] must include computed audit_fields
-        assert "audit_fields" in gate_schema_dict
-        assert set(gate_schema_dict["audit_fields"]) == {"field_c", "field_d"}
-
-    def test_gate_config_schema_falls_back_to_raw_when_no_computed(self) -> None:
-        """Gate should still use raw config["schema"] when upstream has no
-        output_schema_config.
+    def test_gate_inherits_raw_schema_when_no_computed(self) -> None:
+        """Gate inherits output_schema_config from upstream even when
+        upstream has no computed _output_schema_config (parsed from config).
         """
         transform = MockTransformWithoutSchemaConfig()
         source = MockSource()
@@ -622,19 +715,17 @@ class TestPassThroughNodesInheritComputedSchema:
         gate_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.GATE]
         assert len(gate_nodes) == 1
 
-        gate_schema_dict = gate_nodes[0].config["schema"]
+        gate_schema = gate_nodes[0].output_schema_config
+        assert gate_schema is not None
+        assert gate_schema.guaranteed_fields == ("config_field",)
 
-        # Should inherit raw schema with config_field
-        assert gate_schema_dict["guaranteed_fields"] == ["config_field"]
-
-    def test_coalesce_config_schema_includes_computed_fields(self) -> None:
-        """Coalesce node's config["schema"] should reflect computed
-        output_schema_config from upstream fork branches.
+    def test_coalesce_inherits_computed_schema_config(self) -> None:
+        """Coalesce node inherits output_schema_config with computed
+        guaranteed/audit fields from upstream fork branches.
         """
         transform = MockTransformWithSchemaConfig()
         source = MockSource()
 
-        # Transform feeds into a fork gate
         wired = WiredTransform(
             plugin=transform,  # type: ignore[arg-type]
             settings=TransformSettings(
@@ -673,19 +764,15 @@ class TestPassThroughNodesInheritComputedSchema:
             coalesce_settings=[coalesce],
         )
 
-        # Find coalesce node
         coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
         assert len(coalesce_nodes) == 1
 
-        coalesce_schema_dict = coalesce_nodes[0].config["schema"]
-
-        # Coalesce must inherit computed guaranteed_fields from upstream
-        assert "guaranteed_fields" in coalesce_schema_dict
-        assert set(coalesce_schema_dict["guaranteed_fields"]) == {"field_a", "field_b"}
-
-        # Coalesce must inherit computed audit_fields from upstream
-        assert "audit_fields" in coalesce_schema_dict
-        assert set(coalesce_schema_dict["audit_fields"]) == {"field_c", "field_d"}
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        assert coal_schema.guaranteed_fields is not None
+        assert set(coal_schema.guaranteed_fields) == {"field_a", "field_b"}
+        assert coal_schema.audit_fields is not None
+        assert set(coal_schema.audit_fields) == {"field_c", "field_d"}
 
     def test_deferred_gate_after_coalesce_inherits_computed_schema(self) -> None:
         """A gate downstream of a coalesce node (deferred to pass 2 in builder)
@@ -743,36 +830,27 @@ class TestPassThroughNodesInheritComputedSchema:
         gate_nodes = [n for n in graph.get_nodes() if n.plugin_name == "config_gate:final_check"]
         assert len(gate_nodes) == 1
 
-        gate_schema_dict = gate_nodes[0].config["schema"]
+        gate_schema = gate_nodes[0].output_schema_config
+        assert gate_schema is not None
+        assert gate_schema.guaranteed_fields is not None
+        assert set(gate_schema.guaranteed_fields) == {"field_a", "field_b"}
+        assert gate_schema.audit_fields is not None
+        assert set(gate_schema.audit_fields) == {"field_c", "field_d"}
 
-        # Must have computed fields propagated through coalesce from upstream
-        assert "guaranteed_fields" in gate_schema_dict
-        assert set(gate_schema_dict["guaranteed_fields"]) == {"field_a", "field_b"}
-        assert "audit_fields" in gate_schema_dict
-        assert set(gate_schema_dict["audit_fields"]) == {"field_c", "field_d"}
 
-
-class TestSchemaAliasingPrevention:
-    """Tests that schema dicts are deep-copied, not aliased across nodes.
-
-    BUG FIX: P1-2026-02-14 — _best_schema_dict() returned direct references
-    to schema dicts, so gate and coalesce nodes could share the same dict
-    object. Mutating one node's schema would silently corrupt another's.
+class TestPassThroughNodesUseTypedSchema:
+    """After single-source-of-truth refactor, pass-through nodes (gates, coalesce)
+    should have output_schema_config populated but should NOT have config['schema'].
     """
 
-    def test_gate_schema_is_independent_of_upstream_transform(self) -> None:
-        """Gate's config['schema'] must not be the same object as upstream transform schema.
-
-        Before the fix, _best_schema_dict() returned the raw dict reference,
-        so gate.config['schema'] and transform.config['schema'] were the
-        same Python object. Deep-copy prevents this aliasing.
-        """
-        transform = MockTransformWithoutSchemaConfig()
+    def test_gate_has_output_schema_config_not_dict(self) -> None:
+        """Gate should have output_schema_config but no config['schema']."""
+        transform = MockTransformWithSchemaConfig()
         source = MockSource()
         wired = WiredTransform(
             plugin=transform,  # type: ignore[arg-type]
             settings=TransformSettings(
-                name="basic_step",
+                name="llm_step",
                 plugin=transform.name,
                 input="source_out",
                 on_success="gate_in",
@@ -797,49 +875,48 @@ class TestSchemaAliasingPrevention:
             gates=[gate],
         )
 
-        transform_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.TRANSFORM]
         gate_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.GATE]
-        assert len(transform_nodes) == 1
         assert len(gate_nodes) == 1
 
-        transform_schema = transform_nodes[0].config["schema"]
-        gate_schema = gate_nodes[0].config["schema"]
+        gate_info = gate_nodes[0]
+        # Typed schema is populated
+        assert gate_info.output_schema_config is not None
+        assert gate_info.output_schema_config.guaranteed_fields == ("field_a", "field_b")
+        assert gate_info.output_schema_config.audit_fields == ("field_c", "field_d")
+        # Dict form is NOT written to pass-through nodes
+        assert "schema" not in gate_info.config
 
-        # Schemas must be structurally equal but NOT the same object
-        assert transform_schema["guaranteed_fields"] == gate_schema["guaranteed_fields"]
-        assert transform_schema is not gate_schema, (
-            "Gate schema must be a deep copy, not aliased to transform schema. "
-            "Aliasing means mutations to one node's schema silently corrupt another."
-        )
-
-    def test_multiple_gates_have_independent_schemas(self) -> None:
-        """Multiple gates consuming the same upstream must have independent schemas."""
-        transform = MockTransformWithoutSchemaConfig()
+    def test_coalesce_has_output_schema_config_not_dict(self) -> None:
+        """Coalesce should have output_schema_config but no config['schema']."""
+        transform = MockTransformWithSchemaConfig()
         source = MockSource()
+
         wired = WiredTransform(
             plugin=transform,  # type: ignore[arg-type]
             settings=TransformSettings(
-                name="basic_step",
+                name="llm_step",
                 plugin=transform.name,
                 input="source_out",
-                on_success="gate1_in",
+                on_success="fork_in",
                 on_error="discard",
                 options={},
             ),
         )
 
-        gate1 = GateSettings(
-            name="gate_1",
-            input="gate1_in",
+        fork_gate = GateSettings(
+            name="splitter",
+            input="fork_in",
             condition="True",
-            routes={"true": "gate2_in", "false": "output"},
+            routes={"true": "fork", "false": "output"},
+            fork_to=["branch_a", "branch_b"],
         )
 
-        gate2 = GateSettings(
-            name="gate_2",
-            input="gate2_in",
-            condition="True",
-            routes={"true": "output", "false": "output"},
+        coalesce = CoalesceSettings(
+            name="merger",
+            branches=["branch_a", "branch_b"],
+            policy="require_all",
+            merge="union",
+            on_success="output",
         )
 
         graph = ExecutionGraph.from_plugin_instances(
@@ -848,14 +925,214 @@ class TestSchemaAliasingPrevention:
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
-            gates=[gate1, gate2],
+            gates=[fork_gate],
+            coalesce_settings=[coalesce],
         )
 
-        gate_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.GATE]
-        assert len(gate_nodes) == 2
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
 
-        gate1_schema = gate_nodes[0].config["schema"]
-        gate2_schema = gate_nodes[1].config["schema"]
+        coal_info = coalesce_nodes[0]
+        assert coal_info.output_schema_config is not None
+        assert coal_info.output_schema_config.guaranteed_fields == ("field_a", "field_b")
+        assert "schema" not in coal_info.config
 
-        # Both should have schemas but be independent objects
-        assert gate1_schema is not gate2_schema, "Multiple gates must have independent schema copies to prevent aliasing corruption."
+
+class _ConfigurableTransform:
+    """Mock transform with per-instance guaranteed_fields for schema tests."""
+
+    input_schema = None
+    output_schema = None
+    config: ClassVar[dict[str, Any]] = {"schema": {"mode": "observed"}}
+    on_error: str | None = None
+    on_success: str | None = "output"
+    declared_output_fields: frozenset[str] = frozenset()
+    passes_through_input: bool = False
+
+    def __init__(self, name: str, guaranteed_fields: tuple[str, ...] | None) -> None:
+        self.name = name
+        self._output_schema_config = SchemaConfig(
+            mode="observed",
+            fields=None,
+            guaranteed_fields=guaranteed_fields,
+        )
+
+
+class TestCoalesceMaterializedSchemaFromBuilder:
+    """Integration tests: builder coalesce schema materialization via from_plugin_instances().
+
+    These verify the materialized output_schema_config on the coalesce node
+    preserves the None-vs-empty-tuple contract when branches have different
+    guaranteed_fields declarations.
+
+    The unit tests in test_dag_contract_validation.py exercise
+    get_effective_guaranteed_fields() on manually-built graphs. These tests
+    exercise the builder's coalesce path that COMPUTES and MATERIALIZES
+    the intersection during from_plugin_instances().
+    """
+
+    def _build_fork_coalesce_with_branch_transforms(
+        self,
+        transform_a_guaranteed: tuple[str, ...] | None,
+        transform_b_guaranteed: tuple[str, ...] | None,
+        *,
+        policy: str = "best_effort",
+    ) -> ExecutionGraph:
+        """Build: source → fork → [transform_a, transform_b] → coalesce → sink.
+
+        Default policy is best_effort because most tests in this class assert
+        the INTERSECTION contract (None-vs-empty-tuple distinction under AND
+        semantics). Under require_all, the builder uses UNION instead — those
+        assertions would not hold. Tests that specifically cover the
+        require_all union materialization live in
+        test_dag_coalesce_optionality.py::TestBuilderBranchExclusiveFieldDowngrade.
+        """
+        source = MockSource()
+
+        t_a = _ConfigurableTransform("branch_transform_a", transform_a_guaranteed)
+        t_b = _ConfigurableTransform("branch_transform_b", transform_b_guaranteed)
+
+        wired_a = WiredTransform(
+            plugin=t_a,  # type: ignore[arg-type]
+            settings=TransformSettings(
+                name="t_a",
+                plugin=t_a.name,
+                input="branch_a",
+                on_success="t_a_out",
+                on_error="discard",
+                options={},
+            ),
+        )
+        wired_b = WiredTransform(
+            plugin=t_b,  # type: ignore[arg-type]
+            settings=TransformSettings(
+                name="t_b",
+                plugin=t_b.name,
+                input="branch_b",
+                on_success="t_b_out",
+                on_error="discard",
+                options={},
+            ),
+        )
+
+        fork_gate = GateSettings(
+            name="splitter",
+            input="source_out",
+            condition="True",
+            routes={"true": "fork", "false": "output"},
+            fork_to=["branch_a", "branch_b"],
+        )
+
+        # best_effort requires timeout_seconds; require_all ignores it.
+        # Pass unconditionally so the helper supports either policy.
+        coalesce = CoalesceSettings(
+            name="merger",
+            branches={"branch_a": "t_a_out", "branch_b": "t_b_out"},
+            policy=policy,
+            merge="union",
+            on_success="output",
+            timeout_seconds=60.0,
+        )
+
+        return ExecutionGraph.from_plugin_instances(
+            source=source,  # type: ignore[arg-type]
+            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            transforms=[wired_a, wired_b],
+            sinks={"output": MockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[fork_gate],
+            coalesce_settings=[coalesce],
+        )
+
+    def test_mixed_none_and_explicit_materializes_abstain(self) -> None:
+        """Branch with None guaranteed_fields abstains — doesn't kill materialized intersection."""
+        graph = self._build_fork_coalesce_with_branch_transforms(
+            transform_a_guaranteed=("x", "y"),
+            transform_b_guaranteed=None,
+        )
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        # branch_b abstains, branch_a's guarantees survive
+        assert coal_schema.guaranteed_fields is not None
+        assert set(coal_schema.guaranteed_fields) == {"x", "y"}
+
+    def test_empty_intersection_materializes_empty_tuple_not_none(self) -> None:
+        """Branches with disjoint fields → guaranteed_fields is (), not None.
+
+        () means "explicitly guarantees nothing" (branches declared but share
+        no fields). None means "abstains" (no branch made any declaration).
+        The audit trail must distinguish these for IRAP traceability.
+
+        Tests the INTERSECTION materialization path (best_effort). Under
+        require_all, the same setup would materialize union = ('x', 'y')
+        because every branch always arrives.
+        """
+        graph = self._build_fork_coalesce_with_branch_transforms(
+            transform_a_guaranteed=("x",),
+            transform_b_guaranteed=("y",),
+        )
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        assert coal_schema.guaranteed_fields is not None, "guaranteed_fields should be () (explicitly empty), not None (abstain)"
+        assert coal_schema.guaranteed_fields == ()
+
+    def test_all_none_materializes_none(self) -> None:
+        """Both branches with None guaranteed_fields → materialized as None (abstain)."""
+        graph = self._build_fork_coalesce_with_branch_transforms(
+            transform_a_guaranteed=None,
+            transform_b_guaranteed=None,
+        )
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        assert coal_schema.guaranteed_fields is None
+
+    def test_explicit_empty_tuple_kills_materialized_intersection(self) -> None:
+        """Branch with guaranteed_fields=() participates and collapses materialized intersection.
+
+        This tests the Python API boundary: a transform that constructs
+        SchemaConfig(guaranteed_fields=()) is saying "I guarantee zero fields."
+        Under best_effort, the coalesce should materialize () (explicitly
+        empty), not None (abstain) — the None-vs-empty distinction must be
+        preserved for IRAP traceability.
+
+        Under require_all, the same setup would materialize union = ('x', 'y')
+        because branch_a's guarantees survive (branch_a always arrives).
+        """
+        graph = self._build_fork_coalesce_with_branch_transforms(
+            transform_a_guaranteed=("x", "y"),
+            transform_b_guaranteed=(),
+        )
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        # branch_b explicitly guarantees nothing → intersection collapses to ()
+        assert coal_schema.guaranteed_fields is not None, "guaranteed_fields should be () (explicitly empty), not None (abstain)"
+        assert coal_schema.guaranteed_fields == ()
+
+    def test_require_all_materializes_union_preserving_explicit_empty_semantics(self) -> None:
+        """Under require_all, materialized guarantees are UNION (not intersection).
+
+        Symmetric counterpart to test_empty_intersection_materializes_empty_tuple_not_none:
+        the same disjoint branch guarantees that produce () under best_effort
+        produce the union under require_all because every branch always
+        arrives and contributes its guarantees to the merged row.
+        """
+        graph = self._build_fork_coalesce_with_branch_transforms(
+            transform_a_guaranteed=("x",),
+            transform_b_guaranteed=("y",),
+            policy="require_all",
+        )
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        # Union under require_all: both branches' guarantees survive.
+        assert coal_schema.guaranteed_fields is not None
+        assert set(coal_schema.guaranteed_fields) == {"x", "y"}

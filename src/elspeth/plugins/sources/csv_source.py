@@ -76,12 +76,14 @@ class CSVSource(BaseSource):
 
     name = "csv"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:c93b8b0f8bb509c6"
+    config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = CSVSourceConfig.from_dict(config)
+        cfg = CSVSourceConfig.from_dict(config, plugin_name=self.name)
 
         self._path = cfg.resolved_path()
         self._delimiter = cfg.delimiter
@@ -97,6 +99,7 @@ class CSVSource(BaseSource):
 
         # Store schema config for audit trail (required by DataPluginConfig)
         self._schema_config = cfg.schema_config
+        self._initialize_declared_guaranteed_fields(self._schema_config)
 
         # Store quarantine routing destination
         self._on_validation_failure = cfg.on_validation_failure
@@ -210,8 +213,10 @@ class CSVSource(BaseSource):
         Yields:
             SourceRow for each row (valid or quarantined)
         """
-        # Create csv.reader on file handle for multiline field support
-        reader = csv.reader(f, delimiter=self._delimiter)
+        # Create csv.reader on file handle for multiline field support.
+        # strict=True is required so malformed quoted input fails at the
+        # source boundary instead of being silently merged into later rows.
+        reader = csv.reader(f, delimiter=self._delimiter, strict=True)
 
         # Skip CSV records as configured (not raw lines), preserving multiline alignment.
         # skip_rows targets non-CSV metadata preamble (comments, version headers, etc.)
@@ -270,6 +275,18 @@ class CSVSource(BaseSource):
                     )
                 return  # Don't continue with corrupted parser state
 
+        def next_nonblank_record() -> list[str]:
+            """Return the next nonblank CSV record.
+
+            csv.reader yields [] for blank physical lines. We apply the same
+            skip rule before header discovery and during data iteration so a
+            leading blank line cannot become a zero-column header.
+            """
+            while True:
+                values = next(reader)
+                if values:
+                    return values
+
         # Determine headers based on config
         if self._columns is not None:
             # Headerless mode - use explicit columns
@@ -277,7 +294,7 @@ class CSVSource(BaseSource):
         else:
             # Read header row from file
             try:
-                raw_headers = next(reader)
+                raw_headers = next_nonblank_record()
             except StopIteration:
                 # File exhausted after skip_rows — no header row remains.
                 # Record so the audit trail shows skip_rows consumed all content.
@@ -319,7 +336,6 @@ class CSVSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return
-
         # Resolve field names (normalization + mapping)
         # This may raise ValueError on collision
         self._field_resolution = resolve_field_names(
@@ -342,16 +358,18 @@ class CSVSource(BaseSource):
 
         # Process data rows with manual iteration to catch csv.Error per row
         row_num = 0  # Logical row number (data rows only)
-        blank_line_count = 0
         while True:
             try:
                 # Try to read next row - csv.Error raised here for malformed rows
-                values = next(reader)
+                values = next_nonblank_record()
             except StopIteration:
                 break  # End of file
             except csv.Error as e:
                 # CSV parsing error (bad quoting, unmatched quotes, etc.)
-                # Quarantine this row instead of crashing the run
+                # CRITICAL: csv.Error can leave the parser in a corrupted state where
+                # subsequent next() calls skip, merge, or misattribute rows.  The
+                # skip_rows path already stops on csv.Error for this reason (see above).
+                # We must do the same here — record the failure and stop processing.
                 row_num += 1
                 physical_line = reader.line_num
                 raw_row = {
@@ -359,7 +377,11 @@ class CSVSource(BaseSource):
                     "__line_number__": physical_line,
                     "__row_number__": row_num,
                 }
-                error_msg = f"CSV parse error at line {physical_line}: {e}"
+                error_msg = (
+                    f"CSV parse error at line {physical_line}: {e}. "
+                    f"Stopping file processing — csv.Error can corrupt parser state, "
+                    f"making subsequent rows untrustworthy."
+                )
 
                 ctx.record_validation_error(
                     row=raw_row,
@@ -374,13 +396,7 @@ class CSVSource(BaseSource):
                         error=error_msg,
                         destination=self._on_validation_failure,
                     )
-                continue  # Skip to next row
-
-            # Skip empty rows (blank lines in CSV)
-            # csv.reader returns [] for blank lines, which would cause field count mismatch
-            if not values:
-                blank_line_count += 1
-                continue
+                return  # Don't continue with corrupted parser state
 
             row_num += 1
             # reader.line_num tracks physical file line position (including multiline fields)
@@ -431,8 +447,8 @@ class CSVSource(BaseSource):
                 # Validate against locked contract to catch type drift on
                 # inferred fields. Pydantic extra="allow" accepts any type
                 # for extras — the contract enforces inferred types here.
-                contract = self.get_schema_contract()
-                if contract is not None and contract.locked:
+                contract = self.require_schema_contract()
+                if contract.locked:
                     violations = contract.validate(validated_row)
                     if violations:
                         error_msg = "; ".join(str(v) for v in violations)
@@ -468,14 +484,6 @@ class CSVSource(BaseSource):
                         error=str(e),
                         destination=self._on_validation_failure,
                     )
-
-        if blank_line_count > 0:
-            ctx.record_validation_error(
-                row={"__blank_lines__": blank_line_count},
-                error=f"CSV contained {blank_line_count} blank line(s) that were skipped during processing",
-                schema_mode="parse",
-                destination=self._on_validation_failure,
-            )
 
         # CRITICAL: Handle empty source case (all rows quarantined or no rows)
         # If no valid rows were processed, the contract is still unlocked.

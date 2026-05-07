@@ -1,7 +1,7 @@
 # tests/core/landscape/test_recorder_contracts.py
-"""Tests for LandscapeRecorder schema contract methods.
+"""Tests for RecorderFactory schema contract methods.
 
-Phase 5 Unified Schema Contracts: Task 3 - LandscapeRecorder contract methods
+Phase 5 Unified Schema Contracts: Task 3 - RecorderFactory contract methods
 for storing and retrieving schema contracts in the audit trail.
 """
 
@@ -17,7 +17,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import nodes_table, runs_table, validation_errors_table
 
 # Dynamic schema for tests that don't care about specific fields
@@ -32,7 +32,7 @@ class TestBeginRunWithSchemaContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Create a schema contract
         contract = SchemaContract(
@@ -56,7 +56,7 @@ class TestBeginRunWithSchemaContract:
             locked=True,
         )
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"source": "test.csv"},
             canonical_version="v1",
             schema_contract=contract,
@@ -84,9 +84,9 @@ class TestBeginRunWithSchemaContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"source": "test.csv"},
             canonical_version="v1",
         )
@@ -110,10 +110,10 @@ class TestUpdateRunContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Start run without contract
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # After processing first row, source infers schema
         contract = SchemaContract(
@@ -130,7 +130,7 @@ class TestUpdateRunContract:
             locked=True,
         )
 
-        recorder.update_run_contract(run.run_id, contract)
+        factory.run_lifecycle.update_run_contract(run.run_id, contract)
 
         # Verify stored
         with db.connection() as conn:
@@ -156,13 +156,13 @@ class TestUpdateNodeOutputContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Start run without contract
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Register source node without output_contract (dynamic source)
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run.run_id,
             node_id="source_1",
             plugin_name="csv",
@@ -189,7 +189,7 @@ class TestUpdateNodeOutputContract:
         )
 
         # Update the node's output_contract
-        recorder.update_node_output_contract(run.run_id, "source_1", contract)
+        factory.data_flow.update_node_output_contract(run.run_id, "source_1", contract)
 
         # Verify stored
         with db.connection() as conn:
@@ -216,7 +216,7 @@ class TestGetRunContract:
     def test_get_run_contract_returns_stored_contract(self) -> None:
         """get_run_contract() returns the stored schema contract."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Store contract via begin_run
         original_contract = SchemaContract(
@@ -233,14 +233,14 @@ class TestGetRunContract:
             locked=True,
         )
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={},
             canonical_version="v1",
             schema_contract=original_contract,
         )
 
         # Retrieve it
-        retrieved = recorder.get_run_contract(run.run_id)
+        retrieved = factory.run_lifecycle.get_run_contract(run.run_id)
 
         assert retrieved is not None
         assert retrieved.mode == "FLEXIBLE"
@@ -252,11 +252,11 @@ class TestGetRunContract:
     def test_get_run_contract_returns_none_when_not_stored(self) -> None:
         """get_run_contract() returns None when no contract is stored."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        result = recorder.get_run_contract(run.run_id)
+        result = factory.run_lifecycle.get_run_contract(run.run_id)
 
         assert result is None
 
@@ -269,9 +269,9 @@ class TestRegisterNodeWithContracts:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         input_contract = SchemaContract(
             mode="FIXED",
@@ -286,7 +286,7 @@ class TestRegisterNodeWithContracts:
             ),
         )
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -321,9 +321,9 @@ class TestRegisterNodeWithContracts:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         output_contract = SchemaContract(
             mode="FLEXIBLE",
@@ -338,7 +338,7 @@ class TestRegisterNodeWithContracts:
             ),
         )
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -367,9 +367,9 @@ class TestRegisterNodeWithContracts:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         input_contract = SchemaContract(
             mode="FIXED",
@@ -397,7 +397,7 @@ class TestRegisterNodeWithContracts:
             ),
         )
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -428,11 +428,11 @@ class TestRegisterNodeWithContracts:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -462,9 +462,9 @@ class TestGetNodeContracts:
     def test_get_node_contracts_returns_both_contracts(self) -> None:
         """get_node_contracts() returns (input, output) tuple."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         input_contract = SchemaContract(
             mode="FIXED",
@@ -492,7 +492,7 @@ class TestGetNodeContracts:
             ),
         )
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -505,7 +505,7 @@ class TestGetNodeContracts:
             output_contract=output_contract,
         )
 
-        input_result, output_result = recorder.get_node_contracts(run.run_id, node.node_id)
+        input_result, output_result = factory.data_flow.get_node_contracts(run.run_id, node.node_id)
 
         assert input_result is not None
         assert input_result.mode == "FIXED"
@@ -518,11 +518,11 @@ class TestGetNodeContracts:
     def test_get_node_contracts_returns_none_tuple_when_not_stored(self) -> None:
         """get_node_contracts() returns (None, None) when no contracts stored."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -533,7 +533,7 @@ class TestGetNodeContracts:
             sequence=1,
         )
 
-        input_result, output_result = recorder.get_node_contracts(run.run_id, node.node_id)
+        input_result, output_result = factory.data_flow.get_node_contracts(run.run_id, node.node_id)
 
         assert input_result is None
         assert output_result is None
@@ -541,9 +541,9 @@ class TestGetNodeContracts:
     def test_get_node_contracts_partial_contracts(self) -> None:
         """get_node_contracts() handles partial contracts (only input or output)."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         output_only = SchemaContract(
             mode="OBSERVED",
@@ -558,7 +558,7 @@ class TestGetNodeContracts:
             ),
         )
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -570,7 +570,7 @@ class TestGetNodeContracts:
             output_contract=output_only,
         )
 
-        input_result, output_result = recorder.get_node_contracts(run.run_id, node.node_id)
+        input_result, output_result = factory.data_flow.get_node_contracts(run.run_id, node.node_id)
 
         assert input_result is None
         assert output_result is not None
@@ -585,12 +585,12 @@ class TestRecordValidationErrorWithContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Create source node for FK constraint
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -610,7 +610,7 @@ class TestRecordValidationErrorWithContract:
             actual_value="not_a_number",
         )
 
-        error_id = recorder.record_validation_error(
+        error_id = factory.data_flow.record_validation_error(
             run_id=run.run_id,
             node_id="source_1",
             row_data={"amount": "not_a_number"},
@@ -645,11 +645,11 @@ class TestRecordValidationErrorWithContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -665,7 +665,7 @@ class TestRecordValidationErrorWithContract:
             original_name="Customer ID",
         )
 
-        error_id = recorder.record_validation_error(
+        error_id = factory.data_flow.record_validation_error(
             run_id=run.run_id,
             node_id="source_1",
             row_data={},
@@ -699,11 +699,11 @@ class TestRecordValidationErrorWithContract:
         from sqlalchemy import select
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -714,7 +714,7 @@ class TestRecordValidationErrorWithContract:
             sequence=0,
         )
 
-        error_id = recorder.record_validation_error(
+        error_id = factory.data_flow.record_validation_error(
             run_id=run.run_id,
             node_id="source_1",
             row_data={"bad": "data"},
@@ -753,7 +753,7 @@ class TestContractIntegrityVerification:
         from elspeth.core.landscape.schema import runs_table
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         contract = SchemaContract(
             mode="FIXED",
@@ -769,7 +769,7 @@ class TestContractIntegrityVerification:
             locked=True,
         )
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={},
             canonical_version="v1",
             schema_contract=contract,
@@ -781,8 +781,8 @@ class TestContractIntegrityVerification:
             assert result is not None, "Run not found in database"
             stored_hash = result[0]
 
-        # Retrieve contract via recorder
-        retrieved = recorder.get_run_contract(run.run_id)
+        # Retrieve contract via factory
+        retrieved = factory.run_lifecycle.get_run_contract(run.run_id)
 
         # Verify hash integrity: stored DB hash must match recomputed hash
         assert retrieved is not None
@@ -794,9 +794,9 @@ class TestContractIntegrityVerification:
     def test_get_node_contracts_verifies_hash(self) -> None:
         """get_node_contracts() verifies hash integrity on retrieval."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         contract = SchemaContract(
             mode="FLEXIBLE",
@@ -811,7 +811,7 @@ class TestContractIntegrityVerification:
             ),
         )
 
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -823,7 +823,7 @@ class TestContractIntegrityVerification:
             input_contract=contract,
         )
 
-        input_result, _ = recorder.get_node_contracts(run.run_id, node.node_id)
+        input_result, _ = factory.data_flow.get_node_contracts(run.run_id, node.node_id)
 
         # Hash should match
         assert input_result is not None

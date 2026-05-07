@@ -1,0 +1,13 @@
+# Deployment-specific skill overlays are NOT version-controlled.
+# They contain company/environment-specific knowledge (providers,
+# secret naming, domain patterns) that varies per deployment.
+#
+# To create a deployment skill:
+#   cp pipeline_composer.md.example pipeline_composer.md
+#   Edit pipeline_composer.md with your deployment-specific content
+#
+# The .example file IS tracked — it's the template.
+
+*
+!.gitignore
+!*.example

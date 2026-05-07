@@ -9,17 +9,11 @@ per_file_rules:
 - pattern: cli.py
   rules:
   - R5
-  reason: Type discrimination for plugin dispatch and config validation
+  reason: Type discrimination for plugin dispatch, SQLite URI parsing, and raw YAML secrets validation
   expires: null
-  max_hits: 3
+  max_hits: 4
 - pattern: cli_helpers.py
   rules:
   - R1
   reason: resolve_audit_passphrase reads env vars (Tier 3 boundary) - .get() returns None to signal absent passphrase
   expires: null
-- pattern: cli_helpers.py
-  rules:
-  - R5
-  reason: Deep-freeze guards for PluginBundle immutability
-  expires: null
-  max_hits: 3

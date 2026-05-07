@@ -56,11 +56,11 @@ class TestExplainFieldPrecedence:
         contract = _make_contract(field_a, field_x)
 
         db = MagicMock()
-        recorder = MagicMock()
-        recorder.get_run.return_value = MagicMock()
-        recorder.get_run_contract.return_value = contract
+        factory = MagicMock()
+        factory.run_lifecycle.get_run.return_value = MagicMock()
+        factory.run_lifecycle.get_run_contract.return_value = contract
 
-        result = explain_field(db, recorder, "run-123", "x")
+        result = explain_field(db, factory, "run-123", "x")
         assert "error" not in result
 
         # Must return field_x (normalized_name='x'), not field_a (original_name='x')
@@ -81,11 +81,11 @@ class TestExplainFieldPrecedence:
         contract = _make_contract(field_a)
 
         db = MagicMock()
-        recorder = MagicMock()
-        recorder.get_run.return_value = MagicMock()
-        recorder.get_run_contract.return_value = contract
+        factory = MagicMock()
+        factory.run_lifecycle.get_run.return_value = MagicMock()
+        factory.run_lifecycle.get_run_contract.return_value = contract
 
-        result = explain_field(db, recorder, "run-123", "Original A")
+        result = explain_field(db, factory, "run-123", "Original A")
         assert "error" not in result
 
         assert result["normalized_name"] == "normalized_a"
@@ -104,11 +104,11 @@ class TestExplainFieldPrecedence:
         contract = _make_contract(field_a)
 
         db = MagicMock()
-        recorder = MagicMock()
-        recorder.get_run.return_value = MagicMock()
-        recorder.get_run_contract.return_value = contract
+        factory = MagicMock()
+        factory.run_lifecycle.get_run.return_value = MagicMock()
+        factory.run_lifecycle.get_run_contract.return_value = contract
 
-        raw_result = explain_field(db, recorder, "run-123", "nonexistent")
+        raw_result = explain_field(db, factory, "run-123", "nonexistent")
         result = cast(FieldNotFoundError, raw_result)
         assert "nonexistent" in result["error"]
         assert "amount" in result["available_fields"]

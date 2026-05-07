@@ -16,6 +16,12 @@ from elspeth.engine.dependency_resolver import _hash_settings_file, _load_depend
 class TestLoadDependsOnValidation:
     """Tests for Tier 3 validation in _load_depends_on (review finding #2)."""
 
+    def test_non_mapping_document_raises(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad.yaml"
+        f.write_text("[]\n")
+        with pytest.raises(ValueError, match="must be a YAML mapping"):
+            _load_depends_on(f)
+
     def test_non_list_depends_on_raises(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.yaml"
         f.write_text("depends_on: not_a_list\n")
@@ -46,6 +52,18 @@ class TestLoadDependsOnValidation:
         deps = _load_depends_on(f)
         assert len(deps) == 1
         assert deps[0]["name"] == "dep"
+
+    def test_yaml_syntax_error_raises_value_error(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad.yaml"
+        f.write_text("depends_on: [\n")
+        with pytest.raises(ValueError, match="Invalid YAML"):
+            _load_depends_on(f)
+
+    def test_valid_entry_uses_dependency_contract_normalization(self, tmp_path: Path) -> None:
+        f = tmp_path / "good.yaml"
+        f.write_text('depends_on:\n  - name: " dep "\n    settings: " ./dep.yaml "\n')
+        deps = _load_depends_on(f)
+        assert deps == [{"name": "dep", "settings": "./dep.yaml"}]
 
     def test_absent_depends_on_returns_empty(self, tmp_path: Path) -> None:
         f = tmp_path / "no_deps.yaml"

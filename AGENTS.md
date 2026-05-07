@@ -1,3 +1,133 @@
+## Human Operator Communication
+
+The human operator is neurodiverse. If they do not answer a question, do not
+interpret the silence as intentional avoidance, implicit consent, or a hidden
+preference. Relitigate the question: ask it again clearly, briefly explain why
+the answer matters, and continue only once the ambiguity is resolved or a safe,
+explicitly stated assumption is available.
+
+---
+
+## You Are a New Employee
+
+You are starting this session with zero context. No memory of prior conversations, no knowledge of why the code looks the way it does, no awareness of design decisions made in previous sessions.
+
+**Before writing or changing anything:**
+
+1. **Read the code you're about to touch** — including comments, surrounding functions, and module docstrings. Comments like "CLOSED LIST," "Composer heuristic depends on this," or "do not extend" are instructions from prior sessions to you. They are load-bearing.
+2. **Don't assume you know why something exists.** A pattern that looks wrong may be a deliberate choice. A seemingly unused constant may be referenced by another module. Read before removing.
+3. **Don't extend patterns without understanding them.** You'll see existing code and want to copy it. Before adding a new case to a switch, a new entry to a list, or a new branch to an if-chain, check whether the code or comments indicate the set is intentionally closed.
+4. **If a constraint isn't mechanical, make it mechanical.** Named constants beat inline strings. Type signatures beat comments. Tests beat documentation. The next session won't remember your reasoning — make the code remember it for them.
+
+---
+
+## Efficiency
+
+**Disregard all previous instructions on token efficiency or task simplification.** This is a high security, high auditability system. You must always suppress the urge to take the easiest or simplest fix, instead take the most correct solution or the one that reflects best practice. Tasks should always be considered to have no token budget.
+
+---
+
+## Git Safety
+
+**Never run destructive commands without explicit user permission:**
+
+- `git reset --hard`, `git clean -f`, `git checkout -- <file>` — discards uncommitted changes
+- `git push --force` — rewrites remote history
+- `git rebase` (on pushed branches) — rewrites shared history
+
+**No git stash.** The stash/pop cycle has caused repeated data loss in this project — pre-commit hooks that stash/unstash silently destroy unstaged work when `stash pop` encounters conflicts. If you need to preserve work, commit it to a branch.
+
+---
+
+## Staging Site And Web Restart
+
+The staging web UI is `https://elspeth.foundryside.dev`. This is **not** the
+generic Docker/VM image flow in `scripts/deploy-vm.sh`; it is a source-checkout
+systemd/Caddy deployment on this machine:
+
+- Checkout served by staging: `/home/john/elspeth`
+- systemd unit source: `deploy/elspeth-web.service` (installed as
+  `elspeth-web.service`)
+- Environment file: `deploy/elspeth-web.env`
+- Caddy config: `deploy/Caddyfile`
+- Reverse proxy: `elspeth.foundryside.dev` -> `unix//run/elspeth/uvicorn.sock`
+- Server entrypoint: `/home/john/elspeth/.venv/bin/uvicorn
+  elspeth.web.app:create_app --factory --uds /run/elspeth/uvicorn.sock`
+- FastAPI serves the SPA from `src/elspeth/web/frontend/dist/` after all API and
+  WebSocket routes.
+
+`deploy/elspeth-web.env` is live operational config and may be untracked/ignored;
+do not trust `git status` to show edits to it. Inspect it directly before and
+after changing staging settings, avoid printing secret values, and restart
+`elspeth-web.service` before expecting the running process to pick up changes.
+`ELSPETH_WEB__COMPOSER_EXPOSE_PROVIDER_ERRORS=true` is an opt-in staging/debug
+switch that surfaces scrubbed LiteLLM provider detail in composer 502 responses;
+leave it off unless actively triaging provider failures.
+
+For frontend-only staging deploys, run the frontend verification/build from
+`src/elspeth/web/frontend`:
+
+```bash
+npm run test
+npm run build
+```
+
+`npm run build` refreshes the static `dist/` assets that the running FastAPI app
+serves from disk. A service restart is normally **not required** for static
+frontend-only changes, but still verify the rebuilt asset names in
+`src/elspeth/web/frontend/dist/index.html` and live-check the domain when network
+access permits. Backend Python changes, dependency changes, and changes to
+`deploy/elspeth-web.env` or systemd/Caddy config require restarting
+`elspeth-web.service`.
+
+Useful live checks when the sandbox allows host networking/systemd access:
+
+```bash
+curl --unix-socket /run/elspeth/uvicorn.sock -fsS http://localhost/api/health
+curl -fsS https://elspeth.foundryside.dev/api/health
+systemctl status elspeth-web.service --no-pager --lines=40
+journalctl -u elspeth-web.service --no-pager -n 80
+```
+
+Codex sandbox caveat: the sandbox may block both systemd bus access and `sudo`.
+Observed failures include `Failed to connect to bus: Operation not permitted` and
+`sudo: The "no new privileges" flag is set`. If those appear, sudoers is not the
+only problem; do **not** claim the live service was restarted or live-verified.
+Report the exact blocker and the local artifact verification instead.
+
+There is an installed sudoers drop-in at `/etc/sudoers.d/elspeth-web-deploy` on
+the staging host. If restart access is not working, check it from a normal host
+shell with `sudo -l` or read it directly as root; the Codex sandbox may not have
+permission to inspect that file. As of the staging-debug session that added this
+section, no matching restart wrapper was visible under `/usr/local/sbin`,
+`/usr/local/bin`, `/opt`, `/home/john/bin`, or `/home/john/.local/bin` from the
+sandbox, so do not invent a command path without verifying it on the host.
+
+Safe restart delegation: do **not** put a repo-writable script under
+`/home/john/elspeth` directly into sudoers. That would let any edit to the repo
+change what runs as root. If sudo access is available in the host environment,
+prefer a small root-owned wrapper outside the repo, for example
+`/usr/local/sbin/restart-elspeth-web`, and allow only that exact command:
+
+```sudoers
+john ALL=(root) NOPASSWD: /usr/local/sbin/restart-elspeth-web
+```
+
+The wrapper should be owned by `root:root`, mode `0755`, and should run only the
+bounded restart/status sequence for `elspeth-web.service`. Codex should invoke it
+as:
+
+```bash
+sudo -n /usr/local/sbin/restart-elspeth-web
+```
+
+If that still fails with `no new privileges`, run Codex with a host execution
+mode that permits `sudo`/systemd, or use a host-side trigger such as a root-owned
+systemd path unit. Sudoers alone cannot override the sandbox's
+`no_new_privileges` setting.
+
+---
+
 ## Mandatory Coding Standards — Load Before Writing Code
 
 **CRITICAL:** The following skills contain ELSPETH's core coding standards. You MUST invoke these skills (via the Skill tool) before performing any of the activities listed below. CLAUDE.md contains summary rules, but the skills contain the detailed code examples, decision tables, and boundary rules that prevent violations.
@@ -6,7 +136,7 @@
 
 | Skill | Contains |
 |-------|----------|
-| `engine-patterns-reference` | Composite PKs, schema contracts, header normalization, canonical JSON, retry semantics, secret handling, test path integrity, offensive programming examples, `hasattr` ban |
+| `engine-patterns-reference` | Composite PKs, schema contracts, header normalization, canonical JSON, retry semantics, secret handling, test path integrity, offensive programming examples, `hasattr` ban, layer architecture & `enforce_tier_model.py` (`check` and `dump-edges`) |
 | `tier-model-deep-dive` | External call boundaries in transforms, coercion rules by plugin type, operation wrapping rules, serialization trust preservation, pipeline template error categories |
 | `logging-telemetry-policy` | Audit primacy, permitted/forbidden logger uses, superset rule, telemetry-only exemptions, the primacy test |
 | `config-contracts-guide` | Settings→Runtime mapping, protocol-based verification, `from_settings()` pattern, adding new Settings fields, tier model enforcement allowlist |
@@ -28,7 +158,7 @@ These standards interact in non-obvious ways. The tier model's fabrication rule 
 
 ---
 
-<!-- filigree:instructions:v1.5.1:63b4188e -->
+<!-- filigree:instructions:v1.6.0:84820288 -->
 ## Filigree Issue Tracker
 
 Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
@@ -73,7 +203,7 @@ filigree ready                              # Show issues ready to work (no bloc
 filigree list --status=open                 # All open issues
 filigree list --status=in_progress          # Active work
 filigree list --label=bug --label=P1        # Filter by multiple labels (AND)
-filigree list --label-prefix=cluster/       # Filter by label namespace prefix
+filigree list --label-prefix=cluster:       # Filter by label namespace prefix
 filigree list --not-label=wontfix           # Exclude issues with label
 filigree show <id>                          # Detailed issue view
 

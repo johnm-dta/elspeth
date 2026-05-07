@@ -13,16 +13,19 @@ def test_azure_blob_sink_does_not_support_resume():
 def test_azure_blob_sink_configure_for_resume_raises():
     """AzureBlobSink.configure_for_resume should raise NotImplementedError."""
     from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
+    from tests.fixtures.base_classes import inject_write_failure
 
     # Create minimal sink - we just need to test the method, not actual Azure connection
     # Use a mock connection string format that passes validation
-    sink = AzureBlobSink(
-        {
-            "connection_string": "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net",
-            "container": "test-container",
-            "blob_path": "test/output.csv",
-            "schema": {"mode": "observed"},
-        }
+    sink = inject_write_failure(
+        AzureBlobSink(
+            {
+                "connection_string": "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net",
+                "container": "test-container",
+                "blob_path": "test/output.csv",
+                "schema": {"mode": "observed"},
+            }
+        )
     )
 
     with pytest.raises(NotImplementedError) as exc_info:

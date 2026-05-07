@@ -1,10 +1,14 @@
 """Tests for RAGRetrievalTransform lifecycle and process flow."""
 
+from __future__ import annotations
+
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from elspeth.contracts.errors import RetrievalNotReadyError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
@@ -12,12 +16,12 @@ from elspeth.plugins.transforms.rag.transform import RAGRetrievalTransform
 
 
 @pytest.fixture(autouse=True)
-def _set_fingerprint_key(monkeypatch):
+def _set_fingerprint_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure ELSPETH_FINGERPRINT_KEY is set for all tests."""
     monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-fingerprint-key-for-rag-tests")
 
 
-def _make_transform(**overrides):
+def _make_transform(**overrides: Any) -> RAGRetrievalTransform:
     """Create a transform with valid config."""
     config = {
         "output_prefix": "policy",
@@ -34,7 +38,7 @@ def _make_transform(**overrides):
     return RAGRetrievalTransform(config)
 
 
-def _mock_ctx(state_id="state-1", token_id="token-1"):
+def _mock_ctx(state_id: str = "state-1", token_id: str = "token-1") -> MagicMock:
     """Create a mock TransformContext."""
     ctx = MagicMock()
     ctx.state_id = state_id
@@ -46,7 +50,7 @@ def _mock_ctx(state_id="state-1", token_id="token-1"):
     return ctx
 
 
-def _mock_lifecycle_ctx():
+def _mock_lifecycle_ctx() -> MagicMock:
     """Create a mock LifecycleContext."""
     ctx = MagicMock()
     ctx.run_id = "run-1"
@@ -56,7 +60,7 @@ def _mock_lifecycle_ctx():
     return ctx
 
 
-def _make_row(data):
+def _make_row(data: dict[str, Any]) -> PipelineRow:
     """Create a real PipelineRow."""
     contract = SchemaContract(mode="OBSERVED", fields=())
     return PipelineRow(data, contract)
@@ -66,6 +70,9 @@ class TestTransformLifecycle:
     def test_close_before_on_start_does_not_raise(self):
         transform = _make_transform()
         transform.close()
+
+    def test_declares_truthful_pass_through(self) -> None:
+        assert RAGRetrievalTransform.passes_through_input is True
 
     def test_declared_output_fields(self):
         transform = _make_transform()
@@ -100,6 +107,32 @@ class TestTransformLifecycle:
         with pytest.raises(RuntimeError, match="state_id"):
             transform.process(row, ctx)
 
+    def test_forward_probe_preserves_query_field_and_close_remains_safe(self) -> None:
+        transform = RAGRetrievalTransform(RAGRetrievalTransform.probe_config())
+        original_provider = MagicMock()
+        transform._provider = original_provider
+
+        result = transform.execute_forward_invariant_probe(
+            transform.forward_invariant_probe_rows(
+                _make_row({"baseline": "kept"}),
+            ),
+            _mock_ctx(),
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline"] == "kept"
+        assert result.row["rag_probe_query"] == "What is the policy?"
+        assert result.row["policy__rag_context"] == "1. Probe context"
+        assert result.row["policy__rag_count"] == 1
+        assert result.row["policy__rag_score"] == 0.95
+        assert transform._provider is original_provider
+        assert transform._on_start_called is False
+        original_provider.search.assert_not_called()
+
+        transform.close()
+        original_provider.close.assert_called_once()
+
 
 def _ready_provider_result():
     """Default CollectionReadinessResult for tests that don't care about readiness."""
@@ -122,8 +155,10 @@ def _setup_transform_with_mock_provider(chunks=None, **config_overrides):
     mock_provider = MagicMock()
     mock_provider.search.return_value = chunks or []
     mock_provider.check_readiness.return_value = _ready_provider_result()
+    mock_provider.last_skipped_count = 0
+    mock_provider.last_skipped_reasons = []
 
-    mock_config_cls = MagicMock(return_value=MagicMock())
+    mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
     mock_factory = MagicMock(return_value=mock_provider)
 
     transform = _make_transform(**config_overrides)
@@ -160,6 +195,25 @@ class TestProcessFlow:
         sources = json.loads(output["policy__rag_sources"])
         assert len(sources["sources"]) == 2
 
+    def test_successful_retrieval_thaws_nested_source_metadata(self):
+        chunks = [
+            RetrievalChunk(
+                content="Result 1",
+                score=0.9,
+                source_id="doc1",
+                metadata={"outer": {"inner": 1}, "items": [{"k": "v"}]},
+            ),
+        ]
+        transform, _ = _setup_transform_with_mock_provider(chunks)
+        row = _make_row({"question": "What is RAG?"})
+        ctx = _mock_ctx()
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        sources = json.loads(result.row["policy__rag_sources"])
+        assert sources["sources"][0]["metadata"] == {"outer": {"inner": 1}, "items": [{"k": "v"}]}
+
     def test_zero_results_quarantine(self):
         transform, _ = _setup_transform_with_mock_provider(
             chunks=[],
@@ -171,6 +225,22 @@ class TestProcessFlow:
         result = transform.process(row, ctx)
         assert result.status == "error"
         assert result.reason["reason"] == "no_results"
+
+    def test_zero_results_quarantine_preserves_skipped_metadata(self):
+        transform, mock_provider = _setup_transform_with_mock_provider(
+            chunks=[],
+            on_no_results="quarantine",
+        )
+        mock_provider.last_skipped_count = 2
+        mock_provider.last_skipped_reasons = [{"reason": "bad_payload"}, {"reason": "score_nan"}]
+        row = _make_row({"question": "obscure query"})
+        ctx = _mock_ctx()
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "error"
+        assert result.reason["skipped_count"] == 2
+        assert result.reason["skipped_reasons"] == [{"reason": "bad_payload"}, {"reason": "score_nan"}]
 
     def test_zero_results_continue(self):
         transform, _ = _setup_transform_with_mock_provider(
@@ -187,6 +257,23 @@ class TestProcessFlow:
         assert output["policy__rag_context"] is None
         assert output["policy__rag_count"] == 0
         assert output["policy__rag_score"] is None
+
+    def test_zero_results_continue_preserves_skipped_metadata(self):
+        transform, mock_provider = _setup_transform_with_mock_provider(
+            chunks=[],
+            on_no_results="continue",
+        )
+        mock_provider.last_skipped_count = 2
+        mock_provider.last_skipped_reasons = [{"reason": "bad_payload"}, {"reason": "score_nan"}]
+        row = _make_row({"question": "obscure query"})
+        ctx = _mock_ctx()
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        metadata = result.success_reason["metadata"]
+        assert metadata["skipped_count"] == 2
+        assert metadata["skipped_reasons"] == [{"reason": "bad_payload"}, {"reason": "score_nan"}]
 
     def test_retryable_error_propagates(self):
         transform, mock_provider = _setup_transform_with_mock_provider()
@@ -271,17 +358,21 @@ class TestNoResultsQuarantineContext:
 class TestRAGTransformReadinessGuard:
     """Tests for the readiness check in on_start()."""
 
-    def _make_mock_provider(self, *, reachable=True, count=10, collection="test-index"):
+    def _make_mock_provider(self, *, reachable: bool = True, count: int | None = 10, collection: str = "test-index") -> MagicMock:
         """Build a mock provider with check_readiness pre-configured."""
         from elspeth.contracts.probes import CollectionReadinessResult
 
         mock_provider = MagicMock()
-        if count > 0:
+        mock_provider.last_skipped_count = 0
+        if not reachable:
+            message = f"Collection '{collection}' unreachable"
+            count = None  # Unreachable → count unknown
+        elif count is not None and count > 0:
             message = f"Collection '{collection}' has {count} documents"
-        elif reachable:
+        elif count == 0:
             message = f"Collection '{collection}' is empty"
         else:
-            message = f"Collection '{collection}' unreachable"
+            message = f"Collection '{collection}' count unknown"
 
         mock_provider.check_readiness.return_value = CollectionReadinessResult(
             collection=collection,
@@ -291,9 +382,9 @@ class TestRAGTransformReadinessGuard:
         )
         return mock_provider
 
-    def _run_on_start_with_mock(self, mock_provider):
+    def _run_on_start_with_mock(self, mock_provider: MagicMock) -> RAGRetrievalTransform:
         """Patch PROVIDERS registry and call on_start()."""
-        mock_config_cls = MagicMock(return_value=MagicMock())
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
         mock_factory = MagicMock(return_value=mock_provider)
 
         transform = _make_transform()
@@ -318,7 +409,7 @@ class TestRAGTransformReadinessGuard:
     def test_readiness_recorded_in_landscape(self) -> None:
         """on_start() records the readiness check outcome in the audit trail."""
         mock_provider = self._make_mock_provider(count=42, collection="my-index")
-        mock_config_cls = MagicMock(return_value=MagicMock())
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
         mock_factory = MagicMock(return_value=mock_provider)
 
         transform = _make_transform()
@@ -344,7 +435,7 @@ class TestRAGTransformReadinessGuard:
         from elspeth.contracts.errors import RetrievalNotReadyError
 
         mock_provider = self._make_mock_provider(count=0, reachable=True)
-        mock_config_cls = MagicMock(return_value=MagicMock())
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
         mock_factory = MagicMock(return_value=mock_provider)
 
         transform = _make_transform()
@@ -366,7 +457,7 @@ class TestRAGTransformReadinessGuard:
         from elspeth.contracts.errors import RetrievalNotReadyError
 
         mock_provider = self._make_mock_provider(count=0, reachable=False)
-        mock_config_cls = MagicMock(return_value=MagicMock())
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
         mock_factory = MagicMock(return_value=mock_provider)
 
         transform = _make_transform()
@@ -389,7 +480,7 @@ class TestRAGTransformReadinessGuard:
         from elspeth.contracts.errors import RetrievalNotReadyError
 
         mock_provider = self._make_mock_provider(count=0, collection="my-vectors")
-        mock_config_cls = MagicMock(return_value=MagicMock())
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
         mock_factory = MagicMock(return_value=mock_provider)
 
         transform = _make_transform()
@@ -409,10 +500,8 @@ class TestRAGTransformReadinessGuard:
 
     def test_failed_readiness_still_recorded_in_landscape(self) -> None:
         """record_readiness_check is called even when the check fails (audit before raise)."""
-        from elspeth.contracts.errors import RetrievalNotReadyError
-
         mock_provider = self._make_mock_provider(count=0, reachable=True, collection="empty-col")
-        mock_config_cls = MagicMock(return_value=MagicMock())
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
         mock_factory = MagicMock(return_value=mock_provider)
 
         transform = _make_transform()
@@ -436,6 +525,32 @@ class TestRAGTransformReadinessGuard:
             reachable=True,
             count=0,
             message="Collection 'empty-col' is empty",
+        )
+
+    def test_provider_construction_failure_is_recorded_before_raise(self) -> None:
+        """Constructor-time provider failures still emit a failed readiness audit row."""
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
+        mock_factory = MagicMock(side_effect=RetrievalError("missing collection", retryable=False))
+
+        transform = _make_transform()
+        lifecycle_ctx = _mock_lifecycle_ctx()
+
+        with (
+            patch.dict(
+                "elspeth.plugins.transforms.rag.transform.PROVIDERS",
+                {"azure_search": (mock_config_cls, mock_factory)},
+            ),
+            pytest.raises(RetrievalNotReadyError, match="missing collection"),
+        ):
+            transform.on_start(lifecycle_ctx)
+
+        lifecycle_ctx.landscape.record_readiness_check.assert_called_once_with(
+            run_id="run-1",
+            name="rag_retrieval",
+            collection="test-index",
+            reachable=False,
+            count=None,
+            message="missing collection",
         )
 
     def test_count_one_passes(self) -> None:

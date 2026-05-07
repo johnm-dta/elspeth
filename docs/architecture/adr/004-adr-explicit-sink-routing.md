@@ -328,3 +328,67 @@ Per CLAUDE.md's No Legacy Code Policy: "WE HAVE NO USERS YET." A phased rollout 
 - Config contracts pattern: `contracts/config/protocols.py`, `scripts/check_contracts`
 - Prior field-orphaning bug: P2-2026-01-21 (`exponential_base`)
 - Prior test-path divergence bug: BUG-LINEAGE-01
+
+## Subsequent amendments
+
+### Counter split (elspeth-5069612f3c, 2026-05-02)
+
+Subsequent to ADR-010 Phase 2.2 (commit cc895589), the engine's
+`ExecutionCounters.rows_routed` was split into `rows_routed_success`
+(MOVE — gate `route_to_sink`) and `rows_routed_failure` (DIVERT — transform
+`on_error` reroute). The split surfaces the MOVE/DIVERT distinction defined
+in this ADR all the way through to the run-status predicate, allowing
+gate-only pipelines (whose terminal-routed sinks ARE the success path) to
+classify as `RunStatus.COMPLETED` rather than `FAILED`. The corresponding
+`RowOutcome.ROUTED_ON_ERROR` enum value carries the producer-site signal
+from the transform on_error path through to the accumulator and is
+persisted directly to `token_outcomes.outcome` for audit-trail
+attributability.
+
+**Predicate asymmetry — `RowOutcome.DIVERTED` vs `RowOutcome.ROUTED_ON_ERROR`.**
+Three "divert"-flavoured concepts coexist after this PR and they are NOT
+synonymous: `RoutingMode.DIVERT` (config-level intent label on an edge),
+`RowOutcome.DIVERTED` (terminal outcome for sink-write infrastructure
+failures redirected to failsink), and `rows_routed_failure` (counter for
+transform-side data failures routed via on_error). `rows_routed_failure`
+contributes to the `failure_indicator` of the run-status predicate;
+`rows_diverted` does not. The asymmetry is principled, not incidental: a
+sink-write failure (DIVERTED) is sink-side infrastructure breakage that
+the failsink absorbs cleanly, leaving the run capable of `COMPLETED`
+status; a transform-side data failure (ROUTED_ON_ERROR) is row-data
+breakage that prevented the row from reaching a value-producing terminal,
+which is the structural definition of a failure indicator. See the
+"Terminology and predicate asymmetry" section of the
+`2026-05-02-rows-routed-counter-split` plan for the full analysis,
+including the rejected Option B (unifying `rows_diverted` into the
+failure indicator) and the rationale for treating any future unification
+as a separate ADR-level amendment.
+
+**`routed_destinations` remains a landed-count map.** The per-sink
+`routed_destinations` map is intentionally not split into MOVE and DIVERT
+submaps in this PR. It records where routed rows landed, not why they were
+routed. Consumers must not infer routing intent from this map. Use
+`rows_routed_success` / `rows_routed_failure` for aggregate predicate role,
+`token_outcomes.outcome` for token-level producer circumstance, and
+`routing_events.mode` for edge-level route mode. Splitting the per-sink map
+would be a separate audit-reporting feature because it changes display and
+aggregation semantics beyond the P1 status bug.
+
+**Upgrade-boundary semantics.** This PR also changes the meaning of two
+read surfaces at the upgrade boundary. `ProgressEvent.rows_succeeded`
+previously counted all routed rows in the progress display path; after the
+split, it counts `rows_succeeded + rows_routed_success` and excludes
+on_error-routed rows. MCP `outcome_distribution` is a distribution of stored
+`token_outcomes.outcome` values; pre-split `"routed"` buckets are legacy
+ambiguous, while post-split data has distinct `"routed"` and
+`"routed_on_error"` buckets. The database maintenance runbook records the
+operator action: delete/recreate stale runtime state at upgrade, or preserve
+legacy evidence only with date/commit-context qualification and an accepted
+audit limitation.
+
+**Producer-site discrimination record.** The project-wide rule for encoding
+producer-known terminal circumstances as `RowOutcome` variants, plus the
+naming rule explaining why `RowOutcome.ROUTED_ON_ERROR` maps to the
+predicate-role counter `rows_routed_failure`, is recorded in ADR-018
+("Producer-Site Outcome Discrimination"). This ADR-004 amendment is only the
+explicit-sink-routing local application of that decision.

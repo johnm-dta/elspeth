@@ -5,14 +5,13 @@ Invalid state combinations are prevented at the type level.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum, auto
 
 import structlog
 from sqlalchemy.exc import DatabaseError, OperationalError
 
 from elspeth.contracts import NodeType
 from elspeth.core.landscape import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.tui.types import LineageData, NodeStateInfo
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
@@ -36,22 +35,12 @@ class InvalidStateTransitionError(Exception):
         super().__init__(f"{method}() requires state in [{allowed}], but current state is {current_state}")
 
 
-class ScreenStateType(Enum):
-    """Discriminator for screen state types."""
-
-    UNINITIALIZED = auto()  # No data source configured
-    LOADING_FAILED = auto()  # Data source configured but loading failed
-    LOADED = auto()  # Data loaded successfully
-
-
 @dataclass(frozen=True, slots=True)
 class UninitializedState:
     """Screen has no data source configured.
 
     This is the default state when created without db/run_id.
     """
-
-    state_type: ScreenStateType = ScreenStateType.UNINITIALIZED
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +54,6 @@ class LoadingFailedState:
     db: LandscapeDB
     run_id: str
     error: str | None = field(default=None)
-    state_type: ScreenStateType = field(default=ScreenStateType.LOADING_FAILED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +67,6 @@ class LoadedState:
     run_id: str
     lineage_data: LineageData
     tree: LineageTree
-    state_type: ScreenStateType = ScreenStateType.LOADED
 
 
 # Discriminated union type - exhaustive pattern matching possible
@@ -161,8 +148,8 @@ class ExplainScreen:
             LoadedState on success, LoadingFailedState on failure.
         """
         try:
-            recorder = LandscapeRecorder(db)
-            nodes = recorder.get_nodes(run_id)
+            factory = RecorderFactory(db)
+            nodes = factory.data_flow.get_nodes(run_id)
 
             # Organize nodes by type
             source_nodes = [n for n in nodes if n.node_type == NodeType.SOURCE]
@@ -250,9 +237,9 @@ class ExplainScreen:
             NodeStateInfo with at minimum node_id, plugin_name, node_type,
             or None if node not found
         """
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
         # Query by composite PK (node_id, run_id) - no post-hoc validation needed
-        node = recorder.get_node(node_id, run_id)
+        node = factory.data_flow.get_node(node_id, run_id)
 
         if node is None:
             return None

@@ -55,6 +55,13 @@ def init_display_headers(
     # is equivalent banned defensive programming.
     _ = sink._output_contract  # Crashes with AttributeError if super().__init__() not called
 
+    if headers_mode == HeaderMode.CUSTOM and headers_custom_mapping is None:
+        raise ValueError(
+            "CUSTOM header mode requires an explicit headers_custom_mapping dict. "
+            "Got headers_mode=CUSTOM with headers_custom_mapping=None — "
+            "this would silently fall back to NORMALIZED mode."
+        )
+
     sink._headers_mode = headers_mode
     sink._headers_custom_mapping = headers_custom_mapping
     sink._resolved_display_headers = None
@@ -221,12 +228,26 @@ def apply_display_headers(sink: DisplayHeaderHost, rows: list[dict[str, Any]]) -
         return rows
 
     # Transform each row's keys to display names
-    # Fields not in the mapping keep their original names (transform-added fields)
+    # In ORIGINAL mode, fields not in the mapping keep their original names
+    # (transform-added fields that weren't in the source contract).
+    # In CUSTOM mode, ALL fields must be explicitly mapped — unmapped fields
+    # are a configuration error per the header contract.
+    is_custom = sink._headers_mode == HeaderMode.CUSTOM
     result_rows = []
     for row in rows:
         mapped: dict[str, Any] = {}
         for k, v in row.items():
-            display_key = display_map[k] if k in display_map else k  # noqa: SIM401 — .get() banned by tier model
+            if k in display_map:
+                display_key = display_map[k]
+            elif is_custom:
+                raise ValueError(
+                    f"CUSTOM header mode has no mapping for field '{k}'. "
+                    f"All fields must be explicitly mapped — silent fallback to normalized "
+                    f"names risks data corruption in external system handover. "
+                    f"Mapped fields: {sorted(display_map.keys())}"
+                )
+            else:
+                display_key = k
             if display_key in mapped:
                 raise ValueError(
                     f"Header collision: multiple fields map to output key '{display_key}'. "

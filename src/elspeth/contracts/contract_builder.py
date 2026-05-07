@@ -12,7 +12,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.contracts.type_normalization import normalize_type_for_contract
 
 
 class ContractBuilder:
@@ -73,8 +74,16 @@ class ContractBuilder:
         if self._contract.locked:
             return self._contract
 
-        # Build reverse mapping: normalized -> original
-        normalized_to_original = {v: k for k, v in field_resolution.items()}
+        # Build reverse mapping: normalized -> original (with collision detection)
+        normalized_to_original: dict[str, str] = {}
+        for orig, norm in field_resolution.items():
+            if norm in normalized_to_original:
+                raise ValueError(
+                    f"field_resolution collision: normalized name '{norm}' maps to "
+                    f"both '{normalized_to_original[norm]}' and '{orig}'. "
+                    f"Upstream normalization should prevent this — this is a source plugin bug."
+                )
+            normalized_to_original[norm] = orig
 
         # Start from current contract
         updated = self._contract
@@ -93,14 +102,35 @@ class ContractBuilder:
             # resolution, that's a bug in the source plugin. KeyError is correct!
             original_name = normalized_to_original[normalized_name]
 
-            # Catch unsupported types (dict, list, Decimal, etc.) and map to
-            # object ("any"), consistent with contract_propagation.py.
-            # These are valid data values that should infer as 'object' type,
-            # not crash the contract builder.
+            # Infer type from value, mapping unsupported types to object ("any").
             try:
-                updated = updated.with_field(normalized_name, original_name, value)
+                python_type = normalize_type_for_contract(value)
             except TypeError:
-                updated = updated.with_field(normalized_name, original_name, object())
+                python_type = object
+
+            # Null-like values (None, pd.NA, pd.NaT) normalize to type(None),
+            # but for inference that means "type unknown, field is nullable" —
+            # not "field is always NoneType". Use object+nullable to avoid
+            # locking the field to NoneType and causing false violations on
+            # subsequent rows with real values.
+            nullable = False
+            if python_type is type(None):
+                python_type = object
+                nullable = True
+
+            new_field = FieldContract(
+                normalized_name=normalized_name,
+                original_name=original_name,
+                python_type=python_type,
+                required=False,
+                source="inferred",
+                nullable=nullable,
+            )
+            updated = SchemaContract(
+                mode=updated.mode,
+                fields=(*updated.fields, new_field),
+                locked=updated.locked,
+            )
 
         # Lock the contract
         updated = updated.with_locked()

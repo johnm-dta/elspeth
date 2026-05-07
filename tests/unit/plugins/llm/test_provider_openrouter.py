@@ -91,7 +91,7 @@ class TestExecuteQuery:
     """Tests for execute_query method."""
 
     def test_parses_json_response(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_http_response()
             mock_get.return_value = mock_client
@@ -114,7 +114,7 @@ class TestExecuteQuery:
 
     def test_max_tokens_none_omitted_from_request_body(self, provider: OpenRouterLLMProvider) -> None:
         """When max_tokens=None, it should NOT appear in the request body."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_http_response()
             mock_get.return_value = mock_client
@@ -134,7 +134,7 @@ class TestExecuteQuery:
             assert "max_tokens" not in request_body
 
     def test_rejects_nan_in_response(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             # NaN in JSON
             resp = httpx.Response(
@@ -157,7 +157,7 @@ class TestExecuteQuery:
                 )
 
     def test_rejects_null_content(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             body = json.dumps(
                 {
@@ -185,7 +185,7 @@ class TestExecuteQuery:
                 )
 
     def test_rejects_non_string_content(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             body = json.dumps(
                 {
@@ -214,7 +214,7 @@ class TestExecuteQuery:
 
     def test_validates_usage_non_finite_via_json_parse(self, provider: OpenRouterLLMProvider) -> None:
         """Infinity in JSON is caught at the parse level by reject_nonfinite_constant."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             # Infinity literal in JSON — caught by reject_nonfinite_constant during json.loads
             raw_json = b'{"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": Infinity}}'
@@ -240,7 +240,7 @@ class TestExecuteQuery:
     def test_validates_usage_non_finite_float(self, provider: OpenRouterLLMProvider) -> None:
         """Non-finite float that survives JSON parsing (e.g., provider returns huge float)
         is caught by the post-parse usage validation."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             # Valid JSON but we patch json.loads to return non-finite float in usage
             mock_client.post.return_value = _make_http_response()
@@ -258,7 +258,7 @@ class TestExecuteQuery:
                 return result
 
             with (
-                patch.object(mod.json, "loads", side_effect=patched_loads),
+                patch.object(mod.json, "loads", side_effect=patched_loads),  # type: ignore[attr-defined]
                 pytest.raises(LLMClientError, match="Non-finite value in usage"),
             ):
                 provider.execute_query(
@@ -273,7 +273,7 @@ class TestExecuteQuery:
     def test_empty_string_content_raises_content_policy_error(self, provider: OpenRouterLLMProvider) -> None:
         """Empty string content (not null) must raise ContentPolicyError,
         not ValueError from LLMQueryResult invariant."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             body = json.dumps(
                 {
@@ -303,7 +303,7 @@ class TestExecuteQuery:
 
     def test_whitespace_only_content_raises_content_policy_error(self, provider: OpenRouterLLMProvider) -> None:
         """Whitespace-only content must raise ContentPolicyError."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             body = json.dumps(
                 {
@@ -332,7 +332,7 @@ class TestExecuteQuery:
                 )
 
     def test_unknown_finish_reason(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_http_response(finish_reason="end_turn")
             mock_get.return_value = mock_client
@@ -350,7 +350,7 @@ class TestExecuteQuery:
         assert result.finish_reason.raw == "end_turn"
 
     def test_maps_finish_reason_stop(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_http_response(finish_reason="stop")
             mock_get.return_value = mock_client
@@ -371,7 +371,7 @@ class TestHTTPErrorMapping:
     """Tests for HTTP status code → exception mapping."""
 
     def test_429_raises_rate_limit_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(429)
             mock_get.return_value = mock_client
@@ -387,7 +387,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_500_raises_server_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(500)
             mock_get.return_value = mock_client
@@ -404,7 +404,7 @@ class TestHTTPErrorMapping:
 
     def test_502_raises_server_error(self, provider: OpenRouterLLMProvider) -> None:
         """Verify 502 Bad Gateway maps to ServerError (5xx range, not just 500)."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(502)
             mock_get.return_value = mock_client
@@ -421,7 +421,7 @@ class TestHTTPErrorMapping:
 
     def test_503_raises_server_error(self, provider: OpenRouterLLMProvider) -> None:
         """Verify 503 Service Unavailable maps to ServerError."""
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(503)
             mock_get.return_value = mock_client
@@ -437,7 +437,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_network_error_raises_network_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.side_effect = httpx.ConnectError("connection refused")
             mock_get.return_value = mock_client
@@ -453,7 +453,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_timeout_raises_network_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.side_effect = httpx.ReadTimeout("timed out")
             mock_get.return_value = mock_client
@@ -469,7 +469,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_4xx_raises_llm_client_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(400)
             mock_get.return_value = mock_client
@@ -485,7 +485,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_400_context_length_raises_context_length_error(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(
                 400,
@@ -504,7 +504,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_400_context_length_exceeded_pattern(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(
                 400,
@@ -523,7 +523,7 @@ class TestHTTPErrorMapping:
                 )
 
     def test_empty_choices_raises(self, provider: OpenRouterLLMProvider) -> None:
-        with patch.object(provider, "_get_http_client") as mock_get:
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             body = json.dumps({"choices": [], "model": "gpt-4o"})
             resp = httpx.Response(

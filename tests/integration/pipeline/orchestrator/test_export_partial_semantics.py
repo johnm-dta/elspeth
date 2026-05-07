@@ -27,10 +27,10 @@ from elspeth.contracts.events import (
 )
 from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 from elspeth.core.events import EventBus
-from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from tests.fixtures.base_classes import as_sink, as_source
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, FailingSource, ListSource
 
@@ -81,10 +81,10 @@ class TestExportFailurePartialRunSemantics:
         orchestrator = Orchestrator(db, event_bus=event_bus)
 
         export_status_calls: list[tuple[str, ExportStatus]] = []
-        original_set_export_status = LandscapeRecorder.set_export_status
+        original_set_export_status = RunLifecycleRepository.set_export_status
 
         def record_export_status(
-            self: LandscapeRecorder,
+            self: RunLifecycleRepository,
             run_id: str,
             status: ExportStatus,
             *,
@@ -103,7 +103,7 @@ class TestExportFailurePartialRunSemantics:
             )
 
         with (
-            patch.object(LandscapeRecorder, "set_export_status", new=record_export_status),
+            patch.object(RunLifecycleRepository, "set_export_status", new=record_export_status),
             patch(
                 "elspeth.engine.orchestrator.core.export_landscape",
                 side_effect=RuntimeError("export sink failed"),
@@ -115,6 +115,7 @@ class TestExportFailurePartialRunSemantics:
                 graph=graph,
                 settings=settings,
                 payload_store=payload_store,
+                sink_factory=lambda name: sink,
             )
 
         assert [status for _, status in export_status_calls] == [
@@ -124,7 +125,8 @@ class TestExportFailurePartialRunSemantics:
         run_id = export_status_calls[0][0]
         assert all(call_run_id == run_id for call_run_id, _ in export_status_calls)
 
-        run = make_recorder(db).get_run(run_id)
+        factory = make_factory(db)
+        run = factory.run_lifecycle.get_run(run_id)
         assert run is not None
         assert run.status == RunStatus.COMPLETED
         assert run.export_status == ExportStatus.FAILED
@@ -171,10 +173,10 @@ class TestExportFailurePartialRunSemantics:
         orchestrator = Orchestrator(db, event_bus=event_bus)
 
         export_status_calls: list[tuple[str, ExportStatus]] = []
-        original_set_export_status = LandscapeRecorder.set_export_status
+        original_set_export_status = RunLifecycleRepository.set_export_status
 
         def record_export_status(
-            self: LandscapeRecorder,
+            self: RunLifecycleRepository,
             run_id: str,
             status: ExportStatus,
             *,
@@ -193,7 +195,7 @@ class TestExportFailurePartialRunSemantics:
             )
 
         with (
-            patch.object(LandscapeRecorder, "set_export_status", new=record_export_status),
+            patch.object(RunLifecycleRepository, "set_export_status", new=record_export_status),
             patch("elspeth.engine.orchestrator.core.export_landscape") as mock_export,
             pytest.raises(RuntimeError, match="source load failure"),
         ):
@@ -202,6 +204,7 @@ class TestExportFailurePartialRunSemantics:
                 graph=graph,
                 settings=settings,
                 payload_store=payload_store,
+                sink_factory=lambda name: sink,
             )
 
         mock_export.assert_not_called()
@@ -215,7 +218,8 @@ class TestExportFailurePartialRunSemantics:
         assert summary.total_rows == 0
         assert summary.run_id is not None
 
-        run = make_recorder(db).get_run(summary.run_id)
+        factory = make_factory(db)
+        run = factory.run_lifecycle.get_run(summary.run_id)
         assert run is not None
         assert run.status == RunStatus.FAILED
         assert run.export_status is None

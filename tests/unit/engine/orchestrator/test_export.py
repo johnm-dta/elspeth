@@ -5,13 +5,14 @@ export.py has two responsibilities:
 1. Export audit trail to JSON/CSV sinks after run completion
 2. Reconstruct Pydantic schemas from JSON schema dicts (for pipeline resume)
 
-The export functions mock the LandscapeExporter and sinks.
+The export functions mock the LandscapeExporter, RecorderFactory, and sinks.
 The schema reconstruction functions are pure logic — no mocks needed.
 """
 
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,7 +23,6 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from elspeth.contracts import SinkProtocol
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
@@ -30,6 +30,30 @@ from elspeth.engine.orchestrator.export import (
     export_landscape,
     reconstruct_schema_from_json,
 )
+
+
+@contextmanager
+def _noop_track_operation(*_args: Any, **_kwargs: Any) -> Any:
+    """Stub for track_operation that wires ctx.operation_id without touching the DB."""
+    yield Mock()
+
+
+def _make_sink_and_factory(*, config: dict[str, Any] | None = None, **overrides: Any) -> tuple[Mock, Any]:
+    """Create a mock sink and a factory that returns it."""
+    sink = Mock()
+    sink.config = config or {}
+    sink.node_id = None
+    for k, v in overrides.items():
+        setattr(sink, k, v)
+    return sink, lambda name: sink
+
+
+@pytest.fixture(autouse=True)
+def _mock_recorder_factory():
+    """Prevent export tests from hitting real DB via RecorderFactory.register_node()."""
+    with patch("elspeth.core.landscape.factory.RecorderFactory"):
+        yield
+
 
 # =============================================================================
 # export_landscape — JSON format
@@ -50,63 +74,69 @@ class TestExportLandscapeJSON:
         """JSON format exports all records through sink.write()."""
         db = Mock()
         settings = self._make_settings()
-        sink = Mock()
-        sink.config = {}
-        sinks: dict[str, SinkProtocol] = {"output": sink}
+        sink, factory = _make_sink_and_factory()
 
-        with patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter:
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
             exporter = MockExporter.return_value
             exporter.export_run.return_value = [{"type": "run", "id": "r1"}]
 
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, factory)
 
+        sink.on_start.assert_called_once()
         sink.write.assert_called_once()
         sink.flush.assert_called_once()
+        sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
 
     def test_json_export_skips_write_when_no_records(self) -> None:
         """Empty export produces no sink.write() call."""
         db = Mock()
         settings = self._make_settings()
-        sink = Mock()
-        sink.config = {}
-        sinks: dict[str, SinkProtocol] = {"output": sink}
+        sink, factory = _make_sink_and_factory()
 
-        with patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter:
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
             exporter = MockExporter.return_value
             exporter.export_run.return_value = []
 
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, factory)
 
         sink.write.assert_not_called()
         sink.flush.assert_called_once()
+        sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
 
     def test_missing_sink_raises_valueerror(self) -> None:
         """Referencing non-existent sink raises clear error."""
         db = Mock()
         settings = self._make_settings(sink="nonexistent")
-        sinks: dict[str, SinkProtocol] = {"output": Mock()}
+
+        def bad_factory(name: str) -> Any:
+            raise ValueError(f"Export sink '{name}' not found in sink configuration")
 
         with pytest.raises(ValueError, match=r"nonexistent.*not found"):
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, bad_factory)
 
     def test_signing_reads_env_key(self) -> None:
         """Signing enabled reads ELSPETH_SIGNING_KEY from env."""
         db = Mock()
         settings = self._make_settings(sign=True)
-        sink = Mock()
-        sink.config = {}
-        sinks: dict[str, SinkProtocol] = {"output": sink}
+        _sink, factory = _make_sink_and_factory()
 
         with (
             patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
             patch.dict("os.environ", {"ELSPETH_SIGNING_KEY": "test-key-123"}),
         ):
             exporter = MockExporter.return_value
             exporter.export_run.return_value = []
 
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, factory)
 
         MockExporter.assert_called_once_with(db, signing_key=b"test-key-123")
 
@@ -114,49 +144,53 @@ class TestExportLandscapeJSON:
         """Signing enabled without ELSPETH_SIGNING_KEY raises ValueError."""
         db = Mock()
         settings = self._make_settings(sign=True)
-        sinks: dict[str, SinkProtocol] = {"output": Mock()}
+        _sink, factory = _make_sink_and_factory()
 
         with (
             patch.dict("os.environ", {}, clear=True),
             pytest.raises(ValueError, match="ELSPETH_SIGNING_KEY"),
         ):
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, factory)
 
     def test_sink_close_called_when_write_raises(self) -> None:
         """sink.close() must be called even when sink.write() raises."""
         db = Mock()
         settings = self._make_settings()
-        sink = Mock()
-        sink.config = {}
+        sink, factory = _make_sink_and_factory()
         sink.write.side_effect = RuntimeError("write failed")
-        sinks: dict[str, SinkProtocol] = {"output": sink}
 
-        with patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter:
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
             exporter = MockExporter.return_value
             exporter.export_run.return_value = [{"type": "run", "id": "r1"}]
 
             with pytest.raises(RuntimeError, match="write failed"):
-                export_landscape(db, "run-1", settings, sinks)
+                export_landscape(db, "run-1", settings, factory)
 
+        sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
 
     def test_sink_close_called_when_flush_raises(self) -> None:
         """sink.close() must be called even when sink.flush() raises."""
         db = Mock()
         settings = self._make_settings()
-        sink = Mock()
-        sink.config = {}
+        sink, factory = _make_sink_and_factory()
         sink.flush.side_effect = RuntimeError("flush failed")
-        sinks: dict[str, SinkProtocol] = {"output": sink}
 
-        with patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter:
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
             exporter = MockExporter.return_value
             exporter.export_run.return_value = [{"type": "run", "id": "r1"}]
 
             with pytest.raises(RuntimeError, match="flush failed"):
-                export_landscape(db, "run-1", settings, sinks)
+                export_landscape(db, "run-1", settings, factory)
 
         sink.write.assert_called_once()
+        sink.on_complete.assert_called_once()
         sink.close.assert_called_once()
 
 
@@ -179,23 +213,19 @@ class TestExportLandscapeCSV:
         """CSV export needs file-based sink with 'path' config."""
         db = Mock()
         settings = self._make_settings()
-        sink = Mock()
-        sink.config = {}  # No 'path' key
-        sinks: dict[str, SinkProtocol] = {"output": sink}
+        _sink, factory = _make_sink_and_factory()
 
         with pytest.raises(ValueError, match="CSV export requires file-based sink"):
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, factory)
 
     def test_csv_export_calls_multifile(self, tmp_path: Path) -> None:
         """CSV format delegates to _export_csv_multifile."""
         db = Mock()
         settings = self._make_settings()
-        sink = Mock()
-        sink.config = {"path": str(tmp_path / "export.csv")}
-        sinks: dict[str, SinkProtocol] = {"output": sink}
+        _sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
 
         with patch("elspeth.engine.orchestrator.export._export_csv_multifile") as mock_csv:
-            export_landscape(db, "run-1", settings, sinks)
+            export_landscape(db, "run-1", settings, factory)
 
         mock_csv.assert_called_once()
         call_kwargs = mock_csv.call_args

@@ -1,7 +1,7 @@
 """Analyzer submodules for the ELSPETH Landscape MCP server.
 
 Each submodule exports standalone functions that accept
-(db: LandscapeDB, recorder: LandscapeRecorder) parameters.
+(db: LandscapeDB, factory: RecorderFactory) parameters.
 The LandscapeAnalyzer facade delegates to these functions.
 
 Submodules:

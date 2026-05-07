@@ -7,8 +7,9 @@ Per Data Manifesto: The audit database is OUR data. If we read
 garbage from it, something catastrophic happened - crash immediately.
 """
 
+import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     pass  # Placeholder for future type-only imports
 
 from elspeth.contracts.enums import (
+    _LEGAL_TERMINAL_PAIRS,
     BatchStatus,
     CallStatus,
     CallType,
@@ -27,10 +29,31 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TokenRef:
+    """Bundled reference to a token within a specific run.
+
+    A token_id is meaningless without its run_id — they always travel
+    together semantically. This type enforces that coupling at the
+    type level, preventing parameter-order bugs and mismatched pairs.
+
+    Construction: Construct directly — all call sites (processor,
+    sink executor, plugin context) pair token_id with run_id at the
+    point of use. Tier 1 data is trusted at construction time.
+    """
+
+    token_id: str
+    run_id: str
+
+
+_SOURCE_FILE_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{16}")
 
 
 def _validate_enum(value: object, enum_type: type, field_name: str) -> None:
@@ -88,6 +111,7 @@ class Node:
     config_hash: str
     config_json: str
     registered_at: datetime
+    source_file_hash: str | None = None
     schema_hash: str | None = None
     sequence_in_pipeline: int | None = None
     # Schema configuration for audit trail (WP-11.99)
@@ -99,6 +123,10 @@ class Node:
         require_int(self.sequence_in_pipeline, "sequence_in_pipeline", optional=True, min_value=0)
         _validate_enum(self.node_type, NodeType, "node_type")
         _validate_enum(self.determinism, Determinism, "determinism")
+        if self.source_file_hash is not None and not _SOURCE_FILE_HASH_PATTERN.fullmatch(self.source_file_hash):
+            raise ValueError(
+                f"Tier 1: source_file_hash must match 'sha256:<16-hex>' or be None, got {self.source_file_hash!r} for node {self.node_id!r}"
+            )
         freeze_fields(self, "schema_fields")
 
 
@@ -385,6 +413,8 @@ class Batch:
     """An aggregation batch collecting tokens.
 
     Strict contract - status and trigger_type must be enums.
+    ``retry_of_batch_id`` links a retry batch back to the failed batch whose
+    member set it is replaying.
     """
 
     batch_id: str
@@ -394,6 +424,7 @@ class Batch:
     status: BatchStatus  # Strict: enum only
     created_at: datetime
     aggregation_state_id: str | None = None
+    retry_of_batch_id: str | None = None
     trigger_type: TriggerType | None = None  # Strict: enum only
     trigger_reason: str | None = None
     completed_at: datetime | None = None
@@ -410,6 +441,7 @@ class BatchMember:
     """A token belonging to a batch."""
 
     batch_id: str
+    run_id: str
     token_id: str
     ordinal: int
 
@@ -544,7 +576,13 @@ class ValidationErrorRecord:
     schema_mode: str  # "fixed", "flexible", "observed", "parse"
     destination: str
     created_at: datetime
+    row_id: str | None = None
     row_data_json: str | None = None
+    violation_type: str | None = None  # "type_mismatch", "missing_field", "extra_field"
+    original_field_name: str | None = None  # Display name e.g. "'Amount USD'"
+    normalized_field_name: str | None = None  # Code name e.g. "amount_usd"
+    expected_type: str | None = None  # e.g. "int", "str"
+    actual_type: str | None = None  # Type of actual value
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,22 +672,27 @@ class TransformErrorRecord:
     error_details_json: str | None = None
 
 
+DISCARD_SINK_NAME = "__discard__"
+
+
 @dataclass(frozen=True, slots=True)
 class TokenOutcome:
-    """Recorded terminal state for a token.
+    """Recorded terminal state for a token (ADR-019 two-axis model).
 
-    Captures the moment a token reached its terminal (or buffered) state.
-    Part of AUD-001 audit integrity - explicit rather than derived.
+    ``outcome`` is the lifecycle answer when ``completed=True`` and ``None``
+    when ``completed=False``. ``path`` is the producer-declared provenance axis
+    and is always populated.
     """
 
     outcome_id: str
     run_id: str
     token_id: str
-    outcome: RowOutcome  # Direct type, not forward reference
-    is_terminal: bool
+    outcome: TerminalOutcome | None
+    path: TerminalPath
+    completed: bool
     recorded_at: datetime
 
-    # Outcome-specific fields (nullable based on outcome type)
+    # Outcome-specific fields (nullable based on (outcome, path) pair)
     sink_name: str | None = None
     batch_id: str | None = None
     fork_group_id: str | None = None
@@ -657,14 +700,118 @@ class TokenOutcome:
     expand_group_id: str | None = None
     error_hash: str | None = None
     context_json: str | None = None
-    expected_branches_json: str | None = None  # Branch contract for FORKED/EXPANDED
+    expected_branches_json: str | None = None  # Branch contract for FORK_PARENT/EXPAND_PARENT
 
     def __post_init__(self) -> None:
-        """Validate enum and bool fields - Tier 1 crash on invalid types."""
-        _validate_enum(self.outcome, RowOutcome, "outcome")
-        # is_terminal must be bool, not int or other truthy/falsy value
-        if not isinstance(self.is_terminal, bool):
-            raise TypeError(f"is_terminal must be bool, got {type(self.is_terminal).__name__}: {self.is_terminal!r}")
+        """Validate two-axis invariants — Tier 1 crash on invalid combinations."""
+        if not isinstance(self.completed, bool):
+            raise TypeError(f"completed must be bool, got {type(self.completed).__name__}: {self.completed!r}")
+        if self.completed and self.outcome is None:
+            raise ValueError(
+                f"TokenOutcome {self.outcome_id}: completed=True requires non-NULL outcome "
+                "(ADR-019 invariant: completed XOR (outcome IS NULL))"
+            )
+        if not self.completed and self.outcome is not None:
+            raise ValueError(f"TokenOutcome {self.outcome_id}: completed=False requires outcome=None (got outcome={self.outcome!r})")
+
+        if self.outcome is not None:
+            _validate_enum(self.outcome, TerminalOutcome, "outcome")
+        _validate_enum(self.path, TerminalPath, "path")
+
+        if self.completed:
+            assert self.outcome is not None
+            if (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+                raise ValueError(
+                    f"TokenOutcome {self.outcome_id}: ({self.outcome!r}, {self.path!r}) "
+                    "is not in _LEGAL_TERMINAL_PAIRS — see ADR-019 mapping table."
+                )
+        elif self.path != TerminalPath.BUFFERED:
+            raise ValueError(f"TokenOutcome {self.outcome_id}: completed=False requires path=BUFFERED (got path={self.path!r})")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalPairFieldConstraints:
+    """Column-level constraints for one ADR-019 (outcome, path) pair."""
+
+    required: tuple[str, ...] = ()
+    exact: Mapping[str, object] = field(default_factory=dict)
+    forbidden: tuple[str, ...] = ()
+
+
+_DISCRIMINATOR_FIELDS = (
+    "sink_name",
+    "batch_id",
+    "fork_group_id",
+    "join_group_id",
+    "expand_group_id",
+    "error_hash",
+)
+
+
+def _forbid_except(*allowed: str) -> tuple[str, ...]:
+    return tuple(field_name for field_name in _DISCRIMINATOR_FIELDS if field_name not in allowed)
+
+
+_TERMINAL_PAIR_FIELD_CONSTRAINTS: dict[
+    tuple[TerminalOutcome | None, TerminalPath],
+    TerminalPairFieldConstraints,
+] = {
+    (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW): TerminalPairFieldConstraints(
+        required=("sink_name",),
+        forbidden=_forbid_except("sink_name"),
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED): TerminalPairFieldConstraints(
+        required=("sink_name",),
+        forbidden=_forbid_except("sink_name"),
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED): TerminalPairFieldConstraints(
+        forbidden=_DISCRIMINATOR_FIELDS,
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED): TerminalPairFieldConstraints(
+        required=("sink_name", "error_hash"),
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED): TerminalPairFieldConstraints(
+        forbidden=_DISCRIMINATOR_FIELDS,
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.COALESCED): TerminalPairFieldConstraints(
+        required=("join_group_id",),
+        forbidden=_forbid_except("sink_name", "join_group_id"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.UNROUTED): TerminalPairFieldConstraints(
+        required=("error_hash",),
+        forbidden=_forbid_except("error_hash"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE): TerminalPairFieldConstraints(
+        required=("error_hash",),
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK): TerminalPairFieldConstraints(
+        required=("sink_name", "error_hash"),
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED): TerminalPairFieldConstraints(
+        required=("sink_name", "error_hash"),
+        exact={"sink_name": DISCARD_SINK_NAME},
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT): TerminalPairFieldConstraints(
+        required=("fork_group_id",),
+        forbidden=_forbid_except("fork_group_id"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT): TerminalPairFieldConstraints(
+        required=("expand_group_id",),
+        forbidden=_forbid_except("expand_group_id"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED): TerminalPairFieldConstraints(
+        required=("batch_id",),
+        forbidden=_forbid_except("batch_id"),
+    ),
+    (None, TerminalPath.BUFFERED): TerminalPairFieldConstraints(
+        required=("batch_id",),
+        forbidden=_forbid_except("batch_id"),
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -735,6 +882,8 @@ class Operation:
                 raise ValueError(f"Operation {self.operation_id!r}: status={self.status!r} but duration_ms is None")
             if self.status == "failed" and self.error_message is None:
                 raise ValueError(f"Operation {self.operation_id!r}: status='failed' but error_message is None")
+            if self.status == "failed" and self.error_message == "":
+                raise ValueError(f"Operation {self.operation_id!r}: status='failed' but error_message must not be empty")
             if self.status == "completed" and self.error_message is not None:
                 raise ValueError(f"Operation {self.operation_id!r}: status='completed' but error_message is set")
 
@@ -776,20 +925,20 @@ class SecretResolution:
         run_id: Run that used this secret
         timestamp: When the secret was loaded (epoch seconds, may be before run start)
         env_var_name: Environment variable the secret was injected into
-        source: Source type ('keyvault' - env source doesn't record)
+        source: Source type ('keyvault', 'env', or 'user')
         vault_url: Key Vault URL (None if source != keyvault)
         secret_name: Secret name in the vault
         fingerprint: HMAC-SHA256 fingerprint of the secret value (not the value itself)
         resolution_latency_ms: Time to fetch from vault (None if not measured)
     """
 
-    _ALLOWED_SOURCES: ClassVar[frozenset[str]] = frozenset({"keyvault"})
+    _ALLOWED_SOURCES: ClassVar[frozenset[str]] = frozenset({"keyvault", "env", "user"})
 
     resolution_id: str
     run_id: str
     timestamp: float  # Epoch seconds - may be before run start
     env_var_name: str
-    source: str  # 'keyvault'
+    source: str  # 'keyvault', 'env', or 'user'
     fingerprint: str  # HMAC fingerprint, NOT the secret value
     vault_url: str | None = None
     secret_name: str | None = None
@@ -851,7 +1000,7 @@ class SecretResolutionInput:
     Follows the TokenUsage precedent (commit dffe74a6) for typed audit inputs.
     """
 
-    _ALLOWED_SOURCES: ClassVar[frozenset[str]] = frozenset({"keyvault"})
+    _ALLOWED_SOURCES: ClassVar[frozenset[str]] = frozenset({"keyvault", "env", "user"})
 
     env_var_name: str
     source: str

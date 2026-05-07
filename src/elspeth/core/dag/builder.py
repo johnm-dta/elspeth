@@ -9,11 +9,10 @@ Dependency: models.py (leaf) — no import of graph.py at module level.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from types import MappingProxyType
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import networkx as nx
@@ -21,6 +20,8 @@ import networkx as nx
 from elspeth.contracts import RouteDestination, RoutingMode, error_edge_label
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.schema import FieldDefinition, SchemaConfig, get_raw_schema_config
 from elspeth.contracts.types import (
     AggregationName,
     BranchName,
@@ -30,6 +31,10 @@ from elspeth.contracts.types import (
     SinkName,
 )
 from elspeth.core.canonical import canonical_json
+from elspeth.core.dag.coalesce_merge import (
+    merge_guaranteed_fields,
+    merge_union_fields,
+)
 from elspeth.core.dag.models import (
     _NODE_ID_MAX_LENGTH,
     BranchInfo,
@@ -50,63 +55,61 @@ if TYPE_CHECKING:
     from elspeth.core.dag.models import NodeConfig, WiredTransform
 
 
-def _field_name_type(field_spec: Any) -> tuple[str, str]:
-    """Extract (field_name, field_type) from a field spec in any format.
-
-    Handles:
-    - String: ``"name: str"`` or ``"name: str?"``
-    - to_dict() dict: ``{"name": "x", "type": "str", "required": true}``
-    - YAML dict: ``{"id": "int"}``
-    """
-    if isinstance(field_spec, str):
-        name, _, type_part = field_spec.partition(":")
-        return name.strip(), type_part.strip().rstrip("?")
-    if isinstance(field_spec, dict):
-        if "name" in field_spec and "type" in field_spec:
-            return field_spec["name"], field_spec["type"]
-        if len(field_spec) == 1:
-            name, ftype = next(iter(field_spec.items()))
-            return str(name), str(ftype).rstrip("?")
-    msg = f"Cannot parse field spec: {field_spec!r}"
-    raise ValueError(msg)
-
-
-def _field_required(field_spec: Any) -> bool:
-    """Extract required status from a field spec.
-
-    - String ending with ``?``: optional (``False``)
-    - Dict with ``"required"`` key: use that value
-    - YAML dict ``{"id": "int?"}`` ending with ``?``: optional
-    - Otherwise: required (``True``)
-    """
-    if isinstance(field_spec, str):
-        return not field_spec.strip().endswith("?")
-    if isinstance(field_spec, dict):
-        if "required" in field_spec:
-            value = field_spec["required"]
-            if type(value) is not bool:
-                raise GraphValidationError(f"Field spec 'required' must be exactly bool, got {type(value).__name__}: {value!r}")
-            return value
-        if len(field_spec) == 1:
-            ftype = str(next(iter(field_spec.values())))
-            return not ftype.strip().endswith("?")
-    return True
-
-
 def _validate_output_schema_contract(transform: Any) -> None:
-    """Validate that transforms declaring output fields provide a DAG contract.
+    """Validate consistency between declared_output_fields and _output_schema_config.
 
-    Raises FrameworkBugError if declared_output_fields is non-empty but
-    _output_schema_config is None. This prevents silent DAG validation gaps.
+    Two-directional check:
+    1. Forward: declared_output_fields non-empty → _output_schema_config must exist.
+    2. Containment: declared_output_fields ⊆ guaranteed_fields when both are set.
+
+    Raises FrameworkBugError on any contract violation.
     """
-    if transform.declared_output_fields and transform._output_schema_config is None:
+    declared = transform.declared_output_fields
+    config = transform._output_schema_config
+
+    # Forward: declares fields but no schema contract → silent DAG validation gap.
+    if declared and config is None:
         raise FrameworkBugError(
             f"Transform {transform.name!r} declares output fields "
-            f"{sorted(transform.declared_output_fields)} but provides no "
+            f"{sorted(declared)} but provides no "
             f"_output_schema_config for DAG contract validation. "
             f"Call self._output_schema_config = self._build_output_schema_config(schema_config) "
             f"in __init__ after setting declared_output_fields."
         )
+
+    # Containment: declared fields must appear in effective guaranteed fields.
+    # Uses get_effective_guaranteed_fields() rather than raw guaranteed_fields
+    # to include implicit guarantees from fixed/flexible mode declared fields.
+    # Without this, collision detection checks fields that the DAG contract
+    # doesn't guarantee — downstream required_fields validation has a blind spot.
+    if declared and config is not None and config.declares_guaranteed_fields:
+        effective = config.get_effective_guaranteed_fields()
+        missing = set(declared) - effective
+        if missing:
+            raise FrameworkBugError(
+                f"Transform {transform.name!r} declares output fields "
+                f"{sorted(missing)} not present in effective guaranteed fields "
+                f"{sorted(effective)}. "
+                f"declared_output_fields must be a subset of guaranteed_fields."
+            )
+
+
+def _parse_contract_schema_config(
+    config: Mapping[str, Any],
+    *,
+    owner: str,
+    component_id: str,
+    component_type: str,
+) -> SchemaConfig | None:
+    """Parse a node schema config using the shared raw-option rules."""
+    try:
+        return get_raw_schema_config(config, owner=owner)
+    except ValueError as exc:
+        raise GraphValidationError(
+            f"Invalid schema config: {exc}",
+            component_id=component_id,
+            component_type=component_type,
+        ) from exc
 
 
 def build_execution_graph(
@@ -161,36 +164,50 @@ def build_execution_graph(
             raise GraphValidationError(
                 f"Generated node_id exceeds {_NODE_ID_MAX_LENGTH} characters: "
                 f"'{generated}' (length={len(generated)}). "
-                "Use shorter transform/gate/aggregation/source/sink names."
+                "Use shorter transform/gate/aggregation/source/sink names.",
+                component_id=name,
+                component_type=prefix,
             )
 
         return NodeID(generated)
 
-    def _best_schema_dict(nid: NodeID) -> dict[str, Any]:
-        """Get best available schema dict from a node.
+    def _best_schema_config(nid: NodeID) -> SchemaConfig:
+        """Get SchemaConfig from a node.
 
-        Prefers computed output_schema_config (includes guaranteed_fields,
-        audit_fields from e.g., LLM transforms) over raw config["schema"].
-        Pass-through nodes (gates, coalesce) should inherit the computed
-        schema so audit records reflect actual data contracts.
-
-        Returns a deep copy to prevent aliasing — mutations to the returned
-        dict must not affect the source node's schema or other nodes that
-        received the same schema.
+        All nodes have output_schema_config populated at construction time
+        (sources, transforms, aggregations from config; gates and coalesce
+        from upstream inheritance via _assign_schema).
         """
         info = graph.get_node_info(nid)
-        if info.output_schema_config is not None:
-            return copy.deepcopy(info.output_schema_config.to_dict())
-        # config["schema"] is Any from NodeConfig (dict[str, Any] value access).
-        # It's always a dict at runtime — ensured by DataPluginConfig validation.
-        schema: dict[str, Any] = info.config["schema"]
-        return copy.deepcopy(schema)
+        if info.output_schema_config is None:
+            raise FrameworkBugError(
+                f"Node '{nid}' has no output_schema_config. "
+                "All producer nodes must have output_schema_config populated "
+                "at construction time."
+            )
+        return info.output_schema_config
+
+    def _assign_schema(target_nid: NodeID, schema: SchemaConfig) -> None:
+        """Set output_schema_config on a pass-through node (gate or coalesce).
+
+        Pass-through nodes don't have their own schema — they inherit from
+        upstream producers. This sets the typed SchemaConfig so all consumers
+        can read it directly without fallback chains.
+        """
+        target_info = graph.get_node_info(target_nid)
+        object.__setattr__(target_info, "output_schema_config", schema)
 
     def _sink_name_set() -> set[str]:
         return {str(name) for name in sink_ids}
 
     # Add source
     source_config = source.config
+    source_schema_config = _parse_contract_schema_config(
+        source_config,
+        owner=f"source:{source.name}",
+        component_id=source.name,
+        component_type="source",
+    )
     source_id = node_id("source", source.name, source_config)
     graph.add_node(
         source_id,
@@ -198,6 +215,7 @@ def build_execution_graph(
         plugin_name=source.name,
         config=source_config,
         output_schema=source.output_schema,  # SourceProtocol requires this
+        output_schema_config=source_schema_config,
     )
 
     # Add sinks
@@ -206,12 +224,20 @@ def build_execution_graph(
         sink_config = sink.config
         sid = node_id("sink", sink_name, sink_config)
         sink_ids[SinkName(sink_name)] = sid
+        sink_schema_config = _parse_contract_schema_config(
+            sink_config,
+            owner=f"sink:{sink_name}",
+            component_id=sink_name,
+            component_type="sink",
+        )
         graph.add_node(
             sid,
             node_type=NodeType.SINK,
             plugin_name=sink.name,
             config=sink_config,
             input_schema=sink.input_schema,  # SinkProtocol requires this
+            output_schema_config=sink_schema_config,
+            declared_required_fields=sink.declared_required_fields,
         )
 
     graph.set_sink_id_map(sink_ids)
@@ -237,6 +263,16 @@ def build_execution_graph(
         _validate_output_schema_contract(transform)
         output_schema_config = transform._output_schema_config
 
+        # Shape-preserving transforms don't compute _output_schema_config.
+        # Parse the raw schema config so every node has a typed schema.
+        if output_schema_config is None:
+            output_schema_config = _parse_contract_schema_config(
+                transform_config,
+                owner=f"transform:{wired.settings.name}",
+                component_id=wired.settings.name,
+                component_type="transform",
+            )
+
         graph.add_node(
             tid,
             node_type=node_type,
@@ -245,6 +281,7 @@ def build_execution_graph(
             input_schema=transform.input_schema,  # TransformProtocol requires this
             output_schema=transform.output_schema,  # TransformProtocol requires this
             output_schema_config=output_schema_config,
+            passes_through_input=transform.passes_through_input,
         )
 
     graph.set_transform_id_map(transform_ids_by_seq)
@@ -253,27 +290,47 @@ def build_execution_graph(
     aggregation_ids: dict[AggregationName, NodeID] = {}
     for agg_name, (transform, agg_config) in aggregations.items():
         transform_config = transform.config
+        # Use "input_schema" (not "schema") so add_node() doesn't auto-populate
+        # output_schema_config. Aggregations have dynamic output by design —
+        # BatchStats produces count/sum/mean, not the input fields. The key is
+        # preserved for audit/hashing but doesn't trigger output schema inference.
+        # See elspeth-c3a98c358c.
         agg_node_config = {
             "trigger": agg_config.trigger.model_dump(),
             "output_mode": agg_config.output_mode,
             "options": dict(agg_config.options),
-            "schema": transform_config["schema"],
+            "input_schema": transform_config["schema"],  # Input validation, not output
         }
         aid = node_id("aggregation", agg_name, agg_node_config)
         aggregation_ids[AggregationName(agg_name)] = aid
 
-        # Same validation for aggregation transforms.
-        _validate_output_schema_contract(transform)
+        # Aggregations have dynamic output by design — BatchStats produces
+        # count/sum/mean, not the input fields. But _output_schema_config IS
+        # correct: _build_output_schema_config() merges declared_output_fields
+        # into guaranteed_fields and preserves required_fields (for derived
+        # input requirements like group_by). Downstream pass-through nodes
+        # (gates, coalesce branches) need output_schema_config for _best_schema_config().
+        #
+        # Fallback to the raw schema config for test fixtures that don't
+        # compute _output_schema_config (same pattern as transforms above).
         agg_output_schema_config = transform._output_schema_config
+        if agg_output_schema_config is None:
+            agg_output_schema_config = _parse_contract_schema_config(
+                transform_config,
+                owner=f"aggregation:{agg_name}",
+                component_id=agg_name,
+                component_type="aggregation",
+            )
 
         graph.add_node(
             aid,
             node_type=NodeType.AGGREGATION,
             plugin_name=agg_config.plugin,
             config=agg_node_config,
-            input_schema=transform.input_schema,  # TransformProtocol requires this (aggregations use transforms)
-            output_schema=transform.output_schema,  # TransformProtocol requires this (aggregations use transforms)
+            input_schema=transform.input_schema,
+            output_schema=transform.output_schema,
             output_schema_config=agg_output_schema_config,
+            passes_through_input=transform.passes_through_input,
         )
 
     graph.set_aggregation_id_map(aggregation_ids)
@@ -302,7 +359,11 @@ def build_execution_graph(
 
         config_gate_schema_inputs.append((gid, gate_config.name, gate_config.input))
 
-        # Gate routes to sinks; connection-name routes are deferred.
+        # Gate routes to fork/sinks immediately. Connection-name routes are
+        # deferred until the consumer registry exists. A literal "discard"
+        # route is also deferred unless a real sink by that name exists, so a
+        # real connection named "discard" can win before the virtual-drop
+        # sentinel fallback is applied.
         for route_label, target in gate_config.routes.items():
             if target == "fork":
                 # Fork is a special routing mode - handled by fork_to branches
@@ -320,7 +381,7 @@ def build_execution_graph(
                 node_id=gid,
                 name=gate_config.name,
                 fork_to=tuple(gate_config.fork_to) if gate_config.fork_to is not None else None,
-                routes=MappingProxyType(dict(gate_config.routes)),
+                routes=dict(gate_config.routes),
             )
         )
 
@@ -359,7 +420,9 @@ def build_execution_graph(
                         f"Duplicate branch name '{branch_name}' found in coalesce settings.\n"
                         f"Branch '{branch_name}' is already mapped to coalesce '{existing_coalesce}', "
                         f"but coalesce '{coalesce_config.name}' also declares it.\n"
-                        f"Each fork branch can only merge at one coalesce point."
+                        f"Each fork branch can only merge at one coalesce point.",
+                        component_id=coalesce_config.name,
+                        component_type="coalesce",
                     )
                 branch_to_coalesce[BranchName(branch_name)] = CoalesceName(coalesce_config.name)
 
@@ -399,14 +462,18 @@ def build_execution_graph(
             duplicates = sorted([branch for branch, count in branch_counts.items() if count > 1])
             if duplicates:
                 raise GraphValidationError(
-                    f"Gate '{gate_entry.name}' has duplicate fork branches: {duplicates}. Each fork branch name must be unique."
+                    f"Gate '{gate_entry.name}' has duplicate fork branches: {duplicates}. Each fork branch name must be unique.",
+                    component_id=gate_entry.name,
+                    component_type="gate",
                 )
             for branch_name in gate_entry.fork_to:
                 if branch_name in fork_branch_owner:
                     raise GraphValidationError(
                         f"Fork branch '{branch_name}' is declared by multiple gates: "
                         f"'{fork_branch_owner[branch_name]}' and '{gate_entry.name}'. "
-                        "Fork branch names must be globally unique across all gates."
+                        "Fork branch names must be globally unique across all gates.",
+                        component_id=gate_entry.name,
+                        component_type="gate",
                     )
                 fork_branch_owner[branch_name] = gate_entry.name
                 if BranchName(branch_name) in branch_to_coalesce:
@@ -439,7 +506,9 @@ def build_execution_graph(
                         f"  2. Match a sink name exactly\n"
                         f"\n"
                         f"Available coalesce branches: {sorted(branch_to_coalesce.keys())}\n"
-                        f"Available sinks: {sorted(sink_ids.keys())}"
+                        f"Available sinks: {sorted(sink_ids.keys())}",
+                        component_id=gate_entry.name,
+                        component_type="gate",
                     )
 
     # ===== VALIDATE COALESCE BRANCHES ARE PRODUCED BY GATES =====
@@ -461,7 +530,9 @@ def build_execution_graph(
                     f"\n"
                     f"Branches produced by gates: {sorted(produced_branches) if produced_branches else '(none)'}\n"
                     f"Coalesce '{coalesce_name}' expects branches: "
-                    f"{sorted([b for b, c in branch_to_coalesce.items() if c == coalesce_name])}"
+                    f"{sorted([b for b, c in branch_to_coalesce.items() if c == coalesce_name])}",
+                    component_id=str(coalesce_name),
+                    component_type="coalesce",
                 )
 
     # ===== BUILD PRODUCER REGISTRY =====
@@ -474,7 +545,8 @@ def build_execution_graph(
             existing_node, _existing_label = producers[connection_name]
             raise GraphValidationError(
                 f"Duplicate producer for connection '{connection_name}': "
-                f"{producer_desc[connection_name]} ({existing_node}) and {description} ({node_id})."
+                f"{producer_desc[connection_name]} ({existing_node}) and {description} ({node_id}).",
+                component_id=str(node_id),
             )
         producers[connection_name] = (node_id, label)
         producer_desc[connection_name] = description
@@ -511,18 +583,6 @@ def build_execution_graph(
                     "continue",
                     f"coalesce '{coalesce_config.name}'",
                 )
-
-    for gate_id, route_label, target in gate_route_connections:
-        gate_connection_key = (gate_id, target)
-        gate_connection_route_labels[gate_connection_key].append(route_label)
-
-        # Multiple routes from the same gate may converge to the same target
-        # (e.g., {"true": "next_gate", "false": "next_gate"}). Only register
-        # the producer once — the connection is the same regardless of which
-        # route label was taken.
-        if target in producers and producers[target][0] == gate_id:
-            continue
-        register_producer(target, gate_id, route_label, f"gate route '{route_label}' from '{gate_id}'")
 
     # Register fork branches as produced connections (only for branches with transforms).
     # Identity branches use direct COPY edges and don't need connection registration.
@@ -577,6 +637,23 @@ def build_execution_graph(
             f"coalesce '{coal_name}' branch '{branch_name}'",
         )
 
+    for gate_id, route_label, target in gate_route_connections:
+        if target == "discard" and target not in consumers:
+            # No real sink or consumer claimed this target. It remains the
+            # virtual drop sentinel and must not create a dangling producer.
+            continue
+
+        gate_connection_key = (gate_id, target)
+        gate_connection_route_labels[gate_connection_key].append(route_label)
+
+        # Multiple routes from the same gate may converge to the same target
+        # (e.g., {"true": "next_gate", "false": "next_gate"}). Only register
+        # the producer once — the connection is the same regardless of which
+        # route label was taken.
+        if target in producers and producers[target][0] == gate_id:
+            continue
+        register_producer(target, gate_id, route_label, f"gate route '{route_label}' from '{gate_id}'")
+
     # ===== VALIDATE CONNECTION NAMESPACES =====
     cls._validate_connection_namespaces(
         producers=producers,
@@ -595,12 +672,14 @@ def build_execution_graph(
             suggestions = _suggest_similar(input_connection, sorted(producers.keys()))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
             raise GraphValidationError(
-                f"Gate '{gate_name}' input '{input_connection}' has no producer.{hint}\nAvailable connections: {', '.join(sorted(producers.keys()))}"
+                f"Gate '{gate_name}' input '{input_connection}' has no producer.{hint}\nAvailable connections: {', '.join(sorted(producers.keys()))}",
+                component_id=gate_name,
+                component_type="gate",
             )
         producer_id, _producer_label = producers[input_connection]
         upstream_info = graph.get_node_info(producer_id)
-        if upstream_info.output_schema_config is not None or "schema" in upstream_info.config:
-            graph.get_node_info(gate_id).config["schema"] = _best_schema_dict(producer_id)
+        if upstream_info.output_schema_config is not None:
+            _assign_schema(gate_id, _best_schema_config(producer_id))
         else:
             deferred_config_gate_schemas.append((gate_id, gate_name, input_connection))
 
@@ -639,11 +718,18 @@ def build_execution_graph(
 
     # ===== RESOLVE DEFERRED GATE ROUTES =====
     for gate_id, route_label, target in gate_route_connections:
-        if target not in consumers:
+        if target in consumers:
+            graph.add_route_resolution_entry(gate_id, route_label, RouteDestination.processing_node(consumers[target]))
+        elif target == "discard":
+            graph.add_route_resolution_entry(gate_id, route_label, RouteDestination.discard())
+        else:
             suggestions = _suggest_similar(target, sorted(consumers.keys()))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
-            raise GraphValidationError(f"Gate route target '{target}' is neither a sink nor a known connection name.{hint}")
-        graph.add_route_resolution_entry(gate_id, route_label, RouteDestination.processing_node(consumers[target]))
+            raise GraphValidationError(
+                f"Gate route target '{target}' is neither a sink nor a known connection name.{hint}",
+                component_id=str(gate_id),
+                component_type="gate",
+            )
 
     # Ensure all declared gate route labels are resolvable before runtime.
     graph._validate_route_resolution_map_complete()
@@ -658,7 +744,9 @@ def build_execution_graph(
             suggestions = _suggest_similar(on_success, sorted(consumers.keys()))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
             raise GraphValidationError(
-                f"Transform '{wired.settings.name}' on_success '{on_success}' is neither a sink nor a known connection.{hint}"
+                f"Transform '{wired.settings.name}' on_success '{on_success}' is neither a sink nor a known connection.{hint}",
+                component_id=wired.settings.name,
+                component_type="transform",
             )
 
     for agg_name, (_transform, agg_settings) in aggregations.items():
@@ -672,7 +760,9 @@ def build_execution_graph(
             suggestions = _suggest_similar(agg_on_success, sorted(consumers.keys()))
             hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
             raise GraphValidationError(
-                f"Aggregation '{agg_settings.name}' on_success '{agg_on_success}' is neither a sink nor a known connection.{hint}"
+                f"Aggregation '{agg_settings.name}' on_success '{agg_on_success}' is neither a sink nor a known connection.{hint}",
+                component_id=agg_settings.name,
+                component_type="aggregation",
             )
 
     if coalesce_settings:
@@ -682,13 +772,17 @@ def build_execution_graph(
             if coalesce_config.on_success in consumers:
                 raise GraphValidationError(
                     f"Coalesce '{coalesce_config.name}' has on_success='{coalesce_config.on_success}'. "
-                    "Coalesce on_success must point to a sink when configured."
+                    "Coalesce on_success must point to a sink when configured.",
+                    component_id=coalesce_config.name,
+                    component_type="coalesce",
                 )
             on_success_sink = SinkName(coalesce_config.on_success)
             if on_success_sink not in sink_ids:
                 raise GraphValidationError(
                     f"Coalesce '{coalesce_config.name}' on_success references unknown sink "
-                    f"'{coalesce_config.on_success}'. Available sinks: {sorted(sink_ids.keys())}"
+                    f"'{coalesce_config.on_success}'. Available sinks: {sorted(sink_ids.keys())}",
+                    component_id=coalesce_config.name,
+                    component_type="coalesce",
                 )
             graph.add_edge(
                 coalesce_ids[CoalesceName(coalesce_config.name)],
@@ -710,7 +804,9 @@ def build_execution_graph(
         suggestions = _suggest_similar(source_on_success, sorted(str(s) for s in sink_ids))
         hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
         raise GraphValidationError(
-            f"Source '{source.name}' on_success '{source_on_success}' is neither a sink nor a known connection.{hint}"
+            f"Source '{source.name}' on_success '{source_on_success}' is neither a sink nor a known connection.{hint}",
+            component_id=source.name,
+            component_type="source",
         )
 
     # Re-run namespace validation with dangling-output checks enabled now
@@ -753,7 +849,9 @@ def build_execution_graph(
                 hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
                 raise GraphValidationError(
                     f"Transform '{wired.settings.name}' on_error '{on_error}' references unknown sink.{hint} "
-                    f"Available sinks: {', '.join(sorted(str(s) for s in sink_ids))}"
+                    f"Available sinks: {', '.join(sorted(str(s) for s in sink_ids))}",
+                    component_id=wired.settings.name,
+                    component_type="transform",
                 )
             graph.add_edge(
                 transform_ids_by_name[wired.settings.name],
@@ -771,7 +869,9 @@ def build_execution_graph(
             if failsink_name not in sink_ids:
                 raise GraphValidationError(
                     f"Sink '{sink_name_key}' on_write_failure references '{on_write_failure}' "
-                    f"which is not in sink_ids. Available: {sorted(str(s) for s in sink_ids)}."
+                    f"which is not in sink_ids. Available: {sorted(str(s) for s in sink_ids)}.",
+                    component_id=str(sink_name_key),
+                    component_type="sink",
                 )
             graph.add_edge(
                 sink_node_id,
@@ -828,7 +928,11 @@ def build_execution_graph(
     for coalesce_id in coalesce_ids.values():
         incoming_edges_with_data = list(graph._graph.in_edges(coalesce_id, data=True, keys=True))
         if not incoming_edges_with_data:
-            raise GraphValidationError(f"Coalesce node '{coalesce_id}' has no incoming branches; cannot determine schema for audit.")
+            raise GraphValidationError(
+                f"Coalesce node '{coalesce_id}' has no incoming branches; cannot determine schema for audit.",
+                component_id=str(coalesce_id),
+                component_type="coalesce",
+            )
 
         coal_config = coalesce_id_to_config[coalesce_id]
 
@@ -836,12 +940,12 @@ def build_execution_graph(
         # Identity branches have COPY edges labelled with branch_name.
         # Transform branches have MOVE edges from the last transform — we
         # correlate via the coalesce config's branch_input → branch_name mapping.
-        branch_to_schema: dict[str, dict[str, Any]] = {}
+        branch_to_schema: dict[str, SchemaConfig] = {}
 
         for from_id, _to_id, _key, data in incoming_edges_with_data:
             edge_label = data["label"]
             edge_mode = data["mode"]
-            schema = _best_schema_dict(NodeID(from_id))
+            schema = _best_schema_config(NodeID(from_id))
 
             if edge_mode == RoutingMode.COPY and edge_label in coal_config.branches:
                 # Identity branch: COPY edge labelled with branch name
@@ -858,76 +962,65 @@ def build_execution_graph(
                         branch_to_schema[branch_name] = schema
                         break
 
+        # Update branch_info with schema information for runtime tracking of
+        # lost branch fields. When a branch is diverted at runtime, the coalesce
+        # executor can report which fields were expected from that lost branch.
+        for branch_name_str, schema in branch_to_schema.items():
+            branch_key = BranchName(branch_name_str)
+            if branch_key in branch_info:
+                # Use replace() to preserve any future BranchInfo fields automatically
+                branch_info[branch_key] = replace(branch_info[branch_key], schema=schema)
+
+        # Collect contract fields from ALL branches for propagation.
+        #   guaranteed_fields = policy-aware merge of branches that declare:
+        #                         require_all → UNION (every branch always
+        #                                       arrives, any branch's guarantee
+        #                                       survives dict.update in the
+        #                                       merged row)
+        #                         others      → INTERSECTION (branches may be
+        #                                       lost / only first/quorum arrives,
+        #                                       so only fields guaranteed by
+        #                                       every branch survive)
+        #   audit_fields = union (any audit field from any branch)
+        #
+        # Only branches that declare guarantees participate. See
+        # SchemaConfig.declares_guaranteed_fields for the None-vs-empty contract
+        # (None = abstain, () = participate with empty set).
+        #
+        # This stored tuple must match ExecutionGraph.get_effective_guaranteed_fields()
+        # for the same COALESCE node at runtime — consumers that read the stored
+        # schema directly (deferred config gates via _best_schema_config,
+        # nested coalesces via get_schema_config_from_node, and any non-COALESCE
+        # path through get_guaranteed_fields) rely on this equivalence.
+        # Use extracted merge function for guaranteed_fields
+        merged_guaranteed_tuple = merge_guaranteed_fields(
+            branch_to_schema,
+            require_all=coal_config.has_all_branch_semantics,
+        )
+
+        # Audit fields always use union (any audit field from any branch)
+        audit_sets: list[set[str]] = []
+        for schema_cfg in branch_to_schema.values():
+            af = schema_cfg.audit_fields
+            if af is not None:
+                audit_sets.append(set(af))
+        merged_audit_tuple = tuple(sorted(set.union(*audit_sets))) if audit_sets else None
+
         if coal_config.merge == "union":
-            # Union merge: require compatible types on ALL pairwise overlapping fields.
-            # Parse each branch's SchemaConfig dict to extract field definitions.
-            # Tracks (type, required, first_branch) to preserve optionality markers.
-            seen_types: dict[str, tuple[str, bool, str]] = {}  # field → (type, required, first_branch)
-            all_observed = False
-            for branch_name, schema_dict in branch_to_schema.items():
-                if schema_dict["mode"] == "observed":
-                    all_observed = True
-                    break
-                # Non-observed schemas must have "fields" — to_dict() always emits
-                # it, and from_dict() rejects explicit schemas without it.  Absence
-                # here is a bug in the upstream schema provider (_best_schema_dict).
-                # See: elspeth-ba100104c2 (coalesce merge should use SchemaConfig).
-                fields_list = schema_dict["fields"]
-                if not fields_list:
-                    continue
-                for field_spec in fields_list:
-                    fname, ftype = _field_name_type(field_spec)
-                    freq = _field_required(field_spec)
-                    if fname in seen_types:
-                        prior_type, _prior_req, prior_branch = seen_types[fname]
-                        if prior_type != ftype:
-                            raise GraphValidationError(
-                                f"Coalesce node '{coalesce_id}' receives incompatible "
-                                f"types for field '{fname}' in union merge: "
-                                f"branch '{prior_branch}' has {prior_type!r}, "
-                                f"branch '{branch_name}' has {ftype!r}. "
-                                "Union merge requires compatible types on shared fields."
-                            )
-                        # If optional in ANY branch, optional in the merged output.
-                        if not freq:
-                            seen_types[fname] = (prior_type, False, prior_branch)
-                    else:
-                        seen_types[fname] = (ftype, freq, branch_name)
-            # Build merged schema preserving contract fields.
-            if all_observed or not seen_types:
-                merged: dict[str, Any] = {"mode": "observed"}
-            else:
-                merged = {
-                    "mode": "flexible",
-                    "fields": [f"{name}: {ftype}{'?' if not req else ''}" for name, (ftype, req, _) in seen_types.items()],
-                }
-            # Propagate contract fields from branches:
-            #   guaranteed_fields = intersection (guaranteed by ALL branches)
-            #   audit_fields = union (any audit field from any branch)
-            #
-            # Every branch participates — absent guaranteed_fields means "I
-            # guarantee nothing", not "I abstain from the vote".  An undeclared
-            # branch collapses the intersection to ∅, which is correct: we
-            # can't promise downstream what an undeclared branch provides.
-            # (Upstream should provide SchemaConfig objects, not dicts that
-            # may or may not carry optional keys — see bug ticket below.)
-            guaranteed_sets: list[set[str]] = []
-            audit_sets: list[set[str]] = []
-            for schema_dict in branch_to_schema.values():
-                gf = schema_dict.get("guaranteed_fields")
-                guaranteed_sets.append(set(gf) if gf is not None else set())
-                af = schema_dict.get("audit_fields")
-                if af is not None:
-                    audit_sets.append(set(af))
-            merged_guaranteed = set.intersection(*guaranteed_sets) if guaranteed_sets else set()
-            if merged_guaranteed:
-                merged["guaranteed_fields"] = sorted(merged_guaranteed)
-            if audit_sets:
-                merged["audit_fields"] = sorted(set.union(*audit_sets))
-            graph.get_node_info(coalesce_id).config["schema"] = merged
+            # Union merge: use extracted merge function for field-level logic
+            # See merge_union_fields() docstring for OR/AND semantics explanation
+            merged_schema = merge_union_fields(
+                branch_to_schema,
+                require_all=coal_config.has_all_branch_semantics,
+                collision_policy=coal_config.union_collision_policy,
+                branch_order=tuple(coal_config.branches.keys()),
+                coalesce_id=coalesce_id,
+                guaranteed_fields=merged_guaranteed_tuple,
+                audit_fields=merged_audit_tuple,
+            )
+            _assign_schema(coalesce_id, merged_schema)
         elif coal_config.merge == "select":
             # Select merge: use selected branch's schema directly.
-            # _best_schema_dict() returns a SchemaConfig-compatible dict.
             select_branch = coal_config.select_branch
             assert select_branch is not None  # Guaranteed by validate_merge_requirements
             if select_branch not in branch_to_schema:
@@ -935,23 +1028,37 @@ def build_execution_graph(
                     f"Coalesce node '{coalesce_id}' select_branch '{select_branch}' "
                     f"has no schema mapping. Available branches: "
                     f"{sorted(branch_to_schema.keys())}. "
-                    "This indicates a graph construction bug."
+                    "This indicates a graph construction bug.",
+                    component_id=str(coalesce_id),
+                    component_type="coalesce",
                 )
-            graph.get_node_info(coalesce_id).config["schema"] = branch_to_schema[select_branch]
+            _assign_schema(coalesce_id, branch_to_schema[select_branch])
         else:
             # Nested merge: output has branch names as top-level fields, each
             # containing the branch's row data as a nested dict.  Since the type
             # system only supports flat types, declare branch fields as "any".
-            graph.get_node_info(coalesce_id).config["schema"] = {
-                "mode": "flexible",
-                "fields": [f"{branch}: any" for branch in branch_to_schema],
-            }
+            # For partial-arrival policies, branch fields are optional since not
+            # all branches may arrive at runtime.
+            optional = not coal_config.has_all_branch_semantics
+            nested_fields = tuple(FieldDefinition(name=branch, field_type="any", required=not optional) for branch in branch_to_schema)
+            nested_schema = SchemaConfig(
+                mode="flexible",
+                fields=nested_fields,
+            )
+            _assign_schema(coalesce_id, nested_schema)
+
+    # Update branch_info on the graph now that schemas are populated.
+    # The initial set_branch_info (line ~821) stored entries without schemas.
+    # This call overwrites with schema-enriched entries for runtime lost-branch
+    # field tracking.
+    if branch_info:
+        graph.set_branch_info(branch_info)
 
     # Config gate schema resolution (pass 2): resolve gates that were deferred
     # because their upstream producer (e.g., coalesce) didn't have schema yet.
     for gate_id, _gate_name, input_connection in deferred_config_gate_schemas:
         producer_id, _producer_label = producers[input_connection]
-        graph.get_node_info(gate_id).config["schema"] = _best_schema_dict(producer_id)
+        _assign_schema(gate_id, _best_schema_config(producer_id))
 
     # PHASE 2 VALIDATION: Validate schema compatibility AFTER graph is built
     graph.validate_edge_compatibility()
@@ -960,19 +1067,14 @@ def build_execution_graph(
     if coalesce_id_to_config:
         graph.warn_divert_coalesce_interactions(coalesce_id_to_config)
 
-    # Freeze all NodeInfo configs now that schema resolution is complete.
-    # NodeInfo is frozen=True so we use object.__setattr__ to replace the
-    # mutable dict with an immutable MappingProxyType.  This prevents
-    # accidental mutation of node configs after graph construction.
-    #
-    # Note: This is a shallow freeze (top-level only). Deep immutability is
-    # not enforced because downstream code (SchemaConfig.from_dict, etc.)
-    # expects dict/list types, not MappingProxyType/tuple. The aliasing bug
-    # The aliasing bug is fixed by deep-copying in _best_schema_dict() instead.
+    # Deep-freeze all NodeInfo configs now that schema resolution is complete.
+    # NodeInfo.__post_init__ cannot freeze config because the builder mutates
+    # it during multi-step schema propagation (gate/coalesce schema assignment).
+    # deep_freeze converts nested dicts/lists to MappingProxyType/tuple recursively.
     for _, attrs in graph._graph.nodes(data=True):
         info = attrs["info"]
         if isinstance(info.config, dict):
-            object.__setattr__(info, "config", MappingProxyType(info.config))
+            object.__setattr__(info, "config", deep_freeze(info.config))
 
     # Step maps and node sequence support node_id-based processor traversal.
     graph.set_pipeline_nodes(pipeline_nodes)

@@ -36,13 +36,13 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import Determinism, PluginSchema, TransformResult
+from elspeth.contracts import Determinism, PluginSchema, TransformProtocol, TransformResult
 from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.plugins.transforms.passthrough import PassThrough
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
 
 if TYPE_CHECKING:
-    from elspeth.contracts import TransformProtocol
     from elspeth.contracts.plugin_context import PluginContext
 
 
@@ -57,6 +57,72 @@ def _skip_if_batch_transform(transform: TransformProtocol) -> None:
     """Skip process()-oriented contracts for batch-only transforms."""
     if _is_batch_transform(transform):
         pytest.skip("Transform uses BatchTransformMixin - process() not supported, use accept()")
+
+
+def _process_valid_input(
+    transform: TransformProtocol,
+    valid_input: dict[str, Any],
+    ctx: PluginContext,
+) -> TransformResult:
+    """Run process() on the valid-input fixture and require a TransformResult."""
+    pipeline_row = make_pipeline_row(valid_input)
+    result = transform.process(pipeline_row, ctx)
+    assert isinstance(result, TransformResult), f"process() returned {type(result).__name__}, expected TransformResult"
+    return result
+
+
+def _process_successful_valid_input(
+    transform: TransformProtocol,
+    valid_input: dict[str, Any],
+    ctx: PluginContext,
+) -> TransformResult:
+    """Run process() on valid input and require the fixture to be genuinely valid."""
+    result = _process_valid_input(transform, valid_input, ctx)
+    assert result.status == "success", (
+        f"valid_input fixture must produce a successful TransformResult; got status={result.status!r}, reason={result.reason!r}"
+    )
+    return result
+
+
+def _assert_frozenset_of_str(value: object, *, attr_name: str) -> frozenset[str]:
+    """Assert a protocol field is a frozenset[str] and return it narrowed."""
+    assert isinstance(value, frozenset), f"{attr_name} is {type(value).__name__}, expected frozenset"
+    assert all(isinstance(field, str) for field in value), f"{attr_name} must contain only str values"
+    return value
+
+
+def _transform_boundary_snapshot(transform: TransformProtocol) -> dict[str, Any]:
+    return {
+        "can_drop_rows": transform.can_drop_rows,
+        "config": dict(transform.config),
+        "creates_tokens": transform.creates_tokens,
+        "declared_input_fields": transform.declared_input_fields,
+        "declared_output_fields": transform.declared_output_fields,
+        "determinism": transform.determinism,
+        "effective_static_contract": transform.effective_static_contract(),
+        "input_schema": transform.input_schema,
+        "is_batch_aware": transform.is_batch_aware,
+        "lifecycle_started": transform._on_start_called,
+        "name": transform.name,
+        "node_id": transform.node_id,
+        "on_error": transform.on_error,
+        "on_success": transform.on_success,
+        "output_schema": transform.output_schema,
+        "passes_through_input": transform.passes_through_input,
+        "plugin_version": transform.plugin_version,
+        "source_file_hash": transform.source_file_hash,
+    }
+
+
+def _transform_result_snapshot(result: TransformResult) -> dict[str, Any]:
+    return {
+        "reason": result.reason,
+        "retryable": result.retryable,
+        "row": result.row.to_dict() if result.row is not None else None,
+        "rows": tuple(row.to_dict() for row in result.rows) if result.rows is not None else None,
+        "status": result.status,
+        "success_reason": result.success_reason,
+    }
 
 
 class TransformContractTestBase(ABC):
@@ -89,41 +155,50 @@ class TransformContractTestBase(ABC):
     # Protocol Attribute Contracts
     # =========================================================================
 
-    def test_transform_has_name(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'name' attribute."""
-        assert hasattr(transform, "name")
+    def test_transform_satisfies_runtime_protocol(self, transform: TransformProtocol) -> None:
+        """Contract: Transform MUST satisfy the runtime engine protocol."""
+        assert isinstance(transform, TransformProtocol)
+
+    def test_transform_engine_identity_surface_is_coherent(self, transform: TransformProtocol) -> None:
+        """Contract: engine-facing identity and routing metadata MUST be well formed."""
         assert isinstance(transform.name, str)
         assert len(transform.name) > 0
-
-    def test_transform_has_input_schema(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have an 'input_schema' attribute that is a PluginSchema subclass."""
         assert isinstance(transform.input_schema, type)
         assert issubclass(transform.input_schema, PluginSchema)
-
-    def test_transform_has_output_schema(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have an 'output_schema' attribute that is a PluginSchema subclass."""
         assert isinstance(transform.output_schema, type)
         assert issubclass(transform.output_schema, PluginSchema)
-
-    def test_transform_has_determinism(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'determinism' attribute."""
-        assert hasattr(transform, "determinism")
         assert isinstance(transform.determinism, Determinism)
-
-    def test_transform_has_plugin_version(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'plugin_version' attribute."""
-        assert hasattr(transform, "plugin_version")
         assert isinstance(transform.plugin_version, str)
+        assert isinstance(transform.config, dict)
+        assert transform.node_id is None or isinstance(transform.node_id, str)
+        assert transform.source_file_hash is None or isinstance(transform.source_file_hash, str)
+        assert isinstance(transform._on_start_called, bool)
+        assert transform.on_error is None or isinstance(transform.on_error, str)
+        assert transform.on_success is None or isinstance(transform.on_success, str)
 
-    def test_transform_has_batch_awareness_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have 'is_batch_aware' attribute."""
-        assert hasattr(transform, "is_batch_aware")
+    def test_transform_behavior_flags_are_boolean(self, transform: TransformProtocol) -> None:
+        """Contract: engine dispatch and governance flags MUST be explicit booleans."""
         assert isinstance(transform.is_batch_aware, bool)
-
-    def test_transform_has_creates_tokens_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have 'creates_tokens' attribute."""
-        assert hasattr(transform, "creates_tokens")
+        assert isinstance(transform.supports_row_mode_when_batch_aware, bool)
         assert isinstance(transform.creates_tokens, bool)
+        assert isinstance(transform.passes_through_input, bool)
+        assert isinstance(transform.can_drop_rows, bool)
+
+    def test_declaration_surfaces_are_normalized_and_effective(self, transform: TransformProtocol) -> None:
+        """Contract: declared fields are normalized and included in the static contract."""
+        _assert_frozenset_of_str(transform.declared_input_fields, attr_name="declared_input_fields")
+        static_contract = _assert_frozenset_of_str(
+            transform.effective_static_contract(),
+            attr_name="effective_static_contract()",
+        )
+        declared_output_fields = _assert_frozenset_of_str(
+            transform.declared_output_fields,
+            attr_name="declared_output_fields",
+        )
+        assert declared_output_fields <= static_contract, (
+            "declared_output_fields must be included in effective_static_contract(); "
+            f"missing={sorted(declared_output_fields - static_contract)!r}"
+        )
 
     # =========================================================================
     # process() Method Contracts
@@ -137,22 +212,17 @@ class TransformContractTestBase(ABC):
     ) -> None:
         """Contract: process() MUST return TransformResult."""
         _skip_if_batch_transform(transform)
-        pipeline_row = make_pipeline_row(valid_input)
-        result = transform.process(pipeline_row, ctx)
-        assert isinstance(result, TransformResult), f"process() returned {type(result).__name__}, expected TransformResult"
+        _process_valid_input(transform, valid_input, ctx)
 
-    def test_success_result_has_status(
+    def test_valid_input_returns_success_status(
         self,
         transform: TransformProtocol,
         valid_input: dict[str, Any],
         ctx: PluginContext,
     ) -> None:
-        """Contract: TransformResult MUST have status field."""
+        """Contract: valid_input fixture MUST exercise the success path."""
         _skip_if_batch_transform(transform)
-        pipeline_row = make_pipeline_row(valid_input)
-        result = transform.process(pipeline_row, ctx)
-        assert hasattr(result, "status")
-        assert result.status in ("success", "error")
+        _process_successful_valid_input(transform, valid_input, ctx)
 
     def test_success_result_has_output_data(
         self,
@@ -162,12 +232,10 @@ class TransformContractTestBase(ABC):
     ) -> None:
         """Contract: Success results MUST have output data (row or rows)."""
         _skip_if_batch_transform(transform)
-        pipeline_row = make_pipeline_row(valid_input)
-        result = transform.process(pipeline_row, ctx)
-        if result.status == "success":
-            assert result.has_output_data, (
-                "Success TransformResult has no output data. Use TransformResult.success(row) or TransformResult.success_multi(rows)."
-            )
+        result = _process_successful_valid_input(transform, valid_input, ctx)
+        assert result.has_output_data, (
+            "Success TransformResult has no output data. Use TransformResult.success(row) or TransformResult.success_multi(rows)."
+        )
 
     def test_success_single_row_is_pipeline_row(
         self,
@@ -177,23 +245,21 @@ class TransformContractTestBase(ABC):
     ) -> None:
         """Contract: Success single-row output MUST be a PipelineRow."""
         _skip_if_batch_transform(transform)
-        pipeline_row = make_pipeline_row(valid_input)
-        result = transform.process(pipeline_row, ctx)
-        if result.status == "success" and result.row is not None:
+        result = _process_successful_valid_input(transform, valid_input, ctx)
+        if result.row is not None:
             assert isinstance(result.row, PipelineRow), f"TransformResult.row is {type(result.row).__name__}, expected PipelineRow"
 
-    def test_success_multi_row_is_list_of_pipeline_rows(
+    def test_success_multi_row_is_tuple_of_pipeline_rows(
         self,
         transform: TransformProtocol,
         valid_input: dict[str, Any],
         ctx: PluginContext,
     ) -> None:
-        """Contract: Success multi-row output MUST be a list of PipelineRows."""
+        """Contract: Success multi-row output MUST be a tuple of PipelineRows."""
         _skip_if_batch_transform(transform)
-        pipeline_row = make_pipeline_row(valid_input)
-        result = transform.process(pipeline_row, ctx)
-        if result.status == "success" and result.rows is not None:
-            assert isinstance(result.rows, list), f"TransformResult.rows is {type(result.rows).__name__}, expected list"
+        result = _process_successful_valid_input(transform, valid_input, ctx)
+        if result.rows is not None:
+            assert isinstance(result.rows, tuple), f"TransformResult.rows is {type(result.rows).__name__}, expected tuple"
             for i, row in enumerate(result.rows):
                 assert isinstance(row, PipelineRow), f"TransformResult.rows[{i}] is {type(row).__name__}, expected PipelineRow"
 
@@ -207,26 +273,36 @@ class TransformContractTestBase(ABC):
         valid_input: dict[str, Any],
         ctx: PluginContext,
     ) -> None:
-        """Contract: close() MUST be safe to call multiple times."""
-        # Process something first (skip process() for batch transforms)
+        """Contract: repeated close() preserves transform metadata and output snapshots."""
+        result = None
+        result_snapshot = None
         if not _is_batch_transform(transform):
-            pipeline_row = make_pipeline_row(valid_input)
-            transform.process(pipeline_row, ctx)
+            result = _process_successful_valid_input(transform, valid_input, ctx)
+            result_snapshot = _transform_result_snapshot(result)
+        boundary_snapshot = _transform_boundary_snapshot(transform)
 
-        # close() should not raise on first call
-        transform.close()
+        assert transform.close() is None
+        assert transform.close() is None
+        assert transform.close() is None
 
-        # close() should not raise on subsequent calls (idempotent)
-        transform.close()
-        transform.close()
+        assert _transform_boundary_snapshot(transform) == boundary_snapshot
+        if result_snapshot is not None:
+            assert result is not None
+            assert _transform_result_snapshot(result) == result_snapshot
 
     def test_on_start_does_not_raise(
         self,
         transform: TransformProtocol,
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_start() lifecycle hook MUST not raise."""
-        transform.on_start(ctx)
+        """Contract: on_start() returns None and sets the lifecycle guard."""
+        boundary_snapshot = _transform_boundary_snapshot(transform)
+        boundary_snapshot["lifecycle_started"] = True
+
+        assert transform.on_start(ctx) is None
+
+        assert transform._on_start_called is True
+        assert _transform_boundary_snapshot(transform) == boundary_snapshot
 
     def test_on_complete_does_not_raise(
         self,
@@ -234,12 +310,20 @@ class TransformContractTestBase(ABC):
         valid_input: dict[str, Any],
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_complete() lifecycle hook MUST not raise."""
-        # Process something first (skip process() for batch transforms)
+        """Contract: on_complete() preserves transform metadata and output snapshots."""
+        result = None
+        result_snapshot = None
         if not _is_batch_transform(transform):
-            pipeline_row = make_pipeline_row(valid_input)
-            transform.process(pipeline_row, ctx)
-        transform.on_complete(ctx)
+            result = _process_successful_valid_input(transform, valid_input, ctx)
+            result_snapshot = _transform_result_snapshot(result)
+        boundary_snapshot = _transform_boundary_snapshot(transform)
+
+        assert transform.on_complete(ctx) is None
+
+        assert _transform_boundary_snapshot(transform) == boundary_snapshot
+        if result_snapshot is not None:
+            assert result is not None
+            assert _transform_result_snapshot(result) == result_snapshot
 
 
 class TransformContractPropertyTestBase(TransformContractTestBase):
@@ -356,3 +440,17 @@ class TransformErrorContractTestBase(TransformContractTestBase):
         result = transform.process(pipeline_row, ctx)
         assert result.status == "error"
         assert isinstance(result.retryable, bool)
+
+
+class TestTransformContractBaseExemplar(TransformContractPropertyTestBase):
+    """Concrete exemplar so this contract file is directly executable."""
+
+    @pytest.fixture
+    def transform(self) -> TransformProtocol:
+        """Return the canonical simple transform used to prove base collection."""
+        return PassThrough({"schema": {"mode": "observed"}})
+
+    @pytest.fixture
+    def valid_input(self) -> dict[str, Any]:
+        """Return input that should process successfully."""
+        return {"id": 1, "name": "contract-exemplar", "value": 42}

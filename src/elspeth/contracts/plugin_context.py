@@ -10,21 +10,24 @@ The PluginContext carries everything a plugin needs during execution:
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
+from elspeth.contracts.freeze import deep_freeze
 
 if TYPE_CHECKING:
     from elspeth.contracts import Call, CallStatus, CallType, TransformErrorReason
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
+    from elspeth.contracts.audit_protocols import PluginAuditWriter
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.errors import ContractViolation
     from elspeth.contracts.identity import TokenInfo
+    from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-    from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.rate_limit import RateLimitRegistry
 
 logger = logging.getLogger(__name__)
@@ -80,9 +83,11 @@ class PluginContext:
     config: Mapping[str, Any]
 
     # === Audit & Infrastructure ===
-    landscape: LandscapeRecorder | None = None
+    landscape: PluginAuditWriter | None = None
+    payload_store: PayloadStore | None = None
     rate_limit_registry: RateLimitRegistry | None = None
     concurrency_config: RuntimeConcurrencyConfig | None = None
+    shutdown_event: threading.Event | None = None
 
     # Additional metadata
     node_id: str | None = field(default=None)
@@ -113,7 +118,7 @@ class PluginContext:
     # Exactly one of state_id or operation_id should be set when recording calls
     state_id: str | None = field(default=None)  # For transform calls (via node_states)
     operation_id: str | None = field(default=None)  # For source/sink calls (via operations)
-    # Note: call_index allocation is delegated to LandscapeRecorder.allocate_call_index()
+    # Note: call_index allocation is delegated to PluginAuditWriter.allocate_call_index()
     # to ensure coordination with audited clients.
 
     # === Telemetry Callback ===
@@ -122,67 +127,36 @@ class PluginContext:
     # Plugins ALWAYS call this after successful Landscape recording - no None checks.
     telemetry_emit: Callable[[Any], None] = field(default=lambda event: None)
 
-    # === Checkpoint API ===
-    # Used by batch transforms (e.g., azure_batch_llm) for crash recovery.
-    # The checkpoint stores batch_id, row_mapping, etc. as a typed
-    # BatchCheckpointState (frozen dataclass) between invocations.
-    #
-    # Checkpoints are keyed by node_id to support multiple batch transforms.
-    # The orchestrator restores these from the BatchPendingError.checkpoint
-    # when scheduling retries.
-    _checkpoint: BatchCheckpointState | None = field(default=None)
+    # Validation errors that must later be linked to a persisted quarantine row.
+    # Entries are (match_key, error_id), where match_key hashes the raw row payload
+    # before orchestrator normalization/wrapping.
+    _pending_quarantine_validation_errors: list[tuple[str, str]] = field(default_factory=list)
 
-    # Batch checkpoints restored from previous BatchPendingError
-    # Maps node_id -> typed checkpoint state for each batch transform
-    _batch_checkpoints: dict[str, BatchCheckpointState] = field(default_factory=dict)
+    def __post_init__(self) -> None:
+        # Deep-freeze config so plugins cannot mutate the run configuration
+        # after the audit snapshot (settings_json, config_hash) is recorded.
+        # PluginContext is not frozen (checkpoint/token need mutation), but
+        # config must be immutable for audit integrity.
+        self.config = deep_freeze(self.config)
 
-    def get_checkpoint(self) -> BatchCheckpointState | None:
-        """Get checkpoint state for batch transforms.
+    @staticmethod
+    def _validation_error_match_key(row: Any) -> str:
+        """Build a stable lookup key for a raw validation-error payload."""
+        from elspeth.contracts.hashing import repr_hash, stable_hash
 
-        Used by batch transforms to recover state after crashes.
-        Returns None if no checkpoint exists.
+        try:
+            return stable_hash(row)
+        except (ValueError, TypeError):
+            return repr_hash(row)
 
-        First checks for a restored batch checkpoint (from a previous
-        BatchPendingError), then falls back to the local checkpoint.
-
-        Returns:
-            BatchCheckpointState with batch state, or None if empty
-        """
-        # First check for restored batch checkpoint (keyed by node_id)
-        if self.node_id and self.node_id in self._batch_checkpoints:
-            return self._batch_checkpoints[self.node_id]
-
-        # Fall back to local checkpoint
-        return self._checkpoint
-
-    def set_checkpoint(self, state: BatchCheckpointState) -> None:
-        """Set checkpoint state for batch transforms.
-
-        Replaces the checkpoint with the provided typed state.
-        Writes to the restored batch checkpoint slot (if present for
-        this node), or the local checkpoint otherwise.
-
-        Args:
-            state: Typed checkpoint state (BatchCheckpointState)
-        """
-        if self.node_id and self.node_id in self._batch_checkpoints:
-            self._batch_checkpoints[self.node_id] = state
-        else:
-            self._checkpoint = state
-
-    def clear_checkpoint(self) -> None:
-        """Clear checkpoint state after batch completion.
-
-        Called when batch processing completes successfully
-        or when starting fresh after a failure.
-
-        Clears both the local checkpoint and any restored batch checkpoint
-        for the current node to prevent stale data on subsequent batches.
-        """
-        self._checkpoint = None
-        # Also clear restored batch checkpoint to prevent stale resume data
-        if self.node_id and self.node_id in self._batch_checkpoints:
-            del self._batch_checkpoints[self.node_id]
+    def pop_pending_quarantine_validation_error_id(self, row: Any) -> str | None:
+        """Consume the queued validation error ID matching a quarantined row payload."""
+        match_key = self._validation_error_match_key(row)
+        for index, (pending_match_key, error_id) in enumerate(self._pending_quarantine_validation_errors):
+            if pending_match_key == match_key:
+                del self._pending_quarantine_validation_errors[index]
+                return error_id
+        return None
 
     def record_call(
         self,
@@ -220,7 +194,6 @@ class PluginContext:
             FrameworkBugError: If neither or both of state_id and operation_id are set
         """
         from elspeth.contracts import FrameworkBugError
-        from elspeth.contracts.errors import AuditIntegrityError
 
         if self.landscape is None:
             raise FrameworkBugError(
@@ -250,7 +223,7 @@ class PluginContext:
 
         # Route to appropriate recorder method
         if has_state:
-            # Delegate call_index allocation to centralized LandscapeRecorder.
+            # Delegate call_index allocation to centralized PluginAuditWriter.
             # This ensures UNIQUE(state_id, call_index) when mixing ctx.record_call()
             # with audited clients (AuditedLLMClient, AuditedHTTPClient), which also
             # use recorder.allocate_call_index().
@@ -364,12 +337,10 @@ class PluginContext:
                     token_usage=token_usage,
                 )
             )
-        except (FrameworkBugError, AuditIntegrityError):
-            raise  # System bugs and audit integrity violations must crash
-        except Exception as tel_err:
-            if isinstance(tel_err, (TypeError, AttributeError, NameError)):
-                raise  # Programming errors must crash — but not KeyError from external data
-            # Telemetry failure must not corrupt the call recording
+        except (OSError, ConnectionError, TimeoutError) as tel_err:
+            # Telemetry transport failures are expected and must not corrupt
+            # the call recording. All other exceptions (including Tier 1,
+            # programming errors like KeyError) propagate naturally.
             logger.warning(
                 "telemetry_emit_failed in record_call",
                 extra={
@@ -422,12 +393,12 @@ class PluginContext:
                 row_id = stable_hash(row)[:16]
             except (ValueError, TypeError) as e:
                 # Non-canonical data (NaN, Infinity, or other non-serializable types)
-                # Hash the repr() instead - not canonical, but preserves audit trail
-                row_preview = repr(row)[:200] + "..." if len(repr(row)) > 200 else repr(row)
+                # Hash the repr() instead - not canonical, but preserves audit trail.
+                # Log only the error type, not row content (logging policy: no row data outside Landscape).
                 logger.warning(
-                    "Row data not canonically serializable, using repr() hash: %s | Row preview: %s",
+                    "Row data not canonically serializable, using repr() hash: %s (%s)",
+                    type(e).__name__,
                     str(e),
-                    row_preview,
                 )
                 row_id = repr_hash(row)[:16]
 
@@ -459,6 +430,10 @@ class PluginContext:
             destination=destination,
             contract_violation=contract_violation,
         )
+
+        if destination != "discard" and error_id is not None:
+            match_key = self._validation_error_match_key(row)
+            self._pending_quarantine_validation_errors.append((match_key, error_id))
 
         return ValidationErrorToken(
             row_id=row_id,
@@ -500,8 +475,7 @@ class PluginContext:
             )
 
         error_id = self.landscape.record_transform_error(
-            run_id=self.run_id,
-            token_id=token_id,
+            ref=TokenRef(token_id=token_id, run_id=self.run_id),
             transform_id=transform_id,
             row_data=row,
             error_details=error_details,

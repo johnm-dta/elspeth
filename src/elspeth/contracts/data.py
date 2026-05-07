@@ -19,6 +19,7 @@ from types import UnionType
 from typing import Annotated, Any, TypeVar, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic.fields import FieldInfo
 
 T = TypeVar("T", bound="PluginSchema")
 
@@ -96,7 +97,7 @@ def validate_row(
                 SchemaValidationError(
                     field=field,
                     message=error["msg"],
-                    value=error.get("input"),
+                    value=error["input"],
                 )
             )
         return errors
@@ -114,6 +115,7 @@ class CompatibilityResult:
     missing_fields: tuple[str, ...] = ()
     type_mismatches: tuple[tuple[str, str, str], ...] = ()
     extra_fields: tuple[str, ...] = ()
+    constraint_mismatches: tuple[tuple[str, str], ...] = ()
 
     @property
     def error_message(self) -> str | None:
@@ -127,10 +129,65 @@ class CompatibilityResult:
         if self.type_mismatches:
             mismatches = [f"{name} (expected {expected}, got {actual})" for name, expected, actual in self.type_mismatches]
             parts.append(f"Type mismatches: {', '.join(mismatches)}")
+        if self.constraint_mismatches:
+            constraints = [f"{name}: {reason}" for name, reason in self.constraint_mismatches]
+            parts.append(f"Constraint mismatches: {', '.join(constraints)}")
         if self.extra_fields:
             parts.append(f"Extra fields forbidden by consumer: {', '.join(self.extra_fields)}")
 
         return "; ".join(parts)
+
+
+def _get_allow_inf_nan(field: FieldInfo) -> bool | None:
+    """Extract the allow_inf_nan constraint from a FieldInfo's metadata.
+
+    Returns False if the field explicitly disallows inf/nan, True if it
+    explicitly allows them, or None if the field has no such constraint
+    (Pydantic default: inf/nan allowed).
+
+    Pydantic v2 stores Field(allow_inf_nan=False) in FieldInfo.metadata
+    as a _PydanticGeneralMetadata or AllowInfNan object with an
+    ``allow_inf_nan`` attribute in its __dict__.
+    """
+    for item in field.metadata:
+        try:
+            item_vars = vars(item)
+        except TypeError:
+            # Metadata items like plain strings don't have __dict__
+            continue
+        if "allow_inf_nan" in item_vars:
+            value: bool = item_vars["allow_inf_nan"]
+            return value
+    return None
+
+
+def _check_field_constraints(
+    field_name: str,
+    producer_field: FieldInfo,
+    consumer_field: FieldInfo,
+) -> str | None:
+    """Check if consumer field constraints are satisfied by producer field.
+
+    Returns a human-readable reason string if incompatible, None if compatible.
+
+    Constraint direction: if the consumer requires a constraint (e.g.,
+    allow_inf_nan=False) that the producer does not guarantee, the producer
+    might emit values the consumer will reject at runtime.
+
+    Only checks constraints where mismatch causes runtime validation failure.
+    """
+    # allow_inf_nan: consumer requires finite floats but producer doesn't guarantee them.
+    # None means "no constraint" (Pydantic default), which allows inf/nan.
+    consumer_allows = _get_allow_inf_nan(consumer_field)
+    producer_allows = _get_allow_inf_nan(producer_field)
+    if consumer_allows is False and producer_allows is not False:
+        # Only flag if producer's base type can actually produce non-finite values.
+        # int values are always finite; only float/Decimal can be NaN/Infinity.
+        producer_base = _unwrap_annotated(producer_field.annotation)
+        if producer_base is not int:
+            return "consumer requires finite floats (allow_inf_nan=False) but producer does not guarantee it"
+
+    return None
 
 
 def check_compatibility(
@@ -146,6 +203,7 @@ def check_compatibility(
     - All REQUIRED fields in consumer are provided by producer
     - Fields with defaults in consumer are optional
     - Field types are compatible (exact match or coercible when consumer allows)
+    - Consumer constraints are satisfied by producer (e.g., allow_inf_nan=False)
     - If consumer has extra="forbid", producer must not have extra fields
     - If consumer has strict=True, no type coercion is allowed (int->float rejected)
 
@@ -167,6 +225,7 @@ def check_compatibility(
 
     missing: list[str] = []
     mismatches: list[tuple[str, str, str]] = []
+    constraint_mismatches: list[tuple[str, str]] = []
 
     for field_name, consumer_field in consumer_fields.items():
         # Check if field is required (no default value)
@@ -190,6 +249,17 @@ def check_compatibility(
                         _type_name(producer_field.annotation),
                     )
                 )
+            else:
+                # Types are compatible — check if consumer has stricter constraints
+                # than producer guarantees.  E.g., consumer requires finite floats
+                # (allow_inf_nan=False) but producer emits unconstrained floats.
+                constraint_reason = _check_field_constraints(
+                    field_name,
+                    producer_field,
+                    consumer_field,
+                )
+                if constraint_reason is not None:
+                    constraint_mismatches.append((field_name, constraint_reason))
 
     # Check for extra fields when consumer forbids them
     extra: list[str] = []
@@ -201,13 +271,14 @@ def check_compatibility(
         consumer_field_names = set(consumer_fields.keys())
         extra = sorted(producer_field_names - consumer_field_names)
 
-    compatible = len(missing) == 0 and len(mismatches) == 0 and len(extra) == 0
+    compatible = len(missing) == 0 and len(mismatches) == 0 and len(constraint_mismatches) == 0 and len(extra) == 0
 
     return CompatibilityResult(
         compatible=compatible,
         missing_fields=tuple(missing),
         type_mismatches=tuple(mismatches),
         extra_fields=tuple(extra),
+        constraint_mismatches=tuple(constraint_mismatches),
     )
 
 
@@ -241,7 +312,9 @@ def _unwrap_annotated(annotation: Any) -> Any:
     """Unwrap typing.Annotated recursively to its underlying type.
 
     Annotated[T, ...] wraps a type with metadata (e.g., Pydantic constraints).
-    For compatibility checking we only care about the base type T, not metadata.
+    For BASE TYPE comparison we strip metadata here.  Semantic constraints
+    (e.g., allow_inf_nan=False) are checked separately by _check_field_constraints
+    using the FieldInfo objects, which Pydantic populates from the Annotated metadata.
 
     Examples:
         Annotated[float, FieldInfo(allow_inf_nan=False)] -> float

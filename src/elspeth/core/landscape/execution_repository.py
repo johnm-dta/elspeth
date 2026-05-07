@@ -11,8 +11,8 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
 from uuid import uuid4
 
-import structlog
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
     Artifact,
@@ -46,6 +46,7 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape._helpers import generate_id, now
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapePostCommitError, LandscapeRecordError
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
     BatchLoader,
@@ -64,6 +65,7 @@ from elspeth.core.landscape.schema import (
     node_states_table,
     operations_table,
     routing_events_table,
+    tokens_table,
 )
 
 if TYPE_CHECKING:
@@ -71,19 +73,25 @@ if TYPE_CHECKING:
     from elspeth.contracts.node_state_context import NodeStateContext
     from elspeth.contracts.payload_store import PayloadStore
 
-logger = structlog.get_logger(__name__)
-
 _TERMINAL_BATCH_STATUSES = frozenset({BatchStatus.COMPLETED, BatchStatus.FAILED})
+_TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateStatus.FAILED})
+_COMPLETABLE_OPERATION_STATUSES = frozenset({"completed", "failed"})
 
 
 class _PreparedCallData(NamedTuple):
-    """Intermediate result from _prepare_call_payloads — hashes, refs, and serialized error."""
+    """Intermediate result from _prepare_call_payloads.
+
+    Carries stable hashes plus any payload bytes that still need post-insert
+    materialization into the payload store.
+    """
 
     request_hash: str
     request_ref: str | None
     response_hash: str | None
     response_ref: str | None
     error_json: str | None
+    request_bytes: bytes | None
+    response_bytes: bytes | None
 
 
 class ExecutionRepository:
@@ -158,10 +166,6 @@ class ExecutionRepository:
             try:
                 input_hash = stable_hash(input_data)
             except (ValueError, TypeError):
-                logger.warning(
-                    "Quarantined node state input not canonically hashable (using repr_hash fallback): %s",
-                    type(input_data).__name__,
-                )
                 input_hash = repr_hash(input_data)
         else:
             input_hash = stable_hash(input_data)
@@ -266,11 +270,28 @@ class ExecutionRepository:
         if duration_ms is None:
             raise ValueError("duration_ms is required when completing a node state")
 
+        # Required fields per status
         if status == NodeStateStatus.COMPLETED and output_data is None:
             raise ValueError("COMPLETED node state requires output_data (output_hash would be NULL)")
 
         if status == NodeStateStatus.FAILED and error is None:
             raise ValueError("FAILED node state requires error details")
+
+        # Forbidden fields per status — prevent writing impossible states to Tier 1 data.
+        # These mirror the read-side checks in NodeStateLoader.load().
+        if status == NodeStateStatus.PENDING:
+            if output_data is not None:
+                raise ValueError("PENDING node state must not have output_data")
+            if error is not None:
+                raise ValueError("PENDING node state must not have error")
+            if success_reason is not None:
+                raise ValueError("PENDING node state must not have success_reason")
+
+        if status == NodeStateStatus.COMPLETED and error is not None:
+            raise ValueError("COMPLETED node state must not have error (contradicts success)")
+
+        if status == NodeStateStatus.FAILED and success_reason is not None:
+            raise ValueError("FAILED node state must not have success_reason (contradicts failure)")
 
         timestamp = now()
         output_hash = stable_hash(output_data) if output_data is not None else None
@@ -287,33 +308,52 @@ class ExecutionRepository:
 
         # Single transaction: UPDATE + SELECT-back for atomicity.
         # Prevents a concurrent reader from seeing the row between states.
-        with self._db.connection() as conn:
-            update_result = conn.execute(
-                node_states_table.update()
-                .where(node_states_table.c.state_id == state_id)
-                .values(
-                    status=status,
-                    output_hash=output_hash,
-                    duration_ms=duration_ms,
-                    error_json=error_json,
-                    success_reason_json=success_reason_json,
-                    context_after_json=context_json,
-                    completed_at=timestamp,
+        # Atomic conditional UPDATE: guard against already-terminal status in the
+        # WHERE clause (same TOCTOU-safe pattern as complete_batch).
+        terminal_values = [s.value for s in _TERMINAL_NODE_STATE_STATUSES]
+        try:
+            with self._db.connection() as conn:
+                update_result = conn.execute(
+                    node_states_table.update()
+                    .where(node_states_table.c.state_id == state_id)
+                    .where(node_states_table.c.status.notin_(terminal_values))
+                    .values(
+                        status=status,
+                        output_hash=output_hash,
+                        duration_ms=duration_ms,
+                        error_json=error_json,
+                        success_reason_json=success_reason_json,
+                        context_after_json=context_json,
+                        completed_at=timestamp,
+                    )
                 )
-            )
-            if update_result.rowcount == 0:
-                raise AuditIntegrityError(
-                    f"complete_node_state: zero rows affected for state_id={state_id} — target row does not exist (audit data corruption)"
-                )
+                if update_result.rowcount == 0:
+                    # Distinguish "not found" from "already terminal".
+                    existing = conn.execute(select(node_states_table.c.status).where(node_states_table.c.state_id == state_id)).fetchone()
+                    if existing is not None:
+                        raise LandscapeRecordError(
+                            f"Cannot complete node state {state_id}: current status {existing.status!r} is already terminal. "
+                            f"Terminal node states are immutable."
+                        )
+                    raise LandscapeRecordError(
+                        f"complete_node_state: zero rows affected for state_id={state_id} — target row does not exist (audit data corruption)"
+                    )
 
-            row = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
+                row = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"complete_node_state failed for state_id={state_id} — database rejected audit update: {type(exc).__name__}: {exc}"
+            ) from exc
 
         if row is None:
-            raise AuditIntegrityError(f"NodeState {state_id} not found after update — database corruption or transaction failure")
-        result = self._node_state_loader.load(row)
+            raise LandscapeRecordError(f"NodeState {state_id} not found after update — database corruption or transaction failure")
+        try:
+            result = self._node_state_loader.load(row)
+        except AuditIntegrityError as exc:
+            raise LandscapePostCommitError(f"NodeState {state_id} became unreadable immediately after completion: {exc}") from exc
         # Type narrowing: result is guaranteed to be terminal (PENDING/COMPLETED/FAILED)
         if isinstance(result, NodeStateOpen):
-            raise AuditIntegrityError(f"NodeState {state_id} should be terminal after completion but has status OPEN")
+            raise LandscapePostCommitError(f"NodeState {state_id} should be terminal after completion but has status OPEN")
         return result
 
     def get_node_state(self, state_id: str) -> NodeState | None:
@@ -330,6 +370,47 @@ class ExecutionRepository:
         if row is None:
             return None
         return self._node_state_loader.load(row)
+
+    def get_completed_row_ids_for_nodes(
+        self,
+        run_id: str,
+        node_ids: frozenset[str],
+    ) -> set[tuple[str, str]]:
+        """Get (node_id, row_id) pairs where a node_state has been completed.
+
+        Used to reconstruct coalesce late-arrival detection state from the
+        Landscape rather than from checkpoint data. The Landscape is the source
+        of truth — checkpoint-based completed_keys is a cache optimization.
+
+        Args:
+            run_id: Run ID to scope the query
+            node_ids: Set of node IDs to query (e.g., coalesce node IDs)
+
+        Returns:
+            Set of (node_id, row_id) tuples where the node_state has a
+            completed_at timestamp (meaning the coalesce resolved — success
+            or failure).
+        """
+        if not node_ids:
+            return set()
+
+        query = (
+            select(node_states_table.c.node_id, tokens_table.c.row_id)
+            .select_from(
+                node_states_table.join(
+                    tokens_table,
+                    node_states_table.c.token_id == tokens_table.c.token_id,
+                )
+            )
+            .where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.node_id.in_(node_ids),
+                node_states_table.c.completed_at.isnot(None),
+            )
+            .distinct()
+        )
+        rows = self._ops.execute_fetchall(query)
+        return {(row.node_id, row.row_id) for row in rows}
 
     def record_routing_event(
         self,
@@ -362,12 +443,9 @@ class ExecutionRepository:
         routing_group_id = routing_group_id or generate_id()
         reason_hash = stable_hash(reason) if reason else None
         timestamp = now()
-
-        # Auto-persist reason to payload store if available and ref not provided
-        # This enables exported audit trails to explain routing decisions
+        auto_reason_bytes = None
         if reason is not None and reason_ref is None and self._payload_store is not None:
-            reason_bytes = canonical_json(reason).encode("utf-8")
-            reason_ref = self._payload_store.store(reason_bytes)
+            auto_reason_bytes = canonical_json(reason).encode("utf-8")
 
         event = RoutingEvent(
             event_id=event_id,
@@ -377,7 +455,7 @@ class ExecutionRepository:
             ordinal=ordinal,
             mode=mode,
             reason_hash=reason_hash,
-            reason_ref=reason_ref,
+            reason_ref=reason_ref if auto_reason_bytes is None else None,
             created_at=timestamp,
         )
 
@@ -394,6 +472,24 @@ class ExecutionRepository:
                 created_at=event.created_at,
             )
         )
+
+        if auto_reason_bytes is not None:
+            materialized_reason_ref = self._materialize_routing_reason_ref_after_insert(
+                reason_bytes=auto_reason_bytes,
+                event_id=event.event_id,
+                expected_rows=1,
+            )
+            return RoutingEvent(
+                event_id=event.event_id,
+                state_id=event.state_id,
+                edge_id=event.edge_id,
+                routing_group_id=event.routing_group_id,
+                ordinal=event.ordinal,
+                mode=event.mode,
+                reason_hash=event.reason_hash,
+                reason_ref=materialized_reason_ref,
+                created_at=event.created_at,
+            )
 
         return event
 
@@ -421,49 +517,71 @@ class ExecutionRepository:
         routing_group_id = generate_id()
         reason_hash = stable_hash(reason) if reason else None
         timestamp = now()
-        events = []
-
-        # Auto-persist shared reason to payload store if available
-        # All events in the fork will reference the same reason payload
-        reason_ref = None
+        auto_reason_bytes = None
         if reason is not None and self._payload_store is not None:
-            reason_bytes = canonical_json(reason).encode("utf-8")
-            reason_ref = self._payload_store.store(reason_bytes)
+            auto_reason_bytes = canonical_json(reason).encode("utf-8")
 
-        with self._db.connection() as conn:
-            for ordinal, route in enumerate(routes):
-                event_id = generate_id()
-                event = RoutingEvent(
-                    event_id=event_id,
-                    state_id=state_id,
-                    edge_id=route.edge_id,
-                    routing_group_id=routing_group_id,
-                    ordinal=ordinal,
-                    mode=route.mode,  # Already RoutingMode enum from RoutingSpec
-                    reason_hash=reason_hash,
-                    reason_ref=reason_ref,
-                    created_at=timestamp,
-                )
-
-                result = conn.execute(
-                    routing_events_table.insert().values(
-                        event_id=event.event_id,
-                        state_id=event.state_id,
-                        edge_id=event.edge_id,
-                        routing_group_id=event.routing_group_id,
-                        ordinal=event.ordinal,
-                        mode=event.mode,
-                        reason_hash=event.reason_hash,
-                        reason_ref=event.reason_ref,
-                        created_at=event.created_at,
+        inserted_events: list[RoutingEvent] = []
+        try:
+            with self._db.connection() as conn:
+                for ordinal, route in enumerate(routes):
+                    event_id = generate_id()
+                    event = RoutingEvent(
+                        event_id=event_id,
+                        state_id=state_id,
+                        edge_id=route.edge_id,
+                        routing_group_id=routing_group_id,
+                        ordinal=ordinal,
+                        mode=route.mode,  # Already RoutingMode enum from RoutingSpec
+                        reason_hash=reason_hash,
+                        reason_ref=None,
+                        created_at=timestamp,
                     )
-                )
-                if result.rowcount == 0:
-                    raise AuditIntegrityError(f"Failed to insert routing event {event_id} for state {state_id} - zero rows affected")
 
-                events.append(event)
+                    result = conn.execute(
+                        routing_events_table.insert().values(
+                            event_id=event.event_id,
+                            state_id=event.state_id,
+                            edge_id=event.edge_id,
+                            routing_group_id=event.routing_group_id,
+                            ordinal=event.ordinal,
+                            mode=event.mode,
+                            reason_hash=event.reason_hash,
+                            reason_ref=event.reason_ref,
+                            created_at=event.created_at,
+                        )
+                    )
+                    if result.rowcount == 0:
+                        raise AuditIntegrityError(f"Failed to insert routing event {event_id} for state {state_id} - zero rows affected")
 
-        return events
+                    inserted_events.append(event)
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_routing_events failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        reason_ref = None
+        if auto_reason_bytes is not None:
+            reason_ref = self._materialize_routing_reason_ref_after_insert(
+                reason_bytes=auto_reason_bytes,
+                routing_group_id=routing_group_id,
+                expected_rows=len(inserted_events),
+            )
+
+        return [
+            RoutingEvent(
+                event_id=event.event_id,
+                state_id=event.state_id,
+                edge_id=event.edge_id,
+                routing_group_id=event.routing_group_id,
+                ordinal=event.ordinal,
+                mode=event.mode,
+                reason_hash=event.reason_hash,
+                reason_ref=reason_ref,
+                created_at=event.created_at,
+            )
+            for event in inserted_events
+        ]
 
     # ── Call recording ─────────────────────────────────────────────────
 
@@ -525,11 +643,12 @@ class ExecutionRepository:
         request_ref: str | None,
         response_ref: str | None,
     ) -> _PreparedCallData:
-        """Serialize, hash, and auto-persist call payloads.
+        """Serialize, hash, and stage call payloads for post-insert storage.
 
         Shared logic for record_call() and record_operation_call(). Converts
-        CallPayload objects to dicts, computes stable hashes, auto-persists
-        to the payload store when available, and serializes error payloads.
+        CallPayload objects to dicts, computes stable hashes, prepares any
+        payload bytes that still need storing after the call row exists, and
+        serializes the error payload.
         """
         request_dict = request_data.to_dict()
         response_dict = response_data.to_dict() if response_data is not None else None
@@ -537,15 +656,12 @@ class ExecutionRepository:
         request_hash = stable_hash(request_dict)
         response_hash = stable_hash(response_dict) if response_dict is not None else None
 
-        # Auto-persist request to payload store if available and ref not provided
+        request_bytes = None
+        response_bytes = None
         if request_ref is None and self._payload_store is not None:
             request_bytes = canonical_json(request_dict).encode("utf-8")
-            request_ref = self._payload_store.store(request_bytes)
-
-        # Auto-persist response to payload store if available and ref not provided
         if response_dict is not None and response_ref is None and self._payload_store is not None:
             response_bytes = canonical_json(response_dict).encode("utf-8")
-            response_ref = self._payload_store.store(response_bytes)
 
         error_json = canonical_json(error.to_dict()) if error is not None else None
 
@@ -555,7 +671,92 @@ class ExecutionRepository:
             response_hash=response_hash,
             response_ref=response_ref,
             error_json=error_json,
+            request_bytes=request_bytes,
+            response_bytes=response_bytes,
         )
+
+    def _materialize_call_ref_after_insert(
+        self,
+        *,
+        call_id: str,
+        column_name: str,
+        payload_bytes: bytes | None,
+    ) -> str | None:
+        """Store one call payload and update the already-recorded call row."""
+        if payload_bytes is None:
+            return None
+        if self._payload_store is None:
+            raise FrameworkBugError(f"_materialize_call_ref_after_insert({call_id!r}, {column_name!r}) requires a payload store")
+
+        try:
+            payload_ref = self._payload_store.store(payload_bytes)
+            self._ops.execute_update(
+                calls_table.update().where(calls_table.c.call_id == call_id).values(**{column_name: payload_ref}),
+                context=f"calls.{column_name} for {call_id}",
+            )
+        except Exception as exc:
+            raise LandscapePostCommitError(
+                f"Call {call_id} was recorded, but {column_name} materialization failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return payload_ref
+
+    def _materialize_routing_reason_ref_after_insert(
+        self,
+        *,
+        reason_bytes: bytes,
+        expected_rows: int,
+        event_id: str | None = None,
+        routing_group_id: str | None = None,
+    ) -> str:
+        """Store a routing reason after the event rows already exist."""
+        if self._payload_store is None:
+            raise FrameworkBugError("_materialize_routing_reason_ref_after_insert() requires a payload store")
+        if (event_id is None) == (routing_group_id is None):
+            raise FrameworkBugError("Routing reason materialization requires exactly one of event_id or routing_group_id")
+        target = event_id if event_id is not None else routing_group_id
+
+        try:
+            reason_ref = self._payload_store.store(reason_bytes)
+            stmt = routing_events_table.update().values(reason_ref=reason_ref)
+            if event_id is not None:
+                stmt = stmt.where(routing_events_table.c.event_id == event_id)
+            else:
+                stmt = stmt.where(routing_events_table.c.routing_group_id == routing_group_id)
+
+            with self._db.connection() as conn:
+                result = conn.execute(stmt)
+                if result.rowcount != expected_rows:
+                    raise AuditIntegrityError(
+                        f"Routing reason ref update for {target} affected {result.rowcount} rows; expected {expected_rows}"
+                    )
+        except Exception as exc:
+            raise LandscapePostCommitError(
+                f"Routing event(s) {target} were recorded, but reason materialization failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return reason_ref
+
+    def _materialize_call_refs_after_insert(self, call_id: str, prepared: _PreparedCallData) -> tuple[str | None, str | None]:
+        """Store staged call payloads after the call row has been committed."""
+        request_ref = prepared.request_ref
+        response_ref = prepared.response_ref
+
+        materialized_request_ref = self._materialize_call_ref_after_insert(
+            call_id=call_id,
+            column_name="request_ref",
+            payload_bytes=prepared.request_bytes,
+        )
+        if materialized_request_ref is not None:
+            request_ref = materialized_request_ref
+
+        materialized_response_ref = self._materialize_call_ref_after_insert(
+            call_id=call_id,
+            column_name="response_ref",
+            payload_bytes=prepared.response_bytes,
+        )
+        if materialized_response_ref is not None:
+            response_ref = materialized_response_ref
+
+        return request_ref, response_ref
 
     def record_call(
         self,
@@ -620,6 +821,7 @@ class ExecutionRepository:
         }
 
         self._ops.execute_insert(calls_table.insert().values(**values))
+        request_ref, response_ref = self._materialize_call_refs_after_insert(call_id, prepared)
 
         return Call(
             call_id=call_id,
@@ -630,9 +832,9 @@ class ExecutionRepository:
             created_at=timestamp,
             state_id=state_id,
             operation_id=None,
-            request_ref=prepared.request_ref,
+            request_ref=request_ref,
             response_hash=prepared.response_hash,
-            response_ref=prepared.response_ref,
+            response_ref=response_ref,
             error_json=prepared.error_json,
             latency_ms=latency_ms,
         )
@@ -691,7 +893,7 @@ class ExecutionRepository:
     def complete_operation(
         self,
         operation_id: str,
-        status: Literal["completed", "failed", "pending"],
+        status: Literal["completed", "failed"],
         *,
         output_data: Mapping[str, object] | None = None,
         error: str | None = None,
@@ -701,7 +903,7 @@ class ExecutionRepository:
 
         Args:
             operation_id: Operation to complete
-            status: Final status ('completed', 'failed', or 'pending' for BatchPendingError)
+            status: Final status ('completed' or 'failed')
             output_data: Optional output context
             error: Error message if failed
             duration_ms: Operation duration
@@ -709,12 +911,29 @@ class ExecutionRepository:
         Raises:
             FrameworkBugError: If operation doesn't exist or is already completed
         """
+        # Validate lifecycle invariants before persisting — matches Operation.__post_init__.
+        # These are Tier 1 guards: impossible states in the audit trail are framework bugs.
+        if status not in _COMPLETABLE_OPERATION_STATUSES:
+            raise FrameworkBugError(
+                f"complete_operation({operation_id!r}): unsupported status {status!r}; "
+                f"expected one of {sorted(_COMPLETABLE_OPERATION_STATUSES)}"
+            )
+        if duration_ms is None:
+            raise FrameworkBugError(f"complete_operation({operation_id!r}): status={status!r} but duration_ms is None")
+        if status == "completed" and error is not None:
+            raise FrameworkBugError(f"complete_operation({operation_id!r}): status='completed' but error is set")
+        if status == "failed" and error is None:
+            raise FrameworkBugError(f"complete_operation({operation_id!r}): status='failed' but error is None")
+        if status == "failed" and error == "":
+            raise FrameworkBugError(f"complete_operation({operation_id!r}): status='failed' but error must not be empty")
+
         # Atomic check-and-update: WHERE constrains both identity and status
         # to eliminate the TOCTOU race between separate SELECT and UPDATE.
         # Payload storage is deferred until AFTER the status check succeeds
         # to avoid orphaned blobs on duplicate-completion races or invalid IDs.
         timestamp = now()
         output_hash = stable_hash(output_data) if output_data is not None else None
+        row = None
         stmt = (
             operations_table.update()
             .where((operations_table.c.operation_id == operation_id) & (operations_table.c.status == "open"))
@@ -750,6 +969,16 @@ class ExecutionRepository:
                         f"operation {operation_id} — row disappeared between status update "
                         f"and ref update (database corruption)"
                     )
+            row = conn.execute(select(operations_table).where(operations_table.c.operation_id == operation_id)).fetchone()
+
+        if row is None:
+            raise LandscapePostCommitError(
+                f"Operation {operation_id} not found after completion — database corruption or transaction failure"
+            )
+        try:
+            self._operation_loader.load(row)
+        except AuditIntegrityError as exc:
+            raise LandscapePostCommitError(f"Operation {operation_id} became unreadable immediately after completion: {exc}") from exc
 
     def allocate_operation_call_index(self, operation_id: str) -> int:
         """Allocate next call index for an operation_id (thread-safe).
@@ -838,6 +1067,7 @@ class ExecutionRepository:
         }
 
         self._ops.execute_insert(calls_table.insert().values(**values))
+        request_ref, response_ref = self._materialize_call_refs_after_insert(call_id, prepared)
 
         return Call(
             call_id=call_id,
@@ -848,9 +1078,9 @@ class ExecutionRepository:
             created_at=timestamp,
             state_id=None,
             operation_id=operation_id,
-            request_ref=prepared.request_ref,
+            request_ref=request_ref,
             response_hash=prepared.response_hash,
-            response_ref=prepared.response_ref,
+            response_ref=response_ref,
             error_json=prepared.error_json,
             latency_ms=latency_ms,
         )
@@ -1090,8 +1320,13 @@ class ExecutionRepository:
         Returns:
             BatchMember model
         """
+        batch_row = self._ops.execute_fetchone(select(batches_table.c.run_id).where(batches_table.c.batch_id == batch_id))
+        if batch_row is None:
+            raise AuditIntegrityError(f"Cannot add batch member: batch {batch_id} not found")
+
         member = BatchMember(
             batch_id=batch_id,
+            run_id=batch_row.run_id,
             token_id=token_id,
             ordinal=ordinal,
         )
@@ -1099,9 +1334,11 @@ class ExecutionRepository:
         self._ops.execute_insert(
             batch_members_table.insert().values(
                 batch_id=member.batch_id,
+                run_id=member.run_id,
                 token_id=member.token_id,
                 ordinal=member.ordinal,
-            )
+            ),
+            context="batch_members",
         )
 
         return member
@@ -1142,22 +1379,27 @@ class ExecutionRepository:
         # WHERE clause so the check-and-set is a single statement, eliminating the
         # TOCTOU race between the old get_batch() read and the subsequent update.
         terminal_values = [s.value for s in _TERMINAL_BATCH_STATUSES]
-        with self._db.connection() as conn:
-            result = conn.execute(
-                batches_table.update()
-                .where(batches_table.c.batch_id == batch_id)
-                .where(batches_table.c.status.notin_(terminal_values))
-                .values(**updates)
-            )
-            if result.rowcount == 0:
-                # Distinguish "not found" from "already terminal".
-                existing = conn.execute(select(batches_table.c.status).where(batches_table.c.batch_id == batch_id)).fetchone()
-                if existing is not None:
-                    raise AuditIntegrityError(
-                        f"Cannot transition batch {batch_id} from terminal status {existing.status!r} "
-                        f"to {status.value!r}. Terminal batches are immutable."
-                    )
-                raise AuditIntegrityError(f"Cannot update batch status: batch {batch_id} not found")
+        try:
+            with self._db.connection() as conn:
+                result = conn.execute(
+                    batches_table.update()
+                    .where(batches_table.c.batch_id == batch_id)
+                    .where(batches_table.c.status.notin_(terminal_values))
+                    .values(**updates)
+                )
+                if result.rowcount == 0:
+                    # Distinguish "not found" from "already terminal".
+                    existing = conn.execute(select(batches_table.c.status).where(batches_table.c.batch_id == batch_id)).fetchone()
+                    if existing is not None:
+                        raise AuditIntegrityError(
+                            f"Cannot transition batch {batch_id} from terminal status {existing.status!r} "
+                            f"to {status.value!r}. Terminal batches are immutable."
+                        )
+                    raise AuditIntegrityError(f"Cannot update batch status: batch {batch_id} not found")
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"update_batch_status failed for batch_id={batch_id} — database rejected audit update: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def complete_batch(
         self,
@@ -1191,25 +1433,40 @@ class ExecutionRepository:
 
         timestamp = now()
 
-        # Single transaction: UPDATE + SELECT-back for atomicity.
-        with self._db.connection() as conn:
-            update_result = conn.execute(
-                batches_table.update()
-                .where(batches_table.c.batch_id == batch_id)
-                .values(
-                    status=status,
-                    trigger_type=trigger_type,
-                    trigger_reason=trigger_reason,
-                    aggregation_state_id=state_id,
-                    completed_at=timestamp,
+        # Atomic conditional UPDATE: guard against already-terminal status in the
+        # WHERE clause (same TOCTOU-safe pattern as update_batch_status).
+        terminal_values = [s.value for s in _TERMINAL_BATCH_STATUSES]
+        try:
+            with self._db.connection() as conn:
+                update_result = conn.execute(
+                    batches_table.update()
+                    .where(batches_table.c.batch_id == batch_id)
+                    .where(batches_table.c.status.notin_(terminal_values))
+                    .values(
+                        status=status,
+                        trigger_type=trigger_type,
+                        trigger_reason=trigger_reason,
+                        aggregation_state_id=state_id,
+                        completed_at=timestamp,
+                    )
                 )
-            )
-            if update_result.rowcount == 0:
-                raise AuditIntegrityError(
-                    f"complete_batch: zero rows affected for batch_id={batch_id} — target row does not exist (audit data corruption)"
-                )
+                if update_result.rowcount == 0:
+                    # Distinguish "not found" from "already terminal".
+                    existing = conn.execute(select(batches_table.c.status).where(batches_table.c.batch_id == batch_id)).fetchone()
+                    if existing is not None:
+                        raise AuditIntegrityError(
+                            f"Cannot complete batch {batch_id}: current status {existing.status!r} is already terminal. "
+                            f"Terminal batches are immutable."
+                        )
+                    raise AuditIntegrityError(
+                        f"complete_batch: zero rows affected for batch_id={batch_id} — target row does not exist (audit data corruption)"
+                    )
 
-            row = conn.execute(select(batches_table).where(batches_table.c.batch_id == batch_id)).fetchone()
+                row = conn.execute(select(batches_table).where(batches_table.c.batch_id == batch_id)).fetchone()
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"complete_batch failed for batch_id={batch_id} — database rejected audit update: {type(exc).__name__}: {exc}"
+            ) from exc
 
         if row is None:
             raise AuditIntegrityError(f"Batch {batch_id} not found after update — database corruption or transaction failure")
@@ -1311,7 +1568,10 @@ class ExecutionRepository:
         """
         query = (
             select(batch_members_table)
-            .join(batches_table, batch_members_table.c.batch_id == batches_table.c.batch_id)
+            .join(
+                batches_table,
+                (batch_members_table.c.batch_id == batches_table.c.batch_id) & (batch_members_table.c.run_id == batches_table.c.run_id),
+            )
             .where(batches_table.c.run_id == run_id)
             .order_by(batch_members_table.c.batch_id, batch_members_table.c.ordinal)
         )
@@ -1353,8 +1613,7 @@ class ExecutionRepository:
             existing_row = conn.execute(
                 select(batches_table)
                 .where(batches_table.c.run_id == original.run_id)
-                .where(batches_table.c.aggregation_node_id == original.aggregation_node_id)
-                .where(batches_table.c.attempt == next_attempt)
+                .where(batches_table.c.retry_of_batch_id == original.batch_id)
             ).fetchone()
             if existing_row is not None:
                 return self._batch_loader.load(existing_row)
@@ -1368,6 +1627,7 @@ class ExecutionRepository:
                     run_id=original.run_id,
                     aggregation_node_id=original.aggregation_node_id,
                     attempt=next_attempt,
+                    retry_of_batch_id=original.batch_id,
                     status=BatchStatus.DRAFT,
                     created_at=timestamp,
                 )
@@ -1383,6 +1643,7 @@ class ExecutionRepository:
                 member_result = conn.execute(
                     batch_members_table.insert().values(
                         batch_id=new_batch_id,
+                        run_id=original.run_id,
                         token_id=member_row.token_id,
                         ordinal=member_row.ordinal,
                     )

@@ -10,11 +10,11 @@ deferred to integration tier.
 class TestPluginContextTypes:
     """Verify PluginContext field types match runtime values."""
 
-    def test_context_landscape_annotation_references_real_recorder(self) -> None:
-        """PluginContext.landscape annotation should reference the real LandscapeRecorder.
+    def test_context_landscape_annotation_references_plugin_audit_writer(self) -> None:
+        """PluginContext.landscape annotation should reference PluginAuditWriter.
 
-        The annotation string should reference elspeth.core.landscape.recorder.LandscapeRecorder,
-        not a stub protocol. This test verifies the fix is in place.
+        The annotation should reference elspeth.contracts.audit_protocols.PluginAuditWriter,
+        not a stub protocol or the concrete LandscapeRecorder. This test verifies the fix is in place.
         """
         import dataclasses
 
@@ -26,20 +26,18 @@ class TestPluginContextTypes:
 
         assert landscape_field is not None, "PluginContext should have a 'landscape' field"
 
-        # The type annotation should reference the real LandscapeRecorder
-        # After the fix, __annotations__ should contain 'LandscapeRecorder | None'
+        # The type annotation should reference PluginAuditWriter
         annotations = PluginContext.__annotations__
         landscape_annotation = annotations.get("landscape")
 
-        # Should be a string annotation that contains LandscapeRecorder
         assert landscape_annotation is not None
-        assert "LandscapeRecorder" in str(landscape_annotation)
+        assert "PluginAuditWriter" in str(landscape_annotation)
 
     def test_no_stub_protocol_in_context_module(self) -> None:
-        """The stub LandscapeRecorder protocol should be removed from context.py.
+        """No stub LandscapeRecorder protocol should exist in plugin_context.py.
 
-        After the fix, context.py should import the real LandscapeRecorder
-        (in TYPE_CHECKING block), not define a stub protocol.
+        After the migration, plugin_context.py should import PluginAuditWriter
+        from contracts, not define any local stub.
         """
         import elspeth.contracts.plugin_context as context_module
 
@@ -48,14 +46,12 @@ class TestPluginContextTypes:
         local_items = dir(context_module)
 
         # The module should NOT have its own LandscapeRecorder class defined
-        # Check if any class defined in this module is named LandscapeRecorder
         for name in local_items:
             obj = getattr(context_module, name)
-            # Check if it's a class named LandscapeRecorder defined in this module
             is_local_recorder = (
                 isinstance(obj, type) and name == "LandscapeRecorder" and obj.__module__ == "elspeth.contracts.plugin_context"
             )
             if is_local_recorder:
                 raise AssertionError(
-                    "context.py should not define its own LandscapeRecorder stub. It should import from elspeth.core.landscape.recorder"
+                    "context.py should not define its own LandscapeRecorder stub. It should import PluginAuditWriter from contracts"
                 )

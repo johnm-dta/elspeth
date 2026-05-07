@@ -201,6 +201,60 @@ def test_validate_checkpoint_compatibility_rejects_mismatched_version(checkpoint
         checkpoint_manager._validate_checkpoint_compatibility(checkpoint)
 
 
+def test_create_checkpoint_rejects_cross_run_token(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """Regression: elspeth-5f3ddece43 — checkpoint must not reference token from another run.
+
+    Cross-run checkpoint contamination is audit corruption.
+    """
+    from elspeth.contracts.errors import AuditIntegrityError
+
+    with db.connection() as conn:
+        # Create run A with its token
+        _insert_checkpoint_prereqs(conn, run_id="run-A", token_id="tok-A", node_id="node-A", row_id="row-A")
+        # Create run B (no token)
+        now = datetime.now(UTC)
+        conn.execute(
+            runs_table.insert().values(
+                run_id="run-B",
+                started_at=now,
+                config_hash="cfg",
+                settings_json="{}",
+                canonical_version="sha256-rfc8785-v1",
+                status=RunStatus.RUNNING,
+            )
+        )
+        conn.execute(
+            nodes_table.insert().values(
+                node_id="node-B",
+                run_id="run-B",
+                plugin_name="test",
+                node_type=NodeType.TRANSFORM,
+                plugin_version="1.0.0",
+                determinism=Determinism.DETERMINISTIC,
+                config_hash="cfg",
+                config_json="{}",
+                registered_at=now,
+            )
+        )
+
+    graph = make_graph_linear("node-B")
+    # Try to checkpoint run B with token from run A
+    with pytest.raises(AuditIntegrityError, match="Cross-run checkpoint contamination"):
+        checkpoint_manager.create_checkpoint("run-B", "tok-A", "node-B", 1, graph)
+
+
+def test_create_checkpoint_rejects_nonexistent_token(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """Token must exist for checkpoint creation."""
+    from elspeth.contracts.errors import AuditIntegrityError
+
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn)
+
+    graph = make_graph_linear("node-001")
+    with pytest.raises(AuditIntegrityError, match="does not exist"):
+        checkpoint_manager.create_checkpoint("run-001", "nonexistent-tok", "node-001", 1, graph)
+
+
 def test_delete_checkpoints_removes_all_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)

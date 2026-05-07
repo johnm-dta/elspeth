@@ -33,7 +33,7 @@ from elspeth.core.expression_parser import (
     ExpressionSecurityError,
     ExpressionSyntaxError,
 )
-from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.executors.types import GateOutcome, MissingEdgeError
 from elspeth.engine.spans import SpanFactory
@@ -53,6 +53,7 @@ class _RouteDispatchOutcome:
     child_tokens: tuple[TokenInfo, ...] = ()
     sink_name: str | None = None
     next_node_id: NodeID | None = None
+    discarded: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "child_tokens", tuple(self.child_tokens))
@@ -60,6 +61,11 @@ class _RouteDispatchOutcome:
             raise ValueError(
                 f"_RouteDispatchOutcome invariant violation: sink_name={self.sink_name!r} and "
                 f"next_node_id={self.next_node_id!r} are mutually exclusive."
+            )
+        if self.discarded and (self.sink_name is not None or self.next_node_id is not None):
+            raise ValueError(
+                f"_RouteDispatchOutcome invariant violation: discarded=True cannot be combined with "
+                f"sink_name={self.sink_name!r} or next_node_id={self.next_node_id!r}."
             )
 
 
@@ -80,7 +86,7 @@ class GateExecutor:
     NOT stored in node_states.status.
 
     Example:
-        executor = GateExecutor(recorder, span_factory, step_resolver, edge_map)
+        executor = GateExecutor(execution, span_factory, step_resolver, edge_map)
         outcome = executor.execute_config_gate(
             gate_config=gate_settings,
             node_id=node_id,
@@ -92,7 +98,7 @@ class GateExecutor:
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        execution: ExecutionRepository,
         span_factory: SpanFactory,
         step_resolver: StepResolver,
         edge_map: dict[tuple[NodeID, str], str] | None = None,
@@ -101,13 +107,13 @@ class GateExecutor:
         """Initialize executor.
 
         Args:
-            recorder: Landscape recorder for audit trail
+            execution: Execution repository for audit trail
             span_factory: Span factory for tracing
             step_resolver: Resolves NodeID to 1-indexed audit step position
             edge_map: Maps (node_id, label) -> edge_id for routing
             route_resolution_map: Maps (node_id, label) -> resolved route destination
         """
-        self._recorder = recorder
+        self._execution = execution
         self._spans = span_factory
         self._step_resolver = step_resolver
         self._edge_map = edge_map or {}
@@ -160,11 +166,6 @@ class GateExecutor:
                 )
 
             action = RoutingAction.fork_to_paths(fork_branches, reason=reason)
-            self._record_routing(
-                state_id=state_id,
-                node_id=node_id,
-                action=action,
-            )
             child_tokens, _fork_group_id = token_manager.fork_token(
                 parent_token=token,
                 branches=fork_branches,
@@ -172,7 +173,18 @@ class GateExecutor:
                 run_id=ctx.run_id,
                 row_data=token.row_data,
             )
+            self._record_routing(
+                state_id=state_id,
+                node_id=node_id,
+                action=action,
+            )
             return _RouteDispatchOutcome(action=action, child_tokens=tuple(child_tokens))
+
+        if destination.kind == RouteDestinationKind.DISCARD:
+            return _RouteDispatchOutcome(
+                action=RoutingAction.route(route_label, mode=mode, reason=reason),
+                discarded=True,
+            )
 
         route_action = RoutingAction.route(route_label, mode=mode, reason=reason)
         self._record_routing(
@@ -238,7 +250,7 @@ class GateExecutor:
         # If any unhandled exception occurs before guard.complete() is called,
         # the guard auto-completes the state as FAILED in __exit__.
         with NodeStateGuard(
-            self._recorder,
+            self._execution,
             token_id=token.token_id,
             node_id=node_id,
             run_id=ctx.run_id,
@@ -269,8 +281,11 @@ class GateExecutor:
             elif isinstance(eval_result, str):
                 route_label = eval_result
             else:
-                # Unexpected result type - convert to string
-                route_label = str(eval_result)
+                raise TypeError(
+                    f"Gate '{gate_config.name}' expression returned {type(eval_result).__name__} "
+                    f"({eval_result!r}), expected bool or str. "
+                    f"Expression: {gate_config.condition}"
+                )
 
             # Look up destination in routes config
             if route_label not in gate_config.routes:
@@ -298,6 +313,7 @@ class GateExecutor:
             child_tokens = dispatch.child_tokens
             sink_name = dispatch.sink_name
             next_node_id = dispatch.next_node_id
+            discarded = dispatch.discarded
 
             # Create GateResult for audit fields
             # Config gates don't modify data, so use input dict as output
@@ -307,7 +323,7 @@ class GateExecutor:
                 contract=token.row_data.contract,  # Preserve contract reference
             )
             result.input_hash = input_hash
-            result.output_hash = stable_hash(input_dict)  # Same as input (no modification)
+            result.output_hash = input_hash  # Gates don't modify data — output equals input
             result.duration_ms = duration_ms
 
             # Complete node state - always "completed" for successful execution
@@ -334,6 +350,7 @@ class GateExecutor:
             child_tokens=child_tokens,
             sink_name=sink_name,
             next_node_id=next_node_id,
+            discarded=discarded,
         )
 
     def _record_routing(
@@ -350,11 +367,12 @@ class GateExecutor:
         typed_node_id = NodeID(node_id)
         if len(action.destinations) == 1:
             dest = action.destinations[0]
-            edge_id = self._edge_map.get((typed_node_id, dest))
-            if edge_id is None:
-                raise MissingEdgeError(node_id=typed_node_id, label=dest)
+            try:
+                edge_id = self._edge_map[(typed_node_id, dest)]
+            except KeyError as exc:
+                raise MissingEdgeError(node_id=typed_node_id, label=dest) from exc
 
-            self._recorder.record_routing_event(
+            self._execution.record_routing_event(
                 state_id=state_id,
                 edge_id=edge_id,
                 mode=action.mode,
@@ -364,12 +382,13 @@ class GateExecutor:
             # Multiple destinations (fork)
             routes = []
             for dest in action.destinations:
-                edge_id = self._edge_map.get((typed_node_id, dest))
-                if edge_id is None:
-                    raise MissingEdgeError(node_id=typed_node_id, label=dest)
+                try:
+                    edge_id = self._edge_map[(typed_node_id, dest)]
+                except KeyError as exc:
+                    raise MissingEdgeError(node_id=typed_node_id, label=dest) from exc
                 routes.append(RoutingSpec(edge_id=edge_id, mode=action.mode))
 
-            self._recorder.record_routing_events(
+            self._execution.record_routing_events(
                 state_id=state_id,
                 routes=routes,
                 reason=action.reason,

@@ -17,6 +17,7 @@ Plugin registration:
     The BuiltinExportersPlugin in this module registers all built-in exporters.
 """
 
+from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS
 from elspeth.telemetry.exporters.azure_monitor import AzureMonitorExporter
 from elspeth.telemetry.exporters.console import ConsoleExporter
 from elspeth.telemetry.exporters.datadog import DatadogExporter
@@ -34,6 +35,7 @@ class BuiltinExportersPlugin:
 
 
 __all__ = [
+    "TELEMETRY_TRANSPORT_ERRORS",
     "AzureMonitorExporter",
     "BuiltinExportersPlugin",
     "ConsoleExporter",

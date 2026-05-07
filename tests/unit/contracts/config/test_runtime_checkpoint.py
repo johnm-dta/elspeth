@@ -15,6 +15,8 @@ Note on frequency field:
     happens in from_settings(), not through field name mapping.
 """
 
+from types import MappingProxyType
+
 import pytest
 
 # NOTE: Protocol compliance, orphan detection, frozen/slots tests are in test_runtime_common.py
@@ -73,7 +75,7 @@ class TestCheckpointFieldNameMapping:
 
         # CheckpointSettings should not have any field mappings
         # because all field names are the same between Settings and Runtime
-        mappings = FIELD_MAPPINGS.get("CheckpointSettings", {})
+        mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get("CheckpointSettings", {})
 
         assert mappings == {}, f"CheckpointSettings should have no field mappings (same names), but found: {mappings}"
 
@@ -209,7 +211,7 @@ class TestRuntimeCheckpointValidation:
         with pytest.raises(TypeError, match="frequency must be int"):
             RuntimeCheckpointConfig(
                 enabled=True,
-                frequency=True,  # type: ignore[arg-type]  # Intentional: testing bool rejection
+                frequency=True,
                 checkpoint_interval=None,
                 aggregation_boundaries=True,
             )
@@ -222,6 +224,6 @@ class TestRuntimeCheckpointValidation:
             RuntimeCheckpointConfig(
                 enabled=True,
                 frequency=1,
-                checkpoint_interval=True,  # type: ignore[arg-type]  # Intentional: testing bool rejection
+                checkpoint_interval=True,
                 aggregation_boundaries=True,
             )

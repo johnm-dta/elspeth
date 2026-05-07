@@ -12,6 +12,7 @@ def extract_content(
     html: str,
     format: str,
     strip_elements: list[str] | None = None,
+    text_separator: str = " ",
 ) -> str:
     """Extract content from HTML in specified format.
 
@@ -25,6 +26,7 @@ def extract_content(
         html: Raw HTML content (Tier 3 — untrusted)
         format: Output format ("markdown", "text", "raw")
         strip_elements: HTML tags to remove before extraction
+        text_separator: Separator used between DOM text nodes for text output
 
     Returns:
         Extracted content as string
@@ -60,7 +62,7 @@ def extract_content(
             return h.handle(cleaned_html)
 
         elif format == "text":
-            return soup.get_text(separator=" ", strip=True)
+            return soup.get_text(separator=text_separator, strip=True)
 
         else:
             raise ValueError(f"Unknown format: {format}")

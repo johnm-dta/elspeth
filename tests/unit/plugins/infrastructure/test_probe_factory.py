@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from elspeth.contracts.probes import CollectionProbe
 from elspeth.core.dependency_config import CollectionProbeConfig
@@ -29,15 +30,15 @@ class TestBuildCollectionProbes:
         assert build_collection_probes([]) == []
 
     def test_unknown_provider_raises(self) -> None:
-        configs = [
+        # CollectionProbeConfig.provider is Literal["chroma"] — unknown
+        # providers are rejected at config construction time, not at
+        # build_collection_probes() time.
+        with pytest.raises(ValidationError, match="provider"):
             CollectionProbeConfig(
                 collection="test",
                 provider="unknown_provider",
                 provider_config={},
             )
-        ]
-        with pytest.raises(ValueError, match="unknown_provider"):
-            build_collection_probes(configs)
 
     def test_multiple_probes(self) -> None:
         configs = [
@@ -105,7 +106,7 @@ class TestChromaCollectionProbeBehavior:
             result = probe.probe()
 
         assert result.reachable is True
-        assert result.count == 0
+        assert result.count is None
         assert "not found" in result.message
 
     def test_auth_error_reports_unreachable(self) -> None:

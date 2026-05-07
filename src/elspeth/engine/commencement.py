@@ -90,7 +90,20 @@ def evaluate_commencement_gates(
                 gate.condition,
                 allowed_names=_GATE_ALLOWED_NAMES,
             )
-            passed = bool(parser.evaluate(frozen_context))
+            result = parser.evaluate(frozen_context)
+            if not isinstance(result, bool):
+                raise CommencementGateFailedError(
+                    gate_name=gate.name,
+                    condition=gate.condition,
+                    reason=(
+                        f"Gate expression returned {type(result).__name__} ({result!r}), "
+                        f"not bool. Commencement gates must evaluate to True or False — "
+                        f"use a comparison (e.g., '> 0', '== \"expected\"') instead of "
+                        f"relying on Python truthiness."
+                    ),
+                    context_snapshot=audit_snapshot,
+                )
+            passed = result
         except CommencementGateFailedError:
             raise
         except (TypeError, AttributeError, AssertionError, NameError, KeyError, RecursionError):

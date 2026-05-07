@@ -1,12 +1,6 @@
 per_file_rules:
 - pattern: engine/orchestrator/types.py
   rules:
-  - FG1
-  reason: PipelineConfig uses direct MappingProxyType wraps — will be converted to freeze_fields (see elspeth-78a7d469b5)
-  expires: '2026-04-15'
-  max_hits: 3
-- pattern: engine/orchestrator/types.py
-  rules:
   - FG2
   reason: ResumeState.unprocessed_rows isinstance guard — rows must stay as plain dicts for PipelineRow consumption
   expires: null

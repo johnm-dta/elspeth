@@ -72,7 +72,12 @@ def validate_route_destinations(
 
     # Check each route destination
     for (gate_node_id, route_label), destination in route_resolution_map.items():
-        if destination.kind in (RouteDestinationKind.CONTINUE, RouteDestinationKind.FORK, RouteDestinationKind.PROCESSING_NODE):
+        if destination.kind in (
+            RouteDestinationKind.CONTINUE,
+            RouteDestinationKind.FORK,
+            RouteDestinationKind.PROCESSING_NODE,
+            RouteDestinationKind.DISCARD,
+        ):
             continue
 
         if destination.sink_name is None:
@@ -164,7 +169,12 @@ def validate_source_quarantine_destination(
         )
 
 
-_ALLOWED_FAILSINK_PLUGINS = frozenset({"csv", "json", "xml"})
+# Sink plugin names eligible as failsinks (Rule 4 of validate_sink_failsink_destinations).
+# MUST be a subset of the runtime sink registry — drift here means engine
+# pre-validation accepts a plugin that does not exist, deferring a guaranteed
+# runtime crash (PluginNotFoundError in get_sink_by_name) past validation.
+# Enforced by tests/unit/web/composer/test_skill_drift.py::TestEngineValidatorPluginDrift::test_allowed_failsink_plugins_subset_of_registered_sinks.
+_ALLOWED_FAILSINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
 
 
 def validate_sink_failsink_destinations(
@@ -182,7 +192,7 @@ def validate_sink_failsink_destinations(
     1. 'discard' is always valid
     2. Sink name must exist in available_sinks
     3. Sink cannot reference itself
-    4. Target sink must use csv, json, or xml plugin type
+    4. Target sink must use csv or json plugin type
     5. Target sink must have on_write_failure='discard' (no chains)
 
     Args:
@@ -221,7 +231,7 @@ def validate_sink_failsink_destinations(
         if plugin_type not in allowed_failsink_plugins:
             raise RouteValidationError(
                 f"Sink '{sink_name}' on_write_failure references '{dest}' "
-                f"(plugin='{plugin_type}'), but failsinks must use csv, json, or xml plugins."
+                f"(plugin='{plugin_type}'), but failsinks must use csv or json plugins."
             )
 
         # Rule 5: no chains — target must use 'discard'

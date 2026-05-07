@@ -91,37 +91,53 @@ Open `examples/threshold_gate/settings.yaml`:
 # SENSE: Where data comes from
 source:
   plugin: csv
+  on_success: gate_in               # Route validated rows to the gate
   options:
     path: examples/threshold_gate/input.csv
     schema:
-      mode: free
+      mode: fixed
       fields:
         - "id: int"
+        - "name: str"
         - "amount: int"
+        - "category: str"
     on_validation_failure: discard
 
 # DECIDE: How to route rows
 gates:
   - name: amount_threshold
+    input: gate_in                  # Receive rows from source
     condition: "row['amount'] > 1000"
     routes:
-      "true": high_values    # High amounts → high_values sink
-      "false": continue      # Normal amounts → output_sink
+      "true": high_values           # High amounts → high_values sink
+      "false": output               # Normal amounts → output sink
 
 # ACT: Where data goes
 sinks:
   output:
     plugin: csv
+    on_write_failure: discard
     options:
       path: examples/threshold_gate/output/normal.csv
       schema:
-        fields: dynamic
+        mode: fixed
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
   high_values:
     plugin: csv
+    on_write_failure: discard
     options:
       path: examples/threshold_gate/output/high_values.csv
       schema:
-        fields: dynamic
+        mode: fixed
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
 
 # Audit trail
 landscape:
@@ -136,6 +152,8 @@ landscape:
 | `gates` | **DECIDE** - Route based on condition |
 | `sinks` | **ACT** - Write to output files |
 | `landscape` | **AUDIT** - Record everything |
+
+**DAG wiring:** Notice `on_success: gate_in` on the source and `input: gate_in` on the gate — these connect pipeline stages by name. Each node declares where it sends rows (`on_success`) and where it receives them (`input`). Sinks require `on_write_failure` to declare what happens if a write fails (`discard` drops the row).
 
 ### Step 4: Run the Pipeline
 
@@ -200,7 +218,7 @@ This launches an interactive terminal UI where you can explore:
 - Gate evaluation results and routing decisions
 - Final destination and artifact hash
 
-> **Note:** Text output via `--no-tui` is planned for a future release. Currently, the TUI provides the lineage exploration interface.
+> **Tip:** Use `--no-tui` for plain text output or `--json` for machine-readable output instead of the interactive TUI.
 
 Every decision is traceable. If an auditor asks "why was this transaction flagged?", you have the answer.
 
@@ -240,37 +258,53 @@ cat > config/pipeline.yaml << 'EOF'
 # SENSE: Load from CSV
 source:
   plugin: csv
+  on_success: gate_in
   options:
     path: /app/input/transactions.csv  # Container path!
     schema:
-      mode: free
+      mode: fixed
       fields:
         - "id: int"
+        - "name: str"
         - "amount: int"
+        - "category: str"
     on_validation_failure: discard
 
 # DECIDE: Route high-value transactions
 gates:
   - name: amount_threshold
+    input: gate_in
     condition: "row['amount'] > 1000"
     routes:
       "true": high_values
-      "false": continue
+      "false": output
 
 # ACT: Write to output files
 sinks:
   output:
     plugin: csv
+    on_write_failure: discard
     options:
       path: /app/output/normal.csv  # Container path!
       schema:
-        fields: dynamic
+        mode: fixed
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
   high_values:
     plugin: csv
+    on_write_failure: discard
     options:
       path: /app/output/high_values.csv  # Container path!
       schema:
-        fields: dynamic
+        mode: fixed
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
 
 # Audit trail
 landscape:
@@ -350,7 +384,7 @@ docker run --rm \
    ORDER BY ns.step_index;"
 ```
 
-> **Note:** Text output via `--no-tui` is planned for a future release. Currently, use the TUI for interactive lineage exploration or query the audit database directly for CI/CD environments.
+> **Tip:** Use `--no-tui` for plain text output or `--json` for machine-readable output. The TUI requires an interactive terminal, so use these flags in CI/CD environments.
 
 ---
 
@@ -378,7 +412,7 @@ docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
 docker compose run --rm elspeth run --settings /app/config/pipeline.yaml --execute
 
 # Explain (interactive TUI)
-docker compose run -it --rm elspeth explain --run latest --row 2 --database /app/state/landscape.db
+docker compose run -it --rm elspeth explain --run latest --row 2 --database /app/state/audit.db
 ```
 
 ---
@@ -398,9 +432,10 @@ The CSV source:
 ### 2. DECIDE (Gate)
 
 The threshold gate:
+- Received rows on its `gate_in` input connection
 - Evaluated `row['amount'] > 1000` for each row
 - Rows with `true` → routed to `high_values` sink
-- Rows with `false` → continued to default `output` sink
+- Rows with `false` → routed to `output` sink
 
 ### 3. ACT (Sinks)
 
@@ -438,18 +473,25 @@ Re-run and see how the routing changes.
 Route "premium" transactions (> $2500) separately:
 
 ```yaml
+source:
+  plugin: csv
+  on_success: premium_check_in
+  options: ...
+
 gates:
   - name: premium_check
+    input: premium_check_in
     condition: "row['amount'] > 2500"
     routes:
       "true": premium
-      "false": continue
+      "false": high_value_check_in    # Chain to next gate
 
   - name: high_value_check
+    input: high_value_check_in
     condition: "row['amount'] > 1000"
     routes:
       "true": high_values
-      "false": continue
+      "false": output
 
 sinks:
   output:
@@ -458,10 +500,11 @@ sinks:
     # ... high-value transactions
   premium:
     plugin: csv
+    on_write_failure: discard
     options:
       path: /app/output/premium.csv
       schema:
-        fields: dynamic
+        mode: observed
 ```
 
 ### Add a Transform
@@ -469,20 +512,30 @@ sinks:
 Add a field before routing:
 
 ```yaml
+source:
+  plugin: csv
+  on_success: mapper_in
+  options: ...
+
 transforms:
-  - plugin: field_mapper
+  - name: add_tier
+    plugin: field_mapper
+    input: mapper_in
+    on_success: tier_gate_in
+    on_error: discard
     options:
       schema:
-        fields: dynamic
+        mode: observed
       computed:
         tier: "row['amount'] > 2500 and 'premium' or (row['amount'] > 1000 and 'high' or 'normal')"
 
 gates:
   - name: tier_router
+    input: tier_gate_in
     condition: "row['tier'] == 'premium'"
     routes:
       "true": premium
-      "false": continue
+      "false": output
 ```
 
 ---
@@ -503,7 +556,7 @@ For comprehensive troubleshooting, see the [Troubleshooting Guide](troubleshooti
 **Fix:** Add type coercion in schema:
 ```yaml
 schema:
-  mode: free
+  mode: fixed
   fields:
     - "amount: int"  # Will coerce "1500" to 1500
 ```
@@ -517,9 +570,10 @@ schema:
 # In source config - coerce to int at source
 source:
   plugin: csv
+  on_success: gate_in
   options:
     schema:
-      mode: free
+      mode: fixed
       fields:
         - "amount: int"  # Coerces "1500" to 1500
 

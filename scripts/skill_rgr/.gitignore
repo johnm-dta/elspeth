@@ -1,0 +1,4 @@
+# Run artefacts: full message transcripts including model-specific reasoning
+# content. Useful as local evidence; not worth committing because they
+# rerun in seconds and bloat the repo.
+transcripts/

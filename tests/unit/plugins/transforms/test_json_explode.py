@@ -70,6 +70,28 @@ class TestJSONExplodeHappyPath:
 
         assert transform.creates_tokens is True
 
+    def test_input_semantic_requirements_declare_array_field_list(self) -> None:
+        """json_explode statically requires array_field to be a list value."""
+        from elspeth.contracts.plugin_semantics import SemanticValueType
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "array_field": "items",
+            }
+        )
+
+        requirements = transform.input_semantic_requirements()
+
+        assert len(requirements.fields) == 1
+        req = requirements.fields[0]
+        assert req.field_name == "items"
+        assert req.requirement_code == "json_explode.array_field.list"
+        assert req.accepted_value_types == frozenset({SemanticValueType.LIST})
+        assert req.accepted_content_kinds == frozenset()
+        assert req.accepted_text_framings == frozenset()
+
     def test_empty_array_returns_error(self, ctx: PluginContext) -> None:
         """Empty array produces error (nothing to deaggregate)."""
         from elspeth.plugins.transforms.json_explode import JSONExplode
@@ -207,6 +229,25 @@ class TestJSONExplodeHappyPath:
         assert result.rows[0].to_dict() == {"id": 1, "item": "a", "item_index": 0}
         assert result.rows[1].to_dict() == {"id": 1, "item": "b", "item_index": 1}
 
+    def test_backward_probe_rows_drop_array_field(self, ctx: PluginContext) -> None:
+        """Backward invariant probe drives the real deaggregation path."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(JSONExplode.probe_config())
+        probe = make_pipeline_row({"baseline": "kept"})
+
+        result = transform.execute_backward_invariant_probe(
+            transform.backward_invariant_probe_rows(probe),
+            ctx,
+        )
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 1
+        assert result.rows[0]["baseline"] == "kept"
+        assert result.rows[0]["item"] == "only-item"
+        assert "json_explode_items" not in result.rows[0].to_dict()
+
 
 class TestJSONExplodeTypeViolations:
     """Tests for type violations - these should CRASH, not return errors.
@@ -297,12 +338,11 @@ class TestJSONExplodeTypeViolations:
         with pytest.raises(TypeError, match=r"Field 'items' must be a list"):
             transform.process(make_pipeline_row(row), ctx)
 
-    def test_tuple_value_crashes_with_type_error(self, ctx: PluginContext) -> None:
-        """Tuple value is upstream bug - should crash with TypeError.
+    def test_tuple_value_accepted_after_deep_freeze(self, ctx: PluginContext) -> None:
+        """Tuple value is valid — PipelineRow deep-freezes lists to tuples.
 
-        Tuples are iterable in Python, but JSONExplode requires lists.
-        JSON has no tuple type - if data came from JSON it would be a list.
-        A tuple indicates the data came from Python code that should be fixed.
+        After deep_freeze, all lists in PipelineRow become tuples. Transforms
+        must accept both list and tuple for array fields.
         """
         from elspeth.plugins.transforms.json_explode import JSONExplode
 
@@ -313,10 +353,12 @@ class TestJSONExplodeTypeViolations:
             }
         )
 
-        row = {"id": 1, "items": ("a", "b", "c")}  # Tuple, not list!
+        row = {"id": 1, "items": ("a", "b", "c")}  # Tuple (frozen list)
 
-        with pytest.raises(TypeError, match=r"Field 'items' must be a list"):
-            transform.process(make_pipeline_row(row), ctx)
+        result = transform.process(make_pipeline_row(row), ctx)
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 3
 
     def test_non_iterable_value_crashes(self, ctx: PluginContext) -> None:
         """Non-iterable value is upstream bug - should crash (TypeError)."""
@@ -383,6 +425,51 @@ class TestJSONExplodeConfiguration:
                     "schema": DYNAMIC_SCHEMA,
                     "array_field": "items",
                     "on_success": "output",
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("output_field", "match"),
+        [
+            ("Line Item", "valid Python identifier"),
+            ("Order ID", "valid Python identifier"),
+            ("   ", "must be non-empty"),
+        ],
+    )
+    def test_rejects_invalid_output_field_names(self, output_field: str, match: str) -> None:
+        """output_field creates a new pipeline field and must be normalized."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        with pytest.raises(PluginConfigError, match=match):
+            JSONExplode(
+                {
+                    "schema": DYNAMIC_SCHEMA,
+                    "array_field": "items",
+                    "output_field": output_field,
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"mode": "observed", "guaranteed_fields": ["id", "line_items"]},
+            {"mode": "fixed", "fields": ["id: int", "line_items: any"]},
+            {"mode": "flexible", "fields": ["id: int", "line_items: any"]},
+        ],
+    )
+    def test_rejects_original_header_array_field_when_schema_participates_in_contract_propagation(
+        self,
+        schema: dict[str, object],
+    ) -> None:
+        """Static contract generation cannot safely resolve original-header aliases."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        with pytest.raises(PluginConfigError, match=r"array_field.*normalized"):
+            JSONExplode(
+                {
+                    "schema": schema,
+                    "array_field": "Line Items",
+                    "output_field": "item",
                 }
             )
 
@@ -862,3 +949,97 @@ class TestOutputSchemaConfig:
         )
         assert transform._output_schema_config is not None
         assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"item"})
+
+
+class TestJSONExplodeOutputSchemaExcludesArrayField:
+    """Tests that array_field is NOT in _output_schema_config.guaranteed_fields.
+
+    Bug fix: JSONExplode called _build_output_schema_config() which copies input
+    guaranteed_fields into output. But JSONExplode removes array_field at runtime,
+    so it must not appear in output guarantees.
+    """
+
+    def test_array_field_not_in_guaranteed_fields_when_in_input(self):
+        """array_field from input guaranteed_fields is excluded from output."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "array_field": "items",
+                "output_field": "item",
+                "include_index": True,
+                "schema": {"mode": "observed", "guaranteed_fields": ["id", "items"]},
+            }
+        )
+        assert transform._output_schema_config is not None
+        guaranteed = frozenset(transform._output_schema_config.guaranteed_fields)
+        assert "items" not in guaranteed
+        assert "item" in guaranteed
+        assert "item_index" in guaranteed
+        assert "id" in guaranteed
+
+    def test_output_preserves_non_array_guaranteed_fields(self):
+        """Non-array guaranteed fields from input are preserved in output."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "array_field": "tags",
+                "output_field": "tag",
+                "include_index": False,
+                "schema": {"mode": "observed", "guaranteed_fields": ["id", "name", "tags"]},
+            }
+        )
+        assert transform._output_schema_config is not None
+        guaranteed = frozenset(transform._output_schema_config.guaranteed_fields)
+        assert "tags" not in guaranteed
+        assert "tag" in guaranteed
+        assert "id" in guaranteed
+        assert "name" in guaranteed
+
+
+class TestJSONExplodeNoneAbstainSemantics:
+    """Tests that JSONExplode preserves None-vs-empty-tuple semantics.
+
+    When upstream guaranteed_fields is None (abstain), the transform should
+    still produce explicit guarantees if it adds its own fields (output_field,
+    item_index). When upstream declares but the transform removes everything,
+    the result should be explicit (not None).
+    """
+
+    def test_upstream_none_with_declared_fields_produces_explicit(self):
+        """Upstream None + transform adds output_field → explicit guarantees."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "array_field": "items",
+                "output_field": "item",
+                "include_index": False,
+                "schema": {"mode": "observed"},
+                # No guaranteed_fields key → upstream is None
+            }
+        )
+        assert transform._output_schema_config is not None
+        # Transform always adds output_field, so it can guarantee it
+        assert transform._output_schema_config.guaranteed_fields is not None
+        assert "item" in transform._output_schema_config.guaranteed_fields
+
+    def test_upstream_declared_array_only_produces_explicit_after_removal(self):
+        """Upstream declares only array_field → removed → output has only declared fields."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "array_field": "items",
+                "output_field": "item",
+                "include_index": False,
+                "schema": {"mode": "observed", "guaranteed_fields": ["items"]},
+            }
+        )
+        assert transform._output_schema_config is not None
+        guaranteed = transform._output_schema_config.guaranteed_fields
+        # "items" removed, "item" added → explicit tuple with just "item"
+        assert guaranteed is not None
+        assert "items" not in guaranteed
+        assert "item" in guaranteed

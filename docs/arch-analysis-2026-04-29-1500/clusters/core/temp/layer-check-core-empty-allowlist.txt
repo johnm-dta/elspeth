@@ -1,0 +1,1656 @@
+
+============================================================
+VIOLATIONS FOUND: 205
+============================================================
+
+payload_store.py:116:8
+  Rule: R6 - silent-except
+  Code: except FileNotFoundError:
+  Context: FilesystemPayloadStore.store
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: payload_store.py:R6:FilesystemPayloadStore:store:fp=7ffad90e4cb20922
+
+payload_store.py:181:8
+  Rule: R6 - silent-except
+  Code: except FileNotFoundError:
+  Context: FilesystemPayloadStore.delete
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: payload_store.py:R6:FilesystemPayloadStore:delete:fp=5e6dea501dc28457
+
+operations.py:199:15
+  Rule: R5 - isinstance
+  Code: if isinstance(db_error, contract_errors.TIER_1_ERRORS):
+  Context: track_operation
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: operations.py:R5:track_operation:fp=5eb38371e9621613
+
+events.py:83:25
+  Rule: R1 - dict.get
+  Code: handlers = tuple(self._subscribers.get(type(event), ()))
+  Context: EventBus.emit
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: events.py:R1:EventBus:emit:fp=6f513a170f117689
+
+secrets.py:58:7
+  Rule: R5 - isinstance
+  Code: if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value:
+  Context: _is_secret_ref
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: secrets.py:R5:_is_secret_ref:fp=c4a69ba78b697182
+
+secrets.py:60:11
+  Rule: R5 - isinstance
+  Code: if isinstance(ref, str):
+  Context: _is_secret_ref
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: secrets.py:R5:_is_secret_ref:fp=20b1ab476c9387e1
+
+secrets.py:67:11
+  Rule: R5 - isinstance
+  Code: if not isinstance(value, str) or not env_ref_names:
+  Context: _is_secret_env_ref
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: secrets.py:R5:_is_secret_env_ref:fp=f3a7aa75869989d7
+
+secrets.py:97:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, Mapping):
+  Context: _walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: secrets.py:R5:_walk:fp=8cd5d27b9619a9ae
+
+secrets.py:111:9
+  Rule: R5 - isinstance
+  Code: elif isinstance(obj, list):
+  Context: _walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: secrets.py:R5:_walk:fp=755597011f4f00b0
+
+templates.py:119:8
+  Rule: R5 - isinstance
+  Code: isinstance(node, Call)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=d1955b2cf60acf6a
+
+templates.py:120:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node, Getattr)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=4247e0b88629e83d
+
+templates.py:121:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node.node, Name)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=f9bf3e8698293af5
+
+templates.py:125:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.args[0], Const)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=aeb7baef853d35bb
+
+templates.py:126:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.args[0].value, str)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=cc94e02c69776df5
+
+templates.py:134:8
+  Rule: R5 - isinstance
+  Code: isinstance(node, Getattr)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=fff64485bd4a0155
+
+templates.py:135:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node, Name)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=a23cc48570810a7c
+
+templates.py:143:8
+  Rule: R5 - isinstance
+  Code: isinstance(node, Getitem)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=5310f31019fc9f55
+
+templates.py:144:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node, Name)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=ad7df796c600e594
+
+templates.py:146:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.arg, Const)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=a26bac6de22e47a8
+
+templates.py:147:12
+  Rule: R5 - isinstance
+  Code: and isinstance(node.arg.value, str)
+  Context: _walk_ast
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:_walk_ast:fp=1cd15b4998d9f850
+
+templates.py:188:12
+  Rule: R5 - isinstance
+  Code: isinstance(node, Call)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=a6bc703372c17bd3
+
+templates.py:189:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node, Getattr)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=237a1172e5b4295b
+
+templates.py:190:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node.node, Name)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=6552812395bf330b
+
+templates.py:194:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.args[0], Const)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=9729f2322fde6e4d
+
+templates.py:195:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.args[0].value, str)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=3603a4bd6ec0bc9d
+
+templates.py:200:12
+  Rule: R5 - isinstance
+  Code: isinstance(node, Getattr)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=94ff644909c7e47c
+
+templates.py:201:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node, Name)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=c21beccbae528a1b
+
+templates.py:208:12
+  Rule: R5 - isinstance
+  Code: isinstance(node, Getitem)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=2ae274af40b58949
+
+templates.py:209:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.node, Name)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=00de373194903292
+
+templates.py:211:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.arg, Const)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=700b6b0625f5938b
+
+templates.py:212:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.arg.value, str)
+  Context: extract_jinja2_fields_with_details.walk
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: templates.py:R5:extract_jinja2_fields_with_details:walk:fp=971472eeb9b842cb
+
+config.py:187:15
+  Rule: R5 - isinstance
+  Code: if not isinstance(v, str):
+  Context: SecretsConfig.validate_vault_url_format
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:SecretsConfig:validate_vault_url_format:fp=8b8716c919b61c6f
+
+config.py:313:15
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Constant) and isinstance(node.value, str):
+  Context: TriggerConfig.validate_condition_expression._extract_string_key
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:_extract_string_key:fp=07e5998755c4cf44
+
+config.py:313:50
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Constant) and isinstance(node.value, str):
+  Context: TriggerConfig.validate_condition_expression._extract_string_key
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:_extract_string_key:fp=ebad4fd7aa488a38
+
+config.py:324:15
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "row":
+  Context: TriggerConfig.validate_condition_expression
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:fp=f9315823e46e496a
+
+config.py:324:51
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "row":
+  Context: TriggerConfig.validate_condition_expression
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:fp=909e9c4b6e0d466f
+
+config.py:333:16
+  Rule: R5 - isinstance
+  Code: isinstance(node, ast.Call)
+  Context: TriggerConfig.validate_condition_expression
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:fp=48bd8280f6303800
+
+config.py:334:20
+  Rule: R5 - isinstance
+  Code: and isinstance(node.func, ast.Attribute)
+  Context: TriggerConfig.validate_condition_expression
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:fp=01e175384ed910dd
+
+config.py:335:20
+  Rule: R5 - isinstance
+  Code: and isinstance(node.func.value, ast.Name)
+  Context: TriggerConfig.validate_condition_expression
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:TriggerConfig:validate_condition_expression:fp=b5de787e793c562b
+
+config.py:716:11
+  Rule: R5 - isinstance
+  Code: if isinstance(v, list):
+  Context: CoalesceSettings.normalize_branches
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:CoalesceSettings:normalize_branches:fp=efc1417d5e7eb507
+
+config.py:1539:24
+  Rule: R1 - dict.get
+  Code: env_value = os.environ.get(var_name)
+  Context: _expand_env_vars._expand_string.replacer
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: config.py:R1:_expand_env_vars:_expand_string:replacer:fp=9f023009a9d6dfa3
+
+config.py:1554:11
+  Rule: R5 - isinstance
+  Code: if isinstance(value, str):
+  Context: _expand_env_vars._expand_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_env_vars:_expand_value:fp=627405b6e6913bfd
+
+config.py:1556:13
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, dict):
+  Context: _expand_env_vars._expand_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_env_vars:_expand_value:fp=e3d991eb6ff7cf47
+
+config.py:1558:13
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, list):
+  Context: _expand_env_vars._expand_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_env_vars:_expand_value:fp=43d2cead15a5a500
+
+config.py:1620:4
+  Rule: R6 - silent-except
+  Code: except ValueError:
+  Context: _fingerprint_secrets
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: config.py:R6:_fingerprint_secrets:fp=b025b93b6b0cec32
+
+config.py:1625:11
+  Rule: R5 - isinstance
+  Code: if isinstance(value, dict):
+  Context: _fingerprint_secrets._process_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_secrets:_process_value:fp=17c4952d5ca09e3a
+
+config.py:1627:13
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, list):
+  Context: _fingerprint_secrets._process_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_secrets:_process_value:fp=ae18588c8572d96d
+
+config.py:1629:13
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, str) and _is_secret_field(key):
+  Context: _fingerprint_secrets._process_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_secrets:_process_value:fp=ee4d71827a19c845
+
+config.py:1652:15
+  Rule: R5 - isinstance
+  Code: if isinstance(d[key], str) and _is_secret_field(key):
+  Context: _fingerprint_secrets._recurse
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_secrets:_recurse:fp=265a37386dc6c880
+
+config.py:1729:48
+  Rule: R5 - isinstance
+  Code: query_password_value = value if isinstance(value, str) else value[0]
+  Context: _sanitize_dsn
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_sanitize_dsn:fp=53784a5c894ed7e1
+
+config.py:1730:47
+  Rule: R5 - isinstance
+  Code: elif key.lower() == "odbc_connect" and isinstance(value, str):
+  Context: _sanitize_dsn
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_sanitize_dsn:fp=be50e8424e629cb5
+
+config.py:1762:4
+  Rule: R6 - silent-except
+  Code: except ValueError:
+  Context: _sanitize_dsn
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: config.py:R6:_sanitize_dsn:fp=b7d4d7b0cc3bcd95
+
+config.py:1821:34
+  Rule: R5 - isinstance
+  Code: if "transforms" in config and isinstance(config["transforms"], list):
+  Context: _expand_config_templates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_config_templates:fp=30e19147092bfc92
+
+config.py:1824:15
+  Rule: R5 - isinstance
+  Code: if isinstance(plugin_config, dict):
+  Context: _expand_config_templates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_config_templates:fp=5817b97fecbc7541
+
+config.py:1826:43
+  Rule: R5 - isinstance
+  Code: if "options" in plugin and isinstance(plugin["options"], dict):
+  Context: _expand_config_templates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_config_templates:fp=cb1778072719ab7e
+
+config.py:1834:36
+  Rule: R5 - isinstance
+  Code: if "aggregations" in config and isinstance(config["aggregations"], list):
+  Context: _expand_config_templates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_config_templates:fp=b517f523bb38c081
+
+config.py:1837:15
+  Rule: R5 - isinstance
+  Code: if isinstance(agg_config, dict):
+  Context: _expand_config_templates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_config_templates:fp=e6789dfa86647044
+
+config.py:1839:40
+  Rule: R5 - isinstance
+  Code: if "options" in agg and isinstance(agg["options"], dict):
+  Context: _expand_config_templates
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_expand_config_templates:fp=5e3e100b5926036b
+
+config.py:1878:16
+  Rule: R1 - dict.get
+  Code: allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+  Context: _fingerprint_config_for_audit
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: config.py:R1:_fingerprint_config_for_audit:fp=a5cb22fa8c247339
+
+config.py:1885:33
+  Rule: R5 - isinstance
+  Code: if "landscape" in config and isinstance(config["landscape"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=8b90b45a28a5b0ba
+
+config.py:1887:34
+  Rule: R5 - isinstance
+  Code: if "url" in landscape and isinstance(landscape["url"], str):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=c51d72bc01bd8f96
+
+config.py:1901:30
+  Rule: R5 - isinstance
+  Code: if "source" in config and isinstance(config["source"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=51febed767acffbf
+
+config.py:1903:31
+  Rule: R5 - isinstance
+  Code: if "options" in ds and isinstance(ds["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=167427e123171e7b
+
+config.py:1907:29
+  Rule: R5 - isinstance
+  Code: if "sinks" in config and isinstance(config["sinks"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=46482f46b7f8a6f3
+
+config.py:1909:15
+  Rule: R5 - isinstance
+  Code: if isinstance(sink, dict) and "options" in sink and isinstance(sink["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=07c4ac7b1c9f0b93
+
+config.py:1909:64
+  Rule: R5 - isinstance
+  Code: if isinstance(sink, dict) and "options" in sink and isinstance(sink["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=354dfbe3d5e0ae24
+
+config.py:1913:34
+  Rule: R5 - isinstance
+  Code: if "transforms" in config and isinstance(config["transforms"], list):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=6cf7153b1c06153b
+
+config.py:1915:15
+  Rule: R5 - isinstance
+  Code: if isinstance(plugin, dict) and "options" in plugin and isinstance(plugin["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=0e08b97b2b0cf767
+
+config.py:1915:68
+  Rule: R5 - isinstance
+  Code: if isinstance(plugin, dict) and "options" in plugin and isinstance(plugin["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=0908552ee40a79d9
+
+config.py:1919:36
+  Rule: R5 - isinstance
+  Code: if "aggregations" in config and isinstance(config["aggregations"], list):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=4549af437a59ae99
+
+config.py:1921:15
+  Rule: R5 - isinstance
+  Code: if isinstance(agg, dict) and "options" in agg and isinstance(agg["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=6cca1ed94abcbbe7
+
+config.py:1921:62
+  Rule: R5 - isinstance
+  Code: if isinstance(agg, dict) and "options" in agg and isinstance(agg["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=fcc8a602cd9261a8
+
+config.py:1925:33
+  Rule: R5 - isinstance
+  Code: if "telemetry" in config and isinstance(config["telemetry"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=3bdd1237fb5e0294
+
+config.py:1927:20
+  Rule: R1 - dict.get
+  Code: exporters = telemetry.get("exporters")
+  Context: _fingerprint_config_for_audit
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: config.py:R1:_fingerprint_config_for_audit:fp=2a0c1e83d23fd6b4
+
+config.py:1928:11
+  Rule: R5 - isinstance
+  Code: if isinstance(exporters, list):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=0a8a56e506e93d7b
+
+config.py:1930:19
+  Rule: R5 - isinstance
+  Code: if isinstance(exporter, dict) and "options" in exporter and isinstance(exporter["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=3795aee7a7b6d44b
+
+config.py:1930:76
+  Rule: R5 - isinstance
+  Code: if isinstance(exporter, dict) and "options" in exporter and isinstance(exporter["options"], dict):
+  Context: _fingerprint_config_for_audit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_fingerprint_config_for_audit:fp=e2040eddfe0d5f6e
+
+config.py:2066:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, dict):
+  Context: _lowercase_schema_keys
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_lowercase_schema_keys:fp=f0830504cd668e62
+
+config.py:2106:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, list):
+  Context: _lowercase_schema_keys
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:_lowercase_schema_keys:fp=0cd9d859f790b09c
+
+config.py:2157:11
+  Rule: R5 - isinstance
+  Code: if not isinstance(_yaml_only, dict):
+  Context: load_settings
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:load_settings:fp=f01ce4184630120b
+
+config.py:2195:11
+  Rule: R5 - isinstance
+  Code: if not isinstance(config_dict, dict):
+  Context: load_settings_from_yaml_string
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: config.py:R5:load_settings_from_yaml_string:fp=c9c0fdd939ff960a
+
+expression_parser.py:126:16
+  Rule: R5 - isinstance
+  Code: return (isinstance(node, ast.Constant) and node.value is None) or (isinstance(node, ast.Name) and node.id == "None")
+  Context: _ExpressionValidator._is_none_constant
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_none_constant:fp=5cfa580fa93e2511
+
+expression_parser.py:126:75
+  Rule: R5 - isinstance
+  Code: return (isinstance(node, ast.Constant) and node.value is None) or (isinstance(node, ast.Name) and node.id == "None")
+  Context: _ExpressionValidator._is_none_constant
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_none_constant:fp=0c24b8c6ea6c6121
+
+expression_parser.py:134:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Name) and node.id in self._allowed_names:
+  Context: _ExpressionValidator._is_allowed_derived
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_allowed_derived:fp=69ea88d3b43bbcde
+
+expression_parser.py:136:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Subscript):
+  Context: _ExpressionValidator._is_allowed_derived
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_allowed_derived:fp=2ab317626c72c7a2
+
+expression_parser.py:140:12
+  Rule: R5 - isinstance
+  Code: isinstance(node, ast.Call)
+  Context: _ExpressionValidator._is_allowed_derived
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_allowed_derived:fp=f86688e53e08c1d8
+
+expression_parser.py:141:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.func, ast.Attribute)
+  Context: _ExpressionValidator._is_allowed_derived
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_allowed_derived:fp=bee9ef11e7396518
+
+expression_parser.py:142:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.func.value, ast.Name)
+  Context: _ExpressionValidator._is_allowed_derived
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:_is_allowed_derived:fp=fd97d72e58bbc9e0
+
+expression_parser.py:166:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.slice, ast.Slice):
+  Context: _ExpressionValidator.visit_Subscript
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Subscript:fp=077fffc1162b4a8c
+
+expression_parser.py:184:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.value, ast.Name) and node.value.id in self._allowed_names:
+  Context: _ExpressionValidator.visit_Attribute
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Attribute:fp=c3d09e764e9d4d79
+
+expression_parser.py:203:12
+  Rule: R5 - isinstance
+  Code: isinstance(node.func, ast.Attribute)
+  Context: _ExpressionValidator.visit_Call
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Call:fp=5c800b833d64ee57
+
+expression_parser.py:204:16
+  Rule: R5 - isinstance
+  Code: and isinstance(node.func.value, ast.Name)
+  Context: _ExpressionValidator.visit_Call
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Call:fp=0a8e517b95afe99d
+
+expression_parser.py:229:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.func, ast.Name) and node.func.id in _SAFE_BUILTINS:
+  Context: _ExpressionValidator.visit_Call
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Call:fp=4787e79adcdf5f92
+
+expression_parser.py:255:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(op, ast.Is | ast.IsNot):
+  Context: _ExpressionValidator.visit_Compare
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Compare:fp=aa37b6b18d3decf6
+
+expression_parser.py:284:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.value, float) and not math.isfinite(node.value):
+  Context: _ExpressionValidator.visit_Constant
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Constant:fp=28d4eb0851ef2bfc
+
+expression_parser.py:287:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.value, str | int | float | bool):
+  Context: _ExpressionValidator.visit_Constant
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit_Constant:fp=546c0bc3dd9ceb18
+
+expression_parser.py:417:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.expr) and type(node) not in self._HANDLED_EXPR_TYPES:
+  Context: _ExpressionValidator.visit
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionValidator:visit:fp=c06db95de0a522f4
+
+expression_parser.py:466:11
+  Rule: R5 - isinstance
+  Code: if isinstance(value, float) and not math.isfinite(value):
+  Context: _ExpressionEvaluator._ensure_finite_float
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:_ensure_finite_float:fp=93fad93a20e77a51
+
+expression_parser.py:506:15
+  Rule: R5 - isinstance
+  Code: if isinstance(value, dict):
+  Context: _ExpressionEvaluator.visit_Subscript
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:visit_Subscript:fp=0ea9800929e01470
+
+expression_parser.py:528:46
+  Rule: R5 - isinstance
+  Code: if not self._single_name_mode and isinstance(node.value, ast.Name) and node.value.id in self._allowed_names:
+  Context: _ExpressionEvaluator.visit_Attribute
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:visit_Attribute:fp=fc3139feae6eaee5
+
+expression_parser.py:540:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+  Context: _ExpressionEvaluator.visit_Call
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:visit_Call:fp=e25351dde7462e46
+
+expression_parser.py:542:13
+  Rule: R5 - isinstance
+  Code: elif isinstance(node.func, ast.Name):
+  Context: _ExpressionEvaluator.visit_Call
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:visit_Call:fp=983fd6164e53c620
+
+expression_parser.py:574:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node.op, ast.And):
+  Context: _ExpressionEvaluator.visit_BoolOp
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:visit_BoolOp:fp=c4f851544dd70950
+
+expression_parser.py:580:13
+  Rule: R5 - isinstance
+  Code: elif isinstance(node.op, ast.Or):
+  Context: _ExpressionEvaluator.visit_BoolOp
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:_ExpressionEvaluator:visit_BoolOp:fp=ba185a79065fe3ff
+
+expression_parser.py:763:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Compare):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=6775d1d16fe0dc25
+
+expression_parser.py:769:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.BoolOp):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=e3cccb3d530ea75d
+
+expression_parser.py:773:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=98bd4a04f75f9ff4
+
+expression_parser.py:773:45
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=63667b07fa759ea9
+
+expression_parser.py:777:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=45b4d41ffd098adf
+
+expression_parser.py:777:46
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=1a0326b7c9a9be9d
+
+expression_parser.py:781:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.Name) and node.id in ("True", "False"):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=2044ce34e7068a0e
+
+expression_parser.py:785:11
+  Rule: R5 - isinstance
+  Code: if isinstance(node, ast.IfExp):
+  Context: ExpressionParser._is_boolean_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: expression_parser.py:R5:ExpressionParser:_is_boolean_node:fp=5e626f7e33feab2b
+
+canonical.py:61:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.floating):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=54c2d02d60087f77
+
+canonical.py:74:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, float):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=d999959c10ca7f31
+
+canonical.py:80:22
+  Rule: R5 - isinstance
+  Code: if obj is None or isinstance(obj, str | int | bool):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=e1a9506c26cf5732
+
+canonical.py:84:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.integer):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=8204328f5d5a1574
+
+canonical.py:86:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.bool_):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=c65382fa7e02810c
+
+canonical.py:88:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.ndarray):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=ae33e349f3bb421e
+
+canonical.py:98:12
+  Rule: R6 - silent-except
+  Code: except TypeError:
+  Context: _normalize_value
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: canonical.py:R6:_normalize_value:fp=b26d50562c16f852
+
+canonical.py:108:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.datetime64):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=caf2dab7931eae70
+
+canonical.py:118:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, pd.Timestamp):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=72f79611b9d549d9
+
+canonical.py:125:24
+  Rule: R5 - isinstance
+  Code: if obj is pd.NA or (isinstance(obj, type(pd.NaT)) and obj is pd.NaT):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=17b0c1703c00c7a2
+
+canonical.py:129:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, datetime):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=05438efe3dcfada6
+
+canonical.py:134:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, date):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=3310aff1426ad617
+
+canonical.py:137:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, time):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=06a2a3260cd7fe4d
+
+canonical.py:140:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, UUID):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=c475409025e910bc
+
+canonical.py:143:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, bytes):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=3db4e2755848ac98
+
+canonical.py:146:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, Decimal):
+  Context: _normalize_value
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_value:fp=c9531c6a04908179
+
+canonical.py:170:7
+  Rule: R5 - isinstance
+  Code: if isinstance(data, PipelineRow):
+  Context: _normalize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_for_canonical:fp=10e73c24908522b7
+
+canonical.py:173:7
+  Rule: R5 - isinstance
+  Code: if isinstance(data, Mapping):
+  Context: _normalize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_for_canonical:fp=91f91f5c3e35e962
+
+canonical.py:175:7
+  Rule: R5 - isinstance
+  Code: if isinstance(data, list | tuple):
+  Context: _normalize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:_normalize_for_canonical:fp=0100cd362b521bd1
+
+canonical.py:296:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, dict):
+  Context: sanitize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:sanitize_for_canonical:fp=aa116ad1556acd55
+
+canonical.py:298:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.ndarray):
+  Context: sanitize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:sanitize_for_canonical:fp=442f9a1f411a1cd0
+
+canonical.py:300:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, (list, tuple)):
+  Context: sanitize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:sanitize_for_canonical:fp=05ba59815ff33f21
+
+canonical.py:302:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+  Context: sanitize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:sanitize_for_canonical:fp=380c8461b687c081
+
+canonical.py:307:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, np.floating) and not np.isfinite(obj):
+  Context: sanitize_for_canonical
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: canonical.py:R5:sanitize_for_canonical:fp=8232406952131b5e
+
+dag/builder.py:1064:11
+  Rule: R5 - isinstance
+  Code: if isinstance(info.config, dict):
+  Context: build_execution_graph
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dag/builder.py:R5:build_execution_graph:fp=5495ade25a19136a
+
+dag/graph.py:239:54
+  Rule: R5 - isinstance
+  Code: component_type=node_type.value if isinstance(node_type, NodeType) else str(node_type),
+  Context: ExecutionGraph.add_node
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: dag/graph.py:R5:ExecutionGraph:add_node:fp=034b31cfc88d8f9c
+
+dag/graph.py:1255:28
+  Rule: R6 - silent-except
+  Code: except (KeyError, GraphValidationError):
+  Context: ExecutionGraph.warn_divert_coalesce_interactions
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=ea839197606998d2
+
+retention/purge.py:384:12
+  Rule: R6 - silent-except
+  Code: except OSError as e:
+  Context: PurgeManager.purge_payloads
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
+
+retention/purge.py:418:12
+  Rule: R4 - broad-except
+  Code: except Exception as exc:
+  Context: PurgeManager.purge_payloads
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: retention/purge.py:R4:PurgeManager:purge_payloads:fp=ed928398c920ef43
+
+landscape/execution_repository.py:168:12
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError):
+  Context: ExecutionRepository.begin_node_state
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
+
+landscape/execution_repository.py:301:44
+  Rule: R5 - isinstance
+  Code: error_data = error.to_dict() if isinstance(error, (ExecutionError, CoalesceFailureReason)) else error
+  Context: ExecutionRepository.complete_node_state
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/execution_repository.py:R5:ExecutionRepository:complete_node_state:fp=d2e05dfce7443480
+
+landscape/execution_repository.py:355:11
+  Rule: R5 - isinstance
+  Code: if isinstance(result, NodeStateOpen):
+  Context: ExecutionRepository.complete_node_state
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/execution_repository.py:R5:ExecutionRepository:complete_node_state:fp=eff9a05711d4e280
+
+landscape/database.py:270:33
+  Rule: R5 - isinstance
+  Code: value = raw_value if isinstance(raw_value, str) else raw_value[0]
+  Context: LandscapeDB._create_sqlcipher_engine
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/database.py:R5:LandscapeDB:_create_sqlcipher_engine:fp=2fa182cf61c311af
+
+landscape/exporter.py:317:24
+  Rule: R1 - dict.get
+  Code: for call in op_calls_by_operation.get(operation.operation_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=455e3f20c68fa667
+
+landscape/exporter.py:396:25
+  Rule: R1 - dict.get
+  Code: for token in tokens_by_row.get(row.row_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=90701a15f81f120d
+
+landscape/exporter.py:412:30
+  Rule: R1 - dict.get
+  Code: for parent in parents_by_token.get(token.token_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=d13bff181e8c8c4b
+
+landscape/exporter.py:423:31
+  Rule: R1 - dict.get
+  Code: for outcome in outcomes_by_token.get(token.token_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=77d4ada8a0a3c91c
+
+landscape/exporter.py:444:29
+  Rule: R1 - dict.get
+  Code: for state in states_by_token.get(token.token_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=9f2474980b6bfbcd
+
+landscape/exporter.py:447:23
+  Rule: R5 - isinstance
+  Code: if isinstance(state, NodeStateOpen):
+  Context: LandscapeExporter._iter_records
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/exporter.py:R5:LandscapeExporter:_iter_records:fp=1cec1edda0e29d55
+
+landscape/exporter.py:467:25
+  Rule: R5 - isinstance
+  Code: elif isinstance(state, NodeStatePending):
+  Context: LandscapeExporter._iter_records
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/exporter.py:R5:LandscapeExporter:_iter_records:fp=65d2e7d2c69a65e0
+
+landscape/exporter.py:487:25
+  Rule: R5 - isinstance
+  Code: elif isinstance(state, NodeStateCompleted):
+  Context: LandscapeExporter._iter_records
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/exporter.py:R5:LandscapeExporter:_iter_records:fp=bf64ae74ce32e23d
+
+landscape/exporter.py:530:33
+  Rule: R1 - dict.get
+  Code: for event in events_by_state.get(state.state_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=54647a782c1117e1
+
+landscape/exporter.py:547:32
+  Rule: R1 - dict.get
+  Code: for call in calls_by_state.get(state.state_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=d9d2d4f0e34017bd
+
+landscape/exporter.py:592:26
+  Rule: R1 - dict.get
+  Code: for member in members_by_batch.get(batch.batch_id, []):
+  Context: LandscapeExporter._iter_records
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2c0214fa9a261b33
+
+landscape/query_repository.py:562:12
+  Rule: R6 - silent-except
+  Code: except PayloadNotFoundError as exc:
+  Context: QueryRepository.explain_row
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/query_repository.py:R6:QueryRepository:explain_row:fp=5b5158345e746330
+
+landscape/data_flow_repository.py:337:12
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError):
+  Context: DataFlowRepository.create_row
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=7ff9eecf981c383d
+
+landscape/data_flow_repository.py:353:16
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError):
+  Context: DataFlowRepository.create_row
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=9e9436a2a8067972
+
+landscape/data_flow_repository.py:1329:8
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError) as e:
+  Context: DataFlowRepository.record_validation_error
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=319a65f85d26c989
+
+landscape/data_flow_repository.py:1473:8
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError) as e:
+  Context: DataFlowRepository.record_transform_error
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=1aa44a88792f0de3
+
+landscape/data_flow_repository.py:1490:8
+  Rule: R6 - silent-except
+  Code: except (ValueError, TypeError) as e:
+  Context: DataFlowRepository.record_transform_error
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=cb577d1552bfca99
+
+landscape/journal.py:241:11
+  Rule: R5 - isinstance
+  Code: if isinstance(parameters, list):
+  Context: LandscapeJournal._normalize_parameters
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/journal.py:R5:LandscapeJournal:_normalize_parameters:fp=b0870ed16a5c89ca
+
+landscape/journal.py:243:11
+  Rule: R5 - isinstance
+  Code: if isinstance(parameters, tuple):
+  Context: LandscapeJournal._normalize_parameters
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/journal.py:R5:LandscapeJournal:_normalize_parameters:fp=ae019c0524a619e2
+
+landscape/journal.py:245:11
+  Rule: R5 - isinstance
+  Code: if isinstance(parameters, dict):
+  Context: LandscapeJournal._normalize_parameters
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/journal.py:R5:LandscapeJournal:_normalize_parameters:fp=5084be1625cdc11c
+
+landscape/journal.py:347:11
+  Rule: R5 - isinstance
+  Code: if isinstance(params, dict):
+  Context: LandscapeJournal._columns_to_values
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/journal.py:R5:LandscapeJournal:_columns_to_values:fp=df8f67a6bdcb6a9e
+
+landscape/run_lifecycle_repository.py:362:15
+  Rule: R5 - isinstance
+  Code: if not isinstance(resolution_data, dict):
+  Context: RunLifecycleRepository.get_source_field_resolution
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/run_lifecycle_repository.py:R5:RunLifecycleRepository:get_source_field_resolution:fp=bc3ddc7aaf349515
+
+landscape/run_lifecycle_repository.py:377:15
+  Rule: R5 - isinstance
+  Code: if not isinstance(resolution_mapping, dict):
+  Context: RunLifecycleRepository.get_source_field_resolution
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/run_lifecycle_repository.py:R5:RunLifecycleRepository:get_source_field_resolution:fp=c5b99eae0d885dd6
+
+landscape/run_lifecycle_repository.py:387:19
+  Rule: R5 - isinstance
+  Code: if not isinstance(key, str) or not isinstance(value, str):
+  Context: RunLifecycleRepository.get_source_field_resolution
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/run_lifecycle_repository.py:R5:RunLifecycleRepository:get_source_field_resolution:fp=c3394c2711343e6d
+
+landscape/run_lifecycle_repository.py:387:47
+  Rule: R5 - isinstance
+  Code: if not isinstance(key, str) or not isinstance(value, str):
+  Context: RunLifecycleRepository.get_source_field_resolution
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/run_lifecycle_repository.py:R5:RunLifecycleRepository:get_source_field_resolution:fp=417823b339442916
+
+landscape/formatters.py:57:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, float):
+  Context: serialize_datetime
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:serialize_datetime:fp=d2afbb898883d3d6
+
+landscape/formatters.py:63:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, datetime):
+  Context: serialize_datetime
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:serialize_datetime:fp=611fed580e171452
+
+landscape/formatters.py:65:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, dict):
+  Context: serialize_datetime
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:serialize_datetime:fp=18720f02b9e89469
+
+landscape/formatters.py:67:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, (list, tuple)):
+  Context: serialize_datetime
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:serialize_datetime:fp=fcce104c47c16455
+
+landscape/formatters.py:94:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, list):
+  Context: dataclass_to_dict
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:dataclass_to_dict:fp=ca959680ac957f7c
+
+landscape/formatters.py:96:33
+  Rule: R5 - isinstance
+  Code: if is_dataclass(obj) and not isinstance(obj, type):
+  Context: dataclass_to_dict
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:dataclass_to_dict:fp=01387aa16523e9c3
+
+landscape/formatters.py:102:43
+  Rule: R5 - isinstance
+  Code: if is_dataclass(value) and not isinstance(value, type):
+  Context: dataclass_to_dict
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:dataclass_to_dict:fp=7e3e4b21ad9c707e
+
+landscape/formatters.py:104:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, (list, tuple)):
+  Context: dataclass_to_dict
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:dataclass_to_dict:fp=bf915ee79a6dd7a3
+
+landscape/formatters.py:106:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, Enum):
+  Context: dataclass_to_dict
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:dataclass_to_dict:fp=00a513039aa82fd3
+
+landscape/formatters.py:251:15
+  Rule: R5 - isinstance
+  Code: if isinstance(value, dict):
+  Context: CSVFormatter.flatten
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:CSVFormatter:flatten:fp=2f3d56b80a0e1ca1
+
+landscape/formatters.py:268:17
+  Rule: R5 - isinstance
+  Code: elif isinstance(value, list):
+  Context: CSVFormatter.flatten
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: landscape/formatters.py:R5:CSVFormatter:flatten:fp=701b81268f26ecd0
+
+security/config_secrets.py:83:32
+  Rule: R1 - dict.get
+  Code: fingerprint_key_available = os.environ.get("ELSPETH_FINGERPRINT_KEY") or "ELSPETH_FINGERPRINT_KEY" in config.mapping
+  Context: load_secrets_from_config
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: security/config_secrets.py:R1:load_secrets_from_config:fp=c6b8e283546c7541
+
+security/web.py:310:8
+  Rule: R4 - broad-except
+  Code: except BaseException as exc:
+  Context: validate_url_for_ssrf._resolve_worker
+  Issue: Broad exception handling can suppress bugs
+  Fix: Catch specific exceptions, or re-raise after logging/quarantining
+  Allowlist key: security/web.py:R4:validate_url_for_ssrf:_resolve_worker:fp=bdf07052a9f75058
+
+security/web.py:316:24
+  Rule: R1 - dict.get
+  Code: status, value = result_queue.get(timeout=timeout)
+  Context: validate_url_for_ssrf
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: security/web.py:R1:validate_url_for_ssrf:fp=b3d293b81a3a0807
+
+security/web.py:322:15
+  Rule: R5 - isinstance
+  Code: assert isinstance(err, BaseException)
+  Context: validate_url_for_ssrf
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: security/web.py:R5:validate_url_for_ssrf:fp=587644c24ab0025d
+
+security/web.py:323:11
+  Rule: R5 - isinstance
+  Code: if isinstance(err, (SSRFBlockedError, NetworkError)):
+  Context: validate_url_for_ssrf
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: security/web.py:R5:validate_url_for_ssrf:fp=7a01ee7ca996531d
+
+security/secret_loader.py:127:16
+  Rule: R1 - dict.get
+  Code: value = os.environ.get(name)
+  Context: EnvSecretLoader.get_secret
+  Issue: dict.get() usage can hide missing key bugs
+  Fix: Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs
+  Allowlist key: security/secret_loader.py:R1:EnvSecretLoader:get_secret:fp=d5cef0272959b730
+
+security/secret_loader.py:196:12
+  Rule: R6 - silent-except
+  Code: except ImportError:
+  Context: KeyVaultSecretLoader.get_secret
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: security/secret_loader.py:R6:KeyVaultSecretLoader:get_secret:fp=e77b2a357f43e9a2
+
+security/secret_loader.py:314:12
+  Rule: R6 - silent-except
+  Code: except SecretNotFoundError:
+  Context: CompositeSecretLoader.get_secret
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: security/secret_loader.py:R6:CompositeSecretLoader:get_secret:fp=cb4d8fc57f9917d4
+
+rate_limit/limiter.py:260:12
+  Rule: R6 - silent-except
+  Code: except BucketFullException:
+  Context: RateLimiter.try_acquire
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: rate_limit/limiter.py:R6:RateLimiter:try_acquire:fp=3e1bc5e9e76ba71f
+
+rate_limit/limiter.py:278:8
+  Rule: R6 - silent-except
+  Code: except AttributeError:
+  Context: RateLimiter.close
+  Issue: Exception handling that swallows errors without re-raise or explicit error result
+  Fix: Raise the exception or return an explicit error/quarantine result
+  Allowlist key: rate_limit/limiter.py:R6:RateLimiter:close:fp=3aef03c2689d8024
+
+checkpoint/serialization.py:66:11
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, datetime):
+  Context: CheckpointEncoder.default
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:CheckpointEncoder:default:fp=3b281eeeed6ea725
+
+checkpoint/serialization.py:96:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, float):
+  Context: _reject_nan_infinity
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_reject_nan_infinity:fp=dca291232de403e4
+
+checkpoint/serialization.py:99:9
+  Rule: R5 - isinstance
+  Code: elif isinstance(obj, dict):
+  Context: _reject_nan_infinity
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_reject_nan_infinity:fp=5489fa474057e670
+
+checkpoint/serialization.py:102:9
+  Rule: R5 - isinstance
+  Code: elif isinstance(obj, (list, tuple)):
+  Context: _reject_nan_infinity
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_reject_nan_infinity:fp=536a707d2c187622
+
+checkpoint/serialization.py:120:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, datetime):
+  Context: _escape_reserved_keys
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_escape_reserved_keys:fp=be3984d8f5bd0518
+
+checkpoint/serialization.py:123:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, tuple):
+  Context: _escape_reserved_keys
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_escape_reserved_keys:fp=8fe487c1aed56a45
+
+checkpoint/serialization.py:131:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, dict):
+  Context: _escape_reserved_keys
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_escape_reserved_keys:fp=a715fdc0c601c28f
+
+checkpoint/serialization.py:141:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, list):
+  Context: _escape_reserved_keys
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_escape_reserved_keys:fp=273f707dcd7d2715
+
+checkpoint/serialization.py:189:7
+  Rule: R5 - isinstance
+  Code: if isinstance(obj, dict):
+  Context: _restore_types
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_restore_types:fp=cb45c50da6366324
+
+checkpoint/serialization.py:195:47
+  Rule: R5 - isinstance
+  Code: if envelope_type == "datetime" and isinstance(envelope_value, str):
+  Context: _restore_types
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_restore_types:fp=4caef713e72da410
+
+checkpoint/serialization.py:204:51
+  Rule: R5 - isinstance
+  Code: if envelope_type == "escaped_dict" and isinstance(envelope_value, dict):
+  Context: _restore_types
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_restore_types:fp=b1dbbdedb998f0f7
+
+checkpoint/serialization.py:208:44
+  Rule: R5 - isinstance
+  Code: if envelope_type == "tuple" and isinstance(envelope_value, list):
+  Context: _restore_types
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_restore_types:fp=ef96cb9ea70edb86
+
+checkpoint/serialization.py:223:9
+  Rule: R5 - isinstance
+  Code: elif isinstance(obj, list):
+  Context: _restore_types
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/serialization.py:R5:_restore_types:fp=755597011f4f00b0
+
+checkpoint/recovery.py:281:19
+  Rule: R5 - isinstance
+  Code: if not isinstance(degraded_data, dict):
+  Context: RecoveryManager.get_unprocessed_row_data
+  Issue: isinstance() checks can mask contract violations outside explicit trust boundaries
+  Fix: Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs
+  Allowlist key: checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=309a6e248bc67595
+
+============================================================
+CHECK FAILED
+============================================================
+
+To allowlist a violation, add an entry to /tmp/empty-allowlist-core
+Example entry:
+{'expires': '2026-05-28',
+ 'key': 'payload_store.py:R6:FilesystemPayloadStore:store:fp=7ffad90e4cb20922',
+ 'owner': '<your-name>',
+ 'reason': '<explain why this is at a trust boundary>',
+ 'safety': '<explain how failures are handled>'}

@@ -6,9 +6,9 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import PipelineRow
-from elspeth.testing import make_pipeline_row
+from elspeth.testing import make_contract, make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
 class TestBaseTransform:
@@ -68,8 +68,8 @@ class TestBaseTransform:
             output_schema = None  # type: ignore[assignment]
 
         transform = IncompleteTransform({})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
         row = make_pipeline_row({"x": 1})
 
         # Calling process() should raise NotImplementedError
@@ -108,8 +108,8 @@ class TestBaseTransform:
                 )
 
         transform = DoubleTransform({"some": "config"})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         result = transform.process(make_pipeline_row({"x": 21}), ctx)
         assert result.row is not None
@@ -139,8 +139,8 @@ class TestBaseTransform:
         transform = SimpleTransform({})
         assert transform._on_start_called is False
 
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
         transform.on_start(ctx)
 
         assert transform._on_start_called is True
@@ -172,6 +172,7 @@ class TestBaseSink:
             name = "memory"
             input_schema = InputSchema
             idempotent = True
+            _on_write_failure: str | None = "discard"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
@@ -194,8 +195,8 @@ class TestBaseSink:
                 pass
 
         sink = MemorySink({})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         result = sink.write([{"value": 1}, {"value": 2}], ctx)
 
@@ -229,6 +230,7 @@ class TestBaseSink:
             name = "batch_memory"
             input_schema = InputSchema
             idempotent = True
+            _on_write_failure: str | None = "discard"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
@@ -251,8 +253,8 @@ class TestBaseSink:
                 pass
 
         sink = BatchMemorySink({})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         result = sink.write([{"value": 1}, {"value": 2}, {"value": 3}], ctx)
 
@@ -291,14 +293,14 @@ class TestBaseSource:
 
             def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
                 for _row in self._data:
-                    yield SourceRow.valid(_row)
+                    yield SourceRow.valid(_row, contract=make_contract(_row))
 
             def close(self) -> None:
                 pass
 
         source = ListSource({"data": [{"value": 1}, {"value": 2}]})
-        recorder = make_recorder()
-        ctx = make_context(landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
 
         rows = list(source.load(ctx))
         assert len(rows) == 2

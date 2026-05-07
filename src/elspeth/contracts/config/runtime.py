@@ -67,10 +67,12 @@ def _validate_int_field(field_name: str, value: Any) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
 
-    # Float - convert to int (reject non-finite values first)
+    # Float - convert to int (reject non-finite and non-integral values)
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"Invalid retry policy: {field_name} must be finite, got {value}")
+        if not value.is_integer():
+            raise ValueError(f"Invalid retry policy: {field_name} must be an integer, got {value}")
         return int(value)
 
     # String - attempt numeric coercion
@@ -165,6 +167,10 @@ class RuntimeRetryConfig:
         from what the user configured, violating auditability.
         """
         require_int(self.max_attempts, "max_attempts", min_value=1)
+        for field_name in ("base_delay", "max_delay", "jitter", "exponential_base"):
+            value = getattr(self, field_name)
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite, got {value!r}")
         if self.base_delay < 0.01:
             raise ValueError(f"base_delay must be >= 0.01, got {self.base_delay}")
         if self.max_delay < 0.1:

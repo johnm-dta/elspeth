@@ -203,6 +203,13 @@ class TestExplicitSinkRouting:
             policy="require_all",
             merge="union",
         )
+        runtime_coalesce = CoalesceSettings(
+            name="merge_paths",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+            on_success="output",
+        )
 
         output_sink = CollectSink(name="output")
         source_sink = CollectSink(name="source_sink")
@@ -225,7 +232,7 @@ class TestExplicitSinkRouting:
                 "source_sink": {"plugin": "test", "on_write_failure": "discard"},
             },
             gates=[fork_gate, terminal_gate],
-            coalesce=[coalesce],
+            coalesce=[runtime_coalesce],
         )
 
         orchestrator = Orchestrator(db)
@@ -236,8 +243,12 @@ class TestExplicitSinkRouting:
             payload_store=payload_store,
         )
 
+        # ADR-019: gate route_to_sink is intentional MOVE provenance on top of
+        # lifecycle SUCCESS, so a gate-routed-only run is COMPLETED.
         assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 2
+        assert run_result.rows_routed_success == 2
 
         # Merged results route to output sink via terminal gate
         assert len(output_sink.results) == 2

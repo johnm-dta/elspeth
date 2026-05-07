@@ -21,9 +21,10 @@ import base64
 import hashlib
 import math
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import networkx as nx
 import numpy as np
@@ -57,11 +58,22 @@ def _normalize_value(obj: Any) -> Any:
         ValueError: If value contains NaN or Infinity
     """
     # Check for NaN/Infinity FIRST (before type coercion)
-    if isinstance(obj, float | np.floating):
+    if isinstance(obj, np.floating):
+        # Use NumPy-native finiteness check — math.isnan/isinf implicitly
+        # downcast through float(), which overflows for np.longdouble values
+        # outside IEEE 754 double range (falsely treating finite values as inf).
+        if not np.isfinite(obj):
+            raise ValueError(f"Cannot canonicalize non-finite float: {obj}. Use None for missing values, not NaN.")
+        converted = float(obj)
+        if not math.isfinite(converted):
+            raise ValueError(
+                f"Cannot canonicalize {type(obj).__name__} value: exceeds IEEE 754 double range. "
+                f"Value is finite in native representation but overflows JSON number format."
+            )
+        return converted
+    if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             raise ValueError(f"Cannot canonicalize non-finite float: {obj}. Use None for missing values, not NaN.")
-        if isinstance(obj, np.floating):
-            return float(obj)
         return obj
 
     # Primitives pass through unchanged
@@ -118,6 +130,15 @@ def _normalize_value(obj: Any) -> Any:
         if obj.tzinfo is None:
             obj = obj.replace(tzinfo=UTC)
         return obj.astimezone(UTC).isoformat()
+
+    if isinstance(obj, date):
+        return obj.isoformat()
+
+    if isinstance(obj, time):
+        return obj.isoformat()
+
+    if isinstance(obj, UUID):
+        return str(obj)
 
     if isinstance(obj, bytes):
         return {"__bytes__": base64.b64encode(obj).decode("ascii")}
@@ -214,6 +235,7 @@ def compute_full_topology_hash(graph: ExecutionGraph) -> str:
                 {
                     "node_id": n,
                     "plugin_name": graph.get_node_info(n).plugin_name,
+                    "node_type": graph.get_node_info(n).node_type.value,
                     "config_hash": stable_hash(graph.get_node_info(n).config),
                 }
                 for n in nx_graph.nodes()
@@ -273,11 +295,15 @@ def sanitize_for_canonical(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         return {k: sanitize_for_canonical(v) for k, v in obj.items()}
+    if isinstance(obj, np.ndarray):
+        return sanitize_for_canonical(obj.tolist())
     if isinstance(obj, (list, tuple)):
         return [sanitize_for_canonical(v) for v in obj]
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
     # numpy floating scalars (longdouble, float16, float32, float64, etc.)
-    if isinstance(obj, np.floating) and not math.isfinite(float(obj)):
+    # Use np.isfinite() — math.isfinite(float(obj)) overflows for np.longdouble
+    # values outside IEEE 754 double range, falsely treating finite values as inf.
+    if isinstance(obj, np.floating) and not np.isfinite(obj):
         return None
     return obj

@@ -504,6 +504,34 @@ class TestPayloadStoreSecurityValidation:
         with pytest.raises(ValueError, match="Invalid content_hash"):
             store.retrieve("")
 
+    def test_rejects_trailing_newline(self, tmp_path: Path) -> None:
+        """content_hash with a trailing newline must be rejected.
+
+        Python's ``re.match(r"^...$", s)`` treats ``$`` as "end of string
+        OR just before a final newline", so a 64-hex hash followed by a
+        single ``\\n`` would pass a naive ``^[a-f0-9]{64}$`` check and
+        then mis-key the on-disk filename — every subsequent lookup
+        would fail with an opaque FileNotFoundError instead of a clean
+        validation error. ``fullmatch`` (and equivalently ``\\A...\\Z``)
+        is the correct anchor: it requires the whole string to match,
+        newline and all.
+
+        A valid SHA-256 digest from ``hashlib.sha256().hexdigest()``
+        never contains ``\\n``, so any value that does is either
+        externally-sourced (Tier 3 boundary — reject) or corrupt Tier-1
+        data (reject).
+        """
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        store = FilesystemPayloadStore(base_path=tmp_path)
+
+        trailing_newline_hash = "a" * 64 + "\n"
+
+        with pytest.raises(ValueError, match="Invalid content_hash"):
+            store.retrieve(trailing_newline_hash)
+        with pytest.raises(ValueError, match="Invalid content_hash"):
+            store.exists(trailing_newline_hash)
+
     def test_accepts_valid_sha256_hash(self, tmp_path: Path) -> None:
         """Valid SHA-256 hex digest should work normally."""
         from elspeth.core.payload_store import FilesystemPayloadStore

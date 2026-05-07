@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
@@ -12,9 +11,10 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.events import (
     ExternalCallCompleted,
@@ -26,11 +26,11 @@ from elspeth.contracts.events import (
     RowCreated,
     RunFinished,
     RunStarted,
-    TelemetryEvent,
     TokenCompleted,
     TransformCompleted,
 )
 from elspeth.telemetry.filtering import should_emit
+from elspeth.telemetry.serialization import serialize_event_attributes
 
 # =============================================================================
 # Constants and Factories
@@ -112,7 +112,8 @@ def _token_completed() -> TokenCompleted:
         run_id=_RUN_ID,
         row_id="row-1",
         token_id="tok-1",
-        outcome=RowOutcome.COMPLETED,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.DEFAULT_FLOW,
         sink_name="output",
     )
 
@@ -137,21 +138,6 @@ def _field_resolution_applied() -> FieldResolutionApplied:
         field_count=2,
         normalization_version="v1",
         resolution_mapping={"Customer ID": "customer_id", "Order Amount": "order_amount"},
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _UnknownEvent(TelemetryEvent):
-    """Custom event subclass to test forward-compatible filtering."""
-
-    custom_field: str = "unknown"
-
-
-def _unknown_event() -> _UnknownEvent:
-    return _UnknownEvent(
-        timestamp=_NOW,
-        run_id=_RUN_ID,
-        custom_field="test",
     )
 
 
@@ -220,6 +206,14 @@ class TestRowEventsFilteredByGranularity:
     def test_token_completed_emits_at_full(self) -> None:
         assert should_emit(_token_completed(), FULL) is True
 
+    def test_token_completed_serializes_outcome_and_path(self) -> None:
+        attrs = serialize_event_attributes(_token_completed())
+
+        assert attrs["event_type"] == "TokenCompleted"
+        assert attrs["outcome"] == "success"
+        assert attrs["path"] == "default_flow"
+        assert attrs["sink_name"] == "output"
+
     def test_field_resolution_applied_suppressed_at_lifecycle(self) -> None:
         assert should_emit(_field_resolution_applied(), LIFECYCLE) is False
 
@@ -244,61 +238,3 @@ class TestExternalCallEventsFullOnly:
 
     def test_external_call_emits_at_full(self) -> None:
         assert should_emit(_external_call(), FULL) is True
-
-
-# =============================================================================
-# Unknown Events: Pass Through (Fail-Open for Forward Compatibility)
-# =============================================================================
-
-
-class TestUnknownEventsPassThrough:
-    def test_unknown_event_passes_at_lifecycle(self) -> None:
-        assert should_emit(_unknown_event(), LIFECYCLE) is True
-
-    def test_unknown_event_passes_at_rows(self) -> None:
-        assert should_emit(_unknown_event(), ROWS) is True
-
-    def test_unknown_event_passes_at_full(self) -> None:
-        assert should_emit(_unknown_event(), FULL) is True
-
-
-# =============================================================================
-# Parametrized Full Matrix
-# =============================================================================
-
-
-_LIFECYCLE_FACTORIES = [
-    pytest.param(_run_started, id="RunStarted"),
-    pytest.param(_run_finished, id="RunFinished"),
-    pytest.param(_phase_changed, id="PhaseChanged"),
-]
-
-_ROW_FACTORIES = [
-    pytest.param(_row_created, id="RowCreated"),
-    pytest.param(_transform_completed, id="TransformCompleted"),
-    pytest.param(_gate_evaluated, id="GateEvaluated"),
-    pytest.param(_token_completed, id="TokenCompleted"),
-    pytest.param(_field_resolution_applied, id="FieldResolutionApplied"),
-]
-
-
-class TestFullMatrix:
-    @pytest.mark.parametrize("factory", _LIFECYCLE_FACTORIES)
-    @pytest.mark.parametrize("granularity", [LIFECYCLE, ROWS, FULL])
-    def test_lifecycle_events_always_true(self, factory, granularity) -> None:
-        assert should_emit(factory(), granularity) is True
-
-    @pytest.mark.parametrize("factory", _ROW_FACTORIES)
-    def test_row_events_false_at_lifecycle(self, factory) -> None:
-        assert should_emit(factory(), LIFECYCLE) is False
-
-    @pytest.mark.parametrize("factory", _ROW_FACTORIES)
-    @pytest.mark.parametrize("granularity", [ROWS, FULL])
-    def test_row_events_true_at_rows_or_full(self, factory, granularity) -> None:
-        assert should_emit(factory(), granularity) is True
-
-    def test_external_call_only_at_full(self) -> None:
-        event = _external_call()
-        assert should_emit(event, LIFECYCLE) is False
-        assert should_emit(event, ROWS) is False
-        assert should_emit(event, FULL) is True

@@ -6,8 +6,11 @@ import time
 from threading import Lock
 from typing import Any
 
+import pytest
+
 from elspeth.contracts import TransformResult
-from elspeth.plugins.infrastructure.pooling import BufferEntry, CapacityError, PoolConfig, PooledExecutor, RowContext
+from elspeth.contracts.errors import CapacityError
+from elspeth.plugins.infrastructure.pooling import BufferEntry, PoolConfig, PooledExecutor, RowContext
 from elspeth.testing import make_pipeline_row
 
 
@@ -67,14 +70,21 @@ class TestRowContext:
         assert ctx.state_id == "state-123"
         assert ctx.row_index == 5
 
-    def test_row_context_immutable_reference(self) -> None:
-        """RowContext should maintain reference to original row."""
+    def test_row_context_isolates_from_external_mutation(self) -> None:
+        """RowContext must deep-freeze the row dict on construction so that
+        external mutation of the source dict is not visible through ctx.row.
+
+        This matches the contract documented on RowContext: the carrier stores
+        a detached MappingProxyType, not a live reference, to prevent data
+        races between worker threads and the dispatch thread holding the
+        original dict.
+        """
         row = {"id": 1}
         ctx = RowContext(row=row, state_id="state-1", row_index=0)
 
-        # Modifying original should affect context (shared reference)
+        # Mutating the source dict must NOT be visible through ctx.row
         row["id"] = 2
-        assert ctx.row["id"] == 2
+        assert ctx.row["id"] == 1
 
 
 class TestPooledExecutorBatch:
@@ -140,7 +150,7 @@ class TestPooledExecutorBatch:
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             with lock:
                 received_state_ids.append((row["idx"], state_id))
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"unique_state_{i}", row_index=i) for i in range(3)]
 
@@ -184,7 +194,7 @@ class TestPooledExecutorBatch:
             with lock:
                 current_concurrent -= 1
 
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(5)]
 
@@ -243,7 +253,7 @@ class TestPooledExecutorStats:
 
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             time.sleep(0.05)  # Long enough for concurrent execution
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         # Run 5 items through pool_size=3 - should see max_concurrent=3
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(5)]
@@ -276,7 +286,7 @@ class TestPooledExecutorStats:
             # First call raises capacity error to trigger throttle
             if current_count == 1:
                 raise CapacityError(429, "Rate limited")
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
         executor.execute_batch(contexts, mock_process)
@@ -294,7 +304,7 @@ class TestPooledExecutorStats:
 
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             time.sleep(0.02)
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         # First batch with 4 items
         contexts1 = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(4)]
@@ -332,7 +342,7 @@ class TestPooledExecutorCapacityHandling:
             # First call raises capacity error, second succeeds
             if current_count == 1:
                 raise CapacityError(429, "Rate limited")
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
 
@@ -438,7 +448,7 @@ class TestPooledExecutorCapacityHandling:
                 row1_completed.wait(timeout=2)  # Wait for row 1 to complete
                 with lock:
                     execution_order.append(f"end_{idx}")
-                return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+                return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
             else:
                 # Row 1: Wait until row 0 is in retry sleep, then complete
                 row0_in_retry_sleep.wait(timeout=2)
@@ -446,7 +456,7 @@ class TestPooledExecutorCapacityHandling:
                 with lock:
                     execution_order.append(f"end_{idx}")
                 row1_completed.set()
-                return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+                return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [
             RowContext(row={"idx": 0}, state_id="state_0", row_index=0),
@@ -643,7 +653,7 @@ class TestPooledExecutorDispatchPacing:
             with lock:
                 dispatch_times.append(time.monotonic())
             time.sleep(0.01)  # Minimal work
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(8)]
 
@@ -679,7 +689,7 @@ class TestPooledExecutorDispatchPacing:
             with lock:
                 dispatch_times.append(time.monotonic())
             time.sleep(0.2)  # Longer than total delay budget
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         # Exactly pool_size rows - all would dispatch together in buggy version
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(4)]
@@ -715,7 +725,7 @@ class TestPooledExecutorOrderingMetadata:
         executor = PooledExecutor(config)
 
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(3)]
 
@@ -741,7 +751,7 @@ class TestPooledExecutorOrderingMetadata:
 
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             time.sleep(0.01)
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(5)]
 
@@ -766,7 +776,7 @@ class TestPooledExecutorOrderingMetadata:
             idx = row["idx"]
             # Reverse delay: idx 0 slowest, idx 4 fastest
             time.sleep(0.05 * (5 - idx))
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(5)]
 
@@ -797,7 +807,7 @@ class TestPooledExecutorOrderingMetadata:
 
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             time.sleep(0.01)
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(2)]
 
@@ -832,7 +842,7 @@ class TestPooledExecutorOrderingMetadata:
                 time.sleep(0.1)  # Slow - holds up emission of item 1
             else:
                 time.sleep(0.01)  # Fast - completes but waits for item 0
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "processed"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
 
         contexts = [
             RowContext(row={"idx": 0}, state_id="state_0", row_index=0),
@@ -872,7 +882,7 @@ class TestPooledExecutorBugFixes:
 
             if current == 1:
                 raise CapacityError(429, "Rate limited")
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "ok"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "ok"})
 
         # Batch 1: triggers 1 capacity retry
         ctx1 = [RowContext(row={"v": 1}, state_id="s1", row_index=0)]
@@ -884,7 +894,7 @@ class TestPooledExecutorBugFixes:
         call_count = 0
 
         def always_succeed(row: dict[str, Any], state_id: str) -> TransformResult:
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "ok"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "ok"})
 
         ctx2 = [RowContext(row={"v": 2}, state_id="s2", row_index=0)]
         executor.execute_batch(ctx2, always_succeed)
@@ -894,6 +904,55 @@ class TestPooledExecutorBugFixes:
         assert stats2["pool_stats"]["capacity_retries"] == 0
 
         executor.shutdown()
+
+    def test_shutdown_prevents_initial_dispatch(self) -> None:
+        """Workers past the dispatch gate should not call process_fn after shutdown.
+
+        Bug: _execute_single() had no shutdown check between _wait_for_dispatch_gate()
+        and process_fn(). Workers that passed the gate before shutdown was signalled
+        would still dispatch to the external service.
+        """
+        config = PoolConfig(pool_size=2, min_dispatch_delay_ms=0)
+        executor = PooledExecutor(config)
+
+        first_worker_entered = threading.Event()
+        call_count = 0
+        lock = Lock()
+
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            idx = row["idx"]
+            with lock:
+                call_count += 1
+            if idx == 0:
+                # First worker signals it has entered, then triggers shutdown
+                first_worker_entered.set()
+                executor.shutdown(wait=False)
+                # Simulate slow processing so other workers see shutdown
+                time.sleep(0.1)
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
+
+        # Submit 4 items with pool_size=2. Workers 0 and 1 start immediately.
+        # Worker 0 triggers shutdown inside process_fn. Workers 2+ should see
+        # shutdown_requested after they pass the dispatch gate.
+        contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(4)]
+
+        entries = executor.execute_batch(contexts, mock_process)
+
+        # All entries should be returned (no silent drops)
+        assert len(entries) == 4
+
+        # At least one entry should have shutdown_requested error (workers that
+        # passed the gate after shutdown was signalled)
+        shutdown_entries = [
+            e
+            for e in entries
+            if e.result.status == "error" and e.result.reason is not None and e.result.reason["reason"] == "shutdown_requested"
+        ]
+        assert len(shutdown_entries) >= 1, (
+            f"Expected at least 1 shutdown_requested error, got {len(shutdown_entries)}. "
+            f"Statuses: {[(e.result.status, e.result.reason) for e in entries]}"
+        )
 
     def test_shutdown_event_stops_retries(self) -> None:
         """Workers should stop retrying after shutdown is requested.
@@ -924,6 +983,52 @@ class TestPooledExecutorBugFixes:
         assert entries[0].result.reason is not None
         assert entries[0].result.reason["reason"] == "shutdown_requested"
 
+    def test_external_shutdown_event_prevents_initial_dispatch(self) -> None:
+        """Run cancellation must stop query workers before the provider call boundary."""
+        config = PoolConfig(pool_size=1, min_dispatch_delay_ms=0)
+        executor = PooledExecutor(config)
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+        call_count = 0
+
+        def should_not_dispatch(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            call_count += 1
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
+
+        ctx = [RowContext(row={"v": 1}, state_id="s1", row_index=0)]
+        entries = executor.execute_batch(ctx, should_not_dispatch, shutdown_event=shutdown_event)
+
+        assert call_count == 0
+        assert len(entries) == 1
+        assert entries[0].result.status == "error"
+        assert entries[0].result.reason is not None
+        assert entries[0].result.reason["reason"] == "shutdown_requested"
+
+    def test_external_shutdown_event_stops_capacity_retry_wait(self) -> None:
+        """Run cancellation must interrupt AIMD retry sleeps between provider attempts."""
+        config = PoolConfig(pool_size=1, max_capacity_retry_seconds=30)
+        executor = PooledExecutor(config)
+        shutdown_event = threading.Event()
+        call_count = 0
+        lock = Lock()
+
+        def fail_once_then_cancel(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            with lock:
+                call_count += 1
+                shutdown_event.set()
+            raise CapacityError(429, "Rate limited")
+
+        ctx = [RowContext(row={"v": 1}, state_id="s1", row_index=0)]
+        entries = executor.execute_batch(ctx, fail_once_then_cancel, shutdown_event=shutdown_event)
+
+        assert call_count == 1
+        assert len(entries) == 1
+        assert entries[0].result.status == "error"
+        assert entries[0].result.reason is not None
+        assert entries[0].result.reason["reason"] == "shutdown_requested"
+
     def test_dispatch_gate_uses_only_static_delay(self) -> None:
         """Dispatch gate should use only min_dispatch_delay_ms, NOT AIMD delay.
 
@@ -935,7 +1040,7 @@ class TestPooledExecutorBugFixes:
         config = PoolConfig(
             pool_size=1,
             min_dispatch_delay_ms=10,
-            recovery_step_ms=10,
+            recovery_step_ms=50,
             max_dispatch_delay_ms=5000,
         )
         executor = PooledExecutor(config)
@@ -950,7 +1055,7 @@ class TestPooledExecutorBugFixes:
 
         def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             dispatch_times.append(time.monotonic())
-            return TransformResult.success(make_pipeline_row(row), success_reason={"action": "ok"})
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "ok"})
 
         ctx = [RowContext(row={"v": i}, state_id=f"s{i}", row_index=i) for i in range(3)]
         executor.execute_batch(ctx, mock_process)
@@ -1077,9 +1182,8 @@ class TestPooledExecutorShutdownRace:
 class TestPooledExecutorFutureException:
     """Regression tests: unguarded future.result() leaves buffer corrupt."""
 
-    def test_future_exception_completes_buffer_slot_with_error(self) -> None:
-        """When a future raises an unexpected exception, the buffer slot must
-        be completed with an error TransformResult instead of leaking."""
+    def test_future_exception_propagates_plainly_and_executor_recovers(self) -> None:
+        """Unexpected worker exceptions must crash the batch, not become row errors."""
         config = PoolConfig(pool_size=3)
         executor = PooledExecutor(config)
 
@@ -1087,30 +1191,32 @@ class TestPooledExecutorFutureException:
             if row["idx"] == 1:
                 raise RuntimeError("Unexpected kaboom")
             return TransformResult.success(
-                make_pipeline_row(row),
+                make_pipeline_row(dict(row)),
                 success_reason={"action": "ok"},
             )
 
         contexts = [RowContext(row={"idx": i}, state_id=f"s_{i}", row_index=i) for i in range(3)]
 
-        entries = executor.execute_batch(contexts, exploding_process)
+        with pytest.raises(RuntimeError, match="Unexpected kaboom"):
+            executor.execute_batch(contexts, exploding_process)
 
-        assert len(entries) == 3
         assert executor.pending_count == 0
 
-        # The exploding row should have an error result, not crash the batch
-        error_entries = [e for e in entries if e.result.status == "error"]
-        assert len(error_entries) == 1
-        assert "unexpected_pool_error" in error_entries[0].result.reason["reason"]
+        recovery_entries = executor.execute_batch(
+            [RowContext(row={"idx": 99}, state_id="s_99", row_index=0)],
+            lambda row, state_id: TransformResult.success(
+                make_pipeline_row(dict(row)),
+                success_reason={"action": "recovered"},
+            ),
+        )
 
-        # Other rows should succeed normally
-        success_entries = [e for e in entries if e.result.status == "success"]
-        assert len(success_entries) == 2
+        assert len(recovery_entries) == 1
+        assert recovery_entries[0].result.status == "success"
 
         executor.shutdown()
 
-    def test_all_futures_exploding_returns_all_errors(self) -> None:
-        """When every future raises, all buffer slots get error results."""
+    def test_all_futures_exploding_propagates_plainly_and_clears_buffer(self) -> None:
+        """Even if every future crashes, the original exception must propagate."""
         config = PoolConfig(pool_size=2)
         executor = PooledExecutor(config)
 
@@ -1119,10 +1225,9 @@ class TestPooledExecutorFutureException:
 
         contexts = [RowContext(row={"idx": i}, state_id=f"s_{i}", row_index=i) for i in range(4)]
 
-        entries = executor.execute_batch(contexts, always_explode)
+        with pytest.raises(ValueError, match=r"Row [0-9] failed"):
+            executor.execute_batch(contexts, always_explode)
 
-        assert len(entries) == 4
         assert executor.pending_count == 0
-        assert all(e.result.status == "error" for e in entries)
 
         executor.shutdown()

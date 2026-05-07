@@ -171,7 +171,7 @@ class TestDependencyRunResult:
     def test_bool_duration_ms_rejected(self) -> None:
         """bool is a subclass of int — require_int rejects it."""
         with pytest.raises(TypeError, match="duration_ms must be int"):
-            DependencyRunResult(name="x", run_id="y", settings_hash="z", duration_ms=True, indexed_at="t")  # type: ignore[arg-type]
+            DependencyRunResult(name="x", run_id="y", settings_hash="z", duration_ms=True, indexed_at="t")
 
 
 class TestCommencementGateResult:

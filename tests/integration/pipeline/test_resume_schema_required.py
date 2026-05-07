@@ -20,7 +20,8 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.infrastructure.base import BaseSource
-from tests.fixtures.landscape import make_recorder
+from elspeth.testing import make_contract
+from tests.fixtures.landscape import make_factory
 
 
 class SourceWithoutSchema(BaseSource):
@@ -37,8 +38,8 @@ class SourceWithoutSchema(BaseSource):
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         """Yield test rows."""
-        yield SourceRow.valid({"id": 1, "value": "row1"})
-        yield SourceRow.valid({"id": 2, "value": "row2"})
+        yield SourceRow.valid({"id": 1, "value": "row1"}, contract=make_contract({"id": 1, "value": "row1"}))
+        yield SourceRow.valid({"id": 2, "value": "row2"}, contract=make_contract({"id": 2, "value": "row2"}))
 
     def on_start(self, ctx: LifecycleContext) -> None:
         pass
@@ -59,13 +60,13 @@ class TestResumeSchemaRequired:
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
         checkpoint_mgr = CheckpointManager(db)
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         return {
             "db": db,
             "payload_store": payload_store,
             "checkpoint_manager": checkpoint_mgr,
-            "recorder": recorder,
+            "factory": factory,
             "tmp_path": tmp_path,
         }
 
@@ -95,12 +96,12 @@ class TestResumeSchemaRequired:
         Without schema, resumed rows would have degraded types (str instead of
         datetime/Decimal), violating the Tier 2 pipeline data trust model.
         """
-        recorder = test_env["recorder"]
+        factory = test_env["factory"]
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
 
         # 1. Create run WITHOUT storing source schema (simulating old run)
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Register nodes using raw SQL
         from datetime import UTC, datetime
@@ -143,13 +144,13 @@ class TestResumeSchemaRequired:
 
         # 2. Create rows and checkpoint
         row_data = {"id": 1, "value": "test"}
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id="source",
             row_index=0,
             data=row_data,
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
@@ -161,11 +162,11 @@ class TestResumeSchemaRequired:
         )
 
         # Mark run as failed (so it can be resumed)
-        recorder.complete_run(run.run_id, status=RunStatus.FAILED)
+        factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.FAILED)
 
-        # 3. Test production code: recorder.get_source_schema() should raise AuditIntegrityError
+        # 3. Test production code: get_source_schema() should raise AuditIntegrityError
         with pytest.raises(AuditIntegrityError) as exc_info:
-            recorder.get_source_schema(run.run_id)
+            factory.run_lifecycle.get_source_schema(run.run_id)
 
         # 4. Verify error message is clear and helpful
         error_msg = str(exc_info.value)

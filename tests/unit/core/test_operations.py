@@ -7,8 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from elspeth.contracts import BatchPendingError
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
 from tests.fixtures.factories import make_context
 
@@ -18,7 +17,7 @@ class _Operation:
     operation_id: str
 
 
-class _FakeRecorder:
+class _FakeFactory:
     def __init__(self, *, complete_error: Exception | None = None) -> None:
         self.begin_calls: list[dict[str, Any]] = []
         self.complete_calls: list[dict[str, Any]] = []
@@ -65,12 +64,12 @@ class _FakeRecorder:
 
 
 def test_track_operation_records_completed_status_and_output_data() -> None:
-    recorder = _FakeRecorder()
+    factory = _FakeFactory()
     ctx = make_context()
     assert ctx.operation_id is None
 
     with track_operation(
-        recorder=cast(LandscapeRecorder, recorder),
+        recorder=cast(ExecutionRepository, factory),
         run_id="run-001",
         node_id="node-001",
         operation_type="source_load",
@@ -81,40 +80,19 @@ def test_track_operation_records_completed_status_and_output_data() -> None:
         handle.output_data = {"rows_loaded": 3}
 
     assert ctx.operation_id is None
-    assert recorder.begin_calls[0]["input_data"] == {"source": "csv"}
-    assert recorder.complete_calls[0]["status"] == "completed"
-    assert recorder.complete_calls[0]["output_data"] == {"rows_loaded": 3}
-
-
-def test_track_operation_marks_pending_for_batch_pending_error() -> None:
-    recorder = _FakeRecorder()
-    ctx = make_context()
-
-    with (
-        pytest.raises(BatchPendingError),
-        track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
-            run_id="run-001",
-            node_id="node-001",
-            operation_type="sink_write",
-            ctx=ctx,
-        ),
-    ):
-        raise BatchPendingError("batch-001", "submitted")
-
-    assert recorder.complete_calls[0]["status"] == "pending"
-    assert recorder.complete_calls[0]["error"] is None
-    assert ctx.operation_id is None
+    assert factory.begin_calls[0]["input_data"] == {"source": "csv"}
+    assert factory.complete_calls[0]["status"] == "completed"
+    assert factory.complete_calls[0]["output_data"] == {"rows_loaded": 3}
 
 
 def test_track_operation_marks_failed_for_exception() -> None:
-    recorder = _FakeRecorder()
+    factory = _FakeFactory()
     ctx = make_context()
 
     with (
         pytest.raises(ValueError, match="boom"),
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="source_load",
@@ -123,8 +101,8 @@ def test_track_operation_marks_failed_for_exception() -> None:
     ):
         raise ValueError("boom")
 
-    assert recorder.complete_calls[0]["status"] == "failed"
-    assert recorder.complete_calls[0]["error"] == "boom"
+    assert factory.complete_calls[0]["status"] == "failed"
+    assert factory.complete_calls[0]["error"] == "boom"
     assert ctx.operation_id is None
 
 
@@ -132,13 +110,13 @@ def test_track_operation_marks_failed_for_base_exception() -> None:
     class _Fatal(BaseException):
         pass
 
-    recorder = _FakeRecorder()
+    factory = _FakeFactory()
     ctx = make_context()
 
     with (
         pytest.raises(_Fatal, match="stop-now"),
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="source_load",
@@ -147,19 +125,75 @@ def test_track_operation_marks_failed_for_base_exception() -> None:
     ):
         raise _Fatal("stop-now")
 
-    assert recorder.complete_calls[0]["status"] == "failed"
-    assert recorder.complete_calls[0]["error"] == "stop-now"
+    assert factory.complete_calls[0]["status"] == "failed"
+    assert factory.complete_calls[0]["error"] == "stop-now"
+    assert ctx.operation_id is None
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_error"),
+    [
+        (KeyboardInterrupt(), "KeyboardInterrupt"),
+        (SystemExit(), "SystemExit"),
+    ],
+)
+def test_track_operation_renders_informative_error_for_blank_base_exception_strings(
+    exc: BaseException,
+    expected_error: str,
+) -> None:
+    factory = _FakeFactory()
+    ctx = make_context()
+
+    with (
+        pytest.raises(type(exc)),
+        track_operation(
+            recorder=cast(ExecutionRepository, factory),
+            run_id="run-001",
+            node_id="node-001",
+            operation_type="source_load",
+            ctx=ctx,
+        ),
+    ):
+        raise exc
+
+    assert factory.complete_calls[0]["status"] == "failed"
+    assert factory.complete_calls[0]["error"] == expected_error
+    assert ctx.operation_id is None
+
+
+def test_track_operation_ignores_broken_exception_str_override() -> None:
+    class _BrokenStrError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+    factory = _FakeFactory()
+    ctx = make_context()
+
+    with (
+        pytest.raises(_BrokenStrError),
+        track_operation(
+            recorder=cast(ExecutionRepository, factory),
+            run_id="run-001",
+            node_id="node-001",
+            operation_type="source_load",
+            ctx=ctx,
+        ),
+    ):
+        raise _BrokenStrError("original message")
+
+    assert factory.complete_calls[0]["status"] == "failed"
+    assert factory.complete_calls[0]["error"] == "original message"
     assert ctx.operation_id is None
 
 
 def test_track_operation_raises_db_error_if_completion_fails_after_success() -> None:
-    recorder = _FakeRecorder(complete_error=RuntimeError("db write failed"))
+    factory = _FakeFactory(complete_error=RuntimeError("db write failed"))
     ctx = make_context()
 
     with (
         pytest.raises(RuntimeError, match="db write failed"),
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="sink_write",
@@ -168,18 +202,18 @@ def test_track_operation_raises_db_error_if_completion_fails_after_success() -> 
     ):
         pass
 
-    assert recorder.complete_calls[0]["status"] == "completed"
+    assert factory.complete_calls[0]["status"] == "completed"
     assert ctx.operation_id is None
 
 
 def test_track_operation_does_not_mask_original_exception_when_completion_fails() -> None:
-    recorder = _FakeRecorder(complete_error=RuntimeError("db write failed"))
+    factory = _FakeFactory(complete_error=RuntimeError("db write failed"))
     ctx = make_context()
 
     with (
         pytest.raises(ValueError, match="original failure"),
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="source_load",
@@ -188,8 +222,8 @@ def test_track_operation_does_not_mask_original_exception_when_completion_fails(
     ):
         raise ValueError("original failure")
 
-    assert recorder.complete_calls[0]["status"] == "failed"
-    assert recorder.complete_calls[0]["error"] == "original failure"
+    assert factory.complete_calls[0]["status"] == "failed"
+    assert factory.complete_calls[0]["error"] == "original failure"
     assert ctx.operation_id is None
 
 
@@ -201,13 +235,13 @@ def test_track_operation_reraises_framework_bug_error_even_with_original_excepti
     """
     from elspeth.contracts import FrameworkBugError
 
-    recorder = _FakeRecorder(complete_error=FrameworkBugError("audit corruption"))
+    factory = _FakeFactory(complete_error=FrameworkBugError("audit corruption"))
     ctx = make_context()
 
     with (
         pytest.raises(FrameworkBugError, match="audit corruption"),
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="source_load",
@@ -223,13 +257,13 @@ def test_track_operation_reraises_audit_integrity_error_even_with_original_excep
     """AuditIntegrityError from complete_operation() must supersede any original exception."""
     from elspeth.contracts.errors import AuditIntegrityError
 
-    recorder = _FakeRecorder(complete_error=AuditIntegrityError("DB corrupted"))
+    factory = _FakeFactory(complete_error=AuditIntegrityError("DB corrupted"))
     ctx = make_context()
 
     with (
         pytest.raises(AuditIntegrityError, match="DB corrupted"),
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="sink_write",
@@ -245,13 +279,13 @@ def test_track_operation_tier1_error_chains_original_exception() -> None:
     """When Tier 1 error supersedes, the original exception is chained via __cause__."""
     from elspeth.contracts import FrameworkBugError
 
-    recorder = _FakeRecorder(complete_error=FrameworkBugError("corruption"))
+    factory = _FakeFactory(complete_error=FrameworkBugError("corruption"))
     ctx = make_context()
 
     with (
         pytest.raises(FrameworkBugError) as exc_info,
         track_operation(
-            recorder=cast(LandscapeRecorder, recorder),
+            recorder=cast(ExecutionRepository, factory),
             run_id="run-001",
             node_id="node-001",
             operation_type="source_load",

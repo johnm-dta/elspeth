@@ -1,0 +1,152 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "Plan has 1 blocking issue (loader naming convention silently breaks pairing for 2 dataclasses) and 8 warnings. The pip-in-CI concern was downgraded after verifying the existing enforce-tier-model workflow uses the same pattern.",
+  "plan_file": "docs/superpowers/plans/2026-04-03-guard-symmetry-scanner.md",
+  "reviewed_at": "2026-04-03T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "source": "reality",
+      "also_flagged_by": ["systems"],
+      "issue": "expected_loader_name() silently fails for *Record-suffixed dataclasses",
+      "evidence": "TransformErrorRecord -> expected_loader_name() -> 'TransformErrorRecordLoader' (does not exist). Actual loader is 'TransformErrorLoader'. Same for ValidationErrorRecord -> 'ValidationErrorRecordLoader' vs actual 'ValidationErrorLoader'. The pairing will silently miss these 2 classes, producing false negatives on real guard symmetry violations.",
+      "priority_score": 36,
+      "priority_breakdown": "Severity=4 (scanner misses real violations) x Likelihood=3 (certain) x Reversibility=3 (false negatives are invisible)",
+      "resolution": "Add entries to LOADER_OVERRIDES: {'TransformErrorRecord': 'TransformErrorLoader', 'ValidationErrorRecord': 'ValidationErrorLoader'}. Alternatively, make expected_loader_name() strip common suffixes ('Record', 'Entry') before appending 'Loader', but LOADER_OVERRIDES is simpler and explicit."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "source": "systems",
+      "issue": "Pre-commit mode unreliable for cross-file scanner",
+      "priority_score": 12,
+      "priority_breakdown": "Severity=2 x Likelihood=3 x Reversibility=2",
+      "recommendation": "Document pre-commit as 'best-effort partial scan' in the scanner's docstring and CI workflow comments. CI full-scan is the authoritative gate."
+    },
+    {
+      "id": "W2",
+      "source": "systems",
+      "also_flagged_by": ["architecture"],
+      "issue": "Broad per-file allowlist absorbs future violations silently",
+      "priority_score": 12,
+      "priority_breakdown": "Severity=2 x Likelihood=3 x Reversibility=2",
+      "recommendation": "Use per-loader entries with max_hits: 1 each instead of a single broad entry for model_loaders.py. This makes new unguarded loaders immediately visible."
+    },
+    {
+      "id": "W3",
+      "source": "quality",
+      "issue": "Indirect AuditIntegrityError (via helper functions) produces false negatives",
+      "priority_score": 8,
+      "priority_breakdown": "Severity=2 x Likelihood=2 x Reversibility=2",
+      "recommendation": "Document as known limitation in the scanner's docstring. Future rule GS2 can detect transitive raise paths."
+    },
+    {
+      "id": "W4",
+      "source": "quality",
+      "issue": "Abstract/Protocol loaders produce false positives (GS1 on stub methods)",
+      "priority_score": 6,
+      "priority_breakdown": "Severity=2 x Likelihood=2 x Reversibility=1 (easy to allowlist)",
+      "recommendation": "Skip classes with @abstractmethod load() or Protocol base. Or document as expected allowlist entries."
+    },
+    {
+      "id": "W5",
+      "source": "quality",
+      "issue": "max_hits: null window between Task 6 (CI commit) and Task 7 (triage)",
+      "priority_score": 6,
+      "priority_breakdown": "Severity=2 x Likelihood=2 x Reversibility=1",
+      "recommendation": "Set initial max_hits values in Task 6 based on known finding count, then refine in Task 7."
+    },
+    {
+      "id": "W6",
+      "source": "architecture",
+      "issue": "Fingerprint uses loader+class name, not AST dump like other enforcers",
+      "priority_score": 4,
+      "priority_breakdown": "Severity=2 x Likelihood=1 x Reversibility=2",
+      "recommendation": "Document the divergence with rationale (post-scan generation, no AST node) in a comment near the fingerprint function."
+    },
+    {
+      "id": "W7",
+      "source": "architecture",
+      "issue": "Third copy of Finding/PerFileRule/Allowlist/YAML loading pattern",
+      "priority_score": 4,
+      "priority_breakdown": "Severity=2 x Likelihood=1 x Reversibility=2",
+      "recommendation": "Out of scope for this plan. Consider extracting shared allowlist infrastructure after all 3 enforcers stabilize."
+    },
+    {
+      "id": "W8",
+      "source": "systems",
+      "issue": "Scanner naming convention enforced socially, not structurally",
+      "priority_score": 4,
+      "priority_breakdown": "Severity=2 x Likelihood=1 x Reversibility=2",
+      "recommendation": "Acceptable for now. LOADER_OVERRIDES is the escape hatch. Document the convention in the scanner docstring."
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "MUST_FIX",
+      "source": "reality",
+      "suggestion": "Add TransformErrorRecord and ValidationErrorRecord to LOADER_OVERRIDES mapping"
+    },
+    {
+      "type": "SHOULD_FIX",
+      "source": "systems",
+      "suggestion": "Document pre-commit mode as best-effort, not authoritative"
+    },
+    {
+      "type": "SHOULD_FIX",
+      "source": "systems",
+      "suggestion": "Use per-loader allowlist entries (max_hits: 1 each) instead of broad per-file pattern"
+    },
+    {
+      "type": "CONSIDER",
+      "source": "quality",
+      "suggestion": "Document indirect AuditIntegrityError as known limitation"
+    },
+    {
+      "type": "CONSIDER",
+      "source": "quality",
+      "suggestion": "Add file-skip notification in pre-commit mode (even if just a debug log)"
+    },
+    {
+      "type": "OUT_OF_SCOPE",
+      "source": "architecture",
+      "suggestion": "Extract shared allowlist module (scripts/cicd/_allowlist.py) after all enforcers stabilize"
+    }
+  ],
+  "conflicts_resolved": [
+    {
+      "issue": "pip install in CI workflow",
+      "architecture_view": "Blocking -- CLAUDE.md prohibits pip, must use uv",
+      "reality_view": "Not flagged",
+      "resolution": "DOWNGRADED to non-issue. Verified existing enforce-tier-model.yaml (line 41-42) uses identical 'pip install pyyaml' pattern. This is a standalone CI job installing a single stdlib-adjacent dependency, not project package management. The CLAUDE.md 'use uv for ALL package management' refers to the project venv, not ephemeral CI containers. If the team wants to address this, it should be a separate issue covering all CI workflows."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 1,
+      "warnings": 0,
+      "notes": "All files, symbols, paths confirmed. Convention compliance verified. Naming convention break is the sole blocker."
+    },
+    "architecture": {
+      "status": "WARNINGS",
+      "blocking": 0,
+      "warnings": 3,
+      "notes": "pip-in-CI downgraded after cross-reference with existing workflow. DRY concern noted but out of scope."
+    },
+    "quality": {
+      "status": "WARNINGS",
+      "blocking": 0,
+      "warnings": 5,
+      "notes": "Several false-negative and false-positive gaps identified. All are documentable known limitations rather than blockers."
+    },
+    "systems": {
+      "status": "WARNINGS",
+      "blocking": 0,
+      "warnings": 3,
+      "notes": "Pre-commit reliability downgraded from blocking to warning (documentation fix sufficient). Allowlist granularity is the most actionable recommendation."
+    }
+  }
+}

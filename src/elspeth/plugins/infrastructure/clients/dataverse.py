@@ -20,9 +20,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import structlog
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-from elspeth.core.security.web import validate_url_for_ssrf
+from elspeth.contracts.freeze import freeze_fields
+from elspeth.core.security.web import NetworkError, SSRFBlockedError, SSRFSafeRequest, validate_url_for_ssrf
 from elspeth.plugins.infrastructure.clients.fingerprinting import (
     filter_response_headers,
     fingerprint_headers,
@@ -91,12 +92,16 @@ class DataverseClientError(Exception):
         status_code: int | None = None,
         latency_ms: float | None = None,
         error_category: str = "protocol_error",
+        request_url: str | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
         self.latency_ms = latency_ms
         self.error_category = error_category
+        self.request_url = request_url
+        self.request_headers = request_headers
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,7 @@ class DataversePageResponse:
             raise ValueError(
                 "next_link and paging_cookie are mutually exclusive — OData queries use next_link, FetchXML queries use paging_cookie"
             )
+        freeze_fields(self, "rows", "headers", "request_headers")
 
 
 class DataverseAuthConfig(BaseModel):
@@ -133,9 +139,10 @@ class DataverseAuthConfig(BaseModel):
     method: Literal["service_principal", "managed_identity"]
 
     # Service principal fields (required when method=service_principal)
+    # repr=False on client_secret prevents credential exposure in stack traces
     tenant_id: str | None = None
     client_id: str | None = None
-    client_secret: str | None = None
+    client_secret: str | None = Field(default=None, repr=False)
 
     @model_validator(mode="after")
     def validate_auth_fields(self) -> Self:
@@ -150,6 +157,35 @@ class DataverseAuthConfig(BaseModel):
             if missing:
                 raise ValueError(f"service_principal auth requires: {', '.join(missing)}")
         return self
+
+    def create_credential(self) -> ClientSecretCredential | ManagedIdentityCredential:
+        """Construct an azure-identity credential from this config.
+
+        Returns the appropriate credential type based on the configured
+        auth method. Fields are guaranteed non-None by model_validator
+        for service_principal mode.
+
+        Returns:
+            ClientSecretCredential or ManagedIdentityCredential
+
+        Raises:
+            ImportError: If azure-identity is not installed.
+        """
+        from azure.identity import ClientSecretCredential, ManagedIdentityCredential
+
+        if self.method == "service_principal":
+            if self.tenant_id is None or self.client_id is None or self.client_secret is None:
+                missing = [f for f in ("tenant_id", "client_id", "client_secret") if getattr(self, f) is None]
+                raise RuntimeError(
+                    f"service_principal auth fields are None at credential creation time: {missing}. "
+                    f"model_validator should have rejected this at construction — this is a bug."
+                )
+            return ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+        return ManagedIdentityCredential()
 
 
 def _validate_domain_allowlist(hostname: str, additional_domains: tuple[str, ...] = ()) -> bool:
@@ -274,11 +310,19 @@ class DataverseClient:
             "OData-Version": "4.0",
         }
 
-    def _validate_url_ssrf(self, url: str) -> None:
+    def _validate_url_ssrf(self, url: str) -> SSRFSafeRequest:
         """Two-layer SSRF validation: domain allowlist + IP-pinning.
+
+        Returns an SSRFSafeRequest with the resolved IP pinned. Callers
+        MUST use safe_request.connection_url for the actual HTTP call
+        and pass safe_request.host_header as the Host header. This
+        prevents DNS rebinding between validation and connection.
 
         Args:
             url: URL to validate
+
+        Returns:
+            SSRFSafeRequest with pinned IP for direct connection
 
         Raises:
             DataverseClientError: If URL fails either validation layer
@@ -302,15 +346,23 @@ class DataverseClient:
 
         # Layer 2: IP-pinning validation (prevents DNS rebinding)
         try:
-            validate_url_for_ssrf(url)
-        except Exception as exc:
+            return validate_url_for_ssrf(url)
+        except (SSRFBlockedError, NetworkError) as exc:
             raise DataverseClientError(
                 f"URL {url!r} failed IP-pinning SSRF validation: {exc}",
                 retryable=False,
                 error_category="ssrf_rejected",
             ) from exc
 
-    def _classify_error(self, status_code: int, headers: dict[str, str], latency_ms: float) -> DataverseClientError:
+    def _classify_error(
+        self,
+        status_code: int,
+        headers: dict[str, str],
+        latency_ms: float,
+        *,
+        request_url: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ) -> DataverseClientError:
         """Classify HTTP error by status code.
 
         Returns a DataverseClientError with retryable flag set appropriately.
@@ -335,12 +387,16 @@ class DataverseClient:
                     retryable=False,
                     status_code=status_code,
                     latency_ms=latency_ms,
+                    request_url=request_url,
+                    request_headers=request_headers,
                 )
             return DataverseClientError(
                 f"Rate limited (429) with Retry-After {effective}s",
                 retryable=True,
                 status_code=status_code,
                 latency_ms=latency_ms,
+                request_url=request_url,
+                request_headers=request_headers,
             )
 
         # 401: Auth failure — retryable once via credential reconstruction
@@ -351,6 +407,8 @@ class DataverseClient:
                 status_code=status_code,
                 latency_ms=latency_ms,
                 error_category="auth_failure",
+                request_url=request_url,
+                request_headers=request_headers,
             )
 
         # Non-retryable client errors
@@ -367,6 +425,8 @@ class DataverseClient:
                 retryable=False,
                 status_code=status_code,
                 latency_ms=latency_ms,
+                request_url=request_url,
+                request_headers=request_headers,
             )
 
         # 5xx: Retryable server errors
@@ -376,6 +436,8 @@ class DataverseClient:
                 retryable=True,
                 status_code=status_code,
                 latency_ms=latency_ms,
+                request_url=request_url,
+                request_headers=request_headers,
             )
 
         # Any other error status
@@ -384,6 +446,8 @@ class DataverseClient:
             retryable=False,
             status_code=status_code,
             latency_ms=latency_ms,
+            request_url=request_url,
+            request_headers=request_headers,
         )
 
     def _execute_request(
@@ -393,17 +457,25 @@ class DataverseClient:
         *,
         json_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        ssrf_safe: SSRFSafeRequest | None = None,
     ) -> DataversePageResponse:
         """Execute an HTTP request against Dataverse.
 
         Handles auth header injection, rate limiting, response parsing,
         and error classification. Returns a validated DataversePageResponse.
 
+        When ssrf_safe is provided, the request connects to the pre-validated
+        IP address (preventing DNS rebinding) while preserving the original
+        hostname via the Host header for virtual hosting and TLS SNI.
+
         Args:
             method: HTTP method (GET or PATCH)
-            url: Full URL to request
+            url: Full URL to request (used for audit recording)
             json_body: JSON body for PATCH requests
             extra_headers: Additional headers to merge
+            ssrf_safe: Pre-validated SSRFSafeRequest with pinned IP.
+                When provided, the actual HTTP call uses connection_url
+                (IP-based) instead of url (hostname-based).
 
         Returns:
             DataversePageResponse with validated response data
@@ -415,19 +487,46 @@ class DataverseClient:
 
         auth_headers = self.get_auth_headers()
         headers = {**auth_headers, **(extra_headers or {})}
+        # Fingerprint auth headers early so every error path can carry
+        # request metadata for accurate audit trail recording.
+        fingerprinted = fingerprint_headers(auth_headers)
+
+        # IP-pinning SSRF validation on every outbound request.
+        # When ssrf_safe is pre-validated (e.g., from paginate_odata nextLink
+        # handling), reuse it. Otherwise, validate now — even for config-derived
+        # URLs, because DNS rebinding can occur between __init__ domain check
+        # and the actual TCP connect.
+        if ssrf_safe is None:
+            ssrf_safe = self._validate_url_ssrf(url)
+
+        # Connect to the pinned IP and set the Host header for virtual hosting.
+        # The sni_hostname extension tells httpx/httpcore to use the original
+        # domain for TLS SNI and certificate verification instead of the IP literal.
+        extensions: dict[str, bytes] | None = None
+        connection_url = ssrf_safe.connection_url
+        headers["Host"] = ssrf_safe.host_header
+        if ssrf_safe.scheme == "https":
+            extensions = {"sni_hostname": ssrf_safe.sni_hostname.encode("ascii")}
 
         start = time.perf_counter()
         try:
             if method == "PATCH":
-                response = self._client.patch(url, json=json_body, headers=headers)
+                response = self._client.patch(
+                    connection_url,
+                    json=json_body,
+                    headers=headers,
+                    extensions=extensions,
+                )
             else:
-                response = self._client.get(url, headers=headers)
+                response = self._client.get(connection_url, headers=headers, extensions=extensions)
         except httpx.TimeoutException as exc:
             latency_ms = (time.perf_counter() - start) * 1000
             raise DataverseClientError(
                 f"Request timed out: {exc}",
                 retryable=True,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             ) from exc
         except httpx.ConnectError as exc:
             latency_ms = (time.perf_counter() - start) * 1000
@@ -435,6 +534,8 @@ class DataverseClient:
                 f"Connection failed: {exc}",
                 retryable=True,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             ) from exc
         except httpx.HTTPError as exc:
             latency_ms = (time.perf_counter() - start) * 1000
@@ -442,6 +543,8 @@ class DataverseClient:
                 f"HTTP error: {exc}",
                 retryable=True,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             ) from exc
 
         latency_ms = (time.perf_counter() - start) * 1000
@@ -458,15 +561,19 @@ class DataverseClient:
                 retryable=False,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             )
 
         # Non-success status → classify error
         if response.status_code < 200 or response.status_code >= 300:
-            raise self._classify_error(response.status_code, resp_headers, latency_ms)
-
-        # Fingerprint auth headers at DTO boundary — raw bearer token must
-        # never persist in the DataversePageResponse.
-        fingerprinted = fingerprint_headers(auth_headers)
+            raise self._classify_error(
+                response.status_code,
+                resp_headers,
+                latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
+            )
 
         # For PATCH responses that return 204 No Content
         if response.status_code == 204 or not response.text:
@@ -490,6 +597,8 @@ class DataverseClient:
                 retryable=False,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             )
 
         # Validate response structure
@@ -499,6 +608,8 @@ class DataverseClient:
                 retryable=False,
                 status_code=response.status_code,
                 latency_ms=latency_ms,
+                request_url=url,
+                request_headers=fingerprinted,
             )
 
         # Extract rows from "value" array (queries) or treat as single-item
@@ -511,6 +622,8 @@ class DataverseClient:
                     retryable=False,
                     status_code=response.status_code,
                     latency_ms=latency_ms,
+                    request_url=url,
+                    request_headers=fingerprinted,
                 )
             # Tier 3 boundary: validate each item is a dict. Non-dict elements
             # (strings, ints, nulls) in the value array are malformed responses
@@ -522,6 +635,8 @@ class DataverseClient:
                         retryable=False,
                         status_code=response.status_code,
                         latency_ms=latency_ms,
+                        request_url=url,
+                        request_headers=fingerprinted,
                     )
             rows = value
         else:
@@ -627,9 +742,9 @@ class DataverseClient:
     def paginate_odata(self, initial_url: str) -> Iterator[DataversePageResponse]:
         """Paginate through structured OData query results.
 
-        Follows @odata.nextLink URLs with SSRF validation at each hop.
-        Terminates when no nextLink is present or after consecutive empty
-        pages (empty-page guard).
+        Follows @odata.nextLink URLs with SSRF validation and IP-pinning
+        at each hop. Terminates when no nextLink is present or after
+        consecutive empty pages (empty-page guard).
 
         Args:
             initial_url: First page URL
@@ -642,10 +757,11 @@ class DataverseClient:
                 or protocol errors
         """
         url = initial_url
+        ssrf_safe: SSRFSafeRequest | None = None
         consecutive_empty = 0
 
         while True:
-            page = self.get_page(url)
+            page = self._execute_request("GET", url, ssrf_safe=ssrf_safe)
             yield page
 
             # Empty-page guard
@@ -666,8 +782,11 @@ class DataverseClient:
             if page.next_link is None:
                 break
 
-            # SSRF validate the nextLink before following
-            self._validate_url_ssrf(page.next_link)
+            # SSRF validate the nextLink and pin the resolved IP.
+            # The returned SSRFSafeRequest is passed to _execute_request
+            # so the HTTP call connects to the validated IP, preventing
+            # DNS rebinding between validation and connection.
+            ssrf_safe = self._validate_url_ssrf(page.next_link)
             url = page.next_link
 
     def paginate_fetchxml(self, entity: str, fetch_xml: str) -> Iterator[DataversePageResponse]:
@@ -725,8 +844,20 @@ class DataverseClient:
                     retryable=False,
                     error_category="protocol_violation",
                 )
-            if not page.more_records or page.paging_cookie is None:
+            if not page.more_records:
                 break
+
+            # Tier 3 boundary: morerecords=True with no paging cookie is a
+            # contradictory signal — Dataverse claims more data exists but
+            # provides no mechanism to retrieve it. Surface as protocol error
+            # rather than silently truncating the result set.
+            if page.paging_cookie is None:
+                raise DataverseClientError(
+                    "FetchXML pagination: morerecords=True but no paging cookie provided. "
+                    "Cannot retrieve remaining pages — refusing to silently truncate results.",
+                    retryable=False,
+                    error_category="protocol_violation",
+                )
 
             # Inject paging cookie into the existing ET root.
             # The paging cookie is Tier 3 data — ET.set() handles
@@ -749,20 +880,7 @@ class DataverseClient:
         Args:
             auth_config: Auth configuration to rebuild from
         """
-        from azure.identity import ClientSecretCredential, ManagedIdentityCredential
-
-        if auth_config.method == "service_principal":
-            assert auth_config.tenant_id is not None
-            assert auth_config.client_id is not None
-            assert auth_config.client_secret is not None
-            self._credential = ClientSecretCredential(
-                tenant_id=auth_config.tenant_id,
-                client_id=auth_config.client_id,
-                client_secret=auth_config.client_secret,
-            )
-        else:
-            self._credential = ManagedIdentityCredential()
-
+        self._credential = auth_config.create_credential()
         self._auth_retried = True
 
     def close(self) -> None:

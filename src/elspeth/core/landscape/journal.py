@@ -18,7 +18,7 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 
 logger = structlog.get_logger(__name__)
 
-_BUFFER_KEY = "landscape_journal_buffer"
+_BUFFER_STACK_KEY = "landscape_journal_buffer_stack"
 
 
 class PayloadInfo(TypedDict):
@@ -80,10 +80,29 @@ class LandscapeJournal:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def attach(self, engine: Engine) -> None:
-        """Attach journal listeners to a SQLAlchemy engine."""
+        """Attach journal listeners to a SQLAlchemy engine.
+
+        Listens to savepoint events in addition to commit/rollback so that
+        writes inside rolled-back savepoints are discarded from the buffer
+        rather than flushed on the outer commit.
+        """
         event.listen(engine, "after_cursor_execute", self._after_cursor_execute)
         event.listen(engine, "commit", self._after_commit)
         event.listen(engine, "rollback", self._after_rollback)
+        event.listen(engine, "savepoint", self._after_savepoint)
+        event.listen(engine, "rollback_savepoint", self._after_rollback_savepoint)
+        event.listen(engine, "release_savepoint", self._after_release_savepoint)
+
+    def _ensure_buffer_stack(self, conn: Connection) -> list[list[JournalRecord]]:
+        """Return the buffer stack for a connection, creating if needed.
+
+        The stack always has at least one buffer (the root). Savepoint
+        events push/pop additional buffers on top.
+        """
+        if _BUFFER_STACK_KEY not in conn.info:
+            conn.info[_BUFFER_STACK_KEY] = [[]]
+        stack: list[list[JournalRecord]] = conn.info[_BUFFER_STACK_KEY]
+        return stack
 
     def _after_cursor_execute(
         self,
@@ -106,28 +125,48 @@ class LandscapeJournal:
         if self._include_payloads:
             self._enrich_with_payloads(record, statement, parameters, executemany)
 
-        if _BUFFER_KEY in conn.info:
-            buffer = conn.info[_BUFFER_KEY]
-        else:
-            buffer = []
-            conn.info[_BUFFER_KEY] = buffer
+        stack = self._ensure_buffer_stack(conn)
+        stack[-1].append(record)
 
-        buffer.append(record)
+    def _after_savepoint(self, conn: Connection, name: str) -> None:
+        """Push a new buffer for the savepoint's scope."""
+        stack = self._ensure_buffer_stack(conn)
+        stack.append([])
+
+    def _after_rollback_savepoint(self, conn: Connection, name: str, context: None) -> None:
+        """Discard writes from the rolled-back savepoint."""
+        stack = self._ensure_buffer_stack(conn)
+        if len(stack) > 1:
+            stack.pop()
+
+    def _after_release_savepoint(self, conn: Connection, name: str, context: None) -> None:
+        """Merge committed savepoint writes into the parent buffer."""
+        stack = self._ensure_buffer_stack(conn)
+        if len(stack) > 1:
+            released = stack.pop()
+            stack[-1].extend(released)
 
     def _after_commit(self, conn: Connection) -> None:
-        if _BUFFER_KEY not in conn.info:
+        if _BUFFER_STACK_KEY not in conn.info:
             return
 
-        buffer = conn.info[_BUFFER_KEY]
-        if not buffer:
-            return
+        stack: list[list[JournalRecord]] = conn.info[_BUFFER_STACK_KEY]
+        # Flatten the entire stack (shouldn't have depth > 1 at commit,
+        # but be safe) and flush all committed records.
+        all_records: list[JournalRecord] = []
+        for buffer in stack:
+            all_records.extend(buffer)
+        stack.clear()
+        stack.append([])  # Reset to single root buffer
 
-        self._append_records(buffer)
-        buffer.clear()
+        if all_records:
+            self._append_records(all_records)
 
     def _after_rollback(self, conn: Connection) -> None:
-        if _BUFFER_KEY in conn.info:
-            conn.info[_BUFFER_KEY].clear()
+        if _BUFFER_STACK_KEY in conn.info:
+            stack: list[list[JournalRecord]] = conn.info[_BUFFER_STACK_KEY]
+            stack.clear()
+            stack.append([])  # Reset to single root buffer
 
     # After this many consecutive failures, disable until next success
     _MAX_CONSECUTIVE_FAILURES = 5
@@ -214,7 +253,8 @@ class LandscapeJournal:
 
     def _enrich_with_payloads(self, record: JournalRecord, statement: str, parameters: Any, executemany: bool) -> None:
         table, columns = self._parse_insert_statement(statement)
-        if table != "calls" or columns is None or self._payload_store is None:
+        base_table = table.split(".")[-1] if table else table
+        if base_table != "calls" or columns is None or self._payload_store is None:
             return
 
         if executemany:

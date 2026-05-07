@@ -1,0 +1,17 @@
+{
+  "defensive_pattern_findings_for_context_only": {
+    "by_rule": {
+      "R1": 6,
+      "R4": 22,
+      "R5": 37,
+      "R6": 3,
+      "R9": 1
+    },
+    "note": "Defensive-pattern findings are pre-allowlisted whole-tree-scoped. Their reappearance under empty allowlist is expected; not a layer-conformance signal. The catalog routes these into per-entry Concerns where relevant.",
+    "total": 69
+  },
+  "derivation": "enforce_tier_model.py check --root src/elspeth/engine --allowlist /tmp/empty_allowlist.yaml --format json, then filter for rule_id == L1 and layer_warnings; defensive-pattern violations counted separately for context.",
+  "layer_conformance_authoritative_source": "temp/tier-model-oracle.txt (whole-tree clean run); engine-scoped derivation here corroborates that conclusion for the L1 rule_id specifically.",
+  "layer_import_violations_L1": [],
+  "type_checking_layer_warnings_TC": []
+}

@@ -9,8 +9,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Self
 
-from sqlalchemy import Connection, create_engine, event
+from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
 
 from elspeth.core.landscape.journal import LandscapeJournal
@@ -23,6 +24,9 @@ class SchemaCompatibilityError(Exception):
     pass
 
 
+ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+
+
 # Required columns that have been added since initial schema.
 # Used by _validate_schema() to detect outdated SQLite databases.
 _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -31,6 +35,8 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tokens", "run_id"),
     # Added for composite FK to nodes (node_id, run_id) - enables run-isolated queries
     ("node_states", "run_id"),
+    # Source schema persists typed resume metadata; runtime always writes this on new runs
+    ("runs", "source_schema_json"),
     # Field resolution audit trail - captures original→final header mapping
     ("runs", "source_field_resolution_json"),
     # Fork/expand branch contract - enables recovery validation
@@ -50,16 +56,111 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("operations", "output_data_hash"),
     # Coalesce state for checkpoint recovery - serialized pending merge state
     ("checkpoints", "coalesce_state_json"),
+    # Checkpoint compatibility gate - runtime always stamps the checkpoint format version
+    ("checkpoints", "format_version"),
+    # Mechanical change detection — hash of plugin source file at registration
+    ("nodes", "source_file_hash"),
+    # ADR-010 §Decision 3 M3: runtime VAL manifest — set of
+    # declaration contracts + Tier-1 error classes registered at bootstrap,
+    # serialized as canonical JSON on the runs row.
+    ("runs", "runtime_val_manifest_json"),
+    # Quarantine lineage exactness - links validation errors to persisted rows
+    ("validation_errors", "row_id"),
+    # Batch membership run ownership - enables composite FK enforcement to both
+    # batches and tokens so cross-run batch contamination fails at the database.
+    ("batch_members", "run_id"),
+    # Retry lineage exactness - retry_batch() must deduplicate per failed batch.
+    ("batches", "retry_of_batch_id"),
+    # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
+    ("token_outcomes", "completed"),
+    ("token_outcomes", "path"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
 # Format: (table_name, column_name, referenced_table)
-# Bug fix: error tables were missing foreign keys to nodes/tokens
-_REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
-    ("validation_errors", "node_id", "nodes"),
-    ("transform_errors", "token_id", "tokens"),
-    ("transform_errors", "transform_id", "nodes"),
+# Use this only for exact single-column contracts. Run-scoped contracts belong in
+# _REQUIRED_COMPOSITE_FOREIGN_KEYS so stale single-column FKs cannot satisfy them.
+_REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (("validation_errors", "row_id", "rows"),)
+
+# Required composite foreign keys for run-scoped audit integrity.
+# Format: (table_name, constrained_columns, referenced_table, referenced_columns)
+_REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...]], ...] = (
+    ("token_outcomes", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_outcomes", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
+    ("node_states", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("node_states", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("validation_errors", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("transform_errors", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("transform_errors", ("transform_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("artifacts", ("produced_by_state_id", "run_id"), "node_states", ("state_id", "run_id")),
+    ("artifacts", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("batches", ("aggregation_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("batches", ("aggregation_state_id", "run_id"), "node_states", ("state_id", "run_id")),
+    ("batches", ("retry_of_batch_id", "run_id"), "batches", ("batch_id", "run_id")),
+    ("batch_members", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
+    ("batch_members", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
 )
+
+# Required check constraints for audit integrity.
+# Format: (table_name, constraint_name)
+_REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
+    ("calls", "calls_has_parent"),
+    ("preflight_results", "ck_preflight_result_type"),
+)
+
+# Required indexes (including partial unique indexes) for audit integrity.
+# Format: (table_name, index_name)
+_REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
+    ("calls", "ix_calls_state_call_index_unique"),
+    ("calls", "ix_calls_operation_call_index_unique"),
+    ("token_outcomes", "ix_token_outcomes_terminal_unique"),
+    ("validation_errors", "ix_validation_errors_run_row"),
+)
+
+_ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
+
+
+def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
+    """Return required columns missing from existing tables."""
+    existing_tables = set(inspector.get_table_names())
+    missing: list[tuple[str, str]] = []
+    for table_name, column_name in _REQUIRED_COLUMNS:
+        if table_name not in existing_tables:
+            continue
+        existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if column_name not in existing_columns:
+            missing.append((table_name, column_name))
+    return missing
+
+
+def _collect_token_outcomes_shape_errors(
+    inspector: Inspector,
+    *,
+    engine: Engine | None = None,
+    inspect_sqlite_indexes: bool = False,
+) -> list[str]:
+    """Return ADR-019 shape errors for existing token_outcomes tables."""
+    existing_tables = set(inspector.get_table_names())
+    if "token_outcomes" not in existing_tables:
+        return []
+
+    columns = {column["name"]: column for column in inspector.get_columns("token_outcomes")}
+    errors: list[str] = []
+
+    if "is_terminal" in columns:
+        errors.append("token_outcomes.is_terminal is stale; ADR-019 uses completed")
+    if "outcome" in columns and columns["outcome"]["nullable"] is False:
+        errors.append("token_outcomes.outcome nullable shape is stale; ADR-019 requires nullable outcome for BUFFERED rows")
+
+    if inspect_sqlite_indexes and engine is not None:
+        with engine.connect() as conn:
+            index_sql = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ix_token_outcomes_terminal_unique'"
+            ).scalar_one_or_none()
+        if index_sql is not None and "is_terminal" in str(index_sql).lower():
+            errors.append("token_outcomes stale terminal index predicate references is_terminal; ADR-019 uses completed")
+
+    return errors
 
 
 class LandscapeDB:
@@ -81,7 +182,7 @@ class LandscapeDB:
         Args:
             connection_string: SQLAlchemy connection string
                 e.g., "sqlite:///./state/audit.db"
-                      "postgresql://user:pass@host/dbname"
+                      "postgresql://user@host/dbname"
             passphrase: SQLCipher encryption passphrase. When provided, the
                 database is opened with AES-256 encryption via sqlcipher3.
                 The passphrase is never stored in the URL or audit trail.
@@ -107,6 +208,7 @@ class LandscapeDB:
         self._setup_engine()
         self._validate_schema()  # Check BEFORE create_tables
         self._create_tables()
+        self._create_additive_indexes()
         self._sync_sqlite_schema_epoch()
 
     def _setup_engine(self) -> None:
@@ -259,6 +361,13 @@ class LandscapeDB:
         """Create all tables if they don't exist."""
         metadata.create_all(self.engine)
 
+    def _create_additive_indexes(self) -> None:
+        """Create non-gating performance indexes for existing schemas."""
+        for table in metadata.tables.values():
+            for index in table.indexes:
+                if index.name in _ADDITIVE_INDEX_NAMES:
+                    index.create(self.engine, checkfirst=True)
+
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
 
@@ -311,19 +420,18 @@ class LandscapeDB:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
 
     def _validate_schema(self) -> None:
-        """Validate that existing database has all required columns and foreign keys.
+        """Validate that existing database has the required schema.
 
-        Only validates SQLite databases. PostgreSQL deployments are expected
-        to use Alembic migrations which handle schema evolution properly.
-        This check catches developers using stale local audit.db files.
+        For non-SQLite backends, validates table existence when
+        _require_existing_schema is set (inspection callers like MCP/CLI).
+        For SQLite, performs full validation of columns, foreign keys,
+        check constraints, and indexes to catch stale local audit.db files.
 
         Raises:
-            SchemaCompatibilityError: If database is missing required columns or FKs,
-                or if an encrypted database is opened without the correct passphrase.
+            SchemaCompatibilityError: If database is missing required schema
+                elements, or if an encrypted database is opened without the
+                correct passphrase.
         """
-        if not self.connection_string.startswith("sqlite"):
-            return
-
         from sqlalchemy import inspect
         from sqlalchemy.exc import OperationalError
 
@@ -332,7 +440,7 @@ class LandscapeDB:
             existing_tables = set(inspector.get_table_names())
         except OperationalError as e:
             error_msg = str(e)
-            if "file is not a database" in error_msg or "file is encrypted" in error_msg:
+            if self.connection_string.startswith("sqlite") and ("file is not a database" in error_msg or "file is encrypted" in error_msg):
                 raise SchemaCompatibilityError(
                     "Cannot open Landscape database — file is encrypted or passphrase is incorrect.\n\n"
                     "If this is an encrypted (SQLCipher) database, ensure:\n"
@@ -344,7 +452,7 @@ class LandscapeDB:
             raise
         expected_tables = set(metadata.tables.keys())
         present_landscape_tables = existing_tables & expected_tables
-        schema_epoch = self._get_sqlite_schema_epoch()
+        schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
 
         # If this looks like an existing Landscape database, all known tables must exist.
         # For brand-new DB files (no Landscape tables yet), creation happens in create_all().
@@ -359,30 +467,14 @@ class LandscapeDB:
                 "Verify the database path is correct.\n\n"
                 f"Database: {self.connection_string}"
             )
-        if present_landscape_tables and schema_epoch not in (0, SQLITE_SCHEMA_EPOCH):
-            raise SchemaCompatibilityError(
-                "Landscape database schema epoch is incompatible.\n\n"
-                f"Database epoch: {schema_epoch}\n"
-                f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
-                "This ELSPETH version is using an incompatible SQLite schema epoch.\n"
-                "Pre-1.0 releases may require either recreating the database or "
-                "running a future migration command.\n\n"
-                f"Database: {self.connection_string}"
-            )
         missing_tables = sorted(expected_tables - existing_tables) if present_landscape_tables else []
 
-        missing_columns: list[tuple[str, str]] = []
-
-        for table_name, column_name in _REQUIRED_COLUMNS:
-            # Check if table exists
-            if table_name not in existing_tables:
-                # Table will be created by create_all, skip
-                continue
-
-            # Check if column exists
-            columns = {c["name"] for c in inspector.get_columns(table_name)}
-            if column_name not in columns:
-                missing_columns.append((table_name, column_name))
+        missing_columns = _collect_missing_required_columns(inspector)
+        token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(
+            inspector,
+            engine=self.engine,
+            inspect_sqlite_indexes=self.connection_string.startswith("sqlite"),
+        )
 
         # Check for required foreign keys (Tier 1 audit integrity)
         missing_fks: list[tuple[str, str, str]] = []
@@ -401,9 +493,67 @@ class LandscapeDB:
             if not has_correct_fk:
                 missing_fks.append((table_name, column_name, referenced_table))
 
-        # Raise errors for missing columns or FKs
-        if missing_tables or missing_columns or missing_fks:
+        # Check for required composite foreign keys (Tier 1 audit integrity)
+        missing_composite_fks: list[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = []
+
+        for table_name, constrained_columns, referenced_table, referenced_columns in _REQUIRED_COMPOSITE_FOREIGN_KEYS:
+            if table_name not in existing_tables:
+                continue
+
+            fks = inspector.get_foreign_keys(table_name)
+            has_correct_fk = any(
+                tuple(fk["constrained_columns"]) == constrained_columns
+                and fk["referred_table"] == referenced_table
+                and tuple(fk["referred_columns"]) == referenced_columns
+                for fk in fks
+            )
+
+            if not has_correct_fk:
+                missing_composite_fks.append((table_name, constrained_columns, referenced_table, referenced_columns))
+
+        # Check for required check constraints (Tier 1 audit integrity)
+        missing_checks: list[tuple[str, str]] = []
+
+        for table_name, constraint_name in _REQUIRED_CHECK_CONSTRAINTS:
+            if table_name not in existing_tables:
+                continue
+
+            checks = inspector.get_check_constraints(table_name)
+            has_constraint = any(c["name"] == constraint_name for c in checks)
+
+            if not has_constraint:
+                missing_checks.append((table_name, constraint_name))
+
+        # Check for required indexes (Tier 1 audit integrity)
+        missing_indexes: list[tuple[str, str]] = []
+
+        for table_name, index_name in _REQUIRED_INDEXES:
+            if table_name not in existing_tables:
+                continue
+
+            indexes = inspector.get_indexes(table_name)
+            has_index = any(idx["name"] == index_name for idx in indexes)
+
+            if not has_index:
+                missing_indexes.append((table_name, index_name))
+
+        epoch_incompatible = present_landscape_tables and schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+
+        # Raise errors for missing columns, FKs, check constraints, indexes, or stale ADR-019 shapes.
+        if (
+            missing_tables
+            or missing_columns
+            or token_outcomes_shape_errors
+            or missing_fks
+            or missing_composite_fks
+            or missing_checks
+            or missing_indexes
+            or epoch_incompatible
+        ):
             error_parts = []
+
+            if epoch_incompatible:
+                error_parts.append(f"schema epoch is incompatible:\nDatabase epoch: {schema_epoch}\nCurrent epoch: {SQLITE_SCHEMA_EPOCH}")
 
             if missing_tables:
                 missing_tables_str = ", ".join(missing_tables)
@@ -413,9 +563,39 @@ class LandscapeDB:
                 missing_str = ", ".join(f"{t}.{c}" for t, c in missing_columns)
                 error_parts.append(f"Missing columns: {missing_str}")
 
+            if token_outcomes_shape_errors:
+                error_parts.append("ADR-019 stale token_outcomes shape: " + "; ".join(token_outcomes_shape_errors))
+
             if missing_fks:
                 missing_fk_str = ", ".join(f"{t}.{c} → {ref}" for t, c, ref in missing_fks)
                 error_parts.append(f"Missing foreign keys: {missing_fk_str}")
+
+            if missing_composite_fks:
+                missing_composite_fk_str = ", ".join(
+                    f"{table}({', '.join(columns)}) → {ref_table}({', '.join(ref_columns)})"
+                    for table, columns, ref_table, ref_columns in missing_composite_fks
+                )
+                error_parts.append(f"Missing composite foreign keys: {missing_composite_fk_str}")
+
+            if missing_checks:
+                missing_checks_str = ", ".join(f"{t}.{name}" for t, name in missing_checks)
+                error_parts.append(f"Missing check constraints: {missing_checks_str}")
+
+            if missing_indexes:
+                missing_indexes_str = ", ".join(f"{t}.{name}" for t, name in missing_indexes)
+                error_parts.append(f"Missing indexes: {missing_indexes_str}")
+
+            if (
+                ("token_outcomes", "completed") in missing_columns
+                or ("token_outcomes", "path") in missing_columns
+                or token_outcomes_shape_errors
+            ):
+                error_parts.append(
+                    "ADR-019 changed token_outcomes from the old single-axis outcome/is_terminal to "
+                    "(TerminalOutcome, TerminalPath, completed). See "
+                    f"{ADR019_MIGRATION_GUIDE} and replace the stale audit.db "
+                    "before starting this ELSPETH version."
+                )
 
             raise SchemaCompatibilityError(
                 "Landscape database schema is outdated.\n\n" + "\n".join(error_parts) + "\n\n"
@@ -552,6 +732,7 @@ class LandscapeDB:
 
         if create_tables:
             metadata.create_all(engine)
+            instance._create_additive_indexes()
             instance._sync_sqlite_schema_epoch()
         return instance
 
@@ -581,3 +762,28 @@ class LandscapeDB:
         """
         with self.engine.begin() as conn:
             yield conn
+
+    @contextmanager
+    def read_only_connection(self) -> Iterator[Connection]:
+        """Get a database connection that rejects all write operations.
+
+        Defense-in-depth for untrusted SQL execution (e.g., MCP query tool).
+        For SQLite, sets PRAGMA query_only = ON at the connection level and
+        resets it to OFF in the finally block so the pooled DBAPI connection
+        is returned in a writable state. For PostgreSQL, marks the current
+        transaction READ ONLY. Unsupported backends fail closed instead of
+        yielding a writable transaction.
+        """
+        dialect_name = self.engine.dialect.name
+        with self.engine.begin() as conn:
+            if dialect_name == "sqlite":
+                conn.execute(text("PRAGMA query_only = ON"))
+            elif dialect_name == "postgresql":
+                conn.execute(text("SET TRANSACTION READ ONLY"))
+            else:
+                raise RuntimeError(f"read_only_connection is unsupported for backend '{dialect_name}'")
+            try:
+                yield conn
+            finally:
+                if dialect_name == "sqlite":
+                    conn.execute(text("PRAGMA query_only = OFF"))

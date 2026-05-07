@@ -28,6 +28,7 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
 )
 from elspeth.plugins.sinks.dataverse import DataverseSink
 from elspeth.plugins.sources.dataverse import DataverseSource
+from tests.fixtures.base_classes import inject_write_failure
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -149,6 +150,17 @@ class TestDataverseSourceStructuredQuery:
 
         # Mock the client to return a canned response
         mock_client = MagicMock(spec=DataverseClient)
+        mock_client.get_page.return_value = DataversePageResponse(
+            status_code=200,
+            rows=[{"LogicalName": "contact"}],
+            latency_ms=5.0,
+            headers={"content-type": "application/json"},
+            request_headers={"Authorization": "Bearer fake"},
+            request_url="https://testorg.crm.dynamics.com/api/data/v9.2/EntityDefinitions(LogicalName='contact')?$select=LogicalName",
+            next_link=None,
+            paging_cookie=None,
+            more_records=None,
+        )
         mock_client.paginate_odata.return_value = iter(
             [
                 DataversePageResponse(
@@ -178,7 +190,7 @@ class TestDataverseSourceStructuredQuery:
         source._client = mock_client
 
         ctx = FakeSourceContext()
-        rows = list(source.load(ctx))
+        rows = list(source.load(ctx))  # type: ignore[arg-type]  # test fake context
 
         assert len(rows) == 2
         assert all(not r.is_quarantined for r in rows)
@@ -187,13 +199,24 @@ class TestDataverseSourceStructuredQuery:
 
         # Verify audit recording
         success_calls = [c for c in ctx.calls if c.get("status") == CallStatus.SUCCESS]
-        assert len(success_calls) == 1  # One page = one call
+        assert len(success_calls) == 2  # Metadata probe + one page fetch
 
     def test_multi_page_pagination(self) -> None:
         """Load rows across multiple pages with @odata.nextLink."""
         source = DataverseSource(_make_source_config())
 
         mock_client = MagicMock(spec=DataverseClient)
+        mock_client.get_page.return_value = DataversePageResponse(
+            status_code=200,
+            rows=[{"LogicalName": "contact"}],
+            latency_ms=5.0,
+            headers={"content-type": "application/json"},
+            request_headers={"Authorization": "Bearer fake"},
+            request_url="https://testorg.crm.dynamics.com/api/data/v9.2/EntityDefinitions(LogicalName='contact')?$select=LogicalName",
+            next_link=None,
+            paging_cookie=None,
+            more_records=None,
+        )
         mock_client.paginate_odata.return_value = iter(
             [
                 DataversePageResponse(
@@ -230,12 +253,12 @@ class TestDataverseSourceStructuredQuery:
         source._client = mock_client
 
         ctx = FakeSourceContext()
-        rows = list(source.load(ctx))
+        rows = list(source.load(ctx))  # type: ignore[arg-type]  # test fake context
 
         assert len(rows) == 2
-        # Two pages = two audit call records
+        # Metadata probe + two pages = three audit call records
         success_calls = [c for c in ctx.calls if c.get("status") == CallStatus.SUCCESS]
-        assert len(success_calls) == 2
+        assert len(success_calls) == 3
 
 
 class TestDataverseSourceFetchXML:
@@ -276,7 +299,7 @@ class TestDataverseSourceFetchXML:
         source._client = mock_client
 
         ctx = FakeSourceContext()
-        rows = list(source.load(ctx))
+        rows = list(source.load(ctx))  # type: ignore[arg-type]  # test fake context
 
         assert len(rows) == 1
         assert rows[0].row["fullname"] == "Alice"
@@ -315,7 +338,7 @@ class TestDataverseSourceSchemaLocking:
         source._client = mock_client
 
         ctx = FakeSourceContext()
-        rows = list(source.load(ctx))
+        rows = list(source.load(ctx))  # type: ignore[arg-type]  # test fake context
 
         assert len(rows) == 1
         # Contract should be locked after first valid row
@@ -353,7 +376,7 @@ class TestDataverseSourceSchemaLocking:
         source._client = mock_client
 
         ctx = FakeSourceContext()
-        rows = list(source.load(ctx))
+        rows = list(source.load(ctx))  # type: ignore[arg-type]  # test fake context
 
         assert len(rows) == 0
         contract = source.get_schema_contract()
@@ -402,7 +425,7 @@ class TestDataverseSourceODataStripping:
         source._client = mock_client
 
         ctx = FakeSourceContext()
-        rows = list(source.load(ctx))
+        rows = list(source.load(ctx))  # type: ignore[arg-type]  # test fake context
 
         assert len(rows) == 1
         row = rows[0].row
@@ -423,7 +446,7 @@ class TestDataverseSinkUpsert:
 
     def test_single_row_upsert(self) -> None:
         """Upsert a single row via PATCH."""
-        sink = DataverseSink(_make_sink_config())
+        sink = inject_write_failure(DataverseSink(_make_sink_config()))
 
         mock_client = MagicMock(spec=DataverseClient)
         mock_client.upsert.return_value = DataversePageResponse(
@@ -448,12 +471,13 @@ class TestDataverseSinkUpsert:
 
         ctx = FakeSinkContext()
         rows = [{"email": "alice@test.com", "name": "Alice"}]
-        result = sink.write(rows, ctx)
+        result = sink.write(rows, ctx)  # type: ignore[arg-type]  # test fake context
 
         assert isinstance(result, SinkWriteResult)
         descriptor = result.artifact
         assert descriptor.artifact_type == "webhook"
         assert "contact" in descriptor.path_or_uri
+        assert descriptor.metadata is not None
         assert descriptor.metadata["row_count"] == 1
         assert descriptor.metadata["mode"] == "upsert"
 
@@ -469,7 +493,7 @@ class TestDataverseSinkUpsert:
 
     def test_multi_row_upsert_serial(self) -> None:
         """Multiple rows are upserted serially, each with its own audit record."""
-        sink = DataverseSink(_make_sink_config())
+        sink = inject_write_failure(DataverseSink(_make_sink_config()))
 
         mock_client = MagicMock(spec=DataverseClient)
         mock_client.upsert.return_value = DataversePageResponse(
@@ -498,15 +522,16 @@ class TestDataverseSinkUpsert:
             {"email": "bob@test.com", "name": "Bob"},
             {"email": "charlie@test.com", "name": "Charlie"},
         ]
-        result = sink.write(rows, ctx)
+        result = sink.write(rows, ctx)  # type: ignore[arg-type]  # test fake context
 
+        assert result.artifact.metadata is not None
         assert result.artifact.metadata["row_count"] == 3
         assert mock_client.upsert.call_count == 3
         assert len(ctx.calls) == 3  # One audit record per row
 
     def test_upsert_failure_raises_and_records(self) -> None:
         """Failure on second row raises RuntimeError after recording audit entry."""
-        sink = DataverseSink(_make_sink_config())
+        sink = inject_write_failure(DataverseSink(_make_sink_config()))
 
         call_count = 0
 
@@ -550,7 +575,7 @@ class TestDataverseSinkUpsert:
         ]
 
         with pytest.raises(DataverseClientError, match="Conflict"):
-            sink.write(rows, ctx)
+            sink.write(rows, ctx)  # type: ignore[arg-type]  # test fake context
 
         # First row succeeded, second failed — both recorded
         assert len(ctx.calls) == 2
@@ -576,7 +601,7 @@ class TestDataverseSinkLookupBindings:
                 },
             },
         )
-        sink = DataverseSink(config)
+        sink = inject_write_failure(DataverseSink(config))
 
         mock_client = MagicMock(spec=DataverseClient)
         captured_bodies: list[dict[str, Any]] = []
@@ -607,7 +632,7 @@ class TestDataverseSinkLookupBindings:
 
         ctx = FakeSinkContext()
         rows = [{"email": "alice@test.com", "name": "Alice", "parent_account_id": "abc-123-guid"}]
-        sink.write(rows, ctx)
+        sink.write(rows, ctx)  # type: ignore[arg-type]  # test fake context
 
         assert len(captured_bodies) == 1
         body = captured_bodies[0]
@@ -621,7 +646,7 @@ class TestDataverseSinkEmptyBatch:
     """Empty batch returns descriptor with empty hash."""
 
     def test_empty_rows_returns_descriptor(self) -> None:
-        sink = DataverseSink(_make_sink_config())
+        sink = inject_write_failure(DataverseSink(_make_sink_config()))
 
         mock_client = MagicMock(spec=DataverseClient)
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake"}
@@ -634,8 +659,9 @@ class TestDataverseSinkEmptyBatch:
         sink._client = mock_client
 
         ctx = FakeSinkContext()
-        result = sink.write([], ctx)
+        result = sink.write([], ctx)  # type: ignore[arg-type]  # test fake context
 
         assert isinstance(result, SinkWriteResult)
+        assert result.artifact.metadata is not None
         assert result.artifact.metadata["row_count"] == 0
         assert result.artifact.content_hash == hashlib.sha256(b"").hexdigest()

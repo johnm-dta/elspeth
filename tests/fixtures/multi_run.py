@@ -27,13 +27,15 @@ from elspeth.contracts import (
     NodeStateStatus,
     NodeType,
     RoutingMode,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
@@ -75,11 +77,11 @@ class RunInfo:
 class MultiRunFixture:
     """Structured result from the ``multi_run_landscape`` fixture.
 
-    Provides the recorder plus per-run metadata so tests can assert
+    Provides the factory plus per-run metadata so tests can assert
     exact-match behaviour against any entity type.
     """
 
-    recorder: LandscapeRecorder
+    factory: RecorderFactory
     db: LandscapeDB
     runs: tuple[RunInfo, ...]
 
@@ -115,7 +117,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
     """
 
     db = LandscapeDB.in_memory()
-    recorder = LandscapeRecorder(db)
+    factory = RecorderFactory(db)
 
     run_infos: list[RunInfo] = []
 
@@ -126,9 +128,9 @@ def _build_multi_run_landscape() -> MultiRunFixture:
         sink_nid = f"sink-{suffix}"
 
         # -- run + nodes --
-        recorder.begin_run(config={}, canonical_version="v1", run_id=run_id)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
 
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run_id,
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -137,7 +139,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
             node_id=src_nid,
             schema_config=_OBSERVED_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run_id,
             plugin_name="passthrough",
             node_type=NodeType.TRANSFORM,
@@ -146,7 +148,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
             node_id=xform_nid,
             schema_config=_OBSERVED_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             run_id=run_id,
             plugin_name="csv_sink",
             node_type=NodeType.SINK,
@@ -159,8 +161,8 @@ def _build_multi_run_landscape() -> MultiRunFixture:
         # -- edges --
         edge_s2t = f"edge-{suffix}-s2t"
         edge_t2k = f"edge-{suffix}-t2k"
-        recorder.register_edge(run_id, src_nid, xform_nid, "continue", RoutingMode.MOVE, edge_id=edge_s2t)
-        recorder.register_edge(run_id, xform_nid, sink_nid, "continue", RoutingMode.MOVE, edge_id=edge_t2k)
+        factory.data_flow.register_edge(run_id, src_nid, xform_nid, "continue", RoutingMode.MOVE, edge_id=edge_s2t)
+        factory.data_flow.register_edge(run_id, xform_nid, sink_nid, "continue", RoutingMode.MOVE, edge_id=edge_t2k)
 
         # -- rows, tokens, states, calls, routing, outcomes --
         row_ids: list[str] = []
@@ -171,12 +173,14 @@ def _build_multi_run_landscape() -> MultiRunFixture:
             tok_id = f"tok-{suffix}-{i}"
             state_id = f"st-{suffix}-{i}"
 
-            recorder.create_row(run_id, src_nid, i, {"val": f"{suffix}-{i}"}, row_id=row_id)
-            recorder.create_token(row_id, token_id=tok_id)
+            factory.data_flow.create_row(run_id, src_nid, i, {"val": f"{suffix}-{i}"}, row_id=row_id)
+            factory.data_flow.create_token(row_id, token_id=tok_id)
 
             # begin + complete a node state on the transform node
-            recorder.begin_node_state(tok_id, xform_nid, run_id, step_index=1, input_data={"val": f"{suffix}-{i}"}, state_id=state_id)
-            recorder.complete_node_state(
+            factory.execution.begin_node_state(
+                tok_id, xform_nid, run_id, step_index=1, input_data={"val": f"{suffix}-{i}"}, state_id=state_id
+            )
+            factory.execution.complete_node_state(
                 state_id,
                 NodeStateStatus.COMPLETED,
                 output_data={"val": f"{suffix}-{i}", "processed": True},
@@ -188,7 +192,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
 
             if i == 0:
                 # Record an external call on first token's state
-                call_obj = recorder.record_call(
+                call_obj = factory.execution.record_call(
                     state_id,
                     call_index=0,
                     call_type=CallType.HTTP,
@@ -200,7 +204,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
                 call_id = call_obj.call_id
 
                 # Record a routing event on first token's state
-                re_obj = recorder.record_routing_event(
+                re_obj = factory.execution.record_routing_event(
                     state_id,
                     edge_t2k,
                     RoutingMode.MOVE,
@@ -209,17 +213,22 @@ def _build_multi_run_landscape() -> MultiRunFixture:
                 re_id = re_obj.event_id
 
             # Record token outcome
-            recorder.record_token_outcome(run_id, tok_id, RowOutcome.COMPLETED, sink_name="output")
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=tok_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
 
             row_ids.append(row_id)
             token_infos.append(TokenInfo(token_id=tok_id, row_id=row_id, state_id=state_id, call_id=call_id, routing_event_id=re_id))
 
         # -- batch (on transform node, using aggregation node type conceptually) --
         batch_id = f"batch-{suffix}"
-        recorder.create_batch(run_id, xform_nid, batch_id=batch_id)
-        recorder.add_batch_member(batch_id, token_infos[0].token_id, ordinal=0)
-        recorder.add_batch_member(batch_id, token_infos[1].token_id, ordinal=1)
-        recorder.update_batch_status(batch_id, BatchStatus.EXECUTING, trigger_type=TriggerType.COUNT, trigger_reason="count=2")
+        factory.execution.create_batch(run_id, xform_nid, batch_id=batch_id)
+        factory.execution.add_batch_member(batch_id, token_infos[0].token_id, ordinal=0)
+        factory.execution.add_batch_member(batch_id, token_infos[1].token_id, ordinal=1)
+        factory.execution.update_batch_status(batch_id, BatchStatus.EXECUTING, trigger_type=TriggerType.COUNT, trigger_reason="count=2")
 
         run_infos.append(
             RunInfo(
@@ -235,7 +244,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
             )
         )
 
-    return MultiRunFixture(recorder=recorder, db=db, runs=tuple(run_infos))
+    return MultiRunFixture(factory=factory, db=db, runs=tuple(run_infos))
 
 
 @pytest.fixture

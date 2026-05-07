@@ -17,8 +17,8 @@ from typing import Any
 
 from elspeth.contracts import NodeStateStatus, PipelineRow, RunStatus
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.core.landscape.row_data import RowDataState
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.retention.purge import PurgeManager
@@ -101,13 +101,13 @@ class TestLineageCompleteness:
         assert len(sink.results) == 3
 
         # Verify all rows are recorded in audit trail
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 3
 
         # Verify each row has a lineage
         for row in rows:
-            lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+            lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
             assert lineage is not None, f"Row {row.row_id} has no lineage"
             assert lineage.source_row is not None
             assert len(lineage.node_states) > 0
@@ -136,12 +136,12 @@ class TestLineageCompleteness:
             assert row_data.get("processed_by") == "enricher"
 
         # Verify each row has lineage with at least 2 transform states
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 2
 
         for row in rows:
-            lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+            lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
             assert lineage is not None
             assert len(lineage.node_states) >= 2, f"Row {row.row_id} expected >= 2 node_states, got {len(lineage.node_states)}"
 
@@ -165,8 +165,8 @@ class TestLineageAfterRetention:
         source_data = [{"id": "row_1", "value": 100}]
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, source_data, transforms=[PassTransform()])
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 1
         row = rows[0]
         assert row.source_data_ref is not None
@@ -174,7 +174,7 @@ class TestLineageAfterRetention:
 
         # Verify payload exists before purge
         assert payload_store.exists(row.source_data_ref)
-        before = recorder.get_row_data(row.row_id)
+        before = factory.query.get_row_data(row.row_id)
         assert before.state == RowDataState.AVAILABLE
 
         # Purge payloads (treat run as expired by using retention_days=0 and future as_of)
@@ -185,10 +185,10 @@ class TestLineageAfterRetention:
         purge_manager.purge_payloads(refs)
 
         # Payload should now be purged, but hash remains
-        after = recorder.get_row_data(row.row_id)
+        after = factory.query.get_row_data(row.row_id)
         assert after.state == RowDataState.PURGED
 
-        lineage = recorder.explain_row(run_id, row.row_id)
+        lineage = factory.query.explain_row(run_id, row.row_id)
         assert lineage is not None
         assert lineage.source_data_hash == row.source_data_hash
         assert lineage.payload_available is False
@@ -210,12 +210,12 @@ class TestExplainQueryFunctionality:
         source_data = {"id": "trace_me", "value": 42}
         run_id, db, payload_store, _sink = _run_pipeline(tmp_path, [source_data], transforms=[PassTransform()])
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 1
 
         row = rows[0]
-        lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+        lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
 
         assert lineage is not None, "Explain must return lineage for processed row"
         assert lineage.source_row is not None
@@ -233,12 +233,12 @@ class TestExplainQueryFunctionality:
             transforms=[PassTransform(), _EnrichTransform()],
         )
 
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
-        rows = recorder.get_rows(run_id)
+        factory = RecorderFactory(db, payload_store=payload_store)
+        rows = factory.query.get_rows(run_id)
         assert len(rows) == 1
 
         row = rows[0]
-        lineage = explain(recorder, run_id=run_id, row_id=row.row_id)
+        lineage = explain(factory.query, factory.data_flow, run_id=run_id, row_id=row.row_id)
 
         assert lineage is not None
         assert len(lineage.node_states) >= 2, f"Expected >= 2 node_states (2 transforms), got {len(lineage.node_states)}"

@@ -25,7 +25,8 @@ class TestConsoleFormatters:
             quarantined=1,
             duration_seconds=1.5,
             exit_code=1,
-            routed=3,
+            routed_success=3,
+            routed_failure=0,
             routed_destinations=(("sink_a", 2), ("sink_b", 1)),
         )
 
@@ -48,7 +49,8 @@ class TestConsoleFormatters:
             quarantined=0,
             duration_seconds=2.0,
             exit_code=0,
-            routed=2,
+            routed_success=2,
+            routed_failure=0,
             routed_destinations=(),
         )
 
@@ -113,6 +115,8 @@ class TestConsoleFormatters:
             rows_succeeded=20,
             rows_failed=3,
             rows_quarantined=2,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             elapsed_seconds=0.0,
         )
 
@@ -127,13 +131,22 @@ class TestJsonFormatters:
     """Structured formatter edge behavior."""
 
     def test_progress_json_elapsed_zero_emits_zero_rows_per_second(self) -> None:
-        """JSON progress formatter must emit stable numeric rate on elapsed=0."""
+        """JSON progress formatter must emit stable numeric rate on elapsed=0.
+
+        elspeth-5069612f3c — also asserts the streaming progress JSON
+        carries the routed split (MOVE / DIVERT) so a tail-following JSON
+        consumer sees the same taxonomy in-flight as it does on terminal
+        ``run_completed`` summaries. Pre-fix the streaming progress shape
+        omitted both fields entirely.
+        """
         progress_handler = create_json_formatters()[ProgressEvent]
         event = ProgressEvent(
             rows_processed=50,
-            rows_succeeded=45,
+            rows_succeeded=40,
             rows_failed=3,
             rows_quarantined=2,
+            rows_routed_success=4,
+            rows_routed_failure=1,
             elapsed_seconds=0.0,
         )
 
@@ -144,6 +157,8 @@ class TestJsonFormatters:
         assert payload["event"] == "progress"
         assert payload["rows_per_second"] == 0
         assert payload["elapsed_seconds"] == 0.0
+        assert payload["rows_routed_success"] == 4
+        assert payload["rows_routed_failure"] == 1
 
     def test_run_summary_json_shape_is_stable_with_routed_edge_values(self) -> None:
         """JSON summary output should remain deterministic with routed edge inputs."""
@@ -157,7 +172,8 @@ class TestJsonFormatters:
             quarantined=0,
             duration_seconds=0.0,
             exit_code=2,
-            routed=1,
+            routed_success=1,
+            routed_failure=0,
             routed_destinations=(("error_sink", 1),),
         )
 
@@ -173,6 +189,9 @@ class TestJsonFormatters:
             "succeeded": 0,
             "failed": 1,
             "quarantined": 0,
+            "routed_success": 1,
+            "routed_failure": 0,
+            "routed_destinations": {"error_sink": 1},
             "duration_seconds": 0.0,
             "exit_code": 2,
         }

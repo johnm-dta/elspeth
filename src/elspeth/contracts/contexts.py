@@ -19,17 +19,18 @@ See: docs/plans/2026-02-26-t17-plugincontext-protocol-split-design.md
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from elspeth.contracts import Call, CallStatus, CallType
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
+    from elspeth.contracts.audit_protocols import PluginAuditWriter
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.identity import TokenInfo
+    from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_context import ValidationErrorToken
     from elspeth.contracts.schema_contract import SchemaContract
-    from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.rate_limit import RateLimitRegistry
 
 
@@ -54,7 +55,7 @@ class SourceContext(Protocol):
     def operation_id(self) -> str | None: ...
 
     @property
-    def landscape(self) -> LandscapeRecorder | None: ...
+    def landscape(self) -> PluginAuditWriter | None: ...
 
     @property
     def telemetry_emit(self) -> Callable[[Any], None]: ...
@@ -111,6 +112,9 @@ class TransformContext(Protocol):
     @property
     def contract(self) -> SchemaContract | None: ...
 
+    @property
+    def shutdown_event(self) -> threading.Event | None: ...
+
     def record_call(
         self,
         call_type: CallType,
@@ -122,12 +126,6 @@ class TransformContext(Protocol):
         *,
         provider: str = "unknown",
     ) -> Call | None: ...
-
-    def get_checkpoint(self) -> BatchCheckpointState | None: ...
-
-    def set_checkpoint(self, state: BatchCheckpointState) -> None: ...
-
-    def clear_checkpoint(self) -> None: ...
 
 
 @runtime_checkable
@@ -148,7 +146,7 @@ class SinkContext(Protocol):
     def contract(self) -> SchemaContract | None: ...
 
     @property
-    def landscape(self) -> LandscapeRecorder | None: ...
+    def landscape(self) -> PluginAuditWriter | None: ...
 
     @property
     def operation_id(self) -> str | None: ...
@@ -186,7 +184,10 @@ class LifecycleContext(Protocol):
     def node_id(self) -> str | None: ...  # [R1] Set by orchestrator before on_start()
 
     @property
-    def landscape(self) -> LandscapeRecorder | None: ...
+    def landscape(self) -> PluginAuditWriter | None: ...
+
+    @property
+    def payload_store(self) -> PayloadStore | None: ...
 
     @property
     def rate_limit_registry(self) -> RateLimitRegistry | None: ...
@@ -196,3 +197,6 @@ class LifecycleContext(Protocol):
 
     @property
     def concurrency_config(self) -> RuntimeConcurrencyConfig | None: ...
+
+    @property
+    def shutdown_event(self) -> threading.Event | None: ...

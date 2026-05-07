@@ -158,3 +158,23 @@ class TestParseJsonStrict:
         parsed, error = parse_json_strict("null")
         assert error is None
         assert parsed is None
+
+    def test_duplicate_keys_rejected(self) -> None:
+        """Duplicate keys in JSON object are rejected."""
+        parsed, error = parse_json_strict('{"a": 1, "a": 2}')
+        assert parsed is None
+        assert error is not None
+        assert "Duplicate" in error
+
+    def test_nested_duplicate_keys_rejected(self) -> None:
+        """Duplicate keys in nested JSON object are rejected."""
+        parsed, error = parse_json_strict('{"outer": {"a": 1, "a": 2}}')
+        assert parsed is None
+        assert error is not None
+        assert "Duplicate" in error
+
+    def test_unique_keys_still_accepted(self) -> None:
+        """Normal JSON with unique keys still parses fine (regression check)."""
+        parsed, error = parse_json_strict('{"a": 1, "b": 2, "c": 3}')
+        assert error is None
+        assert parsed == {"a": 1, "b": 2, "c": 3}

@@ -28,7 +28,7 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import CANONICAL_VERSION
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.plugins.sources.csv_source import CSVSource
 from elspeth.plugins.sources.json_source import JSONSource
 
@@ -87,11 +87,11 @@ def _make_test_context() -> _TestablePluginContext:
 
 
 def _make_audited_context(
-    recorder: LandscapeRecorder,
+    factory: RecorderFactory,
     run_id: str,
     node_id: str | None = None,
 ) -> PluginContext:
-    """Create a real PluginContext wired to a LandscapeRecorder.
+    """Create a real PluginContext wired to a RecorderFactory.
 
     Delegates to the shared make_context() factory.
 
@@ -102,13 +102,13 @@ def _make_audited_context(
 
     return make_context(
         run_id=run_id,
-        landscape=recorder,
+        landscape=factory.plugin_audit_writer(),
         node_id=node_id,
     )
 
 
 def _setup_run_and_node(
-    recorder: LandscapeRecorder,
+    factory: RecorderFactory,
 ) -> tuple[str, str]:
     """Create a run and source node in Landscape for FK integrity.
 
@@ -118,11 +118,11 @@ def _setup_run_and_node(
     Returns:
         (run_id, node_id) tuple
     """
-    run = recorder.begin_run(
+    run = factory.run_lifecycle.begin_run(
         config={"source": "test"},
         canonical_version=CANONICAL_VERSION,
     )
-    node = recorder.register_node(
+    node = factory.data_flow.register_node(
         run_id=run.run_id,
         plugin_name="csv",
         node_type=NodeType.SOURCE,
@@ -563,7 +563,7 @@ class TestJSONSourceBoundary:
 class TestSourceQuarantineAuditTrail:
     """Tests that quarantine events are recorded in the Landscape audit trail.
 
-    These tests use a real LandscapeRecorder (not _TestablePluginContext)
+    These tests use a real RecorderFactory (not _TestablePluginContext)
     to verify that quarantine events persist to the audit database and can
     be queried for post-run investigation.
 
@@ -571,13 +571,13 @@ class TestSourceQuarantineAuditTrail:
     complete audit coverage. "I don't know what happened" is never acceptable.
     """
 
-    def test_quarantine_recorded_in_landscape(self, tmp_path: Path, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_quarantine_recorded_in_landscape(self, tmp_path: Path, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """Quarantined row is recorded in Landscape validation_errors table.
 
         Trust boundary: The audit trail must record that a row was
         quarantined, even though it never enters the pipeline.
         """
-        run_id, node_id = _setup_run_and_node(recorder)
+        run_id, node_id = _setup_run_and_node(landscape_factory)
 
         csv_file = tmp_path / "data.csv"
         csv_file.write_text("id,amount\nabc,100\n")
@@ -589,26 +589,26 @@ class TestSourceQuarantineAuditTrail:
                 "on_validation_failure": "quarantine",
             }
         )
-        ctx = _make_audited_context(recorder, run_id, node_id)
+        ctx = _make_audited_context(landscape_factory, run_id, node_id)
         rows = list(source.load(ctx))
 
         assert len(rows) == 1
         assert rows[0].is_quarantined
 
         # Query the Landscape for validation errors
-        errors = recorder.get_validation_errors_for_run(run_id)
+        errors = landscape_factory.data_flow.get_validation_errors_for_run(run_id)
         assert len(errors) == 1
         assert errors[0].run_id == run_id
         assert errors[0].schema_mode == "fixed"
         assert errors[0].destination == "quarantine"
 
-    def test_quarantine_includes_error_reason(self, tmp_path: Path, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_quarantine_includes_error_reason(self, tmp_path: Path, landscape_db: LandscapeDB, landscape_factory: RecorderFactory) -> None:
         """Audit record has a descriptive reason string.
 
         Trust boundary: The audit trail must explain WHY a row was
         quarantined, not just that it was.
         """
-        run_id, node_id = _setup_run_and_node(recorder)
+        run_id, node_id = _setup_run_and_node(landscape_factory)
 
         csv_file = tmp_path / "data.csv"
         csv_file.write_text("id,amount\nnot_a_number,100\n")
@@ -620,10 +620,10 @@ class TestSourceQuarantineAuditTrail:
                 "on_validation_failure": "quarantine",
             }
         )
-        ctx = _make_audited_context(recorder, run_id, node_id)
+        ctx = _make_audited_context(landscape_factory, run_id, node_id)
         list(source.load(ctx))
 
-        errors = recorder.get_validation_errors_for_run(run_id)
+        errors = landscape_factory.data_flow.get_validation_errors_for_run(run_id)
         assert len(errors) == 1
         # Error reason should mention the problematic value or field
         assert errors[0].error is not None
@@ -631,13 +631,15 @@ class TestSourceQuarantineAuditTrail:
         # The row data should be preserved in the audit trail
         assert errors[0].row_data_json is not None
 
-    def test_valid_and_quarantined_rows_both_recorded(self, tmp_path: Path, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
+    def test_valid_and_quarantined_rows_both_recorded(
+        self, tmp_path: Path, landscape_db: LandscapeDB, landscape_factory: RecorderFactory
+    ) -> None:
         """Mix of valid/invalid rows: quarantined rows are recorded in Landscape.
 
         Trust boundary: The audit trail must show the full picture —
         both successful processing and quarantine events.
         """
-        run_id, node_id = _setup_run_and_node(recorder)
+        run_id, node_id = _setup_run_and_node(landscape_factory)
 
         csv_file = tmp_path / "data.csv"
         csv_file.write_text(
@@ -657,7 +659,7 @@ class TestSourceQuarantineAuditTrail:
                 "on_validation_failure": "quarantine",
             }
         )
-        ctx = _make_audited_context(recorder, run_id, node_id)
+        ctx = _make_audited_context(landscape_factory, run_id, node_id)
         rows = list(source.load(ctx))
 
         valid_rows = [r for r in rows if not r.is_quarantined]
@@ -668,7 +670,7 @@ class TestSourceQuarantineAuditTrail:
         assert len(quarantined_rows) == 2
 
         # Both quarantine events recorded in Landscape
-        errors = recorder.get_validation_errors_for_run(run_id)
+        errors = landscape_factory.data_flow.get_validation_errors_for_run(run_id)
         assert len(errors) == 2
 
         # Each error has run_id and destination
@@ -677,14 +679,14 @@ class TestSourceQuarantineAuditTrail:
             assert error.destination == "quarantine"
 
     def test_column_count_mismatch_recorded_in_landscape(
-        self, tmp_path: Path, landscape_db: LandscapeDB, recorder: LandscapeRecorder
+        self, tmp_path: Path, landscape_db: LandscapeDB, landscape_factory: RecorderFactory
     ) -> None:
         """Column count mismatch quarantine is recorded as a parse-level error.
 
         Trust boundary: Structural malformation in external data is a
         distinct error category from schema validation failures.
         """
-        run_id, node_id = _setup_run_and_node(recorder)
+        run_id, node_id = _setup_run_and_node(landscape_factory)
 
         csv_file = tmp_path / "data.csv"
         csv_file.write_text("id,name,status\n1,Alice\n")  # 2 fields, expected 3
@@ -696,13 +698,13 @@ class TestSourceQuarantineAuditTrail:
                 "on_validation_failure": "quarantine",
             }
         )
-        ctx = _make_audited_context(recorder, run_id, node_id)
+        ctx = _make_audited_context(landscape_factory, run_id, node_id)
         rows = list(source.load(ctx))
 
         assert len(rows) == 1
         assert rows[0].is_quarantined
 
-        errors = recorder.get_validation_errors_for_run(run_id)
+        errors = landscape_factory.data_flow.get_validation_errors_for_run(run_id)
         assert len(errors) == 1
         # Column count errors are recorded as "parse" schema_mode
         assert errors[0].schema_mode == "parse"

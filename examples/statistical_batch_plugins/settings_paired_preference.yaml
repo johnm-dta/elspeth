@@ -1,0 +1,43 @@
+source:
+  plugin: csv
+  on_success: paired_in
+  options:
+    path: examples/statistical_batch_plugins/paired_preferences.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'case_id: str'
+      - 'variant: str'
+      - 'preference_score: float'
+    on_validation_failure: discard
+aggregations:
+- name: paired_prompt_preference
+  plugin: batch_paired_preference
+  input: paired_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'case_id: str'
+      - 'variant: str'
+      - 'preference_score: float'
+    pair_field: case_id
+    variant_field: variant
+    score_field: preference_score
+    baseline_variant: control
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/paired_preference.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/paired_preference.db

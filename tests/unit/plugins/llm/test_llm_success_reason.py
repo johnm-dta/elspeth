@@ -8,6 +8,7 @@ payload purge deletes the output row data.
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import Mock
 
@@ -15,9 +16,10 @@ import pytest
 
 from elspeth.contracts.engine import BufferEntry
 from elspeth.contracts.results import TransformResult
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.transforms.llm.multi_query import QuerySpec
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
+from elspeth.plugins.transforms.llm.provider import FinishReason, LLMProvider, LLMQueryResult
 from elspeth.plugins.transforms.llm.templates import PromptTemplate
 from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy, SingleQueryStrategy
 from elspeth.testing import make_pipeline_row
@@ -45,7 +47,7 @@ def _make_mock_provider(responses: list[dict[str, Any]] | None = None) -> Mock:
     """
     import itertools
 
-    mock_provider = Mock()
+    mock_provider = Mock(spec=LLMProvider)
 
     if responses is None:
         responses = [{"score": 85, "rationale": "Good"}]
@@ -73,16 +75,26 @@ def _make_mock_provider(responses: list[dict[str, Any]] | None = None) -> Mock:
     return mock_provider
 
 
+def _identity_contract(contract: SchemaContract) -> SchemaContract:
+    """Mirror the no-op contract alignment used in these unit tests."""
+    return contract
+
+
+def _identity_row(row: PipelineRow) -> PipelineRow:
+    """Mirror the no-op row alignment used in these unit tests."""
+    return row
+
+
 def _make_multi_query_strategy(*, executor: Mock | None = None) -> MultiQueryStrategy:
     """Build a MultiQueryStrategy with two simple query specs."""
     specs = [
         QuerySpec(
             name="sentiment",
-            input_fields={"text": "text"},
+            input_fields=MappingProxyType({"text": "text"}),
         ),
         QuerySpec(
             name="topic",
-            input_fields={"text": "text"},
+            input_fields=MappingProxyType({"text": "text"}),
         ),
     ]
     return MultiQueryStrategy(
@@ -94,6 +106,8 @@ def _make_multi_query_strategy(*, executor: Mock | None = None) -> MultiQueryStr
         temperature=0.7,
         max_tokens=None,
         response_field="llm_response",
+        align_output_contract=_identity_contract,
+        align_output_row_contract=_identity_row,
         executor=executor,
     )
 
@@ -114,9 +128,10 @@ def single_query_result() -> TransformResult:
         temperature=0.7,
         max_tokens=None,
         response_field="llm_response",
+        align_output_contract=_identity_contract,
     )
 
-    mock_provider = Mock()
+    mock_provider = Mock(spec=LLMProvider)
     mock_provider.execute_query.return_value = LLMQueryResult(
         content="The analysis is positive.",
         usage=TokenUsage.known(prompt_tokens=10, completion_tokens=5),
@@ -169,6 +184,8 @@ def parallel_multi_query_result() -> TransformResult:
     def _fake_execute_batch(
         contexts: list[RowContext],
         process_fn: Callable[[dict[str, Any], str], TransformResult],
+        *,
+        shutdown_event: Any | None = None,
     ) -> list[BufferEntry[TransformResult]]:
         entries: list[BufferEntry[TransformResult]] = []
         for i, ctx in enumerate(contexts):

@@ -18,23 +18,23 @@ from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 class TestHTTPClientTelemetry:
     """Tests for telemetry emission from AuditedHTTPClient."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder that returns recorded calls."""
-        recorder = MagicMock()
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository that returns recorded calls."""
+        execution = MagicMock()
         counter = itertools.count()
-        recorder.allocate_call_index.side_effect = lambda _: next(counter)
+        execution.allocate_call_index.side_effect = lambda _: next(counter)
 
         # record_call returns a Call object with hashes
         recorded_call = MagicMock()
         recorded_call.request_hash = "req_hash_123"
         recorded_call.response_hash = "resp_hash_456"
-        recorder.record_call.return_value = recorded_call
+        execution.record_call.return_value = recorded_call
 
-        return recorder
+        return execution
 
     def test_successful_post_emits_telemetry(self) -> None:
         """Successful HTTP POST emits ExternalCallCompleted event."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # Track emitted events
         emitted_events: list[ExternalCallCompleted] = []
@@ -52,7 +52,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -96,7 +96,7 @@ class TestHTTPClientTelemetry:
 
     def test_failed_post_emits_telemetry_with_error_status(self) -> None:
         """Failed HTTP POST emits ExternalCallCompleted with ERROR status."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -105,7 +105,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -135,7 +135,7 @@ class TestHTTPClientTelemetry:
 
     def test_noop_callback_works(self) -> None:
         """No-op callback (telemetry disabled) works without error."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # No-op callback (simulates telemetry disabled)
         def noop_callback(event: Any) -> None:
@@ -150,7 +150,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -164,11 +164,11 @@ class TestHTTPClientTelemetry:
         # Call succeeds without error
         assert response.status_code == 200
         # Audit trail is still recorded
-        recorder.record_call.assert_called_once()
+        execution.record_call.assert_called_once()
 
     def test_telemetry_emitted_after_landscape_recording(self) -> None:
         """Telemetry is emitted AFTER Landscape recording succeeds."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         call_order: list[str] = []
 
@@ -179,7 +179,7 @@ class TestHTTPClientTelemetry:
             recorded_call.response_hash = "resp_hash"
             return recorded_call
 
-        recorder.record_call.side_effect = mock_record_call
+        execution.record_call.side_effect = mock_record_call
 
         def telemetry_emit(event: ExternalCallCompleted) -> None:
             call_order.append("telemetry")
@@ -193,7 +193,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -214,10 +214,10 @@ class TestHTTPClientTelemetry:
         If audit recording fails, telemetry should NOT be emitted because
         the event was never properly recorded.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # Make record_call raise an exception (simulating DB failure)
-        recorder.record_call.side_effect = Exception("Database connection failed")
+        execution.record_call.side_effect = Exception("Database connection failed")
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -233,7 +233,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -260,7 +260,7 @@ class TestHTTPClientTelemetry:
 
         The fix isolates telemetry emission in its own try/except.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         def failing_telemetry_emit(event: ExternalCallCompleted) -> None:
             raise RuntimeError("Telemetry exporter failed!")
@@ -274,7 +274,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -290,13 +290,45 @@ class TestHTTPClientTelemetry:
         assert response.status_code == 200
 
         # CRITICAL: Only ONE audit record, with SUCCESS status
-        assert recorder.record_call.call_count == 1
-        call_kwargs = recorder.record_call.call_args.kwargs
+        assert execution.record_call.call_count == 1
+        call_kwargs = execution.record_call.call_args.kwargs
+        assert call_kwargs["status"] == CallStatus.SUCCESS
+
+    def test_programmer_bug_in_telemetry_callback_crashes_after_audit_recording(self) -> None:
+        """TypeError/KeyError-style telemetry bugs must crash instead of being downgraded to warnings."""
+        execution = self._create_mock_execution()
+
+        def failing_telemetry_emit(event: ExternalCallCompleted) -> None:
+            raise TypeError("telemetry bug")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"result": "success"}
+        mock_response.text = '{"result": "success"}'
+        mock_response.content = b'{"result": "success"}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=execution,
+                state_id="state_123",
+                base_url="https://api.example.com",
+                run_id="run_abc",
+                telemetry_emit=failing_telemetry_emit,
+            )
+            mock_client_instance = mock_client_class.return_value
+            mock_client_instance.post.return_value = mock_response
+
+            with pytest.raises(TypeError, match="telemetry bug"):
+                client.post("/endpoint", json={"input": "test"})
+
+        execution.record_call.assert_called_once()
+        call_kwargs = execution.record_call.call_args.kwargs
         assert call_kwargs["status"] == CallStatus.SUCCESS
 
     def test_http_error_response_emits_telemetry(self) -> None:
         """4xx/5xx response emits telemetry with ERROR status."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -312,7 +344,7 @@ class TestHTTPClientTelemetry:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com",
                 run_id="run_abc",
@@ -341,7 +373,7 @@ class TestHTTPClientTelemetry:
 
         Regression test for credential leak vulnerability.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -358,7 +390,7 @@ class TestHTTPClientTelemetry:
         with patch("httpx.Client") as mock_client_class:
             # URL with embedded credentials
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api_user:super_secret_password@api.example.com:8443",
                 run_id="run_abc",
@@ -383,7 +415,7 @@ class TestHTTPClientTelemetry:
 
     def test_provider_extraction_handles_url_without_credentials(self) -> None:
         """Provider extraction works correctly for URLs without credentials."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -400,7 +432,7 @@ class TestHTTPClientTelemetry:
         with patch("httpx.Client") as mock_client_class:
             # URL without credentials
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_123",
                 base_url="https://api.example.com:443",
                 run_id="run_abc",
@@ -424,15 +456,15 @@ class TestHTTPClientPerCallTokenId:
     The per-call token_id parameter ensures correct telemetry attribution.
     """
 
-    def _create_mock_recorder(self) -> MagicMock:
-        recorder = MagicMock()
+    def _create_mock_execution(self) -> MagicMock:
+        execution = MagicMock()
         counter = itertools.count()
-        recorder.allocate_call_index.side_effect = lambda _: next(counter)
-        return recorder
+        execution.allocate_call_index.side_effect = lambda _: next(counter)
+        return execution
 
     def test_per_call_token_id_overrides_client_default(self) -> None:
         """post(token_id=...) overrides the constructor token_id in telemetry."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         emitted_events: list[ExternalCallCompleted] = []
 
         mock_response = MagicMock()
@@ -443,7 +475,7 @@ class TestHTTPClientPerCallTokenId:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_batch",
                 base_url="https://api.example.com",
                 run_id="run_batch",
@@ -461,7 +493,7 @@ class TestHTTPClientPerCallTokenId:
 
     def test_client_default_token_id_when_no_override(self) -> None:
         """Without per-call override, client-level token_id is used."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         emitted_events: list[ExternalCallCompleted] = []
 
         mock_response = MagicMock()
@@ -472,7 +504,7 @@ class TestHTTPClientPerCallTokenId:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_single",
                 base_url="https://api.example.com",
                 run_id="run_single",
@@ -489,12 +521,12 @@ class TestHTTPClientPerCallTokenId:
 
     def test_per_call_token_id_on_error_path(self) -> None:
         """Per-call token_id is used even when the request fails."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         emitted_events: list[ExternalCallCompleted] = []
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=execution,
                 state_id="state_err",
                 base_url="https://api.example.com",
                 run_id="run_err",

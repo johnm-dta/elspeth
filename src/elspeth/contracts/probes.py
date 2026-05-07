@@ -18,19 +18,26 @@ class CollectionReadinessResult:
 
     All fields are scalars — no freeze guard needed. Validates non-empty collection
     and non-negative count.
+
+    count is None when the count is unknown (unreachable, malformed response,
+    collection absent). Per the data manifesto: absence is evidence, not an
+    invitation to invent a default. Fabricating count=0 for "unknown" conflates
+    "empty" with "we don't know."
     """
 
     collection: str
     reachable: bool
-    count: int
+    count: int | None
     message: str
 
     def __post_init__(self) -> None:
         if not self.collection:
             raise ValueError("collection must not be empty")
-        require_int(self.count, "count", min_value=0)
-        if not self.reachable and self.count != 0:
-            raise ValueError(f"Contradictory state: reachable=False but count={self.count}. Unreachable collections must report count=0.")
+        require_int(self.count, "count", optional=True, min_value=0)
+        if not self.reachable and self.count is not None:
+            raise ValueError(
+                f"Contradictory state: reachable=False but count={self.count}. Unreachable collections cannot have a known count."
+            )
 
 
 @runtime_checkable

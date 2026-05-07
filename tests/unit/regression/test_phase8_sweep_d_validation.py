@@ -14,7 +14,7 @@ import pytest
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.testing import make_field, make_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 DYNAMIC_SCHEMA = {"mode": "observed"}
 
@@ -92,15 +92,16 @@ class TestBatchStatsAggregateOverwrite:
     """D.3: group_by field name must not collide with aggregate keys."""
 
     def test_group_by_collides_with_count(self) -> None:
-        """group_by='count' should raise ValueError since 'count' is an output key.
+        """group_by='count' should raise PluginConfigError since 'count' is an output key.
 
-        The collision check fires at construction time (__init__), not at
-        process() time — fail-fast prevents pipelines from starting with
-        invalid configurations.
+        The collision check fires in the Pydantic model validator during
+        from_dict(), which wraps ValidationError into PluginConfigError —
+        fail-fast prevents pipelines from starting with invalid configurations.
         """
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
         from elspeth.plugins.transforms.batch_stats import BatchStats
 
-        with pytest.raises(ValueError, match="collides with aggregate output key"):
+        with pytest.raises(PluginConfigError, match="collides with aggregate output key"):
             BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "count"})
 
     def test_group_by_no_collision(self) -> None:
@@ -109,8 +110,8 @@ class TestBatchStatsAggregateOverwrite:
 
         transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        ctx = make_context(run_id="test", landscape=recorder)
+        factory = make_factory(db)
+        ctx = make_context(run_id="test", landscape=factory.plugin_audit_writer())
         rows = [_make_row({"amount": 10, "category": "A"})]
         result = transform.process(rows, ctx)
         assert result.status == "success"
@@ -145,8 +146,8 @@ class TestBatchReplicateMaxCopies:
 
         transform = BatchReplicate({"schema": DYNAMIC_SCHEMA, "max_copies": 5})
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        ctx = make_context(run_id="test", landscape=recorder)
+        factory = make_factory(db)
+        ctx = make_context(run_id="test", landscape=factory.plugin_audit_writer())
         # Single row exceeding max_copies — all rows quarantined → error result
         rows = [_make_row({"copies": 10, "data": "value"})]
         result = transform.process(rows, ctx)
@@ -216,13 +217,6 @@ class TestFieldBaseIdentifierValidation:
         with pytest.raises(ValueError, match="not a valid Python identifier"):
             get_llm_guaranteed_fields("my-prefix")
 
-    def test_invalid_audit_field_rejected(self) -> None:
-        """response_field in audit function also validated."""
-        from elspeth.plugins.transforms.llm import get_llm_audit_fields
-
-        with pytest.raises(ValueError, match="not a valid Python identifier"):
-            get_llm_audit_fields("has space")
-
 
 class TestPurgeRetentionDays:
     """D.8: retention_days <= 0 rejected at CLI boundary."""
@@ -275,10 +269,10 @@ class TestMCPErrorTypeValidation:
         from elspeth.mcp.analyzers.queries import get_errors
 
         db = MagicMock()
-        recorder = MagicMock()
+        factory = MagicMock()
 
         with pytest.raises(ValueError, match="Invalid error_type"):
-            get_errors(db, recorder, "run-123", error_type="fatal")
+            get_errors(db, factory, "run-123", error_type="fatal")
 
     def test_valid_error_types_accepted(self) -> None:
         """Known error types should not raise on the validation check itself."""
@@ -297,8 +291,8 @@ class TestBoolExcludedFromInt:
 
         transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "flag"})
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        ctx = make_context(run_id="test", landscape=recorder)
+        factory = make_factory(db)
+        ctx = make_context(run_id="test", landscape=factory.plugin_audit_writer())
         rows = [_make_row({"flag": True})]
 
         with pytest.raises(TypeError, match="must be numeric"):
@@ -310,8 +304,8 @@ class TestBoolExcludedFromInt:
 
         transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount"})
         db = make_landscape_db()
-        recorder = make_recorder(db)
-        ctx = make_context(run_id="test", landscape=recorder)
+        factory = make_factory(db)
+        ctx = make_context(run_id="test", landscape=factory.plugin_audit_writer())
         rows = [_make_row({"amount": 42})]
         result = transform.process(rows, ctx)
         assert result.status == "success"

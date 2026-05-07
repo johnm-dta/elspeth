@@ -1,5 +1,5 @@
 # tests/core/landscape/test_recorder_runs.py
-"""Tests for LandscapeRecorder run lifecycle management and status validation."""
+"""Tests for RecorderFactory run lifecycle management and status validation."""
 
 from __future__ import annotations
 
@@ -14,18 +14,18 @@ if TYPE_CHECKING:
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
-class TestLandscapeRecorderRuns:
+class TestRecorderFactoryRuns:
     """Run lifecycle management."""
 
     def test_begin_run(self) -> None:
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"source": "test.csv"},
             canonical_version="sha256-rfc8785-v1",
         )
@@ -37,13 +37,13 @@ class TestLandscapeRecorderRuns:
     def test_complete_run_success(self) -> None:
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        completed = recorder.complete_run(run.run_id, status=RunStatus.COMPLETED)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        completed = factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.COMPLETED)
 
         assert completed.status == RunStatus.COMPLETED
         assert completed.completed_at is not None
@@ -51,43 +51,43 @@ class TestLandscapeRecorderRuns:
     def test_complete_run_failed(self) -> None:
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        completed = recorder.complete_run(run.run_id, status=RunStatus.FAILED)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        completed = factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.FAILED)
 
         assert completed.status == RunStatus.FAILED
 
     def test_get_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={"key": "value"}, canonical_version="v1")
-        retrieved = recorder.get_run(run.run_id)
+        run = factory.run_lifecycle.begin_run(config={"key": "value"}, canonical_version="v1")
+        retrieved = factory.run_lifecycle.get_run(run.run_id)
 
         assert retrieved is not None
         assert retrieved.run_id == run.run_id
 
 
-class TestLandscapeRecorderRunStatusValidation:
+class TestRecorderFactoryRunStatusValidation:
     """Run status validation against RunStatus enum."""
 
     def test_begin_run_with_enum_status(self) -> None:
         """Test that RunStatus enum is accepted."""
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={},
             canonical_version="v1",
             status=RunStatus.RUNNING,
@@ -100,13 +100,13 @@ class TestLandscapeRecorderRunStatusValidation:
         import pytest
 
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         with pytest.raises(TypeError, match="status must be RunStatus, got str"):
-            recorder.begin_run(
+            factory.run_lifecycle.begin_run(
                 config={},
                 canonical_version="v1",
                 status="runnign",  # type: ignore[arg-type]  # Intentionally wrong type to test validation
@@ -116,13 +116,13 @@ class TestLandscapeRecorderRunStatusValidation:
         """Test that RunStatus enum is accepted for complete_run."""
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        completed = recorder.complete_run(run.run_id, status=RunStatus.COMPLETED)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        completed = factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.COMPLETED)
 
         assert completed.status == RunStatus.COMPLETED
 
@@ -130,18 +130,18 @@ class TestLandscapeRecorderRunStatusValidation:
         """Test that RunStatus enum is accepted for list_runs filter."""
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Create runs with different statuses
-        run1 = recorder.begin_run(config={"n": 1}, canonical_version="v1")
-        run2 = recorder.begin_run(config={"n": 2}, canonical_version="v1")
-        recorder.complete_run(run2.run_id, status=RunStatus.COMPLETED)
+        run1 = factory.run_lifecycle.begin_run(config={"n": 1}, canonical_version="v1")
+        run2 = factory.run_lifecycle.begin_run(config={"n": 2}, canonical_version="v1")
+        factory.run_lifecycle.complete_run(run2.run_id, status=RunStatus.COMPLETED)
 
         # Filter by enum
-        running_runs = recorder.list_runs(status=RunStatus.RUNNING)
+        running_runs = factory.run_lifecycle.list_runs(status=RunStatus.RUNNING)
         assert len(running_runs) == 1
         assert running_runs[0].run_id == run1.run_id
 
@@ -171,44 +171,44 @@ class TestFieldResolutionTierOneIntegrity:
     def test_get_field_resolution_returns_none_when_never_recorded(self) -> None:
         """NULL in DB means resolution was never recorded - return None."""
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         # Don't call record_source_field_resolution
 
-        result = recorder.get_source_field_resolution(run.run_id)
+        result = factory.run_lifecycle.get_source_field_resolution(run.run_id)
         assert result is None
 
     def test_get_field_resolution_returns_mapping_when_recorded(self) -> None:
         """Recorded mapping is returned correctly."""
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         mapping = {"User ID": "user_id", "Amount (USD)": "amount_usd"}
-        recorder.record_source_field_resolution(run.run_id, mapping, "v1")
+        factory.run_lifecycle.record_source_field_resolution(run.run_id, mapping, "v1")
 
-        result = recorder.get_source_field_resolution(run.run_id)
+        result = factory.run_lifecycle.get_source_field_resolution(run.run_id)
         assert result == mapping
 
     def test_get_field_resolution_returns_empty_dict_for_empty_mapping(self) -> None:
         """Empty mapping is valid (source had no fields to map)."""
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        recorder.record_source_field_resolution(run.run_id, {}, None)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        factory.run_lifecycle.record_source_field_resolution(run.run_id, {}, None)
 
-        result = recorder.get_source_field_resolution(run.run_id)
+        result = factory.run_lifecycle.get_source_field_resolution(run.run_id)
         assert result == {}
 
     def test_get_field_resolution_crashes_on_missing_resolution_mapping_key(self) -> None:
@@ -225,12 +225,12 @@ class TestFieldResolutionTierOneIntegrity:
 
         from elspeth.contracts.errors import AuditIntegrityError
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Manually corrupt the database to simulate missing key
         corrupted_json = json.dumps({"normalization_version": "v1"})  # Missing resolution_mapping!
@@ -242,7 +242,7 @@ class TestFieldResolutionTierOneIntegrity:
 
         # Must crash on corruption - not return None
         with pytest.raises(AuditIntegrityError, match=r"missing required key.*resolution_mapping"):
-            recorder.get_source_field_resolution(run.run_id)
+            factory.run_lifecycle.get_source_field_resolution(run.run_id)
 
     def test_get_field_resolution_crashes_on_resolution_mapping_wrong_type(self) -> None:
         """Tier-1 corruption: resolution_mapping must be dict, not list/string/etc."""
@@ -253,12 +253,12 @@ class TestFieldResolutionTierOneIntegrity:
 
         from elspeth.contracts.errors import AuditIntegrityError
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Manually corrupt: resolution_mapping is a list instead of dict
         corrupted_json = json.dumps({"resolution_mapping": ["a", "b"], "normalization_version": "v1"})
@@ -269,7 +269,7 @@ class TestFieldResolutionTierOneIntegrity:
             )
 
         with pytest.raises(AuditIntegrityError, match=r"Corrupt resolution_mapping.*expected dict"):
-            recorder.get_source_field_resolution(run.run_id)
+            factory.run_lifecycle.get_source_field_resolution(run.run_id)
 
     def test_get_field_resolution_crashes_on_wrong_entry_types(self) -> None:
         """Tier-1 corruption: all mapping entries must be str->str."""
@@ -280,12 +280,12 @@ class TestFieldResolutionTierOneIntegrity:
 
         from elspeth.contracts.errors import AuditIntegrityError
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Manually corrupt: value is int instead of str
         corrupted_json = json.dumps({"resolution_mapping": {"header": 123}, "normalization_version": "v1"})
@@ -296,4 +296,4 @@ class TestFieldResolutionTierOneIntegrity:
             )
 
         with pytest.raises(AuditIntegrityError, match=r"Corrupt resolution_mapping entry.*str->str"):
-            recorder.get_source_field_resolution(run.run_id)
+            factory.run_lifecycle.get_source_field_resolution(run.run_id)

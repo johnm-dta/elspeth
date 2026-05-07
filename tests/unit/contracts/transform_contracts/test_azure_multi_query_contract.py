@@ -12,43 +12,75 @@ and queries dict format (T10 Phase B consolidation).
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
+from openai.types.completion_usage import CompletionUsage
 
-from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts import TransformResult
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.llm.transform import LLMTransform
+from elspeth.testing import make_pipeline_row
 
-from .test_batch_transform_protocol import BatchTransformContractTestBase
-
-
-def _make_mock_response(content: str = '{"score": 85, "rationale": "test"}') -> Mock:
-    mock_response = Mock()
-    mock_response.choices = [Mock(message=Mock(content=content))]
-    mock_response.model = "gpt-4o"
-    mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
-    mock_response.model_dump = Mock(return_value={})
-    return mock_response
+from .test_batch_transform_protocol import BatchTransformContractTestBase, CollectingOutputPort
 
 
-def _make_mock_context() -> Mock:
-    ctx = Mock(spec=PluginContext)
-    ctx.run_id = "test-run-001"
-    ctx.state_id = "state-001"
-    ctx.landscape = Mock()
-    ctx.landscape.record_call = Mock()
-    ctx.landscape.allocate_call_index = Mock(return_value=0)
-    return ctx
+def _make_chat_completion(content: str = '{"score": 85, "rationale": "test"}') -> ChatCompletion:
+    return ChatCompletion(
+        id="chatcmpl-test",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content=content),
+            )
+        ],
+        created=0,
+        model="gpt-4o",
+        object="chat.completion",
+        usage=CompletionUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
 
 
-@pytest.fixture(autouse=True)
-def mock_azure_openai():
-    with patch("openai.AzureOpenAI") as mock_azure_class:
-        mock_client = Mock()
-        mock_client.chat.completions.create.return_value = _make_mock_response()
-        mock_azure_class.return_value = mock_client
-        yield mock_client
+class _FakeCompletions:
+    def __init__(self) -> None:
+        self.content = '{"score": 85, "rationale": "test"}'
+
+    def create(self, **_: Any) -> ChatCompletion:
+        return _make_chat_completion(self.content)
+
+
+class _FakeChat:
+    def __init__(self) -> None:
+        self.completions = _FakeCompletions()
+
+
+class _FakeAzureOpenAI:
+    def __init__(self) -> None:
+        self.chat = _FakeChat()
+
+    def close(self) -> None:
+        pass
+
+
+def _submit_and_collect_single_result(
+    started_transform: BatchTransformMixin,
+    row_data: dict[str, Any],
+    ctx: Any,
+    output_port: CollectingOutputPort,
+) -> TransformResult:
+    started_transform.accept(make_pipeline_row(row_data), ctx)
+
+    arrived = output_port.wait_for_results(1, timeout=10.0)
+    assert arrived, "Result did not arrive via OutputPort within timeout"
+
+    results = output_port.get_results()
+    assert len(results) == 1
+    _token, result, _state_id = results[0]
+    assert isinstance(result, TransformResult)
+    return result
 
 
 class TestMultiQueryLLMSpecific:
@@ -131,6 +163,13 @@ class TestMultiQueryLLMSpecific:
 class TestMultiQueryBatchContract(BatchTransformContractTestBase):
     """Verify multi-query LLM transform honors BatchTransformMixin contract."""
 
+    @pytest.fixture(autouse=True)
+    def mock_azure_openai(self):
+        with patch("openai.AzureOpenAI", autospec=True) as mock_azure_class:
+            mock_client = _FakeAzureOpenAI()
+            mock_azure_class.return_value = mock_client
+            yield mock_client
+
     @pytest.fixture
     def batch_transform(self) -> BatchTransformMixin:
         """Provide unconfigured transform (no connect_output yet)."""
@@ -160,3 +199,31 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
     @pytest.fixture
     def valid_input(self) -> dict[str, Any]:
         return {"cs1_a": "value_a", "cs1_b": "value_b"}
+
+    def test_malformed_json_response_emits_non_retryable_query_error(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_azure_openai: _FakeAzureOpenAI,
+    ) -> None:
+        """Contract: malformed LLM JSON fails closed through the batch output path."""
+        mock_azure_openai.chat.completions.content = "not valid JSON"
+
+        result = _submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.row is None
+        assert result.reason is not None
+        assert result.reason["reason"] == "json_parse_failed"
+        assert result.reason["query_name"] == "cs1_test_criterion"
+        assert result.reason["query_index"] == 0
+        assert result.reason["raw_response_preview"] == "not valid JSON"
+        assert result.reason["discarded_successful_queries"] == 0

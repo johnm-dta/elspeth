@@ -8,6 +8,49 @@ description: >
 
 # Logging and Telemetry Policy
 
+> **Model complexity warning:** Logging decisions affect audit integrity. Simple
+> models default to `logger.info()` for everything — this creates noise that
+> obscures the audit trail and violates the primacy rule. Use the decision table
+> below, not judgment.
+
+## Quick Decision Table (Mechanical — No Judgment Required)
+
+For every emission point, match top-to-bottom. First match wins.
+
+| What happened? | Channel | How |
+|----------------|---------|-----|
+| Row processed, gate routed, transform applied, call made | **Audit + Telemetry** | `recorder.record_*()` first (sync), then `_emit_telemetry()` (async) |
+| Run started, finished, phase transition | **Audit + Telemetry** | `recorder.record_*()` first, then telemetry |
+| Plugin initialised, config loaded, provider connected, model selected | **Audit + Telemetry** | These establish system state for audit — "which model was active?" is a valid audit question |
+| Checkpoint size, cache eviction, throughput counter | **Telemetry only** | `_emit_telemetry()` — no auditor asks "what was the checkpoint size?" |
+| Exporter failure count, journal drop rate | **Telemetry only** | Meta-operational, about observability infrastructure itself |
+| Audit system is broken (Landscape write failed) | **Logging** | `logger.error("Landscape write failed", exc_info=True)` — last resort |
+| Telemetry system is broken (exporter crashed) | **Logging** | `logger.error("Exporter crashed", exc_info=True)` — last resort |
+| Temporary debugging you'll remove before merge | **Logging** | `slog.debug(...)` — transitory only |
+
+### Forbidden patterns (never write these)
+
+```python
+# NEVER — row-level decisions in logger (duplicates node_states)
+logger.info(f"Row {row_id} classified as {category}")
+
+# NEVER — transform outcomes in logger (duplicates Landscape)
+logger.info(f"Transform {name} completed for {token_id}")
+
+# NEVER — call results in logger (duplicates calls table)
+logger.info(f"LLM response: {response[:100]}")
+
+# NEVER — infrastructure lifecycle in logger (belongs in telemetry)
+logger.info("Pipeline started")
+logger.info("Checkpoint saved")
+
+# NEVER — silent swallow of telemetry failure
+try:
+    emit_telemetry(event)
+except Exception:
+    pass  # Silently lost — violates "no silent failures"
+```
+
 ## Telemetry (Operational Visibility)
 
 Telemetry provides **real-time operational visibility** alongside the Landscape audit trail.

@@ -49,9 +49,12 @@ from elspeth.engine.executors import (
     TransformExecutor,
 )
 from elspeth.engine.orchestrator import (
+    AggregationFlushResult,
+    ExecutionCounters,
     Orchestrator,
     PipelineConfig,
     RouteValidationError,
+    RowPlugin,
     RunResult,
 )
 from elspeth.engine.processor import RowProcessor
@@ -61,8 +64,10 @@ from elspeth.engine.tokens import TokenManager
 
 __all__ = [
     "AggregationExecutor",
+    "AggregationFlushResult",
     "CoalesceExecutor",
     "CoalesceOutcome",
+    "ExecutionCounters",
     "ExpressionParser",
     "ExpressionSecurityError",
     "ExpressionSyntaxError",
@@ -73,6 +78,7 @@ __all__ = [
     "PipelineConfig",
     "RetryManager",
     "RouteValidationError",
+    "RowPlugin",
     "RowProcessor",
     "RowResult",
     "RunResult",

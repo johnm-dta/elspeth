@@ -45,6 +45,11 @@ class ThrottleConfig:
             raise ValueError(f"ThrottleConfig.backoff_multiplier must be > 1.0 and finite, got {self.backoff_multiplier}")
         if self.recovery_step_ms < 0:
             raise ValueError(f"ThrottleConfig.recovery_step_ms must be non-negative, got {self.recovery_step_ms}")
+        if self.recovery_step_ms == 0 and self.min_dispatch_delay_ms == 0:
+            raise ValueError(
+                "ThrottleConfig.recovery_step_ms and min_dispatch_delay_ms cannot both be 0 "
+                "— AIMD backoff would never recover from capacity errors"
+            )
 
 
 class AIMDThrottle:
@@ -98,9 +103,10 @@ class AIMDThrottle:
         to honor the configured minimum. Otherwise multiplies by backoff_multiplier, capped at max.
         """
         with self._lock:
-            if self._current_delay_ms == 0:
-                # Bootstrap: start with at least the configured minimum
-                # Use max() to honor min_dispatch_delay_ms even if recovery_step_ms is smaller
+            if self._current_delay_ms <= self._config.min_dispatch_delay_ms:
+                # Bootstrap: at baseline (zero or min floor), start backoff from
+                # recovery_step_ms. Uses max() to honor min_dispatch_delay_ms
+                # even if recovery_step_ms is smaller.
                 self._current_delay_ms = float(max(self._config.recovery_step_ms, self._config.min_dispatch_delay_ms))
             else:
                 # Multiplicative increase

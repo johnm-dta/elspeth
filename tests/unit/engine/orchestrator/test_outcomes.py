@@ -1,25 +1,28 @@
 # tests/unit/engine/orchestrator/test_outcomes.py
-"""Tests for row outcome accumulation and coalesce handling functions.
+"""Tests for terminal-pair accumulation and coalesce handling functions.
 
-outcomes.py was extracted from duplicated RowOutcome switch blocks in
+outcomes.py was extracted from duplicated terminal classification switch blocks in
 _execute_run() and _process_resumed_rows(). These tests verify that:
-1. Every RowOutcome variant is correctly accumulated
+1. Every terminal pair is correctly accumulated
 2. Coalesce timeouts trigger downstream processing
 3. End-of-source coalesce flush handles all paths
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
     flush_coalesce_pending,
     handle_coalesce_timeouts,
+    reconcile_sink_write_diversions,
 )
 from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.testing import make_row, make_token_info
@@ -30,16 +33,22 @@ from elspeth.testing import make_row, make_token_info
 
 
 def _make_result(
-    outcome: RowOutcome,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
     *,
     token: TokenInfo | None = None,
     sink_name: str | None = None,
 ) -> Mock:
-    """Create a mock RowResult with the given outcome."""
+    """Create a mock RowResult with the two-axis terminal pair."""
+    result_token = token or make_token_info()
+    if path == TerminalPath.COALESCED and result_token.join_group_id is None:
+        result_token = replace(result_token, join_group_id="join-1")
     result = Mock()
     result.outcome = outcome
-    result.token = token or make_token_info()
+    result.path = path
+    result.token = result_token
     result.sink_name = sink_name
+    result.error = None
     return result
 
 
@@ -56,38 +65,39 @@ def _make_pending() -> dict[str, list[tuple[TokenInfo, PendingOutcome | None]]]:
 # =============================================================================
 
 
-class TestAccumulateRowOutcomesCompleted:
+class TestAccumulateTerminalPairsCompleted:
     """Tests for COMPLETED outcome handling."""
 
     def test_completed_increments_succeeded(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COMPLETED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_succeeded == 1
 
     def test_completed_appends_to_sink(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COMPLETED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert len(pending["output"]) == 1
         pending_outcome = pending["output"][0][1]
         assert pending_outcome is not None
-        assert pending_outcome.outcome == RowOutcome.COMPLETED
+        assert pending_outcome.outcome == TerminalOutcome.SUCCESS
+        assert pending_outcome.path == TerminalPath.DEFAULT_FLOW
 
     def test_completed_ignores_branch_name_and_uses_result_sink(self) -> None:
         """COMPLETED routing uses result.sink_name, not token.branch_name."""
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "branch_a": []}
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="branch_a")
-        results = [_make_result(RowOutcome.COMPLETED, token=token, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock(), "branch_a": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert len(pending["branch_a"]) == 0
         assert len(pending["output"]) == 1
@@ -97,45 +107,48 @@ class TestAccumulateRowOutcomesCompleted:
         counters = _make_counters()
         pending = _make_pending()
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="nonexistent")
-        results = [_make_result(RowOutcome.COMPLETED, token=token, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert len(pending["output"]) == 1
 
 
-class TestAccumulateRowOutcomesRouted:
+class TestAccumulateTerminalPairsRouted:
     """Tests for ROUTED outcome handling."""
 
     def test_routed_increments_counter(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk_sink": []}
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
-        assert counters.rows_routed == 1
+        assert counters.rows_routed_success == 1
+        assert counters.rows_succeeded == 1
+        assert counters.rows_routed_failure == 0
 
     def test_routed_tracks_destination(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk_sink": []}
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.routed_destinations["risk_sink"] == 1
 
     def test_routed_appends_to_named_sink(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk_sink": []}
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert len(pending["risk_sink"]) == 1
         pending_outcome = pending["risk_sink"][0][1]
         assert pending_outcome is not None
-        assert pending_outcome.outcome == RowOutcome.ROUTED
+        assert pending_outcome.outcome == TerminalOutcome.SUCCESS
+        assert pending_outcome.path == TerminalPath.GATE_ROUTED
 
     def test_routed_without_sink_name_crashes(self) -> None:
         """ROUTED outcome without sink_name is a contract violation."""
@@ -143,21 +156,75 @@ class TestAccumulateRowOutcomesRouted:
 
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.ROUTED, sink_name=None)]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name=None)]
 
         with pytest.raises(OrchestrationInvariantError, match="missing sink_name"):
-            accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+            accumulate_row_outcomes(results, counters, pending)
 
 
-class TestAccumulateRowOutcomesTerminal:
+class TestAccumulateTerminalPairsRoutedOnError:
+    """Tests for ROUTED_ON_ERROR outcome handling — DIVERT path."""
+
+    def _make_routed_on_error_result(
+        self,
+        *,
+        sink_name: str = "error_sink",
+        token: TokenInfo | None = None,
+    ) -> Mock:
+        """ROUTED_ON_ERROR requires a real FailureInfo on .error."""
+        from elspeth.contracts.results import FailureInfo
+
+        result = Mock()
+        result.outcome = TerminalOutcome.FAILURE
+        result.path = TerminalPath.ON_ERROR_ROUTED
+        result.token = token or make_token_info()
+        result.sink_name = sink_name
+        result.error = FailureInfo(
+            exception_type="ValueError",
+            message="upstream transform raised",
+        )
+        return result
+
+    def test_routed_on_error_increments_routed_failure_counter(self) -> None:
+        """ROUTED_ON_ERROR increments rows_routed_failure (NOT rows_routed_success)."""
+        counters = _make_counters()
+        pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {
+            "output": [],
+            "error_sink": [],
+        }
+        results = [self._make_routed_on_error_result(sink_name="error_sink")]
+
+        accumulate_row_outcomes(results, counters, pending)
+
+        assert counters.rows_routed_failure == 1
+        assert counters.rows_failed == 1
+        assert counters.rows_routed_success == 0
+
+    def test_routed_increments_routed_success_not_failure(self) -> None:
+        """ROUTED (MOVE path) increments rows_routed_success (NOT rows_routed_failure)."""
+        counters = _make_counters()
+        pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {
+            "output": [],
+            "risk_sink": [],
+        }
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
+
+        accumulate_row_outcomes(results, counters, pending)
+
+        assert counters.rows_routed_success == 1
+        assert counters.rows_succeeded == 1
+        assert counters.rows_routed_failure == 0
+
+
+class TestAccumulateTerminalPairsTerminal:
     """Tests for terminal outcome types that only increment counters."""
 
     def test_failed_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.FAILED)]
+        results = [_make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_failed == 1
         assert len(pending["output"]) == 0
@@ -165,61 +232,72 @@ class TestAccumulateRowOutcomesTerminal:
     def test_quarantined_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.QUARANTINED)]
+        results = [_make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_quarantined == 1
+        assert counters.rows_failed == 1
 
     def test_forked_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.FORKED)]
+        results = [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_forked == 1
 
     def test_expanded_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.EXPANDED)]
+        results = [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_expanded == 1
 
     def test_buffered_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.BUFFERED)]
+        results = [_make_result(None, TerminalPath.BUFFERED)]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_buffered == 1
+
+    def test_dropped_by_filter_counts_as_succeeded(self) -> None:
+        counters = _make_counters()
+        pending = _make_pending()
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)]
+
+        accumulate_row_outcomes(results, counters, pending)
+
+        assert counters.rows_succeeded == 1
+        assert len(pending["output"]) == 0
 
     def test_consumed_in_batch_is_noop(self) -> None:
         """CONSUMED_IN_BATCH doesn't increment any counter (counted on batch flush)."""
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.CONSUMED_IN_BATCH)]
+        results = [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_succeeded == 0
         assert counters.rows_failed == 0
 
 
-class TestAccumulateRowOutcomesCoalesced:
+class TestAccumulateTerminalPairsCoalesced:
     """Tests for COALESCED outcome handling."""
 
     def test_coalesced_increments_both_counters(self) -> None:
         """COALESCED increments both rows_coalesced AND rows_succeeded."""
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COALESCED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_coalesced == 1
         assert counters.rows_succeeded == 1
@@ -227,29 +305,22 @@ class TestAccumulateRowOutcomesCoalesced:
     def test_coalesced_routes_to_sink(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COALESCED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert len(pending["output"]) == 1
         pending_outcome = pending["output"][0][1]
         assert pending_outcome is not None
-        assert pending_outcome.outcome == RowOutcome.COMPLETED
+        assert pending_outcome.outcome == TerminalOutcome.SUCCESS
+        assert pending_outcome.path == TerminalPath.COALESCED
 
 
-class TestAccumulateRowOutcomesExclusiveCounters:
-    """Mutation-killing tests: each variant increments ONLY its counter(s).
+class TestAccumulateTerminalPairsExclusiveCounters:
+    """Mutation-killing tests: each terminal pair increments only its counters.
 
-    These tests kill `==` -> `>=` mutants on RowOutcome comparisons.
-    RowOutcome is a StrEnum, so `>=` compares string values alphabetically:
-      buffered < coalesced < completed < consumed_in_batch < expanded
-      < failed < forked < quarantined < routed
-
-    If `== COMPLETED` mutates to `>= COMPLETED`, then CONSUMED_IN_BATCH,
-    EXPANDED, FAILED, FORKED, QUARANTINED, ROUTED would all incorrectly
-    enter the COMPLETED branch, incrementing rows_succeeded instead of
-    their own counter. By asserting every counter field per variant,
-    the wrong increment is caught.
+    Asserting every counter field per terminal pair catches accidental
+    fallthrough in the accumulator switch.
     """
 
     def _assert_counters(
@@ -259,7 +330,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         succeeded: int = 0,
         failed: int = 0,
         quarantined: int = 0,
-        routed: int = 0,
+        routed_success: int = 0,
+        routed_failure: int = 0,
         forked: int = 0,
         coalesced: int = 0,
         expanded: int = 0,
@@ -269,7 +341,12 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         assert counters.rows_succeeded == succeeded, f"rows_succeeded: expected {succeeded}, got {counters.rows_succeeded}"
         assert counters.rows_failed == failed, f"rows_failed: expected {failed}, got {counters.rows_failed}"
         assert counters.rows_quarantined == quarantined, f"rows_quarantined: expected {quarantined}, got {counters.rows_quarantined}"
-        assert counters.rows_routed == routed, f"rows_routed: expected {routed}, got {counters.rows_routed}"
+        assert counters.rows_routed_success == routed_success, (
+            f"rows_routed_success: expected {routed_success}, got {counters.rows_routed_success}"
+        )
+        assert counters.rows_routed_failure == routed_failure, (
+            f"rows_routed_failure: expected {routed_failure}, got {counters.rows_routed_failure}"
+        )
         assert counters.rows_forked == forked, f"rows_forked: expected {forked}, got {counters.rows_forked}"
         assert counters.rows_coalesced == coalesced, f"rows_coalesced: expected {coalesced}, got {counters.rows_coalesced}"
         assert counters.rows_expanded == expanded, f"rows_expanded: expected {expanded}, got {counters.rows_expanded}"
@@ -279,24 +356,23 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.COMPLETED, sink_name="output")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output")],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters, succeeded=1)
         assert len(pending["output"]) == 1
 
-    def test_routed_only_increments_routed(self) -> None:
+    def test_routed_increments_success_and_routed_success_only(self) -> None:
+        """GATE_ROUTED is a success terminal with a reporting subset counter."""
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk": []}
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.ROUTED, sink_name="risk")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk")],
             counters,
-            {"output": Mock()},
             pending,
         )
-        self._assert_counters(counters, routed=1)
+        self._assert_counters(counters, succeeded=1, routed_success=1)
         assert counters.routed_destinations["risk"] == 1
         assert len(pending["risk"]) == 1
         assert len(pending["output"]) == 0
@@ -305,9 +381,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.FAILED)],
+            [_make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters, failed=1)
@@ -317,21 +392,19 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.QUARANTINED)],
+            [_make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)],
             counters,
-            {"output": Mock()},
             pending,
         )
-        self._assert_counters(counters, quarantined=1)
+        self._assert_counters(counters, failed=1, quarantined=1)
         assert len(pending["output"]) == 0
 
     def test_forked_only_increments_forked(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.FORKED)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters, forked=1)
@@ -341,9 +414,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.CONSUMED_IN_BATCH)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters)  # all zeros
@@ -353,9 +425,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.COALESCED, sink_name="output")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters, coalesced=1, succeeded=1)
@@ -365,9 +436,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.EXPANDED)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters, expanded=1)
@@ -377,9 +447,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.BUFFERED)],
+            [_make_result(None, TerminalPath.BUFFERED)],
             counters,
-            {"output": Mock()},
             pending,
         )
         self._assert_counters(counters, buffered=1)
@@ -395,9 +464,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.CONSUMED_IN_BATCH)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)],
             counters,
-            {"output": Mock()},
             pending,
         )
         assert counters.rows_succeeded == 0
@@ -412,9 +480,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.FORKED)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)],
             counters,
-            {"output": Mock()},
             pending,
         )
         assert counters.rows_failed == 0
@@ -426,7 +493,7 @@ class TestCoalesceCountingOwnership:
 
     _process_merged_coalesce_outcome must NOT increment rows_coalesced.
     All counting happens in accumulate_row_outcomes based on the terminal
-    RowOutcome. This prevents double-counting for terminal coalesces and
+    terminal pair. This prevents double-counting for terminal coalesces and
     ensures non-terminal coalesces (which reach COMPLETED) are consistently
     not counted as COALESCED across all paths.
     """
@@ -444,7 +511,7 @@ class TestCoalesceCountingOwnership:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
         counters = _make_counters()
@@ -455,7 +522,6 @@ class TestCoalesceCountingOwnership:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
@@ -477,7 +543,7 @@ class TestCoalesceCountingOwnership:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
         counters = _make_counters()
@@ -488,7 +554,6 @@ class TestCoalesceCountingOwnership:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
@@ -510,7 +575,7 @@ class TestCoalesceCountingOwnership:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COMPLETED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
 
         counters = _make_counters()
@@ -521,7 +586,6 @@ class TestCoalesceCountingOwnership:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
@@ -531,7 +595,7 @@ class TestCoalesceCountingOwnership:
         assert counters.rows_succeeded == 1
 
 
-class TestAccumulateRowOutcomesMixed:
+class TestAccumulateTerminalPairsMixed:
     """Tests for multiple results in a single call."""
 
     def test_multiple_results_accumulated(self) -> None:
@@ -539,16 +603,16 @@ class TestAccumulateRowOutcomesMixed:
         counters = _make_counters()
         pending = _make_pending()
         results = [
-            _make_result(RowOutcome.COMPLETED, sink_name="output"),
-            _make_result(RowOutcome.COMPLETED, sink_name="output"),
-            _make_result(RowOutcome.FAILED),
-            _make_result(RowOutcome.QUARANTINED),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output"),
+            _make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
+            _make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE),
         ]
 
-        accumulate_row_outcomes(results, counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_succeeded == 2
-        assert counters.rows_failed == 1
+        assert counters.rows_failed == 2
         assert counters.rows_quarantined == 1
         assert len(pending["output"]) == 2
 
@@ -557,10 +621,52 @@ class TestAccumulateRowOutcomesMixed:
         counters = _make_counters()
         pending = _make_pending()
 
-        accumulate_row_outcomes([], counters, {"output": Mock()}, pending)
+        accumulate_row_outcomes([], counters, pending)
 
         assert counters.rows_succeeded == 0
         assert counters.rows_failed == 0
+
+
+class TestReconcileSinkWriteDiversions:
+    """Tests for post-sink durable counter reconciliation."""
+
+    def test_routed_diversion_decrements_routed_counters(self) -> None:
+        """A routed-success sink diversion decrements success and routed subsets."""
+        counters = _make_counters()
+        counters.rows_succeeded = 7
+        counters.rows_routed_success = 1
+        counters.routed_destinations["risk_sink"] = 1
+
+        reconcile_sink_write_diversions(
+            counters,
+            sink_name="risk_sink",
+            pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.GATE_ROUTED),
+            diversion_count=1,
+        )
+
+        assert counters.rows_succeeded == 6
+        assert counters.rows_routed_success == 0
+        assert counters.rows_routed_failure == 0
+        assert counters.routed_destinations == {}
+
+    def test_terminal_coalesced_diversion_decrements_coalesced_and_success(self) -> None:
+        counters = _make_counters()
+        pending = _make_pending()
+        accumulate_row_outcomes(
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")],
+            counters,
+            pending,
+        )
+
+        reconcile_sink_write_diversions(
+            counters,
+            sink_name="output",
+            pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.COALESCED),
+            diversion_count=1,
+        )
+
+        assert counters.rows_coalesced == 0
+        assert counters.rows_succeeded == 0
 
 
 # =============================================================================
@@ -600,7 +706,6 @@ class TestHandleCoalesceTimeouts:
             coalesce_executor=executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
@@ -629,7 +734,7 @@ class TestHandleCoalesceTimeouts:
         )
         # Non-terminal: downstream transforms produce COMPLETED
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COMPLETED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
 
         ctx = Mock()
@@ -637,7 +742,6 @@ class TestHandleCoalesceTimeouts:
             coalesce_executor=executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=ctx,
             counters=counters,
             pending_tokens=pending,
@@ -667,7 +771,7 @@ class TestHandleCoalesceTimeouts:
         )
         # Terminal: processor returns COALESCED (no downstream transforms)
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
         ctx = Mock()
@@ -675,7 +779,6 @@ class TestHandleCoalesceTimeouts:
             coalesce_executor=executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=ctx,
             counters=counters,
             pending_tokens=pending,
@@ -693,10 +796,14 @@ class TestHandleCoalesceTimeouts:
         )
 
     def test_failure_increments_coalesce_failed(self) -> None:
-        """Failed coalesce (missing branches) increments coalesce_failed."""
+        """Failed coalesce (missing branches) increments coalesce_failed and rows_failed.
+
+        Regression: elspeth-045f60670c — rows_failed must reflect consumed tokens.
+        """
         outcome = Mock()
         outcome.merged_token = None
         outcome.failure_reason = "quorum_not_met"
+        outcome.consumed_tokens = (Mock(), Mock(), Mock())  # 3 consumed tokens
 
         executor, processor, counters, pending, node_map = self._setup(
             timed_out_outcomes=[outcome],
@@ -706,14 +813,49 @@ class TestHandleCoalesceTimeouts:
             coalesce_executor=executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
         )
 
         assert counters.rows_coalesce_failed == 1
+        assert counters.rows_failed == 3  # one per consumed token
         assert counters.rows_coalesced == 0
+
+    def test_failure_emits_token_completed_telemetry_for_each_consumed_token(self) -> None:
+        """Timeout-driven coalesce failures must surface in telemetry once per token."""
+        tokens = (
+            make_token_info(row_id="row-1", token_id="token-1"),
+            make_token_info(row_id="row-2", token_id="token-2"),
+        )
+        outcome = Mock()
+        outcome.merged_token = None
+        outcome.failure_reason = "quorum_not_met"
+        outcome.consumed_tokens = tokens
+
+        executor, processor, counters, pending, node_map = self._setup(
+            timed_out_outcomes=[outcome],
+        )
+
+        ctx = Mock()
+        ctx.run_id = "run-1"
+        ctx.telemetry_emit = Mock()
+
+        handle_coalesce_timeouts(
+            coalesce_executor=executor,
+            coalesce_node_map=node_map,
+            processor=processor,
+            ctx=ctx,
+            counters=counters,
+            pending_tokens=pending,
+        )
+
+        assert ctx.telemetry_emit.call_count == 2
+        emitted = [call.args[0] for call in ctx.telemetry_emit.call_args_list]
+        assert [event.token_id for event in emitted] == ["token-1", "token-2"]
+        assert all(event.run_id == "run-1" for event in emitted)
+        assert all(event.outcome == TerminalOutcome.FAILURE for event in emitted)
+        assert all(event.path == TerminalPath.UNROUTED for event in emitted)
 
 
 # =============================================================================
@@ -737,7 +879,7 @@ class TestFlushCoalescePending:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COMPLETED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
         processor.resolve_node_step.return_value = 0
 
@@ -750,7 +892,6 @@ class TestFlushCoalescePending:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=ctx,
             counters=counters,
             pending_tokens=pending,
@@ -780,7 +921,7 @@ class TestFlushCoalescePending:
         processor = Mock()
         processor.resolve_node_step.return_value = 1
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
         counters = _make_counters()
         pending = _make_pending()
@@ -791,7 +932,6 @@ class TestFlushCoalescePending:
             coalesce_executor=coalesce_executor,
             coalesce_node_map=node_map,
             processor=processor,
-            config_sinks={"output": Mock()},
             ctx=ctx,
             counters=counters,
             pending_tokens=pending,
@@ -809,11 +949,15 @@ class TestFlushCoalescePending:
         )
 
     def test_failure_increments_coalesce_failed(self) -> None:
-        """Failed flush outcomes increment coalesce_failed counter."""
+        """Failed flush outcomes increment coalesce_failed and rows_failed counters.
+
+        Regression: elspeth-045f60670c — rows_failed must reflect consumed tokens.
+        """
         outcome = Mock()
         outcome.merged_token = None
         outcome.failure_reason = "incomplete_branches"
         outcome.coalesce_name = None
+        outcome.consumed_tokens = (Mock(), Mock())  # 2 consumed tokens
 
         coalesce_executor = Mock()
         coalesce_executor.flush_pending.return_value = [outcome]
@@ -825,13 +969,50 @@ class TestFlushCoalescePending:
             coalesce_executor=coalesce_executor,
             coalesce_node_map={},
             processor=Mock(),
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
         )
 
         assert counters.rows_coalesce_failed == 1
+        assert counters.rows_failed == 2
+
+    def test_failure_emits_token_completed_telemetry_for_each_consumed_token(self) -> None:
+        """Flush-driven coalesce failures must surface in telemetry once per token."""
+        tokens = (
+            make_token_info(row_id="row-1", token_id="token-1"),
+            make_token_info(row_id="row-2", token_id="token-2"),
+        )
+        outcome = Mock()
+        outcome.merged_token = None
+        outcome.failure_reason = "incomplete_branches"
+        outcome.coalesce_name = None
+        outcome.consumed_tokens = tokens
+
+        coalesce_executor = Mock()
+        coalesce_executor.flush_pending.return_value = [outcome]
+
+        counters = _make_counters()
+        pending = _make_pending()
+        ctx = Mock()
+        ctx.run_id = "run-1"
+        ctx.telemetry_emit = Mock()
+
+        flush_coalesce_pending(
+            coalesce_executor=coalesce_executor,
+            coalesce_node_map={},
+            processor=Mock(),
+            ctx=ctx,
+            counters=counters,
+            pending_tokens=pending,
+        )
+
+        assert ctx.telemetry_emit.call_count == 2
+        emitted = [call.args[0] for call in ctx.telemetry_emit.call_args_list]
+        assert [event.token_id for event in emitted] == ["token-1", "token-2"]
+        assert all(event.run_id == "run-1" for event in emitted)
+        assert all(event.outcome == TerminalOutcome.FAILURE for event in emitted)
+        assert all(event.path == TerminalPath.UNROUTED for event in emitted)
 
     def test_empty_flush_is_noop(self) -> None:
         """No pending coalesces means nothing happens."""
@@ -845,7 +1026,6 @@ class TestFlushCoalescePending:
             coalesce_executor=coalesce_executor,
             coalesce_node_map={},
             processor=Mock(),
-            config_sinks={"output": Mock()},
             ctx=Mock(),
             counters=counters,
             pending_tokens=pending,
@@ -892,7 +1072,6 @@ class TestCoalesceOutcomeValidation:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map=node_map,
                 processor=Mock(),
-                config_sinks={"output": Mock()},
                 ctx=Mock(),
                 counters=counters,
                 pending_tokens=pending,
@@ -919,7 +1098,6 @@ class TestCoalesceOutcomeValidation:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map=node_map,
                 processor=Mock(),
-                config_sinks={"output": Mock()},
                 ctx=Mock(),
                 counters=counters,
                 pending_tokens=pending,
@@ -944,7 +1122,6 @@ class TestCoalesceOutcomeValidation:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={},
                 processor=Mock(),
-                config_sinks={"output": Mock()},
                 ctx=Mock(),
                 counters=counters,
                 pending_tokens=pending,
@@ -970,7 +1147,6 @@ class TestCoalesceOutcomeValidation:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={CoalesceName("merge_1"): NodeID("coalesce::merge_1")},
                 processor=Mock(),
-                config_sinks={"output": Mock()},
                 ctx=Mock(),
                 counters=counters,
                 pending_tokens=pending,
@@ -996,7 +1172,6 @@ class TestCoalesceOutcomeValidation:
                 coalesce_executor=coalesce_executor,
                 coalesce_node_map={},
                 processor=Mock(),
-                config_sinks={"output": Mock()},
                 ctx=Mock(),
                 counters=counters,
                 pending_tokens=pending,

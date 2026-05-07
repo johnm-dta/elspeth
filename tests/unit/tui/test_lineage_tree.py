@@ -1,16 +1,12 @@
 """Tests for lineage tree widget."""
 
+import pytest
+
 from elspeth.tui.types import LineageData, NodeInfo, SourceInfo, TokenDisplayInfo
 
 
 class TestLineageTreeWidget:
     """Tests for LineageTree widget."""
-
-    def test_can_import_widget(self) -> None:
-        """LineageTree widget can be imported."""
-        from elspeth.tui.widgets.lineage_tree import LineageTree
-
-        assert LineageTree is not None
 
     def test_widget_accepts_lineage_data(self) -> None:
         """Widget can be initialized with lineage data."""
@@ -115,28 +111,6 @@ class TestLineageTreeWidget:
         assert any("high" in label for label in node_labels)
         assert any("low" in label for label in node_labels)
 
-    def test_toggle_node_expansion(self) -> None:
-        """Can toggle node expansion state."""
-        from elspeth.tui.widgets.lineage_tree import LineageTree
-
-        lineage_data: LineageData = {
-            "run_id": "run-001",
-            "source": SourceInfo(name="csv_source", node_id="node-001"),
-            "transforms": [],
-            "sinks": [NodeInfo(name="output", node_id="node-002", node_type="sink")],
-            "tokens": [],
-        }
-
-        tree = LineageTree(lineage_data)
-
-        # Toggle source node
-        new_state = tree.toggle_node("node-001")
-        assert new_state is False  # Was expanded, now collapsed
-
-        # Toggle again
-        new_state = tree.toggle_node("node-001")
-        assert new_state is True  # Back to expanded
-
     def test_get_node_by_id(self) -> None:
         """Can find nodes by their ID."""
         from elspeth.tui.widgets.lineage_tree import LineageTree
@@ -192,3 +166,81 @@ class TestLineageTreeWidget:
         assert node_types["Gate: threshold_check"] == "gate"
         assert node_types["Aggregation: batch_agg"] == "aggregation"
         assert node_types["Coalesce: merge_results"] == "coalesce"
+
+
+class TestTreeNodeImmutability:
+    """Tests for TreeNode frozen dataclass invariants."""
+
+    def test_tree_node_is_frozen(self) -> None:
+        """TreeNode attributes cannot be reassigned."""
+        from dataclasses import FrozenInstanceError
+
+        from elspeth.tui.widgets.lineage_tree import TreeNode
+
+        node = TreeNode(label="test", node_type="test")
+        with pytest.raises(FrozenInstanceError):
+            node.label = "modified"  # type: ignore[misc]
+
+    def test_tree_node_children_is_tuple(self) -> None:
+        """TreeNode.children is immutable tuple, not list."""
+        from elspeth.tui.widgets.lineage_tree import TreeNode
+
+        child = TreeNode(label="child", node_type="token")
+        parent = TreeNode(label="parent", node_type="sink", children=(child,))
+
+        assert isinstance(parent.children, tuple)
+        # Tuple doesn't have .append()
+        assert not hasattr(parent.children, "append")
+
+    def test_get_node_by_id_returns_immutable_node(self) -> None:
+        """Nodes returned by get_node_by_id() cannot be mutated."""
+        from dataclasses import FrozenInstanceError
+
+        from elspeth.tui.widgets.lineage_tree import LineageTree
+
+        lineage_data: LineageData = {
+            "run_id": "run-001",
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
+            "transforms": [NodeInfo(name="filter", node_id="node-002", node_type="transform")],
+            "sinks": [NodeInfo(name="output", node_id="node-003", node_type="sink")],
+            "tokens": [],
+        }
+
+        tree = LineageTree(lineage_data)
+        node = tree.get_node_by_id("node-002")
+        assert node is not None
+
+        # Cannot mutate returned node
+        with pytest.raises(FrozenInstanceError):
+            node.expanded = False  # type: ignore[misc]
+
+    def test_tree_node_normalizes_list_children_to_tuple(self) -> None:
+        """TreeNode deep-freezes container fields in __post_init__, so a list
+        of children (if the caller's type annotation was ignored) is normalised
+        to a tuple rather than rejected.
+
+        This is the correct behaviour per the freeze contract: deep_freeze
+        converts list → tuple, preserving the deep-immutability invariant
+        without requiring defensive isinstance guards on the container type.
+        The per-element isinstance(child, TreeNode) check remains the
+        relevant Tier 1 invariant.
+        """
+        from elspeth.tui.widgets.lineage_tree import TreeNode
+
+        node = TreeNode(label="test", node_type="test", children=[])  # type: ignore[arg-type]
+        assert node.children == ()
+        assert isinstance(node.children, tuple)
+
+    def test_tree_node_rejects_non_tree_node_children(self) -> None:
+        """TreeNode raises TypeError for children that aren't TreeNodes."""
+        from elspeth.tui.widgets.lineage_tree import TreeNode
+
+        with pytest.raises(TypeError, match=r"children\[0\] must be TreeNode"):
+            TreeNode(label="test", node_type="test", children=("not a node",))  # type: ignore[arg-type]
+
+    def test_tree_node_rejects_non_string_label(self) -> None:
+        """TreeNode raises TypeError for non-string label."""
+        from elspeth.tui.widgets.lineage_tree import TreeNode
+
+        with pytest.raises(TypeError, match="label must be str"):
+            TreeNode(label=123, node_type="test")  # type: ignore[arg-type]

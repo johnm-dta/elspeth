@@ -16,13 +16,15 @@ from __future__ import annotations
 import json
 import math
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-import structlog
-from pydantic import Field
+from pydantic import Field, field_validator
 
+from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.token_usage import TokenUsage
+from elspeth.contracts.value_source import CatalogValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 from elspeth.plugins.infrastructure.clients.llm import (
     ContentPolicyError,
@@ -33,19 +35,34 @@ from elspeth.plugins.infrastructure.clients.llm import (
     ServerError,
 )
 from elspeth.plugins.transforms.llm.base import LLMConfig
+from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
 from elspeth.plugins.transforms.llm.provider import LLMQueryResult, parse_finish_reason
 from elspeth.plugins.transforms.llm.validation import reject_nonfinite_constant
 
 if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 __all__ = [
+    "OPENROUTER_BASE_URL",
+    "OPENROUTER_BASE_URL_APPLIES_WHEN",
     "OpenRouterConfig",
     "OpenRouterLLMProvider",
+    "normalize_openrouter_base_url",
 ]
 
-logger = structlog.get_logger(__name__)
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+"""Canonical OpenRouter HTTP API base URL used by direct OpenRouter providers."""
+
+OPENROUTER_BASE_URL_APPLIES_WHEN = (("base_url", OPENROUTER_BASE_URL),)
+"""Value-source predicate for configs targeting the canonical OpenRouter API."""
+
+
+def normalize_openrouter_base_url(value: str) -> str:
+    """Normalize base URL spellings that runtime HTTP joining treats as identical."""
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
 class OpenRouterConfig(LLMConfig):
@@ -68,10 +85,15 @@ class OpenRouterConfig(LLMConfig):
 
     api_key: str = Field(..., description="OpenRouter API key")
     base_url: str = Field(
-        default="https://openrouter.ai/api/v1",
+        default=OPENROUTER_BASE_URL,
         description="OpenRouter API base URL",
     )
     timeout_seconds: float = Field(default=60.0, gt=0, description="Request timeout")
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        return normalize_openrouter_base_url(value)
 
     # Tier 2: Plugin-internal tracing (optional, Langfuse only)
     # Azure AI tracing is NOT supported - it auto-instruments the OpenAI SDK,
@@ -79,6 +101,23 @@ class OpenRouterConfig(LLMConfig):
     tracing: dict[str, Any] | None = Field(
         default=None,
         description="Tier 2 tracing configuration (langfuse only - azure_ai not supported)",
+    )
+
+    # Value-source declaration: ``model`` must appear in the OpenRouter
+    # slice of ``litellm.model_list``, BUT only when this config targets
+    # the canonical OpenRouter endpoint. When an operator overrides
+    # ``base_url`` (e.g. to a chaos test server like errorworks/chaosllm,
+    # or a private OpenAI-compatible gateway), the model identifier
+    # semantics are owned by that endpoint — not by litellm's OpenRouter
+    # slug list. The ``applies_when`` predicate keeps the catalog check
+    # in lock-step with the actual HTTP boundary the runtime targets.
+    # ClassVar so Pydantic v2 ignores it.
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = (
+        CatalogValueSource(
+            field_name="model",
+            catalog_id=MODEL_CATALOG_OPENROUTER,
+            applies_when=OPENROUTER_BASE_URL_APPLIES_WHEN,
+        ),
     )
 
 
@@ -102,9 +141,9 @@ class OpenRouterLLMProvider:
         self,
         *,
         api_key: str,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = OPENROUTER_BASE_URL,
         timeout_seconds: float = 60.0,
-        recorder: LandscapeRecorder,
+        recorder: PluginAuditWriter,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: Any = None,
@@ -162,9 +201,8 @@ class OpenRouterLLMProvider:
         """
         snapshot_state_id = state_id
 
+        http_client = self._get_http_client(snapshot_state_id, token_id=token_id)
         try:
-            http_client = self._get_http_client(snapshot_state_id, token_id=token_id)
-
             # Build request body
             request_body: dict[str, Any] = {
                 "model": model,
@@ -278,14 +316,13 @@ class OpenRouterLLMProvider:
             raw_finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
             finish_reason = parse_finish_reason(str(raw_finish_reason)) if raw_finish_reason is not None else None
 
-            # Extract model (provider may return different model than requested)
+            # Extract model (provider may return different model than requested).
+            # Missing 'model' field → fall back to the requested model.
+            # The full response is already recorded in the audit trail via
+            # AuditedHTTPClient.record_call(), so the absence is diagnosable there.
             if isinstance(data, dict) and "model" in data:
                 response_model = data["model"]
             else:
-                logger.warning(
-                    "LLM response missing 'model' field — using requested model for audit",
-                    requested_model=model,
-                )
                 response_model = model
 
             return LLMQueryResult(
@@ -306,7 +343,7 @@ class OpenRouterLLMProvider:
         with self._http_clients_lock:
             if state_id not in self._http_clients:
                 self._http_clients[state_id] = AuditedHTTPClient(
-                    recorder=self._recorder,
+                    execution=self._recorder,
                     state_id=state_id,
                     run_id=self._run_id,
                     telemetry_emit=self._telemetry_emit,
@@ -324,7 +361,13 @@ class OpenRouterLLMProvider:
         """Decrement reference count and close client when last user releases it."""
         client_to_close: AuditedHTTPClient | None = None
         with self._http_clients_lock:
-            count = self._http_client_refs.get(state_id, 0) - 1
+            if state_id not in self._http_client_refs:
+                raise RuntimeError(
+                    f"_release_http_client called for unknown state_id={state_id!r}. "
+                    f"This is a refcount underflow — _get_http_client() was never called "
+                    f"for this state_id, or it was already fully released."
+                )
+            count = self._http_client_refs[state_id] - 1
             self._http_client_refs[state_id] = count
             if count <= 0:
                 client_to_close = self._http_clients.pop(state_id, None)

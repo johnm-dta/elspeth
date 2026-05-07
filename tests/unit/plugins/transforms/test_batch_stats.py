@@ -15,6 +15,7 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.testing import make_field, make_row
 from tests.fixtures.factories import make_context
 
@@ -157,6 +158,24 @@ class TestBatchStatsHappyPath:
         with pytest.raises(TypeError, match="must be numeric"):
             transform.process(rows, ctx)
 
+    def test_backward_probe_rows_drop_original_fields_for_invariant_harness(self, ctx: PluginContext) -> None:
+        """Backward invariant probe exercises the aggregate output path, not passthrough."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(BatchStats.probe_config())
+        probe = _make_row({"baseline": "kept"})
+
+        result = transform.execute_backward_invariant_probe(
+            transform.backward_invariant_probe_rows(probe),
+            ctx,
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert "baseline" not in result.row
+        assert result.row["count"] == 1
+        assert result.row["sum"] == 1.0
+
 
 class TestBatchStatsOutputSchema:
     """Tests for output schema behavior of shape-changing transforms.
@@ -227,7 +246,7 @@ class TestBatchStatsFloatOverflow:
         assert result.row["sum"] == 40.0
         assert result.row["mean"] == 20.0
         assert result.row["skipped_non_finite"] == 1
-        assert result.row["skipped_non_finite_indices"] == [1]
+        assert result.row["skipped_non_finite_indices"] == (1,)
 
     def test_inf_input_skipped_from_computation(self, ctx: PluginContext) -> None:
         """Infinity values are skipped from sum/mean, tracked in skipped_non_finite with indices."""
@@ -248,7 +267,7 @@ class TestBatchStatsFloatOverflow:
         assert result.row["count"] == 1
         assert result.row["sum"] == 10.0
         assert result.row["skipped_non_finite"] == 2
-        assert result.row["skipped_non_finite_indices"] == [1, 2]
+        assert result.row["skipped_non_finite_indices"] == (1, 2)
 
     def test_all_non_finite_returns_error(self, ctx: PluginContext) -> None:
         """Batch with only NaN/Inf values returns error — not fabricated sum=0."""
@@ -287,6 +306,19 @@ class TestBatchStatsFloatOverflow:
         assert result.reason is not None
         assert result.reason["reason"] == "float_overflow"
 
+    def test_mean_overflow_returns_error(self, ctx: PluginContext) -> None:
+        """Huge integer totals that overflow during mean computation return an error."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount"})
+
+        result = transform.process([_make_row({"id": 1, "amount": 10**1000})], ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "float_overflow"
+        assert result.reason["operation"] == "mean"
+
     def test_no_skipped_field_when_all_finite(self, ctx: PluginContext) -> None:
         """skipped_non_finite field is absent when all values are finite."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
@@ -306,16 +338,20 @@ class TestBatchStatsFloatOverflow:
         assert "skipped_non_finite_indices" not in result.row.to_dict()
 
 
-class TestBatchStatsGroupByHomogeneity:
-    """Tests for group_by value validation across batch rows.
-
-    When group_by is configured, all rows in the batch must have the same
-    value for that field. Mixed values indicate a trigger/topology bug.
-    """
+class TestBatchStatsGroupByRollups:
+    """Tests for group_by rollup behavior across batch rows."""
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
         return make_context()
+
+    @pytest.mark.parametrize("blank_group_by", ["", "   "])
+    def test_blank_group_by_rejected_at_config_boundary(self, blank_group_by: str) -> None:
+        """Blank group_by cannot enter declared input/output contracts."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        with pytest.raises(PluginConfigError, match="group_by must not be empty"):
+            BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": blank_group_by})
 
     def test_homogeneous_group_by_included(self, ctx: PluginContext) -> None:
         """All rows same group_by value — included in output."""
@@ -335,8 +371,37 @@ class TestBatchStatsGroupByHomogeneity:
         assert result.row is not None
         assert result.row["category"] == "sales"
 
-    def test_heterogeneous_group_by_raises(self, ctx: PluginContext) -> None:
-        """Mixed group_by values raise ValueError — topology/config bug."""
+    def test_heterogeneous_group_by_emits_one_rollup_per_group(self, ctx: PluginContext) -> None:
+        """Mixed group_by values produce per-group aggregate rows."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
+
+        rows = [
+            _make_row({"id": 1, "amount": 10.0, "category": "sales"}),
+            _make_row({"id": 2, "amount": 20.0, "category": "returns"}),
+            _make_row({"id": 3, "amount": 30.0, "category": "sales"}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.is_multi_row
+        assert result.rows is not None
+
+        rollups = {row["category"]: row for row in result.rows}
+        assert set(rollups) == {"sales", "returns"}
+        assert rollups["sales"]["count"] == 2
+        assert rollups["sales"]["sum"] == 40.0
+        assert rollups["sales"]["mean"] == 20.0
+        assert rollups["sales"]["batch_size"] == 2
+        assert rollups["returns"]["count"] == 1
+        assert rollups["returns"]["sum"] == 20.0
+        assert rollups["returns"]["mean"] == 20.0
+        assert rollups["returns"]["batch_size"] == 1
+
+    def test_two_group_batch_emits_two_rollups(self, ctx: PluginContext) -> None:
+        """Mixed group_by values emit one aggregate row per group."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
 
         transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
@@ -346,8 +411,32 @@ class TestBatchStatsGroupByHomogeneity:
             _make_row({"id": 2, "amount": 20.0, "category": "returns"}),
         ]
 
-        with pytest.raises(ValueError, match="Heterogeneous"):
-            transform.process(rows, ctx)
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.is_multi_row
+        assert result.rows is not None
+        assert [row["category"] for row in result.rows] == ["sales", "returns"]
+
+    def test_all_non_finite_group_returns_group_error(self, ctx: PluginContext) -> None:
+        """A group with no finite values errors without fabricating statistics."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
+
+        rows = [
+            _make_row({"id": 1, "amount": float("nan"), "category": "sales"}),
+            _make_row({"id": 2, "amount": float("inf"), "category": "returns"}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "all_non_finite"
+        assert result.reason["group_by"] == "category"
+        assert result.reason["group_value"] == "sales"
+        assert result.reason["skipped_non_finite_indices"] == [0]
 
     def test_group_by_field_missing_from_all_rows_raises(self, ctx: PluginContext) -> None:
         """Configured group_by missing from all rows should fail fast."""
@@ -380,7 +469,7 @@ class TestBatchStatsGroupByHomogeneity:
 
 class TestOutputSchemaConfig:
     def test_guaranteed_fields_with_mean_and_group_by(self):
-        """group_by is a passthrough field — NOT in declared_output_fields."""
+        """group_by IS guaranteed on every successful result when configured."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
 
         transform = BatchStats(
@@ -392,7 +481,7 @@ class TestOutputSchemaConfig:
             }
         )
         assert transform._output_schema_config is not None
-        assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"count", "sum", "batch_size", "mean"})
+        assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"count", "sum", "batch_size", "mean", "category"})
 
     def test_guaranteed_fields_minimal(self):
         from elspeth.plugins.transforms.batch_stats import BatchStats
@@ -407,7 +496,8 @@ class TestOutputSchemaConfig:
         assert transform._output_schema_config is not None
         assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"count", "sum", "batch_size"})
 
-    def test_declared_output_fields_excludes_group_by(self):
+    def test_declared_output_fields_includes_group_by(self):
+        """group_by is guaranteed on every successful result when configured."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
 
         transform = BatchStats(
@@ -417,8 +507,143 @@ class TestOutputSchemaConfig:
                 "group_by": "region",
             }
         )
-        assert transform.declared_output_fields == frozenset({"count", "sum", "batch_size", "mean"})
-        assert "region" not in transform.declared_output_fields
+        assert transform.declared_output_fields == frozenset({"count", "sum", "batch_size", "mean", "region"})
+        assert "region" in transform.declared_output_fields
+
+
+class TestOutputSchemaConfigDoesNotPropagateInputContract:
+    """Regression tests for elspeth-f5f798f797.
+
+    The user-supplied ``schema:`` block describes the INPUT contract for an
+    aggregation. ``_output_schema_config`` describes what the aggregation
+    EMITS, which for batch_stats is independent of input shape (output is
+    {count, sum, batch_size, mean?, group_by?} — never the input fields
+    themselves). Therefore input ``fields``/``required_fields``/
+    ``guaranteed_fields`` from the user's schema must not leak into
+    ``_output_schema_config``; doing so causes the runtime
+    SchemaConfigModeViolation check to require fields the aggregation never
+    emits, and to expect declared field types that the OBSERVED output
+    contract does not carry.
+    """
+
+    def test_output_config_drops_input_fields_for_flexible_mode(self) -> None:
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                    "required_fields": ["customer_tier", "amount"],
+                },
+                "value_field": "amount",
+                "group_by": "customer_tier",
+                "compute_mean": False,
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        # Input fields/required_fields describe input contract, not output.
+        assert cfg.fields is None, f"Output config must not echo input fields, got {cfg.fields!r}"
+        assert cfg.required_fields is None, f"Output config must not echo input required_fields, got {cfg.required_fields!r}"
+        # guaranteed_fields reflect the actual aggregation output.
+        assert frozenset(cfg.guaranteed_fields or ()) == frozenset({"count", "sum", "batch_size", "customer_tier"})
+
+    def test_output_config_drops_input_fields_for_fixed_mode(self) -> None:
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "fixed",
+                    "fields": ["id: int", "amount: float"],
+                },
+                "value_field": "amount",
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        assert cfg.fields is None
+        assert cfg.required_fields is None
+
+    def test_output_config_drops_input_guaranteed_fields(self) -> None:
+        """Input-side ``guaranteed_fields`` describe upstream guarantees, not aggregation output."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "observed",
+                    "guaranteed_fields": ["upstream_only_field"],
+                },
+                "value_field": "amount",
+                "compute_mean": False,
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        # upstream_only_field is an INPUT guarantee — must not appear as an OUTPUT guarantee.
+        assert "upstream_only_field" not in (cfg.guaranteed_fields or ())
+        assert frozenset(cfg.guaranteed_fields or ()) == frozenset({"count", "sum", "batch_size"})
+
+    def test_runtime_verify_passes_for_failing_eval_reproducer(self) -> None:
+        """End-to-end: the eval-S2-v2 failing config must clear ``verify_schema_config_mode``.
+
+        Reproduced from notes/composer-llm-eval-2026-05-01.md S2 v2: the
+        composer accepted the config but runtime rejected with
+        SchemaConfigModeViolation. After the fix, the runtime check must
+        pass for the same simulated emission.
+        """
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.contracts.schema_contract import PipelineRow
+        from elspeth.contracts.schema_contract_factory import create_contract_from_config
+        from elspeth.engine.executors.schema_config_mode import verify_schema_config_mode
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                    "required_fields": ["customer_tier", "amount"],
+                },
+                "value_field": "amount",
+                "group_by": "customer_tier",
+                "compute_mean": False,
+            }
+        )
+
+        input_contract = create_contract_from_config(
+            SchemaConfig.from_dict({"mode": "flexible", "fields": ["customer_tier: str", "amount: float"]})
+        )
+        rows = [
+            PipelineRow({"customer_tier": "enterprise", "amount": 100.0}, input_contract),
+            PipelineRow({"customer_tier": "enterprise", "amount": 150.0}, input_contract),
+            PipelineRow({"customer_tier": "pro", "amount": 50.0}, input_contract),
+        ]
+
+        results = []
+        for group_value, grouped in transform._group_rows(rows):
+            aggregate, error = transform._aggregate_group(grouped, group_value)
+            assert error is None
+            results.append(aggregate)
+
+        contract = transform._output_contract_for(results)
+        emitted_rows = [PipelineRow(r, contract) for r in results]
+
+        # Must NOT raise SchemaConfigModeViolation.
+        verify_schema_config_mode(
+            output_schema_config=transform._output_schema_config,
+            emitted_rows=emitted_rows,
+            plugin_name="batch_stats",
+            node_id="agg",
+            run_id="r",
+            row_id="row1",
+            token_id="t1",
+        )
 
 
 # =============================================================================
@@ -516,7 +741,7 @@ class TestGroupByCollisionAtInit:
         """
         from elspeth.plugins.transforms.batch_stats import BatchStats
 
-        with pytest.raises(ValueError, match="collides"):
+        with pytest.raises(PluginConfigError, match="collides"):
             BatchStats(
                 {
                     "schema": DYNAMIC_SCHEMA,
@@ -529,11 +754,73 @@ class TestGroupByCollisionAtInit:
         """group_by='count' should be rejected at init, not at process time."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
 
-        with pytest.raises(ValueError, match="collides"):
+        with pytest.raises(PluginConfigError, match="collides"):
             BatchStats(
                 {
                     "schema": DYNAMIC_SCHEMA,
                     "value_field": "amount",
                     "group_by": "count",
+                }
+            )
+
+
+class TestBatchStatsGroupByInOutputContract:
+    """Tests for group_by appearing in declared_output_fields when configured.
+
+    Bug fix: group_by was consumed at runtime but never declared in output
+    guarantees. This meant the DAG builder couldn't validate that downstream
+    transforms requiring group_by would receive it.
+    """
+
+    def test_group_by_in_declared_output_fields(self):
+        """group_by appears in declared_output_fields when configured."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "value_field": "amount",
+                "group_by": "category",
+            }
+        )
+        assert "category" in transform.declared_output_fields
+
+    def test_group_by_in_guaranteed_fields(self):
+        """group_by appears in _output_schema_config.guaranteed_fields when configured."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "value_field": "amount",
+                "group_by": "region",
+            }
+        )
+        assert transform._output_schema_config is not None
+        assert "region" in transform._output_schema_config.guaranteed_fields
+
+    def test_no_group_by_not_in_declared_fields(self):
+        """Without group_by, only stat fields are in declared_output_fields."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "value_field": "amount",
+            }
+        )
+        # Only stat fields, no group_by
+        assert transform.declared_output_fields == frozenset({"count", "sum", "batch_size", "mean"})
+
+    def test_group_by_collision_still_detected(self):
+        """group_by collision with stat fields is still detected at init."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        with pytest.raises(PluginConfigError, match="collides"):
+            BatchStats(
+                {
+                    "schema": DYNAMIC_SCHEMA,
+                    "value_field": "amount",
+                    "group_by": "sum",
                 }
             )

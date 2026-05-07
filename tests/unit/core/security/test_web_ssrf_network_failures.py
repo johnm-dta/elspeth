@@ -284,3 +284,25 @@ class TestSSRFIPv4MappedIPv6MetadataBypass:
         """::ffff:10.0.0.1 should still be allowable (not metadata)."""
         allowed = (ipaddress.ip_network("::/0"),)
         _validate_ip_address("::ffff:10.0.0.1", allowed_ranges=allowed)  # must not raise
+
+
+class TestResolveHostnameOrdering:
+    """Regression: _resolve_hostname must preserve DNS resolver ordering."""
+
+    def test_preserves_ip_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IPs should come back in the order the resolver returned them."""
+        import socket
+
+        from elspeth.core.security.web import _resolve_hostname
+
+        # Simulate getaddrinfo returning ordered IPs
+        fake_results = [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.3", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.2", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", 0)),  # duplicate
+        ]
+        monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: fake_results)
+
+        result = _resolve_hostname("example.com")
+        assert result == ["10.0.0.3", "10.0.0.1", "10.0.0.2"]

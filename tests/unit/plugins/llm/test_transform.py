@@ -8,13 +8,15 @@ tracer wiring, and multi-query partial failure atomicity.
 
 from __future__ import annotations
 
+import threading
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 
 from elspeth.contracts.results import TransformResult
-from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.infrastructure.clients.llm import (
     ContentPolicyError,
@@ -24,7 +26,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
     RateLimitError,
     ServerError,
 )
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, UnrecognizedFinishReason
+from elspeth.plugins.transforms.llm.provider import FinishReason, LLMProvider, LLMQueryResult, UnrecognizedFinishReason
 from elspeth.testing import make_pipeline_row
 
 # ---------------------------------------------------------------------------
@@ -47,7 +49,18 @@ def _make_ctx() -> Mock:
     ctx.run_id = "run-123"
     ctx.token = Mock()
     ctx.token.token_id = "token-1"
+    ctx.shutdown_event = None
     return ctx
+
+
+def _identity_contract(contract: SchemaContract) -> SchemaContract:
+    """Mirror the transform's no-op contract alignment in focused strategy tests."""
+    return contract
+
+
+def _identity_row(row: PipelineRow) -> PipelineRow:
+    """Mirror the transform's no-op row alignment in focused strategy tests."""
+    return row
 
 
 def _make_config(*, provider: str = "azure", **overrides: Any) -> dict[str, Any]:
@@ -94,7 +107,7 @@ def _make_transform_with_mock_provider(
     from elspeth.plugins.transforms.llm.transform import LLMTransform
 
     transform = LLMTransform(config or _make_config())
-    mock_provider = Mock()
+    mock_provider = Mock(spec=LLMProvider)
     transform._provider = mock_provider
     return transform, mock_provider
 
@@ -211,6 +224,27 @@ class TestErrorClassification:
 class TestSingleQuerySuccess:
     """Verify single-query happy path."""
 
+    def test_shutdown_event_prevents_provider_call(self) -> None:
+        """Run cancellation must stop before dispatching a new provider call."""
+        transform, mock_provider = _make_transform_with_mock_provider()
+        mock_provider.execute_query.return_value = LLMQueryResult(
+            content="classified as: positive",
+            usage=TokenUsage.known(10, 5),
+            model="gpt-4o",
+            finish_reason=FinishReason.STOP,
+        )
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+        ctx = _make_ctx()
+        ctx.shutdown_event = shutdown_event
+
+        result = transform._process_row(_make_row(), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "shutdown_requested"
+        mock_provider.execute_query.assert_not_called()
+
     def test_single_query_success_produces_output(self) -> None:
         transform, mock_provider = _make_transform_with_mock_provider()
         mock_provider.execute_query.return_value = LLMQueryResult(
@@ -258,7 +292,7 @@ class TestSingleQuerySuccess:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"result": "ok"}',
             usage=TokenUsage.known(10, 5),
@@ -275,6 +309,62 @@ class TestSingleQuerySuccess:
         assert result.row.contract is not None
         # Multi-query adds query-prefixed fields
         assert any(k.startswith("quality_") or k.startswith("relevance_") for k in result.row.to_dict())
+
+    def test_multi_query_success_preserves_original_input_fields(self) -> None:
+        """Multi-query success must remain truthful for pass-through input fields."""
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        config = _make_multi_query_config(
+            provider="azure",
+            template="Classify: {{ row.text_content }}",
+        )
+        transform = LLMTransform(config)
+        mock_provider = Mock(spec=LLMProvider)
+        mock_provider.execute_query.return_value = LLMQueryResult(
+            content='{"score": 1}',
+            usage=TokenUsage.known(1, 1),
+            model="gpt-4o",
+            finish_reason=FinishReason.STOP,
+        )
+        transform._provider = mock_provider
+
+        row = _make_row({"text": "hello", "baseline": "kept"})
+        result = transform._process_row(row, _make_ctx())
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline"] == "kept"
+        assert result.row["text"] == "hello"
+
+
+class TestInvariantProbeExecution:
+    """Focused regressions for the transform-owned invariant probe seam."""
+
+    def test_forward_probe_restores_existing_provider_and_close_remains_safe(self) -> None:
+        """The invariant probe must not clobber a provider already attached to the transform."""
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        transform = LLMTransform(LLMTransform.probe_config())
+        original_provider = Mock(spec=LLMProvider)
+        transform._provider = original_provider
+
+        result = transform.execute_forward_invariant_probe(
+            transform.forward_invariant_probe_rows(
+                _make_row({"baseline": "kept"}),
+            ),
+            _make_ctx(),
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline"] == "kept"
+        assert result.row["llm_probe_text"] == "probe request"
+        assert result.row["llm_response"] == "probe response"
+        assert transform._provider is original_provider
+        original_provider.execute_query.assert_not_called()
+
+        transform.close()
+        original_provider.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -402,15 +492,15 @@ class TestTruncationDetection:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute_query
         transform._provider = mock_provider
 
         result = transform._process_row(_make_row(), _make_ctx())
         assert result.status == "error"
         assert result.reason is not None
-        assert result.reason["reason"] == "unexpected_finish_reason"
-        assert result.reason["finish_reason"] == "moderation"
+        assert result.reason["reason"] == "unexpected_finish_reason"  # type: ignore[comparison-overlap]
+        assert result.reason["finish_reason"] == "moderation"  # type: ignore[unreachable]
         assert result.reason["query_name"] == "q2"
         assert result.reason["query_index"] == 1
 
@@ -543,7 +633,7 @@ class TestTemplateTierPolicy:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="result",
             usage=TokenUsage.known(10, 5),
@@ -606,7 +696,7 @@ class TestMultiQueryPartialFailure:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute_query
         transform._provider = mock_provider
 
@@ -655,7 +745,7 @@ class TestMultiQueryPartialFailure:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute_query
         transform._provider = mock_provider
 
@@ -692,7 +782,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="override result",
             usage=TokenUsage.known(10, 5),
@@ -724,7 +814,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="override result",
             usage=TokenUsage.known(10, 5),
@@ -759,7 +849,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"score": 85, "label": "high quality"}',
             usage=TokenUsage.known(10, 5),
@@ -795,7 +885,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"score": 42}',
             usage=TokenUsage.known(10, 5),
@@ -825,7 +915,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="not valid json at all",
             usage=TokenUsage.known(10, 5),
@@ -854,7 +944,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="[1, 2, 3]",
             usage=TokenUsage.known(10, 5),
@@ -881,7 +971,7 @@ class TestMultiQueryJSONExtraction:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="just plain text",
             usage=TokenUsage.known(10, 5),
@@ -928,7 +1018,7 @@ class TestMultiQueryContextLength:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
@@ -993,7 +1083,7 @@ class TestMultiQueryNonFiniteRejection:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         transform._provider = mock_provider
         return transform, mock_provider
 
@@ -1234,6 +1324,7 @@ class TestMultiQueryOutputSchemaConfig:
             )
         )
 
+        assert transform._output_schema_config is not None
         assert transform._output_schema_config.guaranteed_fields is not None
         guaranteed = set(transform._output_schema_config.guaranteed_fields)
         assert "quality_llm_response" in guaranteed
@@ -1260,6 +1351,7 @@ class TestMultiQueryOutputSchemaConfig:
         )
 
         # audit_fields should be None or empty — no audit fields in SchemaConfig
+        assert transform._output_schema_config is not None
         audit_fields = transform._output_schema_config.audit_fields
         assert audit_fields is None or len(audit_fields) == 0
 
@@ -1280,6 +1372,7 @@ class TestMultiQueryOutputSchemaConfig:
             )
         )
 
+        assert transform._output_schema_config is not None
         assert transform._output_schema_config.guaranteed_fields is not None
         guaranteed = set(transform._output_schema_config.guaranteed_fields)
 
@@ -1315,6 +1408,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(_make_config())
 
+        assert transform._output_schema_config is not None
         assert transform._output_schema_config.guaranteed_fields is not None
         guaranteed = set(transform._output_schema_config.guaranteed_fields)
         assert "llm_response" in guaranteed
@@ -1335,6 +1429,7 @@ class TestMultiQueryOutputSchemaConfig:
             )
         )
 
+        assert transform._output_schema_config is not None
         assert transform._output_schema_config.guaranteed_fields is not None
         # audit_fields no longer set for multi-query (audit goes to success_reason)
         schema_fields = set(transform._output_schema_config.guaranteed_fields)
@@ -1363,6 +1458,7 @@ class TestMultiQueryOutputSchemaConfig:
             )
         )
 
+        assert transform._output_schema_config is not None
         assert transform._output_schema_config.guaranteed_fields is not None
         guaranteed = set(transform._output_schema_config.guaranteed_fields)
         assert "quality_score" in guaranteed
@@ -1439,7 +1535,7 @@ class TestResponseFormatPassthrough:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"score": 42}',
             usage=TokenUsage.known(10, 5),
@@ -1472,7 +1568,7 @@ class TestResponseFormatPassthrough:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"score": 42}',
             usage=TokenUsage.known(10, 5),
@@ -1498,7 +1594,7 @@ class TestResponseFormatPassthrough:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="just plain text",
             usage=TokenUsage.known(10, 5),
@@ -1541,7 +1637,7 @@ class TestMultiQueryFieldTypeValidation:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         transform._provider = mock_provider
         return transform, mock_provider
 
@@ -1685,7 +1781,7 @@ class TestMultiQueryFieldTypeValidation:
             },
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         call_count = [0]
 
         def mock_execute(messages, *, model, temperature, max_tokens, state_id, token_id, response_format=None):
@@ -1798,7 +1894,7 @@ class TestMultiQuerySequentialRetryBehavior:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
@@ -1821,7 +1917,7 @@ class TestMultiQuerySequentialRetryBehavior:
             pool_size=1,
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = ContentPolicyError("Content blocked")
         transform._provider = mock_provider
 
@@ -1889,13 +1985,13 @@ class TestMultiQuerySequentialReasonImmutability:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
         # Capture direct references to reason dicts at TransformResult construction
         # (NOT copies — we want to detect in-place mutation)
-        captured_reason_refs: list[dict] = []
+        captured_reason_refs: list[dict[str, Any]] = []
         _original_error = TransformResult.error.__func__  # type: ignore[attr-defined]
 
         def tracking_error(cls, reason, *, retryable=False, context_after=None):
@@ -1940,7 +2036,7 @@ class TestMultiQueryParallelExecution:
             pool_size=4,
         )
         transform = LLMTransform(config)
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="response text",
             usage=TokenUsage.known(10, 5),
@@ -1988,7 +2084,7 @@ class TestMultiQueryParallelExecution:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
@@ -2042,7 +2138,7 @@ class TestMultiQueryParallelExecution:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
@@ -2086,7 +2182,7 @@ class TestMultiQueryParallelExecution:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
@@ -2136,7 +2232,7 @@ class TestMultiQueryParallelExecution:
                 )
             raise ContentPolicyError(f"Blocked call {call_count[0]}")
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = mock_execute
         transform._provider = mock_provider
 
@@ -2168,7 +2264,7 @@ class TestMultiQueryParallelExecution:
         assert transform._query_executor is not None
 
         # Mock provider to avoid on_start dependency
-        transform._provider = Mock()
+        transform._provider = Mock(spec=LLMProvider)
         transform.close()
         # After close, executor should be shut down (no error = success)
 
@@ -2554,7 +2650,7 @@ class TestParallelErrorReasonNotFabricated:
         mock_executor = Mock()
 
         query_specs = [
-            QuerySpec(name="quality", input_fields={"text_content": "text"}),
+            QuerySpec(name="quality", input_fields=MappingProxyType({"text_content": "text"})),
         ]
         template = PromptTemplate("{{ text_content }}")
         strategy = MultiQueryStrategy(
@@ -2566,6 +2662,8 @@ class TestParallelErrorReasonNotFabricated:
             temperature=0.0,
             max_tokens=100,
             response_field="llm_response",
+            align_output_contract=_identity_contract,
+            align_output_row_contract=_identity_row,
             executor=mock_executor,
         )
 
@@ -2573,7 +2671,7 @@ class TestParallelErrorReasonNotFabricated:
         # so we can't construct one directly with reason=None. Create a valid one
         # and then corrupt it to simulate a future regression or corruption.
         bogus_error_result = TransformResult.error(
-            {"reason": "placeholder"},
+            {"reason": "placeholder"},  # type: ignore[typeddict-item]  # throwaway; corrupted to None below
             retryable=False,
         )
         object.__setattr__(bogus_error_result, "reason", None)
@@ -2634,8 +2732,8 @@ class TestParallelAuditMetadataThreadSafety:
 
         mock_executor = Mock()
         query_specs = [
-            QuerySpec(name="sentiment", input_fields={"text": "text"}),
-            QuerySpec(name="topic", input_fields={"text": "text"}),
+            QuerySpec(name="sentiment", input_fields=MappingProxyType({"text": "text"})),
+            QuerySpec(name="topic", input_fields=MappingProxyType({"text": "text"})),
         ]
         template = PromptTemplate("Analyze: {{ row.text }}")
         strategy = MultiQueryStrategy(
@@ -2647,10 +2745,12 @@ class TestParallelAuditMetadataThreadSafety:
             temperature=0.0,
             max_tokens=100,
             response_field="llm_response",
+            align_output_contract=_identity_contract,
+            align_output_row_contract=_identity_row,
             executor=mock_executor,
         )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="result",
             usage=TokenUsage.known(10, 5),
@@ -2715,7 +2815,7 @@ class TestParallelAuditMetadataThreadSafety:
         barrier = threading.Barrier(NUM_QUERIES)
 
         mock_executor = Mock()
-        query_specs = [QuerySpec(name=f"q{i}", input_fields={"text": "text"}) for i in range(NUM_QUERIES)]
+        query_specs = [QuerySpec(name=f"q{i}", input_fields=MappingProxyType({"text": "text"})) for i in range(NUM_QUERIES)]
         template = PromptTemplate("Analyze: {{ row.text }}")
         strategy = MultiQueryStrategy(
             query_specs=query_specs,
@@ -2726,10 +2826,12 @@ class TestParallelAuditMetadataThreadSafety:
             temperature=0.0,
             max_tokens=100,
             response_field="llm_response",
+            align_output_contract=_identity_contract,
+            align_output_row_contract=_identity_row,
             executor=mock_executor,
         )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="result",
             usage=TokenUsage.known(10, 5),
@@ -2798,8 +2900,8 @@ class TestMultiQueryFinishReasonAudit:
         from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
 
         query_specs = [
-            QuerySpec(name="sentiment", input_fields={"text": "text"}),
-            QuerySpec(name="topic", input_fields={"text": "text"}),
+            QuerySpec(name="sentiment", input_fields=MappingProxyType({"text": "text"})),
+            QuerySpec(name="topic", input_fields=MappingProxyType({"text": "text"})),
         ]
         template = PromptTemplate("Analyze: {{ row.text }}")
         strategy = MultiQueryStrategy(
@@ -2811,10 +2913,12 @@ class TestMultiQueryFinishReasonAudit:
             temperature=0.0,
             max_tokens=100,
             response_field="llm_response",
+            align_output_contract=_identity_contract,
+            align_output_row_contract=_identity_row,
             executor=None,  # Sequential mode
         )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="result",
             usage=TokenUsage.known(10, 5),
@@ -2843,7 +2947,7 @@ class TestMultiQueryFinishReasonAudit:
         from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
 
         query_specs = [
-            QuerySpec(name="analysis", input_fields={"text": "text"}),
+            QuerySpec(name="analysis", input_fields=MappingProxyType({"text": "text"})),
         ]
         template = PromptTemplate("Analyze: {{ row.text }}")
         strategy = MultiQueryStrategy(
@@ -2855,10 +2959,12 @@ class TestMultiQueryFinishReasonAudit:
             temperature=0.0,
             max_tokens=100,
             response_field="llm_response",
+            align_output_contract=_identity_contract,
+            align_output_row_contract=_identity_row,
             executor=None,
         )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.return_value = LLMQueryResult(
             content="result",
             usage=TokenUsage.known(10, 5),
@@ -2892,7 +2998,7 @@ class TestSequentialErrorReasonNotFabricated:
         from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
 
         query_specs = [
-            QuerySpec(name="quality", input_fields={"text": "text"}),
+            QuerySpec(name="quality", input_fields=MappingProxyType({"text": "text"})),
         ]
         template = PromptTemplate("Analyze: {{ row.text }}")
         strategy = MultiQueryStrategy(
@@ -2904,13 +3010,15 @@ class TestSequentialErrorReasonNotFabricated:
             temperature=0.0,
             max_tokens=100,
             response_field="llm_response",
+            align_output_contract=_identity_contract,
+            align_output_row_contract=_identity_row,
             executor=None,  # Sequential mode
         )
 
         # Patch _execute_one_query at the class level (frozen slots dataclass
         # prevents instance-level patching) to return a corrupted error result.
         bogus_error_result = TransformResult.error(
-            {"reason": "placeholder"},
+            {"reason": "placeholder"},  # type: ignore[typeddict-item]  # throwaway; corrupted to None below
             retryable=False,
         )
         object.__setattr__(bogus_error_result, "reason", None)
@@ -2925,3 +3033,71 @@ class TestSequentialErrorReasonNotFabricated:
             pytest.raises(FrameworkBugError, match="reason=None"),
         ):
             strategy.execute(row, ctx, provider=Mock(), tracer=Mock())
+
+
+class TestQuerySuccessPostFreezeMutationGuards:
+    """Exercise the ``freeze_fields`` post-init guard on
+    ``MultiQueryStrategy._QuerySuccess``.
+
+    ``enforce_freeze_guards.py`` is a static scanner — a typo that omits
+    a field name (``freeze_fields(self, "fields")`` without
+    ``"audit_metadata"``) still parses as a valid call expression and
+    would silently leave ``audit_metadata`` mutable.  These tests pin the
+    runtime contract by mutating each container field after construction
+    and asserting TypeError surfaces.
+    """
+
+    def test_query_success_fields_is_immutable_after_construction(self) -> None:
+        """Mutating ``_QuerySuccess.fields`` after construction must raise TypeError."""
+        from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
+
+        result = MultiQueryStrategy._QuerySuccess(
+            fields={"label": "positive", "confidence": 0.9},
+            audit_metadata={"prompt_hash": "abc"},
+        )
+
+        with pytest.raises(TypeError):
+            result.fields["label"] = "mutated"  # type: ignore[index]
+
+        with pytest.raises(TypeError):
+            result.fields["new_field"] = "x"  # type: ignore[index]
+
+    def test_query_success_audit_metadata_is_immutable_after_construction(self) -> None:
+        """Mutating ``_QuerySuccess.audit_metadata`` after construction must raise TypeError.
+
+        This is the specific leak that a scanner-defeating typo would
+        cause: if a future refactor drops ``"audit_metadata"`` from the
+        freeze_fields call, audit metadata would become mutable and the
+        caller that re-emits it to the Landscape would be writing a live
+        reference — a prime Tier-1 audit-integrity hazard.
+        """
+        from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
+
+        result = MultiQueryStrategy._QuerySuccess(
+            fields={"label": "positive"},
+            audit_metadata={"prompt_hash": "abc", "model_snapshot": "gpt-4o-mini-2024-07-18"},
+        )
+
+        with pytest.raises(TypeError):
+            result.audit_metadata["prompt_hash"] = "def"  # type: ignore[index]
+
+        with pytest.raises(TypeError):
+            result.audit_metadata["injected"] = "x"  # type: ignore[index]
+
+    def test_query_success_source_detachment(self) -> None:
+        """Source mutations to fields / audit_metadata passed in must NOT affect the stored views."""
+        from elspeth.plugins.transforms.llm.transform import MultiQueryStrategy
+
+        fields_src = {"label": "positive"}
+        meta_src = {"prompt_hash": "abc"}
+
+        result = MultiQueryStrategy._QuerySuccess(
+            fields=fields_src,
+            audit_metadata=meta_src,
+        )
+
+        fields_src["label"] = "mutated"
+        meta_src["prompt_hash"] = "def"
+
+        assert result.fields["label"] == "positive"
+        assert result.audit_metadata["prompt_hash"] == "abc"

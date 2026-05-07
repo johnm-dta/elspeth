@@ -16,13 +16,13 @@ from unittest.mock import MagicMock
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TerminalOutcome, TerminalPath, TokenInfo
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
 
 
-def _make_token(token_id: str, row_data: dict | None = None) -> MagicMock:
+def _make_token(token_id: str, row_data: dict[str, object] | None = None) -> MagicMock:
     token = MagicMock(spec=TokenInfo)
     token.token_id = token_id
     token.row_id = f"row-{token_id}"
@@ -34,8 +34,9 @@ def _make_token(token_id: str, row_data: dict | None = None) -> MagicMock:
     return token
 
 
-def _make_executor() -> tuple[SinkExecutor, MagicMock]:
-    recorder = MagicMock()
+def _make_executor() -> tuple[SinkExecutor, MagicMock, MagicMock]:
+    execution = MagicMock()
+    data_flow = MagicMock()
     state_counter = [0]
 
     def _begin_state(**kwargs: Any) -> MagicMock:
@@ -44,12 +45,11 @@ def _make_executor() -> tuple[SinkExecutor, MagicMock]:
         state.state_id = f"state-{state_counter[0]}"
         return state
 
-    recorder.begin_node_state.side_effect = _begin_state
-    recorder.allocate_operation_call_index = MagicMock(return_value=0)
+    execution.begin_node_state.side_effect = _begin_state
     spans = MagicMock()
     spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
     spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
-    return SinkExecutor(recorder, spans, "run-1"), recorder
+    return SinkExecutor(execution, data_flow, spans, run_id="run-1"), execution, data_flow
 
 
 def _build_scenario(batch_size: int, diverted_indices: set[int]) -> tuple[list[MagicMock], MagicMock]:
@@ -60,7 +60,7 @@ def _build_scenario(batch_size: int, diverted_indices: set[int]) -> tuple[list[M
     sink = MagicMock()
     sink.name = "primary"
     sink.node_id = "node-primary"
-    sink.validate_input = False
+    sink.declared_guaranteed_fields = frozenset()
     sink.declared_required_fields = frozenset()
     sink._on_write_failure = "discard"
     sink._reset_diversion_log = MagicMock()
@@ -77,20 +77,28 @@ def test_partition_completeness(batch_size: int, diverted_indices_raw: list[int]
     """Every token gets exactly one outcome: COMPLETED + DIVERTED == total batch."""
     diverted_indices = {i for i in diverted_indices_raw if i < batch_size}
     tokens, sink = _build_scenario(batch_size, diverted_indices)
-    executor, recorder = _make_executor()
+    executor, _execution, data_flow = _make_executor()
 
     executor.write(
         sink=sink,
-        tokens=tokens,
+        tokens=tokens,  # type: ignore[arg-type]
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
     )
 
-    outcome_calls = recorder.record_token_outcome.call_args_list
-    completed_ids = {c.kwargs["token_id"] for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.COMPLETED}
-    diverted_ids = {c.kwargs["token_id"] for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.DIVERTED}
+    outcome_calls = data_flow.record_token_outcome.call_args_list
+    completed_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+    }
+    diverted_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED)
+    }
 
     # Partition completeness: every token accounted for
     assert len(completed_ids) + len(diverted_ids) == batch_size
@@ -110,19 +118,19 @@ def test_exactly_once_terminal_state(batch_size: int, diverted_indices_raw: list
     """Each token_id appears in exactly one record_token_outcome call."""
     diverted_indices = {i for i in diverted_indices_raw if i < batch_size}
     tokens, sink = _build_scenario(batch_size, diverted_indices)
-    executor, recorder = _make_executor()
+    executor, _execution, data_flow = _make_executor()
 
     executor.write(
         sink=sink,
-        tokens=tokens,
+        tokens=tokens,  # type: ignore[arg-type]
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
     )
 
-    outcome_calls = recorder.record_token_outcome.call_args_list
-    recorded_token_ids = [c.kwargs["token_id"] for c in outcome_calls]
+    outcome_calls = data_flow.record_token_outcome.call_args_list
+    recorded_token_ids = [c.kwargs["ref"].token_id for c in outcome_calls]
     # No duplicates
     assert len(recorded_token_ids) == len(set(recorded_token_ids))
     # All input tokens present
@@ -143,7 +151,7 @@ def _build_failsink_scenario(batch_size: int, diverted_indices: set[int]) -> tup
     sink = MagicMock()
     sink.name = "primary"
     sink.node_id = "node-primary"
-    sink.validate_input = False
+    sink.declared_guaranteed_fields = frozenset()
     sink.declared_required_fields = frozenset()
     sink._on_write_failure = "csv_failsink"
     sink._reset_diversion_log = MagicMock()
@@ -151,6 +159,8 @@ def _build_failsink_scenario(batch_size: int, diverted_indices: set[int]) -> tup
     failsink = MagicMock()
     failsink.name = "csv_failsink"
     failsink.node_id = "node-failsink"
+    failsink.declared_guaranteed_fields = frozenset()
+    failsink.declared_required_fields = frozenset()
     failsink.write.return_value = SinkWriteResult(artifact=failsink_artifact)
     failsink._reset_diversion_log = MagicMock()
     return tokens, sink, failsink
@@ -165,23 +175,31 @@ def test_failsink_partition_completeness(batch_size: int, diverted_indices_raw: 
     """Failsink mode: every token gets exactly one outcome (COMPLETED or DIVERTED)."""
     diverted_indices = {i for i in diverted_indices_raw if i < batch_size}
     tokens, sink, failsink = _build_failsink_scenario(batch_size, diverted_indices)
-    executor, recorder = _make_executor()
+    executor, _execution, data_flow = _make_executor()
 
     executor.write(
         sink=sink,
-        tokens=tokens,
+        tokens=tokens,  # type: ignore[arg-type]
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
         failsink=failsink,
         failsink_name="csv_failsink",
         failsink_edge_id="edge-failsink-1",
     )
 
-    outcome_calls = recorder.record_token_outcome.call_args_list
-    completed_ids = {c.kwargs["token_id"] for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.COMPLETED}
-    diverted_ids = {c.kwargs["token_id"] for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.DIVERTED}
+    outcome_calls = data_flow.record_token_outcome.call_args_list
+    completed_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+    }
+    diverted_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK)
+    }
 
     assert len(completed_ids) + len(diverted_ids) == batch_size
     assert completed_ids & diverted_ids == set()
@@ -197,21 +215,21 @@ def test_failsink_exactly_once_terminal_state(batch_size: int, diverted_indices_
     """Failsink mode: each token_id appears in exactly one record_token_outcome call."""
     diverted_indices = {i for i in diverted_indices_raw if i < batch_size}
     tokens, sink, failsink = _build_failsink_scenario(batch_size, diverted_indices)
-    executor, recorder = _make_executor()
+    executor, _execution, data_flow = _make_executor()
 
     executor.write(
         sink=sink,
-        tokens=tokens,
+        tokens=tokens,  # type: ignore[arg-type]
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
         failsink=failsink,
         failsink_name="csv_failsink",
         failsink_edge_id="edge-failsink-1",
     )
 
-    outcome_calls = recorder.record_token_outcome.call_args_list
-    recorded_token_ids = [c.kwargs["token_id"] for c in outcome_calls]
+    outcome_calls = data_flow.record_token_outcome.call_args_list
+    recorded_token_ids = [c.kwargs["ref"].token_id for c in outcome_calls]
     assert len(recorded_token_ids) == len(set(recorded_token_ids))
     assert set(recorded_token_ids) == {t.token_id for t in tokens}

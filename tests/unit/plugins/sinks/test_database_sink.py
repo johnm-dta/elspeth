@@ -1,12 +1,14 @@
 """Tests for database sink plugin."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import MetaData, Table, create_engine, select
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.sinks.database_sink import DatabaseSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_operation_context
 
 # Strict schema config for tests - DataPluginConfig now requires schema
@@ -37,7 +39,7 @@ class TestDatabaseSink:
         """write() creates table and inserts rows."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
@@ -59,7 +61,7 @@ class TestDatabaseSink:
         """Multiple batches can be written to the same table."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         # Write rows in multiple batches (batching now handled by caller)
         sink.write([{"id": 0, "name": "val0"}, {"id": 1, "name": "val1"}], ctx)
@@ -80,7 +82,7 @@ class TestDatabaseSink:
         """close() can be called multiple times."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.close()
@@ -90,7 +92,7 @@ class TestDatabaseSink:
         """Works with in-memory SQLite."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA}))
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         # Can't verify in-memory after close, but should not raise
@@ -101,7 +103,7 @@ class TestDatabaseSink:
         from elspeth.contracts import ArtifactDescriptor
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         artifact = sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.close()
@@ -117,7 +119,7 @@ class TestDatabaseSink:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         rows = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         artifact = sink.write(rows, ctx)
         sink.close()
@@ -131,7 +133,7 @@ class TestDatabaseSink:
         """ArtifactDescriptor metadata includes row_count."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         artifact = sink.write([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}], ctx)
         sink.close()
@@ -145,7 +147,7 @@ class TestDatabaseSink:
         from elspeth.core.canonical import canonical_json, stable_hash
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": STRICT_SCHEMA}))
 
         artifact = sink.write([], ctx)
         sink.close()
@@ -159,7 +161,7 @@ class TestDatabaseSink:
         """DatabaseSink has plugin_version attribute."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA}))
         assert sink.plugin_version == "1.0.0"
 
     def test_has_determinism(self) -> None:
@@ -167,7 +169,7 @@ class TestDatabaseSink:
         from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA})
+        sink = inject_write_failure(DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA}))
         assert sink.determinism == Determinism.IO_WRITE
 
     def test_explicit_schema_creates_all_columns_including_optional(self, db_url: str, ctx: PluginContext) -> None:
@@ -185,12 +187,14 @@ class TestDatabaseSink:
             "fields": ["id: int", "score: float?"],
         }
 
-        sink = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": explicit_schema,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": explicit_schema,
+                }
+            )
         )
 
         # First batch WITHOUT optional field
@@ -227,12 +231,14 @@ class TestDatabaseSink:
             "fields": ["id: int", "name: str", "score: float", "active: bool"],
         }
 
-        sink = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "typed_output",
-                "schema": explicit_schema,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "typed_output",
+                    "schema": explicit_schema,
+                }
+            )
         )
 
         sink.write([{"id": 1, "name": "test", "score": 1.5, "active": True}], ctx)
@@ -294,13 +300,15 @@ class TestDatabaseSinkIfExistsReplace:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         # First sink with append (default) - creates table with initial data
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "append",
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "append",
+                }
+            )
         )
         sink1.write([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}], ctx)
         sink1.close()
@@ -308,13 +316,15 @@ class TestDatabaseSinkIfExistsReplace:
         assert self._get_row_count(db_url, "output") == 2
 
         # Second sink with replace - should drop table and start fresh
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
         sink2.write([{"id": 3, "name": "c"}], ctx)
         sink2.close()
@@ -331,13 +341,15 @@ class TestDatabaseSinkIfExistsReplace:
         """
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
 
         # First write - would drop if table existed
@@ -354,25 +366,29 @@ class TestDatabaseSinkIfExistsReplace:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         # First sink writes initial data
-        sink1 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "append",  # Explicit, but also the default
-            }
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "append",  # Explicit, but also the default
+                }
+            )
         )
         sink1.write([{"id": 1, "name": "a"}], ctx)
         sink1.close()
 
         # Second sink appends more data
-        sink2 = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "output",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "append",
-            }
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "output",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "append",
+                }
+            )
         )
         sink2.write([{"id": 2, "name": "b"}], ctx)
         sink2.close()
@@ -387,13 +403,15 @@ class TestDatabaseSinkIfExistsReplace:
         """
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "new_table",
-                "schema": STRICT_SCHEMA,
-                "if_exists": "replace",
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "new_table",
+                    "schema": STRICT_SCHEMA,
+                    "if_exists": "replace",
+                }
+            )
         )
 
         # Should not raise - creates table since it doesn't exist
@@ -424,12 +442,14 @@ class TestDatabaseSinkSecretHandling:
         monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
         # Should not raise - dev mode allows sanitization without fingerprint
-        sink = DatabaseSink(
-            {
-                "url": "postgresql://user:secret@localhost/db",
-                "table": "test",
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": "postgresql://user:secret@localhost/db",
+                    "table": "test",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
 
         # Verify URL was sanitized (password removed)
@@ -466,12 +486,14 @@ class TestDatabaseSinkSecretHandling:
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
 
         # Should work - no password, no key needed
-        sink = DatabaseSink(
-            {
-                "url": "postgresql://user@localhost/db",
-                "table": "test",
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": "postgresql://user@localhost/db",
+                    "table": "test",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
 
         assert sink._sanitized_url.fingerprint is None
@@ -516,7 +538,7 @@ class TestDatabaseSinkCanonicalHashing:
 
         # Unicode that json.dumps escapes but RFC 8785 keeps literal
         rows = [{"emoji": "😀", "text": "café"}]
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}}))
 
         artifact = sink.write(rows, ctx)
         sink.close()
@@ -536,7 +558,7 @@ class TestDatabaseSinkCanonicalHashing:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         rows = [{"value": float("nan")}]
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}}))
 
         # canonical_json raises ValueError for NaN
         with pytest.raises(ValueError, match="non-finite float"):
@@ -552,7 +574,7 @@ class TestDatabaseSinkCanonicalHashing:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         rows = [{"value": float("inf")}]
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}}))
 
         # canonical_json raises ValueError for Infinity
         with pytest.raises(ValueError, match="non-finite float"):
@@ -572,7 +594,7 @@ class TestDatabaseSinkCanonicalHashing:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         rows = [{"id": np.int64(42), "score": np.float64(3.14)}]
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}}))
 
         # Should not raise - canonical_json normalizes numpy types
         artifact = sink.write(rows, ctx)
@@ -593,7 +615,7 @@ class TestDatabaseSinkCanonicalHashing:
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         rows = [{"emoji": "😀"}]
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}}))
 
         artifact = sink.write(rows, ctx)
         sink.close()
@@ -627,7 +649,7 @@ class TestDatabaseSinkSchemaValidation:
 
         strict_schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": strict_schema})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": strict_schema}))
         assert sink is not None
 
     def test_accepts_free_mode_schema(self, db_url: str) -> None:
@@ -636,7 +658,7 @@ class TestDatabaseSinkSchemaValidation:
 
         free_schema = {"mode": "flexible", "fields": ["id: int"]}
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": free_schema})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": free_schema}))
         assert sink is not None
 
     def test_accepts_dynamic_schema(self, db_url: str) -> None:
@@ -645,7 +667,7 @@ class TestDatabaseSinkSchemaValidation:
 
         dynamic_schema = {"mode": "observed"}
 
-        sink = DatabaseSink({"url": db_url, "table": "output", "schema": dynamic_schema})
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": dynamic_schema}))
         assert sink is not None
 
     def test_flexible_mode_includes_extras_from_first_row(self, db_url: str) -> None:
@@ -666,13 +688,15 @@ class TestDatabaseSinkSchemaValidation:
         )
         # Schema declares only 'id', but first row has 'id', 'name', 'extra'
         flexible_schema = {"mode": "flexible", "fields": ["id: int"]}
-        sink = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "flexible_test",
-                "schema": flexible_schema,
-                "if_exists": "replace",
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "flexible_test",
+                    "schema": flexible_schema,
+                    "if_exists": "replace",
+                }
+            )
         )
 
         # First write has declared field + two extras
@@ -717,13 +741,15 @@ class TestDatabaseSinkSchemaValidation:
         )
         # Schema declares 'id' as int, 'score' as float
         flexible_schema = {"mode": "flexible", "fields": ["id: int", "score: float"]}
-        sink = DatabaseSink(
-            {
-                "url": db_url,
-                "table": "flexible_types_test",
-                "schema": flexible_schema,
-                "if_exists": "replace",
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "flexible_types_test",
+                    "schema": flexible_schema,
+                    "if_exists": "replace",
+                }
+            )
         )
 
         # First row has declared fields + an extra string field
@@ -763,12 +789,14 @@ class TestDatabaseSinkFalseSuccess:
         unknown keys.
         """
         db_path = tmp_path / "test.db"
-        sink = DatabaseSink(
-            {
-                "url": f"sqlite:///{db_path}",
-                "table": "test_table",
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         ctx = make_operation_context(
             node_id="sink-0",
@@ -795,12 +823,14 @@ class TestDatabaseSinkFalseSuccess:
         from elspeth.contracts import CallStatus
 
         db_path = tmp_path / "test.db"
-        sink = DatabaseSink(
-            {
-                "url": f"sqlite:///{db_path}",
-                "table": "test_table",
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         ctx = make_operation_context(
             node_id="sink-0",
@@ -824,7 +854,7 @@ class TestDatabaseSinkFalseSuccess:
 
             def tracking_record_call(**kwargs: object) -> None:
                 recorded_statuses.append(kwargs.get("status"))  # type: ignore[arg-type]
-                original_record_call(**kwargs)
+                original_record_call(**kwargs)  # type: ignore[arg-type]
 
             with (
                 patch.object(ctx, "record_call", side_effect=tracking_record_call),
@@ -847,12 +877,14 @@ class TestDatabaseSinkFalseSuccess:
         import json
 
         db_path = tmp_path / "test.db"
-        sink = DatabaseSink(
-            {
-                "url": f"sqlite:///{db_path}",
-                "table": "test_table",
-                "schema": {"mode": "observed"},
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": {"mode": "observed"},
+                }
+            )
         )
         ctx = make_operation_context(
             node_id="sink-0",
@@ -895,12 +927,14 @@ class TestDatabaseSinkFalseSuccess:
         from unittest.mock import patch
 
         db_path = tmp_path / "test.db"
-        sink = DatabaseSink(
-            {
-                "url": f"sqlite:///{db_path}",
-                "table": "test_table",
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         ctx = make_operation_context(
             node_id="sink-0",
@@ -912,3 +946,132 @@ class TestDatabaseSinkFalseSuccess:
         # Mock _ensure_table to be a no-op, leaving _engine and _table as None
         with patch.object(sink, "_ensure_table"), pytest.raises(AssertionError, match=r"engine.*None.*invariant"):
             sink.write([{"id": 1, "name": "should_fail"}], ctx)
+
+
+class TestDDLAuditRecording:
+    """Tests that DDL operations (CREATE TABLE, DROP TABLE) are recorded in the audit trail.
+
+    The database sink instruments DDL via ctx.record_call with CallType.SQL.
+    INSERT-level record_call is tested elsewhere; these tests cover the DDL paths.
+    """
+
+    def test_create_table_records_audit_call(self, tmp_path: Path) -> None:
+        """First write triggers CREATE TABLE and records it via record_call."""
+        from unittest.mock import patch
+
+        from elspeth.contracts import CallStatus, CallType
+
+        db_path = tmp_path / "test.db"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "audit_test",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+        ctx = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+        original_record_call = ctx.record_call
+        recorded_calls: list[dict[str, Any]] = []
+
+        def tracking_record_call(**kwargs: object) -> None:
+            recorded_calls.append(dict(kwargs))
+            original_record_call(**kwargs)  # type: ignore[arg-type]
+
+        with patch.object(ctx, "record_call", side_effect=tracking_record_call):
+            sink.write([{"id": 1, "name": "alice"}], ctx)
+
+        sink.close()
+
+        # Find the CREATE_TABLE call
+        ddl_calls = [c for c in recorded_calls if c.get("request_data", {}).get("operation") == "CREATE_TABLE"]
+        assert len(ddl_calls) == 1, f"Expected 1 CREATE_TABLE call, got {len(ddl_calls)}"
+
+        create_call = ddl_calls[0]
+        assert create_call["call_type"] == CallType.SQL
+        assert create_call["status"] == CallStatus.SUCCESS
+        assert create_call["request_data"]["table"] == "audit_test"
+        assert create_call["response_data"]["table_created"] == "audit_test"
+        assert create_call["provider"] == "sqlalchemy"
+
+    def test_replace_mode_records_drop_and_create(self, tmp_path: Path) -> None:
+        """With if_exists='replace', both DROP TABLE and CREATE TABLE are audited."""
+        from unittest.mock import patch
+
+        from elspeth.contracts import CallStatus, CallType
+
+        db_path = tmp_path / "test.db"
+
+        # Create initial table
+        sink1 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "replace_test",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+        ctx1 = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+        sink1.write([{"id": 1, "name": "alice"}], ctx1)
+        sink1.close()
+
+        # Now open with replace mode — should DROP then CREATE
+        sink2 = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "replace_test",
+                    "if_exists": "replace",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+        ctx2 = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+        original_record_call = ctx2.record_call
+        recorded_calls: list[dict[str, Any]] = []
+
+        def tracking_record_call(**kwargs: object) -> None:
+            recorded_calls.append(dict(kwargs))
+            original_record_call(**kwargs)  # type: ignore[arg-type]
+
+        with patch.object(ctx2, "record_call", side_effect=tracking_record_call):
+            sink2.write([{"id": 2, "name": "bob"}], ctx2)
+
+        sink2.close()
+
+        operations = [c.get("request_data", {}).get("operation") for c in recorded_calls]
+
+        # Should have DROP_TABLE then CREATE_TABLE (then INSERT)
+        assert "DROP_TABLE" in operations, f"Expected DROP_TABLE in {operations}"
+        assert "CREATE_TABLE" in operations, f"Expected CREATE_TABLE in {operations}"
+
+        # Verify DROP came before CREATE
+        drop_idx = operations.index("DROP_TABLE")
+        create_idx = operations.index("CREATE_TABLE")
+        assert drop_idx < create_idx, "DROP_TABLE should precede CREATE_TABLE"
+
+        # Verify DROP details
+        drop_call = recorded_calls[drop_idx]
+        assert drop_call["call_type"] == CallType.SQL
+        assert drop_call["status"] == CallStatus.SUCCESS
+        assert drop_call["request_data"]["table"] == "replace_test"
+        assert drop_call["response_data"]["table_dropped"] == "replace_test"

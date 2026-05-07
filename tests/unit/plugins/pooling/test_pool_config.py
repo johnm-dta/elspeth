@@ -51,3 +51,33 @@ class TestPoolConfigZeroDelayRejected:
         config = PoolConfig()
         assert config.max_dispatch_delay_ms == 5000
         assert config.recovery_step_ms == 50
+
+
+class TestPoolConfigInfiniteBackoffRejected:
+    """Verify PoolConfig rejects non-finite backoff_multiplier.
+
+    Bug: elspeth-fadff1511a. PoolConfig accepted float("inf") via Pydantic
+    gt=1.0 constraint, but ThrottleConfig.__post_init__ rejects it at runtime.
+    The validation gap means invalid config passes validation and crashes
+    during executor construction.
+    """
+
+    def test_infinity_rejected(self) -> None:
+        """backoff_multiplier=inf is rejected at config validation time."""
+        with pytest.raises(ValidationError, match="backoff_multiplier"):
+            PoolConfig(backoff_multiplier=float("inf"))
+
+    def test_negative_infinity_rejected(self) -> None:
+        """backoff_multiplier=-inf is rejected (also fails gt=1.0)."""
+        with pytest.raises(ValidationError):
+            PoolConfig(backoff_multiplier=float("-inf"))
+
+    def test_nan_rejected(self) -> None:
+        """backoff_multiplier=NaN is rejected."""
+        with pytest.raises(ValidationError):
+            PoolConfig(backoff_multiplier=float("nan"))
+
+    def test_finite_value_accepted(self) -> None:
+        """A normal finite multiplier passes validation."""
+        config = PoolConfig(backoff_multiplier=1.5)
+        assert config.backoff_multiplier == 1.5

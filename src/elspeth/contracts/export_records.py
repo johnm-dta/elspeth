@@ -42,6 +42,7 @@ class NodeExportRecord(TypedDict):
     plugin_name: str
     node_type: str
     plugin_version: str | None
+    source_file_hash: str | None
     determinism: str
     config_hash: str
     config: Any  # Resolved config — structure varies by plugin
@@ -49,6 +50,7 @@ class NodeExportRecord(TypedDict):
     schema_mode: str | None
     schema_fields: list[dict[str, object]] | None
     sequence_in_pipeline: int | None
+    registered_at: str
 
 
 class EdgeExportRecord(TypedDict):
@@ -59,6 +61,7 @@ class EdgeExportRecord(TypedDict):
     to_node_id: str
     label: str | None
     default_mode: str
+    created_at: str
 
 
 class OperationExportRecord(TypedDict):
@@ -76,6 +79,38 @@ class OperationExportRecord(TypedDict):
     input_data_hash: str | None
     output_data_ref: str | None
     output_data_hash: str | None
+
+
+class ValidationErrorExportRecord(TypedDict):
+    record_type: Literal["validation_error"]
+    run_id: str
+    error_id: str
+    node_id: str | None
+    row_id: str | None
+    row_hash: str
+    row_data_json: str | None
+    error: str
+    schema_mode: str
+    destination: str
+    created_at: str
+    violation_type: str | None
+    original_field_name: str | None
+    normalized_field_name: str | None
+    expected_type: str | None
+    actual_type: str | None
+
+
+class TransformErrorExportRecord(TypedDict):
+    record_type: Literal["transform_error"]
+    run_id: str
+    error_id: str
+    token_id: str
+    transform_id: str
+    row_hash: str
+    row_data_json: str | None
+    error_details_json: str | None
+    destination: str
+    created_at: str
 
 
 class CallExportRecord(TypedDict):
@@ -108,6 +143,8 @@ class RowExportRecord(TypedDict):
     row_index: int
     source_node_id: str
     source_data_hash: str | None
+    source_data_ref: str | None
+    created_at: str
 
 
 class TokenExportRecord(TypedDict):
@@ -120,6 +157,7 @@ class TokenExportRecord(TypedDict):
     fork_group_id: str | None
     join_group_id: str | None
     expand_group_id: str | None
+    created_at: str
 
 
 class TokenParentExportRecord(TypedDict):
@@ -135,8 +173,9 @@ class TokenOutcomeExportRecord(TypedDict):
     run_id: str
     outcome_id: str
     token_id: str
-    outcome: str
-    is_terminal: bool
+    outcome: str | None
+    path: str
+    completed: bool
     recorded_at: str
     sink_name: str | None
     batch_id: str | None
@@ -220,6 +259,8 @@ class ArtifactExportRecord(TypedDict):
     path_or_uri: str | None
     content_hash: str | None
     size_bytes: int | None
+    idempotency_key: str | None
+    created_at: str
 
 
 ExportRecord = (
@@ -228,6 +269,8 @@ ExportRecord = (
     | NodeExportRecord
     | EdgeExportRecord
     | OperationExportRecord
+    | ValidationErrorExportRecord
+    | TransformErrorExportRecord
     | CallExportRecord
     | RowExportRecord
     | TokenExportRecord

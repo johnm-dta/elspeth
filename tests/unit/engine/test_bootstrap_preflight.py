@@ -1,194 +1,25 @@
-"""Tests for dependency + gate phases in bootstrap_and_run() and resolve_preflight()."""
+# tests/unit/engine/test_bootstrap_preflight.py
+"""Unit tests for resolve_preflight() — pure logic, no CLI/DB/IO wiring.
+
+Integration tests for bootstrap_and_run() (the full CLI→orchestrator path)
+live in tests/integration/pipeline/test_bootstrap_preflight.py.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from elspeth.contracts.errors import CommencementGateFailedError
+from elspeth.contracts.pipeline_runner import PipelineRunner
 from elspeth.core.dependency_config import (
     CommencementGateConfig,
     CommencementGateResult,
     DependencyRunResult,
 )
-
-
-class TestBootstrapDependencyDispatch:
-    """Test that bootstrap_and_run() calls dependency resolution when configured."""
-
-    def test_skips_dependencies_when_not_configured(self) -> None:
-        """When depends_on is empty, dependency resolver is never called."""
-        mock_config = MagicMock()
-        mock_config.depends_on = []
-        mock_config.commencement_gates = []
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-        mock_config.payload_store.backend = "filesystem"
-
-        with (
-            patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
-            patch("elspeth.core.landscape.LandscapeDB"),
-            patch("elspeth.core.payload_store.FilesystemPayloadStore"),
-            patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
-            patch("elspeth.cli._ensure_output_directories", return_value=[]),
-            patch("elspeth.engine.dependency_resolver.detect_cycles") as mock_detect,
-            patch("elspeth.engine.dependency_resolver.resolve_dependencies") as mock_resolve,
-        ):
-            mock_plugins.return_value = MagicMock()
-            mock_graph = MagicMock()
-            mock_graph_cls.from_plugin_instances.return_value = mock_graph
-
-            mock_run_result = MagicMock()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = mock_run_result
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-            from elspeth.cli_helpers import bootstrap_and_run
-
-            bootstrap_and_run(Path("/fake/pipeline.yaml"))
-
-        mock_detect.assert_not_called()
-        mock_resolve.assert_not_called()
-
-
-class TestBootstrapDependencyResultsFlow:
-    """Test that dependency results flow into gate context (regression for bug #1)."""
-
-    def test_dependency_results_passed_to_gate_context(self) -> None:
-        """Dependency run results must be visible in commencement gate expressions."""
-        from elspeth.core.dependency_config import DependencyConfig, DependencyRunResult
-
-        mock_config = MagicMock()
-        mock_config.depends_on = [DependencyConfig(name="indexer", settings="./index.yaml")]
-        mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-        mock_config.payload_store.backend = "filesystem"
-
-        dep_result = DependencyRunResult(
-            name="indexer",
-            run_id="dep-run-abc",
-            settings_hash="sha256:abc",
-            duration_ms=1000,
-            indexed_at="2026-03-25T12:00:00Z",
-        )
-
-        captured_context = {}
-
-        def capture_gate_context(gates: object, context: dict) -> list:
-            captured_context.update(context)
-            return []
-
-        with (
-            patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config", return_value=MagicMock()),
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
-            patch("elspeth.core.landscape.LandscapeDB"),
-            patch("elspeth.core.payload_store.FilesystemPayloadStore"),
-            patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
-            patch("elspeth.cli._ensure_output_directories", return_value=[]),
-            patch("elspeth.engine.dependency_resolver.detect_cycles"),
-            patch("elspeth.engine.dependency_resolver.resolve_dependencies", return_value=[dep_result]),
-            patch("elspeth.engine.commencement.evaluate_commencement_gates", side_effect=capture_gate_context),
-        ):
-            mock_graph_cls.from_plugin_instances.return_value = MagicMock()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = MagicMock()
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-            from elspeth.cli_helpers import bootstrap_and_run
-
-            bootstrap_and_run(Path("/fake/pipeline.yaml"))
-
-        # Dependency results must be in the gate context — NOT empty
-        assert "dependency_runs" in captured_context
-        assert "indexer" in captured_context["dependency_runs"]
-        assert captured_context["dependency_runs"]["indexer"]["run_id"] == "dep-run-abc"
-
-
-class TestBootstrapCommencementGateDispatch:
-    """Test that bootstrap_and_run() evaluates gates when configured."""
-
-    def test_skips_gates_when_not_configured(self) -> None:
-        """When commencement_gates is empty, gate evaluator is never called."""
-        mock_config = MagicMock()
-        mock_config.depends_on = []
-        mock_config.commencement_gates = []
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-        mock_config.payload_store.backend = "filesystem"
-
-        with (
-            patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
-            patch("elspeth.core.landscape.LandscapeDB"),
-            patch("elspeth.core.payload_store.FilesystemPayloadStore"),
-            patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
-            patch("elspeth.cli._ensure_output_directories", return_value=[]),
-            patch("elspeth.engine.commencement.evaluate_commencement_gates") as mock_eval_gates,
-        ):
-            mock_plugins.return_value = MagicMock()
-            mock_graph = MagicMock()
-            mock_graph_cls.from_plugin_instances.return_value = mock_graph
-
-            mock_run_result = MagicMock()
-            mock_ctx = MagicMock()
-            mock_ctx.orchestrator.run.return_value = mock_run_result
-            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
-
-            from elspeth.cli_helpers import bootstrap_and_run
-
-            bootstrap_and_run(Path("/fake/pipeline.yaml"))
-
-        mock_eval_gates.assert_not_called()
-
-    def test_gate_failure_propagates(self) -> None:
-        """When a gate fails, CommencementGateFailedError propagates through bootstrap."""
-        mock_config = MagicMock()
-        mock_config.depends_on = []
-        mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]  # Non-empty triggers gate eval
-        mock_config.collection_probes = []
-        mock_config.gates = []
-        mock_config.coalesce = []
-        mock_config.landscape.export.enabled = False
-
-        with (
-            patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
-            patch("elspeth.cli_helpers.instantiate_plugins_from_config") as mock_plugins,
-            patch("elspeth.core.dag.ExecutionGraph") as mock_graph_cls,
-            patch("elspeth.cli._ensure_output_directories", return_value=[]),
-            patch(
-                "elspeth.engine.commencement.evaluate_commencement_gates",
-                side_effect=CommencementGateFailedError(
-                    gate_name="test_gate",
-                    condition="False",
-                    reason="test failure",
-                    context_snapshot={},
-                ),
-            ),
-        ):
-            mock_plugins.return_value = MagicMock()
-            mock_graph = MagicMock()
-            mock_graph_cls.from_plugin_instances.return_value = mock_graph
-
-            from elspeth.cli_helpers import bootstrap_and_run
-
-            with pytest.raises(CommencementGateFailedError, match="test_gate"):
-                bootstrap_and_run(Path("/fake/pipeline.yaml"))
 
 
 class TestResolvePreflightDirect:
@@ -222,7 +53,7 @@ class TestResolvePreflightDirect:
             indexed_at="2026-03-25T12:00:00Z",
         )
 
-        mock_runner = MagicMock()
+        mock_runner = MagicMock(spec=PipelineRunner)
 
         with (
             patch("elspeth.engine.dependency_resolver.detect_cycles") as mock_detect,
@@ -251,7 +82,7 @@ class TestResolvePreflightDirect:
             context_snapshot={"collections": {"test": {"count": 10}}},
         )
 
-        mock_probes: list = []
+        mock_probes: list[Any] = []
 
         with (
             patch("elspeth.engine.commencement.evaluate_commencement_gates", return_value=[gate_result]) as mock_eval,
@@ -283,12 +114,12 @@ class TestResolvePreflightDirect:
 
         captured_context = {}
 
-        def capture_gate_context(gates: object, context: dict) -> list:
+        def capture_gate_context(gates: object, context: dict[str, Any]) -> list[Any]:
             captured_context.update(context)
             return []
 
-        mock_runner = MagicMock()
-        mock_probes: list = []
+        mock_runner = MagicMock(spec=PipelineRunner)
+        mock_probes: list[Any] = []
 
         with (
             patch("elspeth.engine.dependency_resolver.detect_cycles"),
@@ -309,7 +140,7 @@ class TestResolvePreflightDirect:
         mock_config.depends_on = []
         mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
 
-        mock_probes: list = []
+        mock_probes: list[Any] = []
 
         with (
             patch(
@@ -350,12 +181,8 @@ class TestResolvePreflightDirect:
         with pytest.raises(FrameworkBugError, match="probes is required"):
             resolve_preflight(mock_config, Path("/fake/pipeline.yaml"), probes=None)
 
-    def test_duplicate_dependency_names_rejected(self) -> None:
-        """Duplicate dependency names must raise before building gate context.
-
-        Without this check, the dict comprehension silently overwrites earlier
-        entries, so gates would evaluate against incomplete dependency data.
-        """
+    def test_duplicate_dependency_names_rejected_before_execution(self) -> None:
+        """Duplicate dependency names must raise before resolve_dependencies runs."""
         from elspeth.core.dependency_config import DependencyConfig
         from elspeth.engine.bootstrap import resolve_preflight
 
@@ -364,18 +191,16 @@ class TestResolvePreflightDirect:
             DependencyConfig(name="indexer", settings="./a.yaml"),
             DependencyConfig(name="indexer", settings="./b.yaml"),
         ]
-        mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
+        mock_config.commencement_gates = None
 
-        dep_results = [
-            DependencyRunResult(name="indexer", run_id="r1", settings_hash="h1", duration_ms=100, indexed_at="2026-01-01T00:00:00Z"),
-            DependencyRunResult(name="indexer", run_id="r2", settings_hash="h2", duration_ms=200, indexed_at="2026-01-01T00:00:00Z"),
-        ]
-
-        mock_runner = MagicMock()
+        mock_runner = MagicMock(spec=PipelineRunner)
 
         with (
-            patch("elspeth.engine.dependency_resolver.detect_cycles"),
-            patch("elspeth.engine.dependency_resolver.resolve_dependencies", return_value=dep_results),
+            patch("elspeth.engine.dependency_resolver.detect_cycles") as mock_detect,
+            patch("elspeth.engine.dependency_resolver.resolve_dependencies") as mock_resolve,
             pytest.raises(ValueError, match=r"Duplicate dependency names.*indexer"),
         ):
-            resolve_preflight(mock_config, Path("/fake/pipeline.yaml"), runner=mock_runner, probes=[])
+            resolve_preflight(mock_config, Path("/fake/pipeline.yaml"), runner=mock_runner)
+
+        mock_detect.assert_not_called()
+        mock_resolve.assert_not_called()

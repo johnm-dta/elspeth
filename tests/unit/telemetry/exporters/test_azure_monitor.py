@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts.enums import RowOutcome, RunStatus
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
     RunFinished,
     RunStarted,
@@ -334,7 +334,7 @@ class TestAzureMonitorExporterErrorHandling:
 
     def test_sdk_export_failure_does_not_raise(self, configured_exporter, mock_azure_exporter) -> None:
         """SDK export failure is logged but doesn't raise."""
-        mock_azure_exporter["instance"].export.side_effect = Exception("SDK error")
+        mock_azure_exporter["instance"].export.side_effect = ConnectionError("SDK transport error")
 
         event = make_run_started()
         configured_exporter._buffer.append(event)
@@ -347,10 +347,20 @@ class TestAzureMonitorExporterErrorHandling:
 
     def test_sdk_shutdown_failure_does_not_raise(self, configured_exporter, mock_azure_exporter) -> None:
         """SDK shutdown failure is logged but doesn't raise."""
-        mock_azure_exporter["instance"].shutdown.side_effect = Exception("Shutdown error")
+        mock_azure_exporter["instance"].shutdown.side_effect = ConnectionError("Shutdown transport error")
 
         # Should not raise
         configured_exporter.close()
+
+    def test_programming_error_in_export_crashes(self, configured_exporter, mock_azure_exporter) -> None:
+        """Programming errors (non-transport) must crash — not be swallowed."""
+        mock_azure_exporter["instance"].export.side_effect = ValueError("Bad payload construction")
+
+        event = make_run_started()
+        configured_exporter._buffer.append(event)
+
+        with pytest.raises(ValueError, match="Bad payload construction"):
+            configured_exporter._flush_batch()
 
 
 class TestAzureMonitorExporterTokenCompleted:
@@ -365,7 +375,8 @@ class TestAzureMonitorExporterTokenCompleted:
             run_id="run-123",
             token_id="token-456",
             row_id="row-789",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
 
@@ -379,4 +390,5 @@ class TestAzureMonitorExporterTokenCompleted:
         span = spans[0]
         assert span.name == "TokenCompleted"
         assert span.attributes.get("token_id") == "token-456"
-        assert span.attributes.get("outcome") == "completed"
+        assert span.attributes.get("outcome") == "success"
+        assert span.attributes.get("path") == "default_flow"

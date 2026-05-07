@@ -16,11 +16,12 @@ Security model:
 from __future__ import annotations
 
 import ast
+import math
 import operator
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+import elspeth.contracts.errors as contract_errors
 
 if TYPE_CHECKING:
     from elspeth.contracts import PipelineRow
@@ -93,15 +94,12 @@ _BOOL_OPS: MappingProxyType[type[ast.boolop], str] = MappingProxyType(
 )
 
 # Safe built-in functions allowed in expressions (immutable to prevent runtime tampering).
-# All are pure functions with no side effects, no I/O, and no access to the runtime
-# environment. They cannot escape the expression sandbox.
+# Only non-coercive operations are permitted. Coercive builtins (str, int, float, bool)
+# are forbidden because they silently normalize Tier 2 data in gate expressions,
+# masking upstream contract bugs and weakening audit attributability.
 _SAFE_BUILTINS: MappingProxyType[str, Any] = MappingProxyType(
     {
         "len": len,
-        "str": str,
-        "int": int,
-        "float": float,
-        "bool": bool,
         "abs": abs,
     }
 )
@@ -120,6 +118,8 @@ class _ExpressionValidator(ast.NodeVisitor):
         self.errors: list[str] = []
         self._in_call_func: bool = False  # Track if currently visiting a Call's func
         self._allowed_names = allowed_names
+        self._allow_allowed_name_reference = 0
+        self._allow_safe_builtin_reference = 0
 
     def _is_none_constant(self, node: ast.expr) -> bool:
         """Check if node is a None literal (ast.Constant or ast.Name)."""
@@ -146,9 +146,19 @@ class _ExpressionValidator(ast.NodeVisitor):
 
     def visit_Name(self, node: ast.Name) -> None:
         """Allow only allowed names, boolean/None literals, and safe builtin names."""
-        if node.id not in self._allowed_names and node.id not in _SAFE_CONSTANTS and node.id not in _SAFE_BUILTINS:
-            self.errors.append(f"Forbidden name: {node.id!r}")
-        self.generic_visit(node)
+        if node.id in _SAFE_CONSTANTS:
+            return
+        if node.id in _SAFE_BUILTINS:
+            if self._allow_safe_builtin_reference > 0:
+                return
+            self.errors.append(f"Bare builtin name: {node.id!r} (only direct calls are allowed)")
+            return
+        if node.id in self._allowed_names:
+            if self._allow_allowed_name_reference > 0:
+                return
+            self.errors.append(f"Bare allowed name: {node.id!r} (use {node.id}['field'] or {node.id}.get('field'))")
+            return
+        self.errors.append(f"Forbidden name: {node.id!r}")
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         """Allow subscript access on allowed-name-derived data only."""
@@ -158,7 +168,12 @@ class _ExpressionValidator(ast.NodeVisitor):
         # Restrict subscript to allowed-name-derived data
         if not self._is_allowed_derived(node.value):
             self.errors.append(f"Subscript access is only allowed on allowed names; got subscript on {ast.dump(node.value)}")
-        self.generic_visit(node)
+        self._allow_allowed_name_reference += 1
+        try:
+            self.visit(node.value)
+        finally:
+            self._allow_allowed_name_reference -= 1
+        self.visit(node.slice)
 
     def visit_Slice(self, node: ast.Slice) -> None:
         """Reject slice syntax."""
@@ -167,20 +182,23 @@ class _ExpressionValidator(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         """Allow only .get method access on allowed names when called."""
         if isinstance(node.value, ast.Name) and node.value.id in self._allowed_names:
+            self._allow_allowed_name_reference += 1
+            try:
+                self.visit(node.value)
+            finally:
+                self._allow_allowed_name_reference -= 1
             if node.attr != "get":
                 self.errors.append(f"Forbidden attribute: {node.attr!r} (only 'get' is allowed)")
             elif not self._in_call_func:
                 # name.get without a call is forbidden - returns method object
-                self.errors.append(
-                    f"Bare '{node.value.id}.get' is forbidden; use '{node.value.id}.get(key)' or '{node.value.id}.get(key, default)'"
-                )
-        else:
-            self.errors.append(f"Forbidden attribute access: {node.attr!r}")
-        self.generic_visit(node)
+                self.errors.append(f"Bare '{node.value.id}.get' is forbidden; use '{node.value.id}.get(key)'")
+            return
+        self.errors.append(f"Forbidden attribute access: {node.attr!r}")
+        self.visit(node.value)
 
     def visit_Call(self, node: ast.Call) -> None:
         """Allow .get() calls on allowed names and safe builtin calls."""
-        # Allow name.get() with 1 or 2 arguments (for any allowed name)
+        # Allow name.get() with exactly 1 argument (for any allowed name)
         if (
             isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
@@ -188,25 +206,35 @@ class _ExpressionValidator(ast.NodeVisitor):
             and node.func.attr == "get"
         ):
             caller_name = node.func.value.id
-            if len(node.args) < 1 or len(node.args) > 2:
-                self.errors.append(f"{caller_name}.get() requires 1 or 2 arguments, got {len(node.args)}")
+            if len(node.args) != 1:
+                self.errors.append(
+                    f"{caller_name}.get() requires exactly 1 argument (key only), got {len(node.args)}. "
+                    f"Default values are forbidden — they fabricate data the source never provided. "
+                    f"Use '{caller_name}.get(key) is not None' to test for field presence."
+                )
             if node.keywords:
                 self.errors.append(f"{caller_name}.get() does not accept keyword arguments")
             # Visit func with context flag set to allow row.get attribute
             self._in_call_func = True
-            self.visit(node.func)
-            self._in_call_func = False
+            try:
+                self.visit(node.func)
+            finally:
+                self._in_call_func = False
             # Visit arguments normally
             for arg in node.args:
                 self.visit(arg)
             return
 
-        # Allow safe builtin calls: len(), str(), int(), float(), bool(), abs()
+        # Allow safe builtin calls: len(), abs()
         if isinstance(node.func, ast.Name) and node.func.id in _SAFE_BUILTINS:
             if node.keywords:
                 self.errors.append(f"{node.func.id}() does not accept keyword arguments")
             # Visit func name (validated by visit_Name)
-            self.visit(node.func)
+            self._allow_safe_builtin_reference += 1
+            try:
+                self.visit(node.func)
+            finally:
+                self._allow_safe_builtin_reference -= 1
             # Visit arguments normally
             for arg in node.args:
                 self.visit(arg)
@@ -253,6 +281,9 @@ class _ExpressionValidator(ast.NodeVisitor):
         """Allow literals: strings, numbers, booleans, None."""
         if node.value is None:
             return  # None is allowed
+        if isinstance(node.value, float) and not math.isfinite(node.value):
+            self.errors.append("Non-finite float literal is forbidden in expressions")
+            return
         if isinstance(node.value, str | int | float | bool):
             return  # Primitives allowed
         self.errors.append(f"Forbidden constant type: {type(node.value).__name__}")
@@ -389,6 +420,30 @@ class _ExpressionValidator(ast.NodeVisitor):
         super().visit(node)
 
 
+# ── Module-level coupling enforcement ─────────────────────────────────
+# Every type in _HANDLED_EXPR_TYPES must have a visit_* method, and every
+# visit_* method must have a corresponding type.  Without this check,
+# adding a type without a handler silently falls through to generic_visit,
+# bypassing security validation.
+_handler_type_names = {t.__name__ for t in _ExpressionValidator._HANDLED_EXPR_TYPES}
+_visitor_method_names = {
+    name.removeprefix("visit_") for name in vars(_ExpressionValidator) if name.startswith("visit_") and name != "visit"
+}
+
+_missing_handlers = _handler_type_names - _visitor_method_names
+_orphan_visitors = _visitor_method_names - _handler_type_names
+
+if _missing_handlers or _orphan_visitors:
+    _parts: list[str] = []
+    if _missing_handlers:
+        _parts.append(f"types without visit_* handler: {sorted(_missing_handlers)}")
+    if _orphan_visitors:
+        _parts.append(f"visit_* handlers without type entry: {sorted(_orphan_visitors)}")
+    raise TypeError(f"_ExpressionValidator handler/type coupling violation: {'; '.join(_parts)}")
+
+del _handler_type_names, _visitor_method_names, _missing_handlers, _orphan_visitors
+
+
 class _ExpressionEvaluator(ast.NodeVisitor):
     """AST visitor that evaluates validated expressions."""
 
@@ -405,6 +460,12 @@ class _ExpressionEvaluator(ast.NodeVisitor):
         # In multi-name mode the context is a namespace dict where each
         # allowed name maps to its value (e.g. {"collections": {...}, "env": {...}}).
         self._single_name_mode = single_name_mode
+
+    def _ensure_finite_float(self, value: Any, *, context: str) -> Any:
+        """Reject non-finite floats produced inside expression evaluation."""
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ExpressionEvaluationError(f"{context} produced non-finite float: {value!r}")
+        return value
 
     def visit_Expression(self, node: ast.Expression) -> Any:
         """Evaluate the top-level expression."""
@@ -432,7 +493,7 @@ class _ExpressionEvaluator(ast.NodeVisitor):
 
     def visit_Constant(self, node: ast.Constant) -> Any:
         """Evaluate constants."""
-        return node.value
+        return self._ensure_finite_float(node.value, context="expression literal")
 
     def visit_Subscript(self, node: ast.Subscript) -> Any:
         """Evaluate subscript access."""
@@ -529,28 +590,29 @@ class _ExpressionEvaluator(ast.NodeVisitor):
         """Evaluate binary operations."""
         left = self.visit(node.left)
         right = self.visit(node.right)
+        op_name = type(node.op).__name__
         op_func = _BINARY_OPS[type(node.op)]
         try:
-            return op_func(left, right)
+            result = op_func(left, right)
         except ZeroDivisionError as e:
-            op_name = type(node.op).__name__
             msg = f"division by zero in {op_name} operation"
             raise ExpressionEvaluationError(msg) from e
         except TypeError as e:
-            op_name = type(node.op).__name__
             msg = f"type error in {op_name}: cannot apply to {type(left).__name__} and {type(right).__name__}"
             raise ExpressionEvaluationError(msg) from e
+        return self._ensure_finite_float(result, context=f"{op_name} operation")
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
         """Evaluate unary operations."""
         operand = self.visit(node.operand)
+        op_name = type(node.op).__name__
         op_func = _UNARY_OPS[type(node.op)]
         try:
-            return op_func(operand)
+            result = op_func(operand)
         except TypeError as e:
-            op_name = type(node.op).__name__
             msg = f"type error in unary {op_name}: cannot apply to {type(operand).__name__}"
             raise ExpressionEvaluationError(msg) from e
+        return self._ensure_finite_float(result, context=f"unary {op_name}")
 
     def visit_List(self, node: ast.List) -> Any:
         """Evaluate list literals."""
@@ -604,8 +666,8 @@ class ExpressionParser:
 
     Allowed operations:
     - Subscript access: name['field'], name['key1']['key2']
-    - Method: name.get('field'), name.get('field', default)
-    - Safe builtins: len(), str(), int(), float(), bool(), abs()
+    - Method: name.get('field') (single-arg only — defaults are fabrication)
+    - Safe builtins: len(), abs()
     - Comparisons: ==, !=, <, >, <=, >=
     - Boolean operators: and, or, not
     - Membership: in, not in
@@ -723,10 +785,6 @@ class ExpressionParser:
         if isinstance(node, ast.IfExp):
             return self._is_boolean_node(node.body) and self._is_boolean_node(node.orelse)
 
-        # Function calls: bool() always returns bool
-        if isinstance(node, ast.Call):
-            return isinstance(node.func, ast.Name) and node.func.id == "bool"
-
         # Everything else (field access, arithmetic, etc.) is not guaranteed boolean
         return False
 
@@ -749,7 +807,7 @@ class ExpressionParser:
             return evaluator.visit(self._ast)
         except (ExpressionEvaluationError, ExpressionSecurityError):
             raise
-        except (FrameworkBugError, AuditIntegrityError):
+        except contract_errors.TIER_1_ERRORS:
             raise  # Framework bugs must not be wrapped as evaluation errors
         except (TypeError, AttributeError, KeyError, NameError, AssertionError, RecursionError):
             raise  # Programming errors in the evaluator must crash through

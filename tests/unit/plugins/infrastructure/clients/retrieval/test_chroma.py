@@ -9,17 +9,39 @@ name to prevent cross-test interference.
 """
 
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
 chromadb = pytest.importorskip("chromadb")
 
+from elspeth.contracts.enums import CallStatus  # noqa: E402
+from elspeth.core.landscape.execution_repository import ExecutionRepository  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError  # noqa: E402
 from elspeth.plugins.infrastructure.clients.retrieval.chroma import (  # noqa: E402
     ChromaSearchProvider,
     ChromaSearchProviderConfig,
 )
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk  # noqa: E402
+
+
+def _mock_execution() -> MagicMock:
+    """Create a mock execution repository with spec enforcement.
+
+    Using spec=ExecutionRepository ensures misspelled method names
+    (e.g., allocate_call_indax) raise AttributeError in tests.
+    """
+    return MagicMock(spec=ExecutionRepository)
+
+
+def _precreate_collection(name: str, distance_function: str = "cosine") -> None:
+    """Pre-create a Chroma collection so ChromaSearchProvider.__init__ finds it.
+
+    ChromaSearchProvider uses get_collection() (not get_or_create) to ensure
+    retrieval operates on existing corpora. Tests must create the collection first.
+    """
+    client = chromadb.Client()
+    client.get_or_create_collection(name=name, metadata={"hnsw:space": distance_function})
 
 
 class TestChromaSearchProviderConfig:
@@ -130,19 +152,21 @@ class TestToConnectionConfig:
 class TestChromaSearchProvider:
     """Tests using real ephemeral ChromaDB — no mocks."""
 
-    def _make_provider(self, documents=None, distance_function="cosine"):
+    def _make_provider(self, documents: list[dict[str, str]] | None = None, distance_function: str = "cosine") -> ChromaSearchProvider:
         # Use unique collection name: chromadb.Client() shares a global in-memory
         # backend, so reusing names across tests causes collection state to bleed.
         unique_name = f"tc-{uuid.uuid4().hex[:12]}"
-        config = ChromaSearchProviderConfig(
-            collection=unique_name,
-            mode="ephemeral",
-            distance_function=distance_function,
+
+        # Pre-create the collection BEFORE constructing the provider.
+        # ChromaSearchProvider uses get_collection() (not get_or_create) —
+        # retrieval requires an existing collection.
+        client = chromadb.Client()
+        collection = client.get_or_create_collection(
+            name=unique_name,
+            metadata={"hnsw:space": distance_function},
         )
-        provider = ChromaSearchProvider(config=config)
 
         if documents:
-            collection = provider._collection
             # ChromaDB 1.x rejects empty metadata dicts — pass None when absent.
             metadatas = [d.get("metadata") or None for d in documents]
             collection.add(
@@ -151,7 +175,12 @@ class TestChromaSearchProvider:
                 metadatas=metadatas,
             )
 
-        return provider
+        config = ChromaSearchProviderConfig(
+            collection=unique_name,
+            mode="ephemeral",
+            distance_function=distance_function,
+        )
+        return ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
 
     def test_search_returns_retrieval_chunks(self):
         provider = self._make_provider(
@@ -264,15 +293,24 @@ class TestChromaSearchProvider:
 
     def test_distance_function_mismatch_raises(self, tmp_path):
         """Uses PersistentClient so both providers share the same backing store."""
+        # Pre-create collection with cosine distance via PersistentClient
+        client = chromadb.PersistentClient(path=str(tmp_path))
+        collection = client.get_or_create_collection(
+            name="mismatch-test",
+            metadata={"hnsw:space": "cosine"},
+        )
+        collection.add(documents=["test"], ids=["doc1"])
+
+        # Provider with matching distance function should succeed
         config_cosine = ChromaSearchProviderConfig(
             collection="mismatch-test",
             mode="persistent",
             persist_directory=str(tmp_path),
             distance_function="cosine",
         )
-        provider_cosine = ChromaSearchProvider(config=config_cosine)
-        provider_cosine._collection.add(documents=["test"], ids=["doc1"])
+        ChromaSearchProvider(config=config_cosine, execution=_mock_execution(), run_id="test-run")
 
+        # Provider with mismatched distance function should fail
         config_l2 = ChromaSearchProviderConfig(
             collection="mismatch-test",
             mode="persistent",
@@ -280,7 +318,20 @@ class TestChromaSearchProvider:
             distance_function="l2",
         )
         with pytest.raises(RetrievalError, match="distance_function"):
-            ChromaSearchProvider(config=config_l2)
+            ChromaSearchProvider(config=config_l2, execution=_mock_execution(), run_id="test-run")
+
+    def test_missing_hnsw_space_metadata_raises(self, tmp_path):
+        """Collection without hnsw:space metadata must crash — can't normalize scores."""
+        client = chromadb.PersistentClient(path=str(tmp_path))
+        client.get_or_create_collection(name="no-metadata-test")
+
+        config = ChromaSearchProviderConfig(
+            collection="no-metadata-test",
+            mode="persistent",
+            persist_directory=str(tmp_path),
+        )
+        with pytest.raises(RetrievalError, match="hnsw:space"):
+            ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
 
     def test_close_does_not_raise(self):
         provider = self._make_provider()
@@ -310,18 +361,18 @@ class TestChromaSearchProvider:
 
     def test_search_records_call(self):
         """Chroma search calls must be recorded in the audit trail."""
-        from unittest.mock import MagicMock
 
         unique_name = f"ta-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
             distance_function="cosine",
         )
-        mock_recorder = MagicMock()
+        mock_execution = _mock_execution()
         provider = ChromaSearchProvider(
             config=config,
-            recorder=mock_recorder,
+            execution=mock_execution,
             run_id="run-1",
         )
         provider._collection.add(documents=["test doc"], ids=["doc1"])
@@ -332,19 +383,20 @@ class TestChromaSearchProvider:
             state_id="state-1",
             token_id="token-1",
         )
-        mock_recorder.record_call.assert_called_once()
+        mock_execution.record_call.assert_called_once()
 
 
 class TestChromaScoreNormalization:
-    def _make_provider(self, distance_function):
+    def _make_provider(self, distance_function: str) -> ChromaSearchProvider:
         # Unique name per call — chromadb.Client() shares a global in-memory backend.
         unique_name = f"tsn-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name, distance_function)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
             distance_function=distance_function,
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         provider._collection.add(documents=["test document"], ids=["doc1"])
         return provider
 
@@ -392,20 +444,20 @@ class TestCallTypeCorrectness:
 
     def test_audit_call_uses_vector_call_type(self):
         """Chroma search should record CallType.VECTOR, not CallType.SQL."""
-        from unittest.mock import MagicMock
 
         from elspeth.contracts.enums import CallType
 
         unique_name = f"tct-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
             distance_function="cosine",
         )
-        mock_recorder = MagicMock()
+        mock_execution = _mock_execution()
         provider = ChromaSearchProvider(
             config=config,
-            recorder=mock_recorder,
+            execution=mock_execution,
             run_id="run-1",
         )
         provider._collection.add(documents=["test doc"], ids=["doc1"])
@@ -416,8 +468,8 @@ class TestCallTypeCorrectness:
             state_id="state-1",
             token_id="token-1",
         )
-        mock_recorder.record_call.assert_called_once()
-        assert mock_recorder.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
+        mock_execution.record_call.assert_called_once()
+        assert mock_execution.record_call.call_args.kwargs["call_type"] == CallType.VECTOR
 
 
 class TestTier3ResultBoundary:
@@ -428,11 +480,12 @@ class TestTier3ResultBoundary:
         from unittest.mock import patch
 
         unique_name = f"t3r-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         # Simulate malformed SDK response — missing 'documents' key
@@ -447,11 +500,12 @@ class TestTier3ResultBoundary:
         from unittest.mock import patch
 
         unique_name = f"t3n-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         with (
@@ -469,11 +523,12 @@ class TestTier3ResultBoundary:
         from unittest.mock import patch
 
         unique_name = f"t3d-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         provider._collection.add(documents=["test doc"], ids=["doc1"])
 
         with (
@@ -490,14 +545,15 @@ class TestTier3ResultBoundary:
 class TestNonFiniteDistanceHandling:
     """Tests for elspeth-69632ec27f: NaN distance from corrupt index."""
 
-    def _make_provider(self):
+    def _make_provider(self) -> ChromaSearchProvider:
         unique_name = f"tnf-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
             distance_function="cosine",
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         return provider
 
     def test_nan_distance_raises_retrieval_error(self):
@@ -552,11 +608,12 @@ class TestDistanceTypeValidation:
         from unittest.mock import patch
 
         unique_name = f"tdt-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         provider._collection.add(documents=["doc a", "doc b"], ids=["doc1", "doc2"])
 
         with (
@@ -575,6 +632,129 @@ class TestDistanceTypeValidation:
             provider.search("test", top_k=2, min_score=0.0, state_id="s1", token_id=None)
 
 
+class TestPostQueryFailureAudit:
+    """Tests for elspeth-9454d584d2: failures after successful query must produce audit records.
+
+    The external call to ChromaDB happened and returned a response. If
+    post-processing fails (malformed response, corrupt distances, non-finite
+    values), the audit trail must still record the call.
+    """
+
+    def test_malformed_response_records_error_call(self):
+        """Malformed SDK response produces audit record before raising."""
+        from unittest.mock import patch
+
+        unique_name = f"pqa-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["test doc"], ids=["doc1"])
+
+        with (
+            patch.object(provider._collection, "query", return_value={"ids": [["doc1"]]}),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_non_numeric_distance_records_error_call(self):
+        """Corrupt distance produces audit record before crashing."""
+        from unittest.mock import patch
+
+        unique_name = f"pqd-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["doc a"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["doc a"]],
+                    "distances": [["not_a_number"]],
+                    "metadatas": [[{}]],
+                },
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_nan_distance_records_error_call(self):
+        """NaN distance from corrupt index produces audit record."""
+        from unittest.mock import patch
+
+        unique_name = f"pqn-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["doc a"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={
+                    "ids": [["doc1"]],
+                    "documents": [["doc a"]],
+                    "distances": [[float("nan")]],
+                    "metadatas": [[{}]],
+                },
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+    def test_none_documents_records_error_call(self):
+        """None in response fields produces audit record."""
+        from unittest.mock import patch
+
+        unique_name = f"pqnr-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
+        execution = _mock_execution()
+        provider = ChromaSearchProvider(
+            config=ChromaSearchProviderConfig(collection=unique_name, mode="ephemeral"),
+            execution=execution,
+            run_id="test-run",
+        )
+        provider._collection.add(documents=["test doc"], ids=["doc1"])
+
+        with (
+            patch.object(
+                provider._collection,
+                "query",
+                return_value={"ids": [["doc1"]], "documents": None, "distances": [[0.1]], "metadatas": [[{}]]},
+            ),
+            pytest.raises(RetrievalError),
+        ):
+            provider.search("test", top_k=1, min_score=0.0, state_id="s1", token_id=None)
+
+        execution.record_call.assert_called_once()
+        assert execution.record_call.call_args.kwargs["status"] == CallStatus.ERROR
+
+
 class TestDocTypeValidation:
     """Tests for elspeth-aaa99db4be: doc type unchecked."""
 
@@ -583,11 +763,12 @@ class TestDocTypeValidation:
         from unittest.mock import patch
 
         unique_name = f"tdv-{uuid.uuid4().hex[:12]}"
+        _precreate_collection(unique_name)
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
         )
-        provider = ChromaSearchProvider(config=config)
+        provider = ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
         provider._collection.add(documents=["real doc"], ids=["doc1"])
 
         # Simulate SDK returning non-string document (corrupt index)
@@ -611,22 +792,28 @@ class TestDocTypeValidation:
 class TestChromaSearchProviderReadiness:
     """Tests for ChromaSearchProvider.check_readiness()."""
 
-    def _make_provider(self, documents=None):
+    def _make_provider(self, documents: list[dict[str, str]] | None = None) -> ChromaSearchProvider:
         unique_name = f"tcr-{uuid.uuid4().hex[:12]}"
+
+        # Pre-create the collection before constructing the provider.
+        client = chromadb.Client()
+        collection = client.get_or_create_collection(
+            name=unique_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+        if documents:
+            collection.add(
+                documents=[d["content"] for d in documents],
+                ids=[d["id"] for d in documents],
+            )
+
         config = ChromaSearchProviderConfig(
             collection=unique_name,
             mode="ephemeral",
             distance_function="cosine",
         )
-        provider = ChromaSearchProvider(config=config)
-
-        if documents:
-            provider._collection.add(
-                documents=[d["content"] for d in documents],
-                ids=[d["id"] for d in documents],
-            )
-
-        return provider
+        return ChromaSearchProvider(config=config, execution=_mock_execution(), run_id="test-run")
 
     def test_collection_with_documents_is_ready(self) -> None:
         """Collection exists and has documents."""
@@ -668,7 +855,7 @@ class TestChromaSearchProviderReadiness:
         result = provider.check_readiness()
 
         assert result.reachable is False
-        assert result.count == 0
+        assert result.count is None
         assert "Connection refused" in result.message
 
     def test_uncaught_exception_crashes_through(self) -> None:

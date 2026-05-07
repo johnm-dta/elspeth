@@ -7,7 +7,7 @@ These tests verify the full integration of:
 3. Contract round-trip through audit trail with full fidelity
 
 Per CLAUDE.md Test Path Integrity: These tests use production code paths
-(CSVSource, LandscapeRecorder, SchemaContract, PipelineRow) rather than
+(CSVSource, RecorderFactory, SchemaContract, PipelineRow) rather than
 manual construction.
 
 Migrated from tests/integration/test_contract_audit_integration.py
@@ -32,7 +32,7 @@ from elspeth.contracts import (
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.schema import validation_errors_table
 from elspeth.plugins.sources.csv_source import CSVSource
-from tests.fixtures.landscape import make_landscape_db, make_recorder, make_recorder_with_run
+from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
@@ -110,19 +110,19 @@ class TestFullAuditTrailWithContracts:
         assert customer_field.original_name == "Customer ID"
         assert customer_field.source == "inferred"
 
-        # Store contract in audit trail via LandscapeRecorder
+        # Store contract in audit trail via RecorderFactory
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Begin run with contract
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "config"},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=contract,
         )
 
         # Verify contract stored in run
-        stored_contract = recorder.get_run_contract(run.run_id)
+        stored_contract = factory.run_lifecycle.get_run_contract(run.run_id)
         assert stored_contract is not None
         assert stored_contract.mode == "OBSERVED"
         assert stored_contract.locked is True
@@ -161,16 +161,16 @@ class TestFullAuditTrailWithContracts:
 
         # Begin run without contract (simulates dynamic schema)
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "config"},
             canonical_version="sha256-rfc8785-v1",
             # No schema_contract initially
         )
 
         # Verify no contract yet
-        assert recorder.get_run_contract(run.run_id) is None
+        assert factory.run_lifecycle.get_run_contract(run.run_id) is None
 
         # Load rows to infer contract
         rows = list(source.load(cast("PluginContext", ctx)))
@@ -181,10 +181,10 @@ class TestFullAuditTrailWithContracts:
         assert contract.locked is True
 
         # Update run with inferred contract
-        recorder.update_run_contract(run.run_id, contract)
+        factory.run_lifecycle.update_run_contract(run.run_id, contract)
 
         # Verify contract now stored
-        stored_contract = recorder.get_run_contract(run.run_id)
+        stored_contract = factory.run_lifecycle.get_run_contract(run.run_id)
         assert stored_contract is not None
         assert stored_contract.mode == "OBSERVED"
         assert len(stored_contract.fields) == 2
@@ -239,7 +239,7 @@ class TestValidationErrorWithContractDetails:
 
         # Now test storing validation error with contract violation in audit trail
         setup = make_recorder_with_run(canonical_version="sha256-rfc8785-v1")
-        db, recorder, run_id = setup.db, setup.recorder, setup.run_id
+        db, run_id = setup.db, setup.run_id
         source_node_id = setup.source_node_id
 
         # Create a contract violation for testing
@@ -252,7 +252,7 @@ class TestValidationErrorWithContractDetails:
         )
 
         # Record validation error with contract violation
-        error_id = recorder.record_validation_error(
+        error_id = setup.data_flow.record_validation_error(
             run_id=run_id,
             node_id=source_node_id,
             row_data={"id": 2, "amount": "not_int"},
@@ -279,15 +279,15 @@ class TestValidationErrorWithContractDetails:
     def test_validation_error_without_contract_violation(self) -> None:
         """Validation errors work without contract violation."""
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "config"},
             canonical_version="sha256-rfc8785-v1",
         )
 
         # Record validation error without contract_violation
-        error_id = recorder.record_validation_error(
+        error_id = factory.data_flow.record_validation_error(
             run_id=run.run_id,
             node_id=None,
             row_data={"field": "value"},
@@ -351,16 +351,16 @@ class TestContractSurvivesAuditRoundTrip:
 
         # Store contract in audit trail
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "config"},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=original_contract,
         )
 
         # Restore contract from audit trail
-        restored_contract = recorder.get_run_contract(run.run_id)
+        restored_contract = factory.run_lifecycle.get_run_contract(run.run_id)
         assert restored_contract is not None
 
         # Verify hash matches (integrity verification)
@@ -464,9 +464,9 @@ class TestContractSurvivesAuditRoundTrip:
     def test_node_contracts_round_trip(self) -> None:
         """Node input/output contracts survive audit trail round-trip."""
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "config"},
             canonical_version="sha256-rfc8785-v1",
         )
@@ -509,7 +509,7 @@ class TestContractSurvivesAuditRoundTrip:
 
         # Register node with contracts
         schema_config = SchemaConfig(mode="flexible", fields=None)
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_transform",
             node_type=NodeType.TRANSFORM,
@@ -521,7 +521,7 @@ class TestContractSurvivesAuditRoundTrip:
         )
 
         # Retrieve contracts
-        retrieved_input, retrieved_output = recorder.get_node_contracts(run.run_id, node.node_id)
+        retrieved_input, retrieved_output = factory.data_flow.get_node_contracts(run.run_id, node.node_id)
 
         # Verify input contract
         assert retrieved_input is not None
@@ -591,7 +591,7 @@ class TestContractWithCheckpointRegistry:
         """Contract registry can be built from audit trail for checkpoint restore."""
         # Create and store multiple contracts
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         contract1 = SchemaContract(
             mode="OBSERVED",
@@ -606,13 +606,13 @@ class TestContractWithCheckpointRegistry:
         )
 
         # Store contracts in audit trail (via runs)
-        run1 = recorder.begin_run(
+        run1 = factory.run_lifecycle.begin_run(
             config={"run": 1},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=contract1,
         )
 
-        run2 = recorder.begin_run(
+        run2 = factory.run_lifecycle.begin_run(
             config={"run": 2},
             canonical_version="sha256-rfc8785-v1",
             schema_contract=contract2,
@@ -621,11 +621,11 @@ class TestContractWithCheckpointRegistry:
         # Build registry from audit trail
         registry: dict[str, SchemaContract] = {}
 
-        restored1 = recorder.get_run_contract(run1.run_id)
+        restored1 = factory.run_lifecycle.get_run_contract(run1.run_id)
         if restored1:
             registry[restored1.version_hash()] = restored1
 
-        restored2 = recorder.get_run_contract(run2.run_id)
+        restored2 = factory.run_lifecycle.get_run_contract(run2.run_id)
         if restored2:
             registry[restored2.version_hash()] = restored2
 

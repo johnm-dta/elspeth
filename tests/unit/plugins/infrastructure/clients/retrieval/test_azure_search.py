@@ -1,8 +1,12 @@
 """Tests for Azure AI Search provider."""
 
+from __future__ import annotations
+
+from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+import respx
 
 from elspeth.plugins.infrastructure.clients.retrieval.azure_search import (
     AzureSearchProvider,
@@ -65,18 +69,18 @@ class TestAzureSearchProviderConfig:
 
 
 class TestAzureSearchProviderSearch:
-    def _make_provider(self, search_mode="hybrid"):
+    def _make_provider(self, search_mode: str = "hybrid") -> AzureSearchProvider:
         config = AzureSearchProviderConfig(
             endpoint="https://test.search.windows.net",
             index="test-index",
             api_key="test-key",
             search_mode=search_mode,
         )
-        recorder = MagicMock()
+        execution = MagicMock()
         telemetry_emit = MagicMock()
         return AzureSearchProvider(
             config=config,
-            recorder=recorder,
+            execution=execution,
             run_id="run-1",
             telemetry_emit=telemetry_emit,
         )
@@ -142,7 +146,7 @@ class TestAzureSearchProviderSearch:
 
 
 class TestScoreNormalization:
-    def _make_provider(self, search_mode="hybrid"):
+    def _make_provider(self, search_mode: str = "hybrid") -> AzureSearchProvider:
         config = AzureSearchProviderConfig(
             endpoint="https://test.search.windows.net",
             index="test-index",
@@ -151,7 +155,7 @@ class TestScoreNormalization:
         )
         return AzureSearchProvider(
             config=config,
-            recorder=MagicMock(),
+            execution=MagicMock(),
             run_id="run-1",
             telemetry_emit=MagicMock(),
         )
@@ -190,7 +194,7 @@ class TestScoreNormalization:
         )
         provider = AzureSearchProvider(
             config=config,
-            recorder=MagicMock(),
+            execution=MagicMock(),
             run_id="run-1",
             telemetry_emit=MagicMock(),
         )
@@ -213,7 +217,7 @@ class TestScoreNormalization:
 
 
 class TestBuildRequestBody:
-    def _make_provider(self, search_mode="hybrid", **overrides):
+    def _make_provider(self, search_mode: str = "hybrid", **overrides: Any) -> AzureSearchProvider:
         config_data = {
             "endpoint": "https://test.search.windows.net",
             "index": "test-index",
@@ -226,7 +230,7 @@ class TestBuildRequestBody:
         config = AzureSearchProviderConfig(**config_data)
         return AzureSearchProvider(
             config=config,
-            recorder=MagicMock(),
+            execution=MagicMock(),
             run_id="run-1",
             telemetry_emit=MagicMock(),
         )
@@ -259,7 +263,7 @@ class TestBuildRequestBody:
 
 
 class TestParseResponse:
-    def _make_provider(self):
+    def _make_provider(self) -> AzureSearchProvider:
         config = AzureSearchProviderConfig(
             endpoint="https://test.search.windows.net",
             index="test-index",
@@ -267,7 +271,7 @@ class TestParseResponse:
         )
         return AzureSearchProvider(
             config=config,
-            recorder=MagicMock(),
+            execution=MagicMock(),
             run_id="run-1",
             telemetry_emit=MagicMock(),
         )
@@ -350,7 +354,13 @@ class TestParseResponse:
 class TestAzureSearchProviderReadiness:
     """Tests for AzureSearchProvider.check_readiness()."""
 
-    def _make_provider(self):
+    @pytest.fixture(autouse=True)
+    def _bypass_ssrf_dns(self):
+        """Readiness tests mock httpx; bypass live DNS pinning at that boundary."""
+        with patch("elspeth.core.security.web.validate_url_for_ssrf"):
+            yield
+
+    def _make_provider(self) -> AzureSearchProvider:
         config = AzureSearchProviderConfig(
             endpoint="https://test.search.windows.net",
             index="test-index",
@@ -358,12 +368,12 @@ class TestAzureSearchProviderReadiness:
         )
         return AzureSearchProvider(
             config=config,
-            recorder=MagicMock(),
+            execution=MagicMock(),
             run_id="run-1",
             telemetry_emit=MagicMock(),
         )
 
-    def _mock_response(self, *, status_code=200, text="0"):
+    def _mock_response(self, *, status_code: int = 200, text: str = "0") -> MagicMock:
         resp = MagicMock()
         type(resp).status_code = PropertyMock(return_value=status_code)
         type(resp).text = PropertyMock(return_value=text)
@@ -411,7 +421,7 @@ class TestAzureSearchProviderReadiness:
             result = provider.check_readiness()
 
         assert result.reachable is True
-        assert result.count == 0
+        assert result.count is None
         assert "not found" in result.message.lower()
 
     def test_connection_error(self) -> None:
@@ -422,7 +432,7 @@ class TestAzureSearchProviderReadiness:
             result = provider.check_readiness()
 
         assert result.reachable is False
-        assert result.count == 0
+        assert result.count is None
         assert "Connection refused" in result.message
 
     def test_auth_header_sent(self) -> None:
@@ -456,7 +466,7 @@ class TestAzureSearchProviderReadiness:
 
         # Reachable (HTTP 200) but unparseable — distinct from unreachable
         assert result.reachable is True
-        assert result.count == 0
+        assert result.count is None
         assert "non-integer" in result.message.lower()
 
     def test_server_error_during_probe(self) -> None:
@@ -467,7 +477,7 @@ class TestAzureSearchProviderReadiness:
             result = provider.check_readiness()
 
         assert result.reachable is False
-        assert result.count == 0
+        assert result.count is None
 
     def test_managed_identity_sends_bearer_token(self) -> None:
         """Managed identity readiness probe acquires a Bearer token via DefaultAzureCredential."""
@@ -478,7 +488,7 @@ class TestAzureSearchProviderReadiness:
         )
         provider = AzureSearchProvider(
             config=config,
-            recorder=MagicMock(),
+            execution=MagicMock(),
             run_id="run-1",
             telemetry_emit=MagicMock(),
         )
@@ -514,3 +524,104 @@ class TestAzureSearchProviderReadiness:
             pytest.raises(TypeError, match="unexpected type"),
         ):
             provider.check_readiness()
+
+
+class TestExecuteSearchHTTP:
+    """HTTP-level tests for _execute_search using respx to mock httpx transport.
+
+    These tests exercise the real HTTP call path through AuditedHTTPClient,
+    unlike the other test classes which mock _execute_search directly.
+    """
+
+    SEARCH_URL = "https://test.search.windows.net/indexes/test-index/docs/search?api-version=2024-07-01"
+
+    def _make_provider(self) -> AzureSearchProvider:
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            api_key="test-key",
+        )
+        execution = MagicMock()
+        telemetry_emit = MagicMock()
+        return AzureSearchProvider(
+            config=config,
+            execution=execution,
+            run_id="run-1",
+            telemetry_emit=telemetry_emit,
+        )
+
+    @pytest.mark.parametrize("status_code", [401, 403])
+    def test_auth_error_response_raises_non_retryable(self, status_code: int) -> None:
+        """HTTP 401/403 both map to RetrievalError(retryable=False)."""
+        provider = self._make_provider()
+
+        with respx.mock:
+            respx.post(self.SEARCH_URL).respond(status_code=status_code, json={"error": "Auth failed"})
+
+            with pytest.raises(RetrievalError) as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+            assert not exc_info.value.retryable
+            assert exc_info.value.status_code == status_code
+
+    def test_429_response_raises_retryable(self) -> None:
+        """HTTP 429 maps to RetrievalError(retryable=True)."""
+
+        provider = self._make_provider()
+
+        with respx.mock:
+            respx.post(self.SEARCH_URL).respond(status_code=429, json={"error": "Rate limited"})
+
+            with pytest.raises(RetrievalError) as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+            assert exc_info.value.retryable
+            assert exc_info.value.status_code == 429
+
+    def test_500_response_raises_retryable(self) -> None:
+        """HTTP 500 maps to RetrievalError(retryable=True)."""
+
+        provider = self._make_provider()
+
+        with respx.mock:
+            respx.post(self.SEARCH_URL).respond(status_code=500, json={"error": "Internal Server Error"})
+
+            with pytest.raises(RetrievalError) as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+            assert exc_info.value.retryable
+            assert exc_info.value.status_code == 500
+
+    def test_200_valid_json_returns_parsed_dict(self) -> None:
+        """HTTP 200 with valid JSON returns the parsed response dict."""
+
+        provider = self._make_provider()
+        response_body = {
+            "value": [
+                {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
+            ]
+        }
+
+        with respx.mock:
+            respx.post(self.SEARCH_URL).respond(status_code=200, json=response_body)
+
+            result = provider._execute_search("test query", top_k=5, state_id="s1", token_id="t1")
+
+        assert result == response_body
+
+    def test_200_malformed_json_raises_non_retryable(self) -> None:
+        """HTTP 200 with unparseable body maps to RetrievalError(retryable=False)."""
+
+        provider = self._make_provider()
+
+        with respx.mock:
+            respx.post(self.SEARCH_URL).respond(
+                status_code=200,
+                content=b"this is not json",
+                headers={"Content-Type": "text/plain"},
+            )
+
+            with pytest.raises(RetrievalError, match="Malformed JSON") as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+            assert not exc_info.value.retryable

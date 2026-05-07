@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex bug hunt report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["markdown_report", "findings"],
+  "properties": {
+    "markdown_report": {
+      "type": "string",
+      "description": "Complete Markdown bug report content. Include one full bug template per finding, separated by a line containing only --- when there are multiple findings."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Machine-readable finding summaries. Use an empty array when no concrete bug was found.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_file",
+          "primary_fix_file",
+          "summary",
+          "severity",
+          "priority",
+          "confidence",
+          "evidence",
+          "no_defect_reason"
+        ],
+        "properties": {
+          "target_file": {
+            "type": "string",
+            "description": "The file this Codex invocation was assigned to audit."
+          },
+          "primary_fix_file": {
+            "type": "string",
+            "description": "The file where the primary fix belongs. Match target_file unless reporting an allowed P0 outside the target."
+          },
+          "summary": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "major", "minor", "trivial"]
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2", "P3"]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line", "claim"],
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": ["integer", "null"],
+                  "minimum": 1
+                },
+                "claim": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "no_defect_reason": {
+            "type": ["string", "null"],
+            "description": "Short reason when this entry represents a no-defect conclusion; otherwise null."
+          }
+        }
+      }
+    }
+  }
+}

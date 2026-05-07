@@ -84,7 +84,7 @@ def _custom_excepthook(args: threading.ExceptHookArgs) -> None:
                 "Suppressed expected pyrate-limiter cleanup exception",
                 thread_ident=thread_ident,
                 thread_name=args.thread.name if args.thread else None,
-                exc_type=args.exc_type.__name__ if args.exc_type else None,
+                exc_type=args.exc_type.__name__ if args.exc_type is not None else None,
             )
             return
         # Capture original reference inside lock (may be uninstalled by another thread)
@@ -162,6 +162,7 @@ class RateLimiter:
         self._window_ms = int(Duration.MINUTE if window_ms is None else window_ms)
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._closed = False
 
         # Single rate - sliding window
         if self._window_ms <= 0:
@@ -187,6 +188,13 @@ class RateLimiter:
         # Single limiter with per-minute rate
         self._limiter = Limiter(self._bucket, max_delay=self._window_ms, raise_when_fail=True)
 
+    @staticmethod
+    def _validate_weight(weight: int) -> None:
+        if type(weight) is not int:
+            raise TypeError(f"weight must be int, got {type(weight).__name__}: {weight!r}")
+        if weight <= 0:
+            raise ValueError(f"weight must be positive, got {weight!r}")
+
     def acquire(self, weight: int = 1, timeout: float | None = None) -> None:
         """Acquire rate limit tokens, blocking if necessary.
 
@@ -200,6 +208,9 @@ class RateLimiter:
         Raises:
             TimeoutError: If timeout expires before tokens are acquired
         """
+        if self._closed:
+            raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
+        self._validate_weight(weight)
         if timeout is not None:
             if type(timeout) not in (int, float):
                 raise TypeError(
@@ -236,6 +247,9 @@ class RateLimiter:
         Returns:
             True if acquired, False if rate limited
         """
+        if self._closed:
+            raise RuntimeError(f"RateLimiter '{self.name}' has been closed")
+        self._validate_weight(weight)
         with self._lock:
             # Temporarily disable max_delay to get immediate response
             original_max_delay = self._limiter.max_delay
@@ -250,6 +264,9 @@ class RateLimiter:
 
     def close(self) -> None:
         """Close the rate limiter and release resources."""
+        if self._closed:
+            return
+        self._closed = True
         # Get reference to the leaker thread before disposing.
         # pyrate-limiter's BucketFactory._leaker is the background thread that
         # drains bucket tokens. This is a third-party library internal (Tier 3

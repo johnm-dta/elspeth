@@ -1,0 +1,265 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "Strong plan with clean reality check (0 hallucinations across 13 files, ~2390 lines). Seven blocking issues cluster into three groups: audit-integrity gaps (B2 positional unpack, B3 missing secret-leak negative test, B4 rg guard not CI-enforced) which are non-negotiable for ELSPETH; systems-level cost concerns (B5 plugin constructor side effects on every preview, B6 no preflight cache or worker-thread timeout) which could turn the compose loop into a thrashing pattern in production; and cheap correctness fixes (B1 BaseException annotation, B7 LLM self-model corruption from synthetic content swap). No reviewer conflicts. No structural rework required - this is a tight punch list before execution.",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-28-runtime-equivalent-composer-preflight.md",
+  "plan_size_lines": 2390,
+  "files_touched": 13,
+  "tasks": 8,
+  "reviewed_at": "2026-04-29T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "blocking_issues": [
+    {
+      "id": "B5",
+      "source": "systems",
+      "category": "systems_cost",
+      "issue": "Side-effect-free preflight is asserted, not enforced - plugin constructor side effects break the claim",
+      "evidence": "instantiate_plugins_from_config(settings) runs every plugin __init__ on every preview call. Azure SDK auth handshakes, Dataverse connection probes, and LiteLLM credential resolution are known to occur in plugin constructors. /validate and /execute survive because they run once; the compose loop does not. A 10-preview compose session = 10 constructor executions per plugin = potential connection leaks, rate-limit exhaustion, or duplicate auth handshakes.",
+      "severity": "critical",
+      "likelihood": "likely",
+      "reversibility": "difficult",
+      "priority_score": 24,
+      "resolution": "Audit all plugin __init__ methods for network I/O. Either add a preflight_mode=True factory that defers network setup until first use, or document confirmed purity for each plugin in the plan and add a CI guard (e.g., a fake socket fixture in plugin construction tests) that fails on network attempts during construction. Pair with B6 - both must land together to make preflight safe in the compose loop."
+    },
+    {
+      "id": "B6",
+      "source": "systems",
+      "category": "systems_cost",
+      "issue": "No latency bound or cache on per-turn preflight; worker-thread hang outlives the compose-loop timeout",
+      "evidence": "last_runtime_preflight reuse is finalization-only, not intra-loop. Three preview_pipeline calls in one turn run the full plugin-instantiation-plus-graph-build sequence three times. run_sync_in_worker for preflight has no separate timeout from the compose loop and cannot be cancelled. Result: ComposerConvergenceError with partial state plus a blocked worker thread.",
+      "severity": "critical",
+      "likelihood": "likely",
+      "reversibility": "difficult",
+      "priority_score": 24,
+      "resolution": "Add a (state_version, settings_hash)-keyed cache for preflight results scoped to the compose call - matches the existing discovery-tool cache pattern. Add an explicit timeout on run_sync_in_worker for preflight (separate from the compose-loop deadline). Document the cache scope (per-compose-call, not per-session) so cache staleness cannot bleed across turns."
+    },
+    {
+      "id": "B3",
+      "source": "quality",
+      "category": "audit_integrity",
+      "issue": "No negative test that resolved secrets are absent from generated YAML",
+      "evidence": "Plan lines 112-113: 'Secret values must never be logged or persisted in generated YAML; resolved secret values are in-memory only.' Task 6 (YAML export) has no test that asserts generate_yaml(state) output contains zero resolved-secret values. This is the canonical regression catcher and is missing entirely.",
+      "severity": "critical",
+      "likelihood": "possible",
+      "reversibility": "irreversible",
+      "priority_score": 36,
+      "resolution": "Add a Task 6 test that builds a state with a resolved secret (e.g., api_key materialized in memory), calls generate_yaml(state), and asserts the resolved value is not in the output - only the secret reference (e.g., ${secrets.api_key}) is present. Place in tests/unit/web/composer/ or wherever YAML export tests live."
+    },
+    {
+      "id": "B2",
+      "source": "architecture",
+      "category": "audit_integrity",
+      "issue": "RUNTIME_GRAPH_VALIDATION_CHECKS positional unpack is silently transposable",
+      "evidence": "Task 2 Step 3 uses _CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA = RUNTIME_GRAPH_VALIDATION_CHECKS. Reordering the tuple silently reassigns names; the superset test only checks set membership, not the position-to-name mapping. Check names appear in audit output - a transposition produces a wrong-but-passing report.",
+      "severity": "high",
+      "likelihood": "possible",
+      "reversibility": "difficult",
+      "priority_score": 12,
+      "resolution": "Define named constants (e.g., CHECK_PLUGIN_INSTANTIATION = 'plugin_instantiation', CHECK_GRAPH_BUILD = 'graph_build', CHECK_SCHEMA_VALIDATION = 'schema_validation') and derive RUNTIME_GRAPH_VALIDATION_CHECKS = (CHECK_PLUGIN_INSTANTIATION, CHECK_GRAPH_BUILD, CHECK_SCHEMA_VALIDATION). Replace positional unpack with attribute access on the constants. Add an equality assertion test on each tuple position to catch reordering."
+    },
+    {
+      "id": "B4",
+      "source": "quality",
+      "category": "audit_integrity",
+      "issue": "rg patch-site guard is a one-shot manual check, not CI enforcement",
+      "evidence": "Reviewer Fixes Folded In line 32 says 'add an rg guard so future stale patch sites are not missed.' Task 2 Step 5 runs the rg command once during implementation. No persistent CI test or pre-commit hook. Stated intent (persistent guard) does not match delivered mechanism (one-shot check).",
+      "severity": "high",
+      "likelihood": "likely",
+      "reversibility": "difficult",
+      "priority_score": 18,
+      "resolution": "Add a pytest in tests/unit/scripts/cicd/ (or wherever the existing CI enforcer tests live) that re-runs the rg pattern against the codebase and asserts no stale patch sites exist. Pattern matches the existing scripts/cicd/enforce_tier_model.py and scripts/cicd/enforce_freeze_guards.py enforcement style. Without this, the guard erodes the moment a future patch site lands."
+    },
+    {
+      "id": "B7",
+      "source": "systems",
+      "category": "correctness",
+      "issue": "LLM self-model corrupted by synthetic message substitution in multi-turn sessions",
+      "evidence": "When preflight fails at finalization, chat_messages.content is replaced with synthetic failure text; the model's original text moves to raw_content, never returned to the LLM. Next compose turn's messages array is built from chat_messages.content - the LLM now reads 'I cannot mark this pipeline complete' as its own prior statement when it actually said 'complete and valid.' In long sessions where the user references prior assistant statements, the LLM cannot reconcile.",
+      "severity": "high",
+      "likelihood": "likely",
+      "reversibility": "difficult",
+      "priority_score": 18,
+      "resolution": "Verify in composer/prompts.py which field feeds the messages array sent back to the LLM. If it is content (not raw_content), prepend a brief annotation to the synthetic message (e.g., 'Note: your prior response asserted completion but was blocked by runtime preflight - the pipeline still has runtime-blocking issues:') so the LLM has self-consistent context. Add a multi-turn integration test that asserts the LLM context after a preflight-blocked turn includes the annotation, not a bare substitution."
+    },
+    {
+      "id": "B1",
+      "source": "architecture",
+      "category": "correctness",
+      "issue": "BaseException vs Exception inconsistency on ComposerRuntimePreflightError",
+      "evidence": "Plan annotates original_exc: BaseException while sibling classes use Exception and the catch site is except Exception. The wider declared type is a documentation lie - no BaseException-only subclass (KeyboardInterrupt, SystemExit) can ever arrive there.",
+      "severity": "medium",
+      "likelihood": "certain",
+      "reversibility": "easy",
+      "priority_score": 6,
+      "resolution": "Change original_exc type annotation from BaseException to Exception to match sibling pattern (ComposerValidationError and others) and the actual catch site. One-character correction in the plan."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "source": "reality",
+      "issue": "preview_pipeline becomes a dead entry in _DISCOVERY_TOOLS after Task 4's special-case branch",
+      "priority_score": 4,
+      "recommendation": "Explicitly remove preview_pipeline from _DISCOVERY_TOOLS in Task 4 to avoid dead-code accumulation."
+    },
+    {
+      "id": "W2",
+      "source": "reality",
+      "issue": "Specific patch line numbers in tests/unit/web/execution/test_service.py are unverified guidance",
+      "priority_score": 3,
+      "recommendation": "Soften plan language - the rg guard is the load-bearing mechanism, line numbers are illustrative. Implementer should rely on the guard, not the line numbers."
+    },
+    {
+      "id": "W3",
+      "source": "reality",
+      "issue": "ValidationSettings.data_dir: Any is intentionally loose but undocumented",
+      "priority_score": 3,
+      "recommendation": "Add a one-line comment at write time explaining why data_dir is typed Any (e.g., 'Path | str | None - accepted shapes vary by validation context')."
+    },
+    {
+      "id": "W4",
+      "source": "quality",
+      "issue": "Three Task 5 write-path tests (recompose-success, convergence-extension, plugin-crash-extension) are bullet-point prose with no def test_... code blocks",
+      "priority_score": 8,
+      "recommendation": "Convert lines 1596-1598 to executable test stubs. The recompose path is the primary evidence that composition_states.is_valid is False after a runtime-failed state is persisted via the normal composer flow - it must be a real test, not prose."
+    },
+    {
+      "id": "W5",
+      "source": "quality",
+      "issue": "_runtime_preflight_failure_message Branch 1 (errors present) has no direct unit test",
+      "priority_score": 6,
+      "recommendation": "Add a unit test for Branch 1 - the most common production path. Branches 2 and 3 already have tests at lines 1183 and 1201."
+    },
+    {
+      "id": "W6",
+      "source": "quality",
+      "issue": "exception_class OTel attribute is unbounded despite 'bounded attributes' claim",
+      "priority_score": 6,
+      "recommendation": "Add an allow-list or normalization (e.g., qualname truncated to a known prefix set, or hashed for unbounded values). Plugin exceptions have arbitrary class names - this can blow OTel cardinality budgets."
+    },
+    {
+      "id": "W7",
+      "source": "quality",
+      "issue": "cast(_ComposerPreflightTelemetrySource, log_prefix) bypasses Literal cardinality at runtime",
+      "priority_score": 4,
+      "recommendation": "cast() is type-checker only. Either pass literal strings directly or validate at the boundary with an explicit if log_prefix in {...}: check."
+    },
+    {
+      "id": "W8",
+      "source": "quality",
+      "issue": "No test asserts the sanitized 500 message excludes the original exception text from any user-visible surface",
+      "priority_score": 6,
+      "recommendation": "Pin the structural sanitization with a regression test that asserts neither the HTTP body nor the LLM message contains the original exception text after a plugin crash during preflight."
+    },
+    {
+      "id": "W9",
+      "source": "quality",
+      "issue": "Secret-resolution failure during preflight is unaddressed",
+      "priority_score": 6,
+      "recommendation": "Specify the error path when scoped_secret_resolver fails during preflight. Add a test and document the fallback (likely: surface as runtime preflight failure with a distinct check name, not as a generic 500)."
+    },
+    {
+      "id": "W10",
+      "source": "quality",
+      "issue": "No test for 'state version advances by more than 1 across multiple tool calls in one turn'",
+      "priority_score": 4,
+      "recommendation": "Add a test that exercises multi-tool-call turns and asserts state_version semantics across the turn (especially relevant if B6's cache key uses state_version)."
+    },
+    {
+      "id": "W11",
+      "source": "systems",
+      "issue": "Cross-database orphan risk - Landscape audit DB preserved across rollout",
+      "priority_score": 6,
+      "recommendation": "Verify no Landscape table holds session_id, chat_message_id, or composition_state_id references before deleting sessions.db. If any do, document the orphan handling - hard FK is unlikely (different DBs), but logical references in JSON metadata fields are common."
+    },
+    {
+      "id": "W12",
+      "source": "systems",
+      "issue": "Plan-embedded deployment runbook creates a precedent for plan-as-runbook",
+      "priority_score": 4,
+      "recommendation": "Extract Task 5 Step 0 (systemd restart commands, env-file paths, host-shell vs sandbox guidance) to docs/guides/session-db-reset.md and reference it from the plan. Plans are decision artifacts; runbooks are operational artifacts - keep them separate."
+    },
+    {
+      "id": "W13",
+      "source": "systems",
+      "issue": "RUNTIME_GRAPH_VALIDATION_CHECKS superset test is name-parity-only, not behavioral parity",
+      "priority_score": 6,
+      "recommendation": "Add an assertion that the execution path and validation path actually exercise an identical set of checks - not just that declared names appear in one path. Pairs with B2."
+    },
+    {
+      "id": "W14",
+      "source": "systems",
+      "issue": "_composer_persisted_validation invariant ValueError will surface as HTTP 500 if any future caller forgets to pass a runtime outcome",
+      "priority_score": 4,
+      "recommendation": "Consider type-system enforcement (e.g., make the runtime_preflight outcome a required positional argument with no default, or use an overload pattern that makes 'authoring-valid without runtime outcome' unrepresentable)."
+    },
+    {
+      "id": "W15",
+      "source": "systems",
+      "issue": "MCP mcp__elspeth-composer__preview_pipeline exposure is not addressed in the locking/preflight story",
+      "priority_score": 6,
+      "recommendation": "Document the concurrency model. If the MCP and HTTP composer share session state, concurrent compose-via-HTTP and preview-via-MCP on the same session can race plugin instantiation. Either serialize via session lock or document the race as accepted (with rationale)."
+    },
+    {
+      "id": "W16",
+      "source": "architecture",
+      "issue": "Blast radius is HIGH (13 files, weighted 23 pts)",
+      "priority_score": 6,
+      "recommendation": "Consider phase split: Tasks 1-2 (pure refactor extracting RUNTIME_GRAPH_VALIDATION_CHECKS) could land separately from Tasks 3-7 (the feature). Smaller blast radius per PR makes review and rollback easier."
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "PHASE_SPLIT",
+      "source": "architecture",
+      "suggestion": "Land Tasks 1-2 (pure refactor) in a separate PR ahead of Tasks 3-7 (feature). The refactor is independently valuable and reduces review surface for the feature PR."
+    },
+    {
+      "type": "ABSTRACTION_REVIEW",
+      "source": "architecture",
+      "suggestion": "ValidationSettings has a single concrete implementer today - mild 'Why Now?' candidate. Acceptable if project standard is protocol-at-boundary; otherwise consider deferring the protocol until a second implementer arrives."
+    },
+    {
+      "type": "ACCEPTED_DEBT",
+      "source": "architecture",
+      "suggestion": "L6 'accepted debt' is genuine YAGNI - the one-off preflight_exception_policy literal is good non-abstraction. Endorsed."
+    }
+  ],
+  "conflicts_resolved": [],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "PASS",
+      "blocking": 0,
+      "warnings": 3,
+      "note": "0 hallucinations, 0 path issues, 0 convention violations across 13 files and ~2390 lines"
+    },
+    "architecture": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 1,
+      "note": "Blast radius HIGH but one-way doors mitigated; pattern alignment good"
+    },
+    "quality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 7,
+      "note": "Test gaps cluster on negative/regression assertions; observability has cardinality concerns"
+    },
+    "systems": {
+      "status": "ISSUES_FOUND",
+      "blocking": 3,
+      "warnings": 5,
+      "note": "Two HIGH-systemic risks (B5, B6) ride together; B7 is a multi-turn LLM corruption concern"
+    }
+  },
+  "priority_ordered_punch_list": [
+    "B3 - Add YAML-export secret-leak negative test (audit integrity, irreversible)",
+    "B5+B6 - Audit plugin __init__ for side effects AND add preflight cache + worker timeout (must land together)",
+    "B4 - Convert rg guard to persistent CI test",
+    "B7 - Annotate synthetic LLM messages so self-model stays consistent",
+    "B2 - Replace positional unpack with named constants and add position-equality assertion",
+    "B1 - Change BaseException to Exception annotation"
+  ],
+  "out_of_scope": [
+    "Calendar-based gating - explicitly forbidden by project memory (ELSPETH ships work-until-done; ADR SLAs are governance, not deadlines)"
+  ]
+}

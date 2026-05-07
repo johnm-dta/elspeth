@@ -13,19 +13,19 @@ from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 class TestAuditedHTTPClient:
     """Tests for AuditedHTTPClient."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder."""
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository."""
         import itertools
 
-        recorder = MagicMock()
-        recorder.record_call = MagicMock()
+        mock_execution = MagicMock()
+        mock_execution.record_call = MagicMock()
         counter = itertools.count()
-        recorder.allocate_call_index.side_effect = lambda _: next(counter)
-        return recorder
+        mock_execution.allocate_call_index.side_effect = lambda _: next(counter)
+        return mock_execution
 
     def test_successful_post_records_to_audit_trail(self) -> None:
         """Successful HTTP POST is recorded to audit trail with full response body."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Mock httpx.Client with JSON response
         mock_response = MagicMock(spec=httpx.Response)
@@ -37,7 +37,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -55,8 +55,8 @@ class TestAuditedHTTPClient:
         assert response.status_code == 200
 
         # Verify audit record
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["state_id"] == "state_123"
         assert call_kwargs["call_index"] == 0
         assert call_kwargs["call_type"] == CallType.HTTP
@@ -70,7 +70,7 @@ class TestAuditedHTTPClient:
 
     def test_call_index_increments(self) -> None:
         """Each call gets a unique, incrementing call index."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -79,7 +79,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -92,18 +92,18 @@ class TestAuditedHTTPClient:
             client.post("https://api.example.com/second")
 
         # Check call indices
-        calls = recorder.record_call.call_args_list
+        calls = mock_execution.record_call.call_args_list
         assert len(calls) == 2
         assert calls[0][1]["call_index"] == 0
         assert calls[1][1]["call_index"] == 1
 
     def test_failed_call_records_error(self) -> None:
         """Failed HTTP call records error details."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -115,11 +115,39 @@ class TestAuditedHTTPClient:
                 client.post("https://api.example.com/v1/process")
 
         # Verify error was recorded
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "ConnectError"
         assert "Connection refused" in call_kwargs["error"].message
+
+    def test_internal_success_path_bug_crashes_without_recording_synthetic_http_error(self) -> None:
+        """ELSPETH success-path bugs must not be misclassified as provider failures."""
+        mock_execution = self._create_mock_execution()
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.content = b'{"ok": true}'
+        mock_response.text = '{"ok": true}'
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                execution=mock_execution,
+                state_id="state_123",
+                run_id="run_abc",
+                telemetry_emit=lambda event: None,
+            )
+            mock_client = mock_client_class.return_value
+            mock_client.post.return_value = mock_response
+
+            with (
+                patch.object(client, "_filter_response_headers", side_effect=TypeError("header filter bug")),
+                pytest.raises(TypeError, match="header filter bug"),
+            ):
+                client.post("https://api.example.com/v1/process")
+
+        mock_execution.record_call.assert_not_called()
 
     def test_auth_headers_fingerprinted_in_recorded_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Auth headers are fingerprinted (not removed) so different credentials produce different hashes.
@@ -132,7 +160,7 @@ class TestAuditedHTTPClient:
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
         monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
 
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -141,7 +169,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -157,7 +185,7 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/v1/process")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_headers = call_kwargs["request_data"].to_dict()["headers"]
 
         # Auth headers should be FINGERPRINTED, not removed
@@ -192,8 +220,8 @@ class TestAuditedHTTPClient:
 
         from elspeth.core.canonical import stable_hash
 
-        recorder1 = self._create_mock_recorder()
-        recorder2 = self._create_mock_recorder()
+        mock_execution1 = self._create_mock_execution()
+        mock_execution2 = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -203,7 +231,7 @@ class TestAuditedHTTPClient:
         with patch("httpx.Client") as mock_client_class:
             # Client 1 with credential A
             client1 = AuditedHTTPClient(
-                recorder=recorder1,
+                execution=mock_execution1,
                 state_id="state_1",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -212,7 +240,7 @@ class TestAuditedHTTPClient:
 
             # Client 2 with credential B (different)
             client2 = AuditedHTTPClient(
-                recorder=recorder2,
+                execution=mock_execution2,
                 state_id="state_2",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -227,8 +255,8 @@ class TestAuditedHTTPClient:
             client2.post("https://api.example.com/v1/process", json={"data": "test"})
 
         # Get the recorded request_data for each call (now CallPayload DTOs)
-        request_data_1 = recorder1.record_call.call_args[1]["request_data"].to_dict()
-        request_data_2 = recorder2.record_call.call_args[1]["request_data"].to_dict()
+        request_data_1 = mock_execution1.record_call.call_args[1]["request_data"].to_dict()
+        request_data_2 = mock_execution2.record_call.call_args[1]["request_data"].to_dict()
 
         # The request_hash values MUST be different
         hash1 = stable_hash(request_data_1)
@@ -248,7 +276,7 @@ class TestAuditedHTTPClient:
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -257,7 +285,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -271,7 +299,7 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/v1/process")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_headers = call_kwargs["request_data"].to_dict()["headers"]
 
         # In dev mode, auth headers are removed (no fingerprint available)
@@ -293,7 +321,7 @@ class TestAuditedHTTPClient:
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
 
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -302,7 +330,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -319,7 +347,7 @@ class TestAuditedHTTPClient:
 
     def test_base_url_prepended(self) -> None:
         """Base URL is prepended to request path."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -328,7 +356,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -340,7 +368,7 @@ class TestAuditedHTTPClient:
             client.post("/v1/process", json={"data": "value"})
 
         # Verify full URL was recorded
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["url"] == "https://api.example.com/v1/process"
 
         # Verify httpx was called with full URL
@@ -350,7 +378,7 @@ class TestAuditedHTTPClient:
 
     def test_base_url_trailing_slash_url_leading_slash(self) -> None:
         """Base URL with trailing slash + URL with leading slash produces single slash."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -360,7 +388,7 @@ class TestAuditedHTTPClient:
         with patch("httpx.Client") as mock_client_class:
             # Both have slashes - would cause double slash with naive concat
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -372,7 +400,7 @@ class TestAuditedHTTPClient:
             client.post("/v1/process")
 
         # Should have exactly one slash, not double
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["url"] == "https://api.example.com/v1/process"
 
         actual_url = mock_client.post.call_args[0][0]
@@ -380,7 +408,7 @@ class TestAuditedHTTPClient:
 
     def test_base_url_no_trailing_slash_url_no_leading_slash(self) -> None:
         """Base URL without trailing slash + URL without leading slash produces correct URL."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -390,7 +418,7 @@ class TestAuditedHTTPClient:
         with patch("httpx.Client") as mock_client_class:
             # Neither has slashes - would cause missing slash with naive concat
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -402,7 +430,7 @@ class TestAuditedHTTPClient:
             client.post("process")
 
         # Should have slash separator inserted
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["url"] == "https://api.example.com/v1/process"
 
         actual_url = mock_client.post.call_args[0][0]
@@ -410,7 +438,7 @@ class TestAuditedHTTPClient:
 
     def test_response_body_size_recorded(self) -> None:
         """Response body size is recorded in bytes."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -419,7 +447,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -429,12 +457,12 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/v1/process")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["response_data"].to_dict()["body_size"] == len(mock_response.content)
 
     def test_request_headers_merged(self) -> None:
         """Per-request headers are merged with default headers."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -443,7 +471,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -465,7 +493,7 @@ class TestAuditedHTTPClient:
 
     def test_timeout_passed_to_client(self) -> None:
         """Timeout configuration is passed to httpx client."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -474,7 +502,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -490,7 +518,7 @@ class TestAuditedHTTPClient:
 
     def test_response_headers_recorded(self) -> None:
         """Response headers are recorded in audit trail."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -500,7 +528,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -510,14 +538,14 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/v1/process")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         response_headers = call_kwargs["response_data"].to_dict()["headers"]
         assert response_headers["content-type"] == "application/json"
         assert response_headers["x-request-id"] == "req-456"
 
     def test_no_base_url_uses_full_url(self) -> None:
         """When no base_url, the full URL is used as-is."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -526,7 +554,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -537,12 +565,12 @@ class TestAuditedHTTPClient:
 
             client.post("https://other-api.example.com/endpoint")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["url"] == "https://other-api.example.com/endpoint"
 
     def test_none_json_body(self) -> None:
         """HTTP call with None json body is handled."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -551,7 +579,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -562,12 +590,12 @@ class TestAuditedHTTPClient:
             # Call without json
             client.post("https://api.example.com/endpoint")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["json"] is None
 
     def test_sensitive_response_headers_filtered(self) -> None:
         """Sensitive response headers (cookies, auth) are filtered from audit trail."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -585,7 +613,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -595,7 +623,7 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/v1/process")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         response_headers = call_kwargs["response_data"].to_dict()["headers"]
 
         # Sensitive headers should NOT be recorded
@@ -609,7 +637,7 @@ class TestAuditedHTTPClient:
 
     def test_per_request_timeout_overrides_default(self) -> None:
         """Per-request timeout overrides the client's default timeout."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -619,7 +647,7 @@ class TestAuditedHTTPClient:
         with patch("httpx.Client") as mock_client_class:
             # Client has default timeout of 30s
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -637,7 +665,7 @@ class TestAuditedHTTPClient:
 
     def test_none_timeout_uses_default(self) -> None:
         """When timeout=None is passed, the client's default timeout is used."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -646,7 +674,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -664,7 +692,7 @@ class TestAuditedHTTPClient:
 
     def test_non_json_response_body_recorded_as_text(self) -> None:
         """Non-JSON response body is recorded as text."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -674,7 +702,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -684,12 +712,12 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/endpoint")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["response_data"].to_dict()["body"] == "Plain text response"
 
     def test_json_response_body_recorded_as_dict(self) -> None:
         """JSON response body is recorded as parsed dict."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -699,7 +727,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -709,12 +737,12 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/endpoint")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["response_data"].to_dict()["body"] == {"choices": [{"message": {"content": "Hello"}}]}
 
     def test_4xx_response_recorded_as_error(self) -> None:
         """HTTP 4xx responses are recorded with ERROR status."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 401
@@ -725,7 +753,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -739,7 +767,7 @@ class TestAuditedHTTPClient:
         assert response.status_code == 401
 
         # Verify ERROR status was recorded
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["response_data"].to_dict()["status_code"] == 401
         assert call_kwargs["error"].type == "HTTPError"
@@ -748,7 +776,7 @@ class TestAuditedHTTPClient:
 
     def test_5xx_response_recorded_as_error(self) -> None:
         """HTTP 5xx responses are recorded with ERROR status."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 503
@@ -758,7 +786,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -772,7 +800,7 @@ class TestAuditedHTTPClient:
         assert response.status_code == 503
 
         # Verify ERROR status was recorded
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["response_data"].to_dict()["status_code"] == 503
         assert call_kwargs["error"].type == "HTTPError"
@@ -780,7 +808,7 @@ class TestAuditedHTTPClient:
 
     def test_2xx_responses_recorded_as_success(self) -> None:
         """HTTP 2xx responses (200-299) are recorded with SUCCESS status."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Test 201 Created
         mock_response = MagicMock(spec=httpx.Response)
@@ -790,7 +818,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -802,7 +830,7 @@ class TestAuditedHTTPClient:
 
         assert response.status_code == 201
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.SUCCESS
         assert call_kwargs["error"] is None
 
@@ -812,7 +840,7 @@ class TestAuditedHTTPClient:
         Note: httpx follows redirects by default, so this tests the case
         when redirects are not followed.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 302
@@ -822,7 +850,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -835,7 +863,7 @@ class TestAuditedHTTPClient:
         assert response.status_code == 302
 
         # 3xx is not in 2xx range, so recorded as ERROR
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].status_code == 302
 
@@ -844,9 +872,9 @@ class TestAuditedHTTPClient:
 
         This test verifies that the HTTP client does not truncate large non-JSON
         responses before passing them to record_call(). The payload store auto-persist
-        mechanism in LandscapeRecorder is designed to handle large payloads.
+        mechanism in ExecutionRepository is designed to handle large payloads.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Create 150KB text response (exceeds old 100KB truncation limit)
         large_text = "x" * 150_000
@@ -859,7 +887,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -869,7 +897,7 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/large-response")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
 
         # CRITICAL: Must record ALL 150KB, not truncated to 100KB
@@ -884,7 +912,7 @@ class TestAuditedHTTPClient:
         """
         import json
 
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Create large JSON with >100KB when serialized
         large_json = {"items": [{"id": i, "data": "x" * 1000} for i in range(200)]}
@@ -899,7 +927,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -909,7 +937,7 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/large-json")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
 
         # JSON should be parsed as dict, not truncated
@@ -925,7 +953,7 @@ class TestAuditedHTTPClient:
         """
         import base64
 
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Simulate a small PNG image (binary data that's not valid UTF-8)
         # PNG file signature + minimal IHDR chunk
@@ -940,7 +968,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -950,7 +978,7 @@ class TestAuditedHTTPClient:
 
             client.post("https://api.example.com/image")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
 
         # Binary should be encoded as base64 in a dict
@@ -969,7 +997,7 @@ class TestAuditedHTTPClient:
         as parse failure with raw text preserved ensures audit completeness without
         crashing.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # JSON with NaN (Python's json.loads accepts this)
         json_with_nan = '{"value": NaN, "other": "data"}'
@@ -982,7 +1010,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -997,8 +1025,8 @@ class TestAuditedHTTPClient:
         assert response.status_code == 200
 
         # Verify audit record was created successfully (not crashed)
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
 
         # Body should be recorded as parse failure with raw text
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
@@ -1013,7 +1041,7 @@ class TestAuditedHTTPClient:
         Similar to NaN test - Infinity is also non-canonicalizable and must be
         rejected at the HTTP boundary.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # JSON with Infinity (Python's json.loads accepts this)
         json_with_infinity = '{"value": Infinity, "count": 42}'
@@ -1026,7 +1054,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1038,8 +1066,8 @@ class TestAuditedHTTPClient:
             response = client.post("https://api.example.com/endpoint")
 
         assert response.status_code == 200
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
 
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
         assert recorded_body["_json_parse_failed"] is True
@@ -1048,7 +1076,7 @@ class TestAuditedHTTPClient:
 
     def test_json_response_with_negative_infinity_recorded_as_parse_failure(self) -> None:
         """JSON response containing -Infinity is recorded as parse failure."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         json_with_neg_infinity = '{"value": -Infinity}'
 
@@ -1060,7 +1088,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1071,7 +1099,7 @@ class TestAuditedHTTPClient:
             response = client.post("https://api.example.com/endpoint")
 
         assert response.status_code == 200
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
         assert recorded_body["_json_parse_failed"] is True
         assert recorded_body["_raw_text"] == json_with_neg_infinity
@@ -1081,7 +1109,7 @@ class TestAuditedHTTPClient:
 
         NaN can appear anywhere in the JSON structure - we must check recursively.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # NaN nested in array within object
         json_with_nested_nan = '{"data": {"values": [1, 2, NaN, 4]}}'
@@ -1094,7 +1122,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1105,7 +1133,7 @@ class TestAuditedHTTPClient:
             response = client.post("https://api.example.com/endpoint")
 
         assert response.status_code == 200
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
         assert recorded_body["_json_parse_failed"] is True
         assert recorded_body["_raw_text"] == json_with_nested_nan
@@ -1116,7 +1144,7 @@ class TestAuditedHTTPClient:
         Regression test to verify that valid JSON (including edge cases like
         null, empty objects, negative numbers) is still parsed correctly.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Valid JSON with edge cases
         valid_json = '{"null_value": null, "negative": -42.5, "empty": {}, "array": [1, 2, 3]}'
@@ -1129,7 +1157,7 @@ class TestAuditedHTTPClient:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1140,7 +1168,7 @@ class TestAuditedHTTPClient:
             response = client.post("https://api.example.com/endpoint")
 
         assert response.status_code == 200
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
 
         # Should be parsed as dict, NOT as parse failure
@@ -1155,19 +1183,19 @@ class TestAuditedHTTPClient:
 class TestAuditedHTTPClientGet:
     """Tests for AuditedHTTPClient.get() method."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder."""
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository."""
         import itertools
 
-        recorder = MagicMock()
-        recorder.record_call = MagicMock()
+        mock_execution = MagicMock()
+        mock_execution.record_call = MagicMock()
         counter = itertools.count()
-        recorder.allocate_call_index.side_effect = lambda _: next(counter)
-        return recorder
+        mock_execution.allocate_call_index.side_effect = lambda _: next(counter)
+        return mock_execution
 
     def test_successful_get_records_to_audit_trail(self) -> None:
         """Successful HTTP GET is recorded to audit trail with full response body."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         # Mock httpx.Client with HTML response
         mock_response = MagicMock(spec=httpx.Response)
@@ -1178,7 +1206,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1194,8 +1222,8 @@ class TestAuditedHTTPClientGet:
         assert response.text == "<html><body>Content</body></html>"
 
         # Verify audit record
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["state_id"] == "state_123"
         assert call_kwargs["call_index"] == 0
         assert call_kwargs["call_type"] == CallType.HTTP
@@ -1209,7 +1237,7 @@ class TestAuditedHTTPClientGet:
 
     def test_get_with_query_params(self) -> None:
         """GET with query params records params in audit trail and passes to httpx."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -1219,7 +1247,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1239,12 +1267,12 @@ class TestAuditedHTTPClientGet:
         assert call_args[1]["params"] == {"q": "test", "limit": 10}
 
         # Verify params were recorded in audit trail
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["params"] == {"q": "test", "limit": 10}
 
     def test_get_with_base_url(self) -> None:
         """GET with base_url prepends base to path correctly."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -1253,7 +1281,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1265,7 +1293,7 @@ class TestAuditedHTTPClientGet:
             client.get("/v1/resource")
 
         # Verify full URL was recorded
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["request_data"].to_dict()["url"] == "https://api.example.com/v1/resource"
 
         # Verify httpx was called with full URL
@@ -1275,11 +1303,11 @@ class TestAuditedHTTPClientGet:
 
     def test_get_failed_call_records_error(self) -> None:
         """Failed HTTP GET call records error details."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1291,8 +1319,8 @@ class TestAuditedHTTPClientGet:
                 client.get("https://example.com/page")
 
         # Verify error was recorded
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["error"].type == "ConnectError"
         assert "Connection refused" in call_kwargs["error"].message
@@ -1302,7 +1330,7 @@ class TestAuditedHTTPClientGet:
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-client")
         monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
 
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -1311,7 +1339,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1322,7 +1350,7 @@ class TestAuditedHTTPClientGet:
 
             client.get("https://api.example.com/resource")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         recorded_headers = call_kwargs["request_data"].to_dict()["headers"]
 
         # Auth header should be fingerprinted
@@ -1332,7 +1360,7 @@ class TestAuditedHTTPClientGet:
 
     def test_get_json_response_recorded_as_dict(self) -> None:
         """GET with JSON response records parsed dict."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
@@ -1342,7 +1370,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1352,12 +1380,12 @@ class TestAuditedHTTPClientGet:
 
             client.get("https://api.example.com/data")
 
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["response_data"].to_dict()["body"] == {"items": [1, 2, 3]}
 
     def test_get_4xx_response_recorded_as_error(self) -> None:
         """GET with 4xx response is recorded with ERROR status."""
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 404
@@ -1367,7 +1395,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1381,7 +1409,7 @@ class TestAuditedHTTPClientGet:
         assert response.status_code == 404
 
         # Verify ERROR status was recorded
-        call_kwargs = recorder.record_call.call_args[1]
+        call_kwargs = mock_execution.record_call.call_args[1]
         assert call_kwargs["status"] == CallStatus.ERROR
         assert call_kwargs["response_data"].to_dict()["status_code"] == 404
         assert call_kwargs["error"].type == "HTTPError"
@@ -1392,7 +1420,7 @@ class TestAuditedHTTPClientGet:
 
         Ensures the NaN/Infinity fix applies to GET requests as well as POST.
         """
-        recorder = self._create_mock_recorder()
+        mock_execution = self._create_mock_execution()
 
         json_with_nan = '{"metric": NaN}'
 
@@ -1404,7 +1432,7 @@ class TestAuditedHTTPClientGet:
 
         with patch("httpx.Client") as mock_client_class:
             client = AuditedHTTPClient(
-                recorder=recorder,
+                execution=mock_execution,
                 state_id="state_123",
                 run_id="run_abc",
                 telemetry_emit=lambda event: None,
@@ -1415,8 +1443,8 @@ class TestAuditedHTTPClientGet:
             response = client.get("https://api.example.com/metrics")
 
         assert response.status_code == 200
-        recorder.record_call.assert_called_once()
-        call_kwargs = recorder.record_call.call_args[1]
+        mock_execution.record_call.assert_called_once()
+        call_kwargs = mock_execution.record_call.call_args[1]
 
         recorded_body = call_kwargs["response_data"].to_dict()["body"]
         assert recorded_body["_json_parse_failed"] is True

@@ -40,13 +40,18 @@ from elspeth.core.templates import (
 # =============================================================================
 
 # Valid Python-style field names (for row.field).
-# Excludes "get" because extract_jinja2_fields intentionally skips row.get
-# (it's a mapping method, handled as row.get("key") call pattern instead).
+# Excludes the PipelineRow API names that extract_jinja2_fields deliberately
+# skips — "get" (mapping method handled as row.get("key") Call pattern),
+# "contract" (@property exposing the SchemaContract), and "to_dict"
+# (serialization method). Must mirror src/elspeth/core/templates.py
+# ``_PIPELINE_ROW_API_NAMES`` or the property domain will produce examples
+# Hypothesis then fails to round-trip through the extractor.
+_EXCLUDED_ROW_API_NAMES = frozenset({"get", "contract", "to_dict"})
 valid_field_names = st.text(
     min_size=1,
     max_size=20,
     alphabet=string.ascii_letters + "_",
-).filter(lambda s: s.isidentifier() and s != "get")
+).filter(lambda s: s.isidentifier() and s not in _EXCLUDED_ROW_API_NAMES)
 
 # Field names that can include dashes/special chars (for row["field"])
 bracket_field_names = st.text(
@@ -355,12 +360,20 @@ class TestWithDetailsConsistencyProperties:
 
         assert set(details.keys()) == simple
 
-    @given(field=bracket_field_names)
+    @given(field=valid_field_names)
     @settings(max_examples=50)
     def test_attr_access_labeled_as_attr(self, field: str) -> None:
-        """Property: Attribute access (row.field) labeled as 'attr'."""
-        assume(field.isidentifier())
+        """Property: Attribute access (row.field) labeled as 'attr'.
 
+        Uses ``valid_field_names`` (which excludes the PipelineRow API names
+        in ``_EXCLUDED_ROW_API_NAMES``) rather than ``bracket_field_names``
+        because this test exercises attribute access (``row.field``) — the
+        extractor applies the API-name filter on that path. Prior to the
+        fix this test took ``bracket_field_names`` which allowed any
+        identifier-or-not string, so Hypothesis found "contract" as a
+        falsifying example (same bug class as the cad25ec0 fix for
+        ``test_duplicate_attributes_deduplicated``).
+        """
         template = f"{{{{ row.{field} }}}}"
         details = extract_jinja2_fields_with_details(template)
 

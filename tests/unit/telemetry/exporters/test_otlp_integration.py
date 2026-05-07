@@ -17,7 +17,7 @@ from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.contracts import TokenCompleted, TokenUsage
-from elspeth.contracts.enums import RowOutcome, RunStatus
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import RunFinished, RunStarted
 from elspeth.telemetry.exporters.otlp import OTLPExporter
 
@@ -114,7 +114,8 @@ class TestOTLPIntegration:
             run_id="run-789",
             token_id="token-abc",
             row_id="row-def",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output_sink",
         )
 
@@ -126,7 +127,8 @@ class TestOTLPIntegration:
         assert span.name == "TokenCompleted"
         assert span.attributes.get("token_id") == "token-abc"
         assert span.attributes.get("row_id") == "row-def"
-        assert span.attributes.get("outcome") == "completed"
+        assert span.attributes.get("outcome") == "success"
+        assert span.attributes.get("path") == "default_flow"
         assert span.attributes.get("sink_name") == "output_sink"
 
     def test_trace_context_correlates_events(self, configured_exporter) -> None:
@@ -305,7 +307,8 @@ class TestOTLPSpanFormat:
             run_id="none-test",
             token_id="token-1",
             row_id="row-1",
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             sink_name=None,  # Explicitly None
         )
         exporter.export(event)

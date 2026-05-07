@@ -1,0 +1,24 @@
+{
+  "cluster": "contracts",
+  "cluster_scope_paths": [
+    "src/elspeth/contracts/"
+  ],
+  "derivation": {
+    "method": "Python filter; edges where both endpoints under contracts/* (intra), one endpoint (inbound/outbound).",
+    "source": "docs/arch-analysis-2026-04-29-1500/temp/l3-import-graph.json"
+  },
+  "inbound_edges": [],
+  "intra_edges": [],
+  "intra_nodes": [],
+  "note": "contracts/ is layer L0; the L3 import graph is L3-only by construction. Empty intra/outbound is the architectural evidence the L0 leaf invariant holds at the L3 boundary. Inbound count reflects how many L3 nodes import from contracts/ at the L3 graph resolution.",
+  "outbound_edges": [],
+  "sccs_touching_cluster": [],
+  "schema_version": "1.0",
+  "stats": {
+    "inbound_edge_count": 0,
+    "intra_edge_count": 0,
+    "intra_node_count": 0,
+    "outbound_edge_count": 0,
+    "sccs_touching_cluster": 0
+  }
+}

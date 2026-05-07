@@ -1,6 +1,6 @@
 [project]
 name = "elspeth"
-version = "0.4.1"
+version = "0.5.0"
 description = "Auditable Sense/Decide/Act pipelines for high-reliability systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -40,7 +40,6 @@ dependencies = [
 
     # Database
     "sqlalchemy>=2.0,<3",  # SQL toolkit and ORM
-    "alembic>=1.18,<2",  # Database migrations
 
     # Retries
     "tenacity>=9.0,<10",  # Retry logic with backoff
@@ -74,6 +73,8 @@ dev = [
     "pytest-asyncio>=1.0,<2",  # Async test support
     "pytest-dotenv>=0.5,<1",  # Load .env for integration tests
     "pytest-timeout>=2.3,<3",  # Test timeouts for stress tests
+    "pytest-xdist>=3.5,<4",  # Parallel test execution
+    "pytest-benchmark>=4.0,<5",  # Performance microbenchmarks for NFR gates (ADR-007/008)
     "hypothesis>=6.98,<7",  # Property-based testing
     "mypy>=1.19,<2",  # Static type checking
     "ruff==0.15.4",  # Linting and formatting
@@ -82,11 +83,13 @@ dev = [
     "pandas-stubs>=2.2,<3",  # Pandas type hints
     "types-networkx>=3.2,<4",  # NetworkX type hints
     "types-PyYAML>=6.0,<7",  # PyYAML type hints
+    "types-jsonschema>=4.25,<5",  # jsonschema type hints (used in LLM schema tests)
     # Mutation testing (Phase 3)
     "mutmut>=2.4,<3",  # Mutation testing
     # ChaosLLM test server
     "errorworks>=0.1.1",  # Chaos testing servers (ChaosLLM, ChaosWeb)
     "starlette>=0.45,<1",  # ASGI framework (needed for TestClient in fixtures)
+    "asgi-lifespan>=2.1,<3",  # FastAPI lifespan support for AsyncClient end-to-end tests
     # HTTP mocking
     "respx>=0.21,<1",  # httpx mocking for web scrape tests
 ]
@@ -130,6 +133,18 @@ security = [
     "sqlcipher3>=0.5.4,<1",
 ]
 
+webui = [
+    # Web UX -- LLM Composer MVP
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "PyJWT[crypto]>=2.8,<3",
+    "python-multipart>=0.0.20",
+    "websockets>=14.0,<15",
+    "httpx>=0.27,<1",
+    "bcrypt>=4.0,<5",
+    "litellm>=1.81,<2",
+]
+
 tracing-langfuse = [
     # Tier 2: Langfuse tracing for LLM plugins
     # v3 built on OpenTelemetry standards - uses context managers for lifecycle
@@ -151,6 +166,7 @@ all = [
     "pytest-asyncio>=1.0,<2",
     "pytest-dotenv>=0.5,<1",
     "pytest-timeout>=2.3,<3",
+    "pytest-benchmark>=4.0,<5",
     "hypothesis>=6.98,<7",
     "mypy>=1.19,<2",
     "ruff==0.15.4",
@@ -183,12 +199,24 @@ all = [
     "sqlcipher3>=0.5.4,<1",
     # rag dependencies
     "chromadb>=1.0,<2",
+    # webui dependencies
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "PyJWT[crypto]>=2.8,<3",
+    "python-multipart>=0.0.20",
+    "websockets>=14.0,<15",
+    "httpx>=0.27,<1",
+    "bcrypt>=4.0,<5",
 ]
 
 [project.scripts]
 elspeth = "elspeth.cli:app"
 elspeth-mcp = "elspeth.mcp:main"
+elspeth-composer = "elspeth.composer_mcp:main"
 check-contracts = "scripts.check_contracts:main"
+
+[project.entry-points.pytest11]
+elspeth-xdist-auto = "elspeth.testing.pytest_xdist_auto"
 
 [project.urls]
 Homepage = "https://github.com/johnm-dta/elspeth"
@@ -227,6 +255,8 @@ ignore = [
     "SIM108", # ternary operator - prefer explicit if/else for readability with comments
     "UP043",  # unnecessary default type args - keep explicit for Python 3.12 compatibility
     "RUF019", # unnecessary key check before dict access - conflicts with project no-.get() policy
+    "RUF051", # dict.pop(key, None) over if/del - conflicts with project no-.get() policy (Tier 1: crash on missing keys)
+    "SIM401", # dict.get() over if/else - conflicts with project no-.get() policy
 ]
 
 [tool.ruff.lint.isort]
@@ -239,7 +269,6 @@ extend-immutable-calls = ["typer.Option", "typer.Argument"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["T20"]  # Allow print in tests
 "scripts/**/*.py" = ["T20"]  # Allow print in CLI scripts
-"alembic/**/*.py" = ["E402"]  # Alembic env.py has imports after config setup
 "vulture_whitelist.py" = ["B018", "F821"]  # Vulture whitelist uses bare names
 # Package __init__ files use categorical __all__ grouping for readability
 "src/elspeth/contracts/__init__.py" = ["RUF022"]
@@ -325,6 +354,7 @@ markers = [
     "asyncio: marks tests as async (handled by pytest-asyncio)",
     "performance: marks tests as performance benchmarks",
     "stress: marks tests as stress tests requiring ChaosLLM HTTP server (deselect with '-m \"not stress\"')",
+    "composer_llm_eval: characterization/replay tests for the 2026-04-28 composer LLM evaluation scenarios",
     "chaosllm: Configure ChaosLLM server for the test (preset=None, **kwargs)",
 ]
 # Load .env file for integration tests (API keys)

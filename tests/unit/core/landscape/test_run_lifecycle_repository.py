@@ -1,9 +1,8 @@
 # tests/unit/core/landscape/test_run_lifecycle_repository.py
 """Direct unit tests for RunLifecycleRepository.
 
-These tests exercise RunLifecycleRepository directly (not through the
-LandscapeRecorder facade) to pin its contract and verify Tier 1 crash
-paths that indirect facade tests miss.
+These tests exercise RunLifecycleRepository directly to pin its contract
+and verify Tier 1 crash paths.
 
 Covers 4 untested branch clusters identified in review:
 1. get_source_schema — non-string type rejection
@@ -20,13 +19,15 @@ import pytest
 from sqlalchemy import update
 
 from elspeth.contracts import ExportStatus, FieldContract, ReproducibilityGrade, RunStatus, SchemaContract, SecretResolutionInput
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
+from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.core.landscape.schema import runs_table
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
 def _make_repo(*, run_id: str = "run-1") -> tuple[LandscapeDB, RunLifecycleRepository]:
@@ -87,6 +88,140 @@ class TestBeginRunDirect:
     def test_get_run_returns_none_for_unknown(self) -> None:
         _, repo = _make_repo()
         assert repo.get_run("nonexistent") is None
+
+    def test_begin_run_completed_status_rejected(self) -> None:
+        """COMPLETED must go through complete_run() so completed_at is recorded."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        with pytest.raises(AuditIntegrityError, match="complete_run"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="completed-at-begin",
+                status=RunStatus.COMPLETED,
+            )
+
+
+class TestBeginRunRuntimeValManifest:
+    """ADR-010 M3 (issue elspeth-1c8185dfec): runtime VAL manifest recorded at begin_run.
+
+    The declaration-contract + Tier-1-error registries must be serialized
+    into the runs row so an auditor can later answer "which VAL contracts
+    were in force during run X?" and "are TIER_1_ERRORS the same across
+    runs X and Y?".
+
+    Tests explicitly set up the registry state they need via
+    ``_snapshot_registry_for_tests`` / ``_restore_registry_snapshot_for_tests``
+    rather than relying on module-import side-effects; at unit-test level
+    ``pass_through.py`` is not automatically imported so the production
+    registry population never runs.
+    """
+
+    @staticmethod
+    def _fetch_manifest(db: LandscapeDB, run_id: str) -> dict[str, object]:
+        from sqlalchemy import select
+
+        with db.connection() as conn:
+            row = conn.execute(select(runs_table.c.runtime_val_manifest_json).where(runs_table.c.run_id == run_id)).fetchone()
+        assert row is not None, f"runs row for {run_id!r} missing"
+        manifest_json = row[0]
+        assert manifest_json is not None, "runtime_val_manifest_json is NULL"
+        return json.loads(manifest_json)
+
+    def test_manifest_records_declaration_contract_registry(self) -> None:
+        """Registered DeclarationContract instances appear in the manifest."""
+        # Force registration by importing pass_through — the production
+        # bootstrap path reaches it through Orchestrator.run(); unit tests
+        # skip that so we import explicitly.
+        import elspeth.contracts.declaration_contracts as dc
+        from elspeth.engine.executors import pass_through  # noqa: F401  (import side-effect)
+
+        snapshot = dc._snapshot_registry_for_tests()
+        try:
+            db = make_landscape_db()
+            ops = DatabaseOps(db)
+            repo = RunLifecycleRepository(db, ops, RunLoader())
+            repo.begin_run(config={}, canonical_version="v1", run_id="m3-declarations")
+            manifest = self._fetch_manifest(db, "m3-declarations")
+        finally:
+            dc._restore_registry_snapshot_for_tests(snapshot)
+
+        declaration_entries = manifest["declaration_contracts"]
+        assert isinstance(declaration_entries, list)
+        names = {entry["name"] for entry in declaration_entries}
+        assert "passes_through_input" in names
+        for entry in declaration_entries:
+            # H2 per-site extension: entries carry dispatch_sites in addition
+            # to the 2A keys.
+            assert set(entry.keys()) == {"name", "class_name", "class_module", "dispatch_sites", "implementation_hash"}
+            assert entry["class_module"].startswith("elspeth.")
+            assert isinstance(entry["dispatch_sites"], list)
+            assert len(entry["dispatch_sites"]) >= 1
+            assert entry["implementation_hash"].startswith("sha256:")
+
+    def test_manifest_records_expected_contract_sites(self) -> None:
+        """The EXPECTED_CONTRACT_SITES per-site manifest (N1) is captured verbatim."""
+        from elspeth.contracts.declaration_contracts import EXPECTED_CONTRACT_SITES
+
+        db, _ = _make_repo(run_id="m3-manifest")
+        manifest = self._fetch_manifest(db, "m3-manifest")
+        expected = {name: sorted(sites) for name, sites in EXPECTED_CONTRACT_SITES.items()}
+        assert manifest["expected_contract_sites"] == expected
+
+    def test_manifest_records_tier_1_errors(self) -> None:
+        """Every Tier-1 error class with its reason is in the manifest."""
+        from elspeth.contracts.tier_registry import _TIER_1_ERRORS_VIEW, tier_1_reason
+
+        db, _ = _make_repo(run_id="m3-tier-1")
+        manifest = self._fetch_manifest(db, "m3-tier-1")
+
+        tier_1_entries = manifest["tier_1_errors"]
+        assert isinstance(tier_1_entries, list)
+        assert len(tier_1_entries) > 0  # at least FrameworkBugError + AuditIntegrityError
+
+        recorded_by_name = {(e["class_module"], e["class_name"]): e["reason"] for e in tier_1_entries}
+        for entry in tier_1_entries:
+            assert entry["implementation_hash"].startswith("sha256:")
+        for cls in _TIER_1_ERRORS_VIEW:
+            key = (cls.__module__, cls.__name__)
+            assert key in recorded_by_name, f"Tier-1 class {key} missing from manifest"
+            assert recorded_by_name[key] == tier_1_reason(cls)
+
+    def test_manifest_includes_landscape_record_error(self) -> None:
+        """Recorder-failure marker types must be registered and serialized."""
+        from elspeth.contracts.tier_registry import _TIER_1_ERRORS_VIEW, tier_1_reason
+        from elspeth.core.landscape.errors import LandscapeRecordError
+
+        db, _ = _make_repo(run_id="m3-landscape-record-error")
+        manifest = self._fetch_manifest(db, "m3-landscape-record-error")
+
+        assert LandscapeRecordError in _TIER_1_ERRORS_VIEW
+
+        recorded_by_name = {(e["class_module"], e["class_name"]): e["reason"] for e in manifest["tier_1_errors"]}
+        key = (LandscapeRecordError.__module__, LandscapeRecordError.__name__)
+        assert key in recorded_by_name
+        assert recorded_by_name[key] == tier_1_reason(LandscapeRecordError)
+
+    def test_begin_run_fails_when_declaration_registry_is_not_frozen(self) -> None:
+        """begin_run must fail closed if the declaration registry is still mutable."""
+        import elspeth.contracts.declaration_contracts as dc
+
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+
+        snapshot = dc._snapshot_registry_for_tests()
+        try:
+            dc._REGISTRY[:] = []  # type: ignore[attr-defined]  # test-only patch under pytest gate
+            for site_list in dc._REGISTRY_BY_SITE.values():  # type: ignore[attr-defined]  # test-only patch under pytest gate
+                site_list.clear()
+            dc._FROZEN = False  # type: ignore[attr-defined]  # test-only patch under pytest gate
+
+            with pytest.raises(FrameworkBugError, match="requires frozen runtime-VAL registries"):
+                repo.begin_run(config={}, canonical_version="v1", run_id="m3-unfrozen")
+        finally:
+            dc._restore_registry_snapshot_for_tests(snapshot)
 
 
 class TestFinalizeRunDirect:
@@ -236,6 +371,23 @@ class TestGetSourceFieldResolution:
             repo.get_source_field_resolution("run-1")
 
 
+class TestRecordSourceFieldResolutionNonexistentRun:
+    """record_source_field_resolution on a nonexistent run must crash."""
+
+    def test_nonexistent_run_raises_audit_integrity(self) -> None:
+        """Writing field resolution to a nonexistent run must raise AuditIntegrityError.
+
+        The error comes from execute_update() detecting zero affected rows.
+        """
+        _, repo = _make_repo()
+        with pytest.raises(AuditIntegrityError):
+            repo.record_source_field_resolution(
+                "ghost-run",
+                {"header": "field"},
+                "v1",
+            )
+
+
 # ---------------------------------------------------------------------------
 # get_run_contract — Tier 1 integrity checks
 # ---------------------------------------------------------------------------
@@ -328,6 +480,41 @@ class TestCompleteRun:
         with pytest.raises(AuditIntegrityError, match="terminal status"):
             repo.complete_run("run-1", RunStatus.RUNNING)
 
+    # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy must
+    # round-trip through Landscape — write the value, read it back,
+    # confirm the persisted enum equals the input enum.
+
+    def test_completed_with_failures_status_accepted_and_round_trips(self) -> None:
+        _, repo = _make_repo(run_id="run-cwf")
+        run = repo.complete_run("run-cwf", RunStatus.COMPLETED_WITH_FAILURES)
+        assert run.status == RunStatus.COMPLETED_WITH_FAILURES
+        # Read back via get_run — confirm persistence preserves the value
+        # verbatim through the SQL string round-trip.
+        reread = repo.get_run("run-cwf")
+        assert reread is not None
+        assert reread.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_empty_status_accepted_and_round_trips(self) -> None:
+        _, repo = _make_repo(run_id="run-empty")
+        run = repo.complete_run("run-empty", RunStatus.EMPTY)
+        assert run.status == RunStatus.EMPTY
+        reread = repo.get_run("run-empty")
+        assert reread is not None
+        assert reread.status == RunStatus.EMPTY
+
+    def test_new_terminal_statuses_block_re_completion(self) -> None:
+        """COMPLETED_WITH_FAILURES and EMPTY are terminal — same immutability
+        guarantee as the pre-existing terminal statuses."""
+        _, repo = _make_repo(run_id="run-immut-cwf")
+        repo.complete_run("run-immut-cwf", RunStatus.COMPLETED_WITH_FAILURES)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo.complete_run("run-immut-cwf", RunStatus.COMPLETED)
+
+        _, repo2 = _make_repo(run_id="run-immut-empty")
+        repo2.complete_run("run-immut-empty", RunStatus.EMPTY)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo2.complete_run("run-immut-empty", RunStatus.FAILED)
+
 
 # ---------------------------------------------------------------------------
 # set_export_status — branching logic
@@ -363,6 +550,16 @@ class TestSetExportStatus:
         assert run is not None
         assert run.export_error is None
 
+    def test_pending_clears_exported_at(self) -> None:
+        """COMPLETED -> PENDING must clear stale completion evidence."""
+        _, repo = _make_repo()
+        repo.set_export_status("run-1", ExportStatus.COMPLETED)
+        repo.set_export_status("run-1", ExportStatus.PENDING)
+        run = repo.get_run("run-1")
+        assert run is not None
+        assert run.export_status == ExportStatus.PENDING
+        assert run.exported_at is None
+
     def test_failed_with_error(self) -> None:
         _, repo = _make_repo()
         repo.set_export_status("run-1", ExportStatus.FAILED, error="connection refused")
@@ -370,6 +567,16 @@ class TestSetExportStatus:
         assert run is not None
         assert run.export_status == ExportStatus.FAILED
         assert run.export_error == "connection refused"
+
+    def test_failed_clears_exported_at(self) -> None:
+        """COMPLETED -> FAILED must also clear stale completion evidence."""
+        _, repo = _make_repo()
+        repo.set_export_status("run-1", ExportStatus.COMPLETED)
+        repo.set_export_status("run-1", ExportStatus.FAILED, error="connection refused")
+        run = repo.get_run("run-1")
+        assert run is not None
+        assert run.export_status == ExportStatus.FAILED
+        assert run.exported_at is None
 
     def test_export_format_and_sink_stored(self) -> None:
         _, repo = _make_repo()
@@ -395,6 +602,18 @@ class TestSetExportStatus:
         _, repo = _make_repo()
         with pytest.raises(AuditIntegrityError, match="only valid with FAILED"):
             repo.set_export_status("run-1", ExportStatus.PENDING, error="something")
+
+    def test_nonexistent_run_raises_audit_integrity(self) -> None:
+        """Setting export status on a nonexistent run must crash with context."""
+        _, repo = _make_repo()
+        with pytest.raises(AuditIntegrityError, match="not found"):
+            repo.set_export_status("ghost-run", ExportStatus.COMPLETED)
+
+    def test_nonexistent_run_error_includes_status(self) -> None:
+        """Error message includes the requested export status for debugging."""
+        _, repo = _make_repo()
+        with pytest.raises(AuditIntegrityError, match="failed"):
+            repo.set_export_status("ghost-run", ExportStatus.FAILED, error="oops")
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +656,12 @@ class TestRecordSecretResolutions:
         stored = repo.get_secret_resolutions_for_run("run-1")
         assert len(stored) == 0
 
+    def test_nonexistent_run_raises_landscape_record_error(self) -> None:
+        """Missing run_id should surface as an audit-layer write failure."""
+        _, repo = _make_repo()
+        with pytest.raises(LandscapeRecordError, match="record_secret_resolutions run_id=ghost-run"):
+            repo.record_secret_resolutions("ghost-run", [self._make_resolution()])
+
     def test_atomicity_on_failure(self) -> None:
         """If any insert fails, no resolutions should be persisted.
 
@@ -445,8 +670,6 @@ class TestRecordSecretResolutions:
         batch should roll back.
         """
         from unittest.mock import patch
-
-        from sqlalchemy.exc import IntegrityError
 
         from elspeth.core.landscape._helpers import generate_id as real_generate_id
 
@@ -469,7 +692,7 @@ class TestRecordSecretResolutions:
 
         with (
             patch("elspeth.core.landscape.run_lifecycle_repository.generate_id", side_effect=duplicate_id),
-            pytest.raises(IntegrityError),
+            pytest.raises(LandscapeRecordError, match="record_secret_resolutions run_id=run-1"),
         ):
             repo.record_secret_resolutions("run-1", resolutions)
 
@@ -546,13 +769,9 @@ class TestCompleteRunCrashPath:
     """Tests for complete_run edge cases and crash paths."""
 
     def test_nonexistent_run_raises(self) -> None:
-        """Completing a nonexistent run must crash.
-
-        DatabaseOps.execute_update raises AuditIntegrityError on zero rows affected,
-        which fires before the post-update AuditIntegrityError check.
-        """
+        """Completing a nonexistent run must crash."""
         _, repo = _make_repo()
-        with pytest.raises(AuditIntegrityError, match="zero rows affected"):
+        with pytest.raises(AuditIntegrityError, match="run not found"):
             repo.complete_run("nonexistent-run", RunStatus.COMPLETED)
 
     def test_complete_preserves_existing_grade_when_none_passed(self) -> None:
@@ -568,6 +787,47 @@ class TestCompleteRunCrashPath:
         run = repo.complete_run("run-1", RunStatus.COMPLETED)
         assert run.status == RunStatus.COMPLETED
         assert run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE
+
+    def test_double_completion_rejected(self) -> None:
+        """Already-terminal run cannot be completed again.
+
+        Bug 3c77199a70: complete_run() must enforce terminal immutability.
+        Once a run reaches COMPLETED/FAILED/INTERRUPTED, the terminal status
+        and completed_at timestamp are the legal record and must not be
+        overwritten.
+        """
+        _, repo = _make_repo()
+        repo.complete_run("run-1", RunStatus.COMPLETED)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo.complete_run("run-1", RunStatus.FAILED)
+
+    def test_completed_to_completed_rejected(self) -> None:
+        """Even same-status double completion is rejected (timestamp overwrite)."""
+        _, repo = _make_repo()
+        repo.complete_run("run-1", RunStatus.COMPLETED)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo.complete_run("run-1", RunStatus.COMPLETED)
+
+    def test_failed_to_completed_rejected(self) -> None:
+        """FAILED run cannot be re-completed as COMPLETED (outcome falsification)."""
+        _, repo = _make_repo()
+        repo.complete_run("run-1", RunStatus.FAILED)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo.complete_run("run-1", RunStatus.COMPLETED)
+
+    def test_interrupted_then_resume_then_complete_allowed(self) -> None:
+        """Resume path: INTERRUPTED → RUNNING (via update_run_status) → COMPLETED.
+
+        The resume path transitions out of terminal state first, then
+        complete_run sees RUNNING and succeeds.
+        """
+        _, repo = _make_repo()
+        repo.complete_run("run-1", RunStatus.INTERRUPTED)
+        # Resume: transition back to RUNNING first
+        repo.update_run_status("run-1", RunStatus.RUNNING)
+        # Now complete_run should succeed
+        run = repo.complete_run("run-1", RunStatus.COMPLETED)
+        assert run.status == RunStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +858,12 @@ class TestUpdateRunStatus:
         with pytest.raises(AuditIntegrityError, match="COMPLETED"):
             repo.update_run_status("run-1", RunStatus.RUNNING)
 
+    def test_completed_status_rejected(self) -> None:
+        """COMPLETED must go through complete_run() so completed_at is recorded."""
+        _, repo = _make_repo()
+        with pytest.raises(AuditIntegrityError, match="complete_run"):
+            repo.update_run_status("run-1", RunStatus.COMPLETED)
+
     def test_failed_to_running_allowed_for_resume(self) -> None:
         """FAILED→RUNNING is the resume path — must be allowed."""
         _, repo = _make_repo()
@@ -616,6 +882,41 @@ class TestUpdateRunStatus:
         run = repo.get_run("run-1")
         assert run is not None
         assert run.status == RunStatus.RUNNING
+
+    def test_failed_to_running_clears_completed_at(self) -> None:
+        """Regression: FAILED→RUNNING must clear completed_at atomically.
+
+        elspeth-55696f7fa5: previously, update_run_status only set status,
+        leaving completed_at set — creating an impossible state where a run
+        is simultaneously RUNNING and has a completion timestamp.
+        """
+        _, repo = _make_repo()
+        repo.complete_run("run-1", RunStatus.FAILED)
+        # Verify completed_at is set after failure
+        run = repo.get_run("run-1")
+        assert run is not None
+        assert run.completed_at is not None
+
+        # Resume: FAILED → RUNNING
+        repo.update_run_status("run-1", RunStatus.RUNNING)
+        run = repo.get_run("run-1")
+        assert run is not None
+        assert run.status == RunStatus.RUNNING
+        assert run.completed_at is None  # Must be cleared
+
+    def test_interrupted_to_running_clears_completed_at(self) -> None:
+        """INTERRUPTED→RUNNING must also clear completed_at."""
+        _, repo = _make_repo()
+        repo.complete_run("run-1", RunStatus.INTERRUPTED)
+        run = repo.get_run("run-1")
+        assert run is not None
+        assert run.completed_at is not None
+
+        repo.update_run_status("run-1", RunStatus.RUNNING)
+        run = repo.get_run("run-1")
+        assert run is not None
+        assert run.status == RunStatus.RUNNING
+        assert run.completed_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -644,9 +945,9 @@ class TestFinalizeRunEdgeCases:
         repo = RunLifecycleRepository(db, ops, RunLoader())
         repo.begin_run(config={}, canonical_version="v1", run_id="nd-run")
 
-        # Register a nondeterministic node via the recorder (need DataFlowRepository)
-        recorder = make_recorder(db)
-        recorder.register_node(
+        # Register a nondeterministic node via the factory (need DataFlowRepository)
+        factory = make_factory(db)
+        factory.data_flow.register_node(
             run_id="nd-run",
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -723,3 +1024,30 @@ class TestSetExportStatusEdgeCases:
         run = repo.get_run("run-1")
         assert run is not None
         assert run.export_error == "second error"
+
+
+class TestPreflightAuditWriteErrors:
+    """Regression tests for preflight/readiness audit write error normalization."""
+
+    def test_record_preflight_results_missing_run_raises_landscape_record_error(self) -> None:
+        """Preflight writes should not leak raw SQLAlchemy errors."""
+        _, repo = _make_repo()
+        preflight = PreflightResult(
+            dependency_runs=(DependencyRunResult(name="dep", run_id="dep-run", settings_hash="hash", duration_ms=1, indexed_at="now"),),
+            gate_results=(CommencementGateResult(name="gate", condition="x", result=True, context_snapshot={}),),
+        )
+        with pytest.raises(LandscapeRecordError, match="record_preflight_results run_id=ghost-run"):
+            repo.record_preflight_results("ghost-run", preflight)
+
+    def test_record_readiness_check_missing_run_raises_landscape_record_error(self) -> None:
+        """Readiness writes should not leak raw SQLAlchemy errors."""
+        _, repo = _make_repo()
+        with pytest.raises(LandscapeRecordError, match="record_readiness_check run_id=ghost-run"):
+            repo.record_readiness_check(
+                "ghost-run",
+                name="probe",
+                collection="docs",
+                reachable=True,
+                count=1,
+                message="ok",
+            )

@@ -12,32 +12,35 @@ Subclasses implement _analyze_field() for their specific Azure API.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
-from threading import Lock
-from typing import TYPE_CHECKING, Any
+from threading import Event, Lock
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 from pydantic import Field, field_validator
 
 from elspeth.contracts import Determinism
+from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
-from elspeth.contracts.errors import PluginRetryableError
+from elspeth.contracts.errors import CapacityError, FrameworkBugError, PluginRetryableError, is_capacity_error
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputPort
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
-from elspeth.plugins.infrastructure.pooling import CapacityError, is_capacity_error
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.azure.errors import MalformedResponseError
 from elspeth.plugins.transforms.safety_utils import get_fields_to_scan
 from elspeth.plugins.transforms.safety_utils import validate_fields_not_empty as _validate_fields
 
-if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
-
 logger = structlog.get_logger(__name__)
+
+_CAPACITY_RETRY_INITIAL_DELAY_SECONDS = 0.05
+_CAPACITY_RETRY_MAX_DELAY_SECONDS = 1.0
+_AZURE_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _warn_telemetry_before_start(event: Any) -> None:
@@ -61,12 +64,28 @@ class BaseAzureSafetyConfig(TransformDataConfig):
         description="Field name(s) to analyze, or 'all' for all string fields",
     )
     max_capacity_retry_seconds: int = Field(3600, gt=0, description="Max seconds to retry capacity errors")
+    batch_wait_timeout_seconds: int = Field(3600, gt=0, description="Max seconds to wait for a batch row result")
 
-    @field_validator("endpoint", "api_key")
+    @field_validator("endpoint")
     @classmethod
-    def _reject_empty_credentials(cls, v: str, info: Any) -> str:
+    def _validate_endpoint_url(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("endpoint must not be empty")
+        parsed = urlparse(v)
+        if parsed.scheme != "https":
+            raise ValueError(f"endpoint must use HTTPS, got scheme '{parsed.scheme}'")
+        if not parsed.hostname:
+            raise ValueError("endpoint must include a hostname")
+        if parsed.username or parsed.password:
+            raise ValueError("endpoint must not contain embedded credentials")
+        return v
+
+    @field_validator("api_key")
+    @classmethod
+    def _reject_empty_api_key(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError(f"{info.field_name} must not be empty")
+            raise ValueError("api_key must not be empty")
         return v
 
     @field_validator("fields")
@@ -104,23 +123,30 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         schema_name: str,
     ) -> None:
         super().__init__(config)
+        self._initialize_declared_input_fields(cfg)
 
         self._endpoint = cfg.endpoint.rstrip("/")
         self._api_key = cfg.api_key
         self._fields = cfg.fields
         self._max_capacity_retry_seconds = cfg.max_capacity_retry_seconds
+        self._batch_wait_timeout_seconds = cfg.batch_wait_timeout_seconds
+        self._effective_batch_wait_timeout_seconds = max(
+            float(self._batch_wait_timeout_seconds),
+            float(self._max_capacity_retry_seconds) + _AZURE_HTTP_TIMEOUT_SECONDS,
+        )
 
         schema = create_schema_from_config(cfg.schema_config, schema_name, allow_coercion=False)
         self.input_schema = schema
         self.output_schema = schema
 
-        self._recorder: LandscapeRecorder | None = None
+        self._recorder: PluginAuditWriter | None = None
         self._run_id: str = ""
         self._telemetry_emit: Callable[[Any], None] = _warn_telemetry_before_start
         self._limiter: Any = None  # RateLimiter | NoOpLimiter | None
 
         self._http_clients: dict[str, Any] = {}  # state_id -> AuditedHTTPClient
         self._http_clients_lock = Lock()
+        self._capacity_retry_shutdown = Event()
 
         self._batch_initialized = False
 
@@ -157,7 +183,7 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
             output=output,
             name=self.name,
             max_workers=max_pending,  # Match workers to max_pending
-            batch_wait_timeout=float(self._max_capacity_retry_seconds),
+            batch_wait_timeout=self._effective_batch_wait_timeout_seconds,
         )
         self._batch_initialized = True
 
@@ -196,6 +222,47 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
             f"{self.__class__.__name__} uses row-level pipelining. Use accept() instead of process(). See class docstring for usage."
         )
 
+    def _execute_forward_invariant_probe_with_client(
+        self,
+        probe_rows: list[PipelineRow],
+        ctx: TransformContext,
+        *,
+        client: Any,
+    ) -> TransformResult:
+        """Drive the single-row validation path with a hermetic HTTP client."""
+        if len(probe_rows) != 1:
+            raise FrameworkBugError(
+                f"{self.__class__.__name__}.execute_forward_invariant_probe() "
+                f"received {len(probe_rows)} rows; Azure safety probes require exactly 1 row."
+            )
+
+        had_client_override = "_get_http_client" in self.__dict__
+        original_get_http_client = self._get_http_client
+        state_id = ctx.state_id or "invariant-probe-state"
+        token_id = ctx.token.token_id if ctx.token is not None else None
+
+        def _fake_get_http_client(
+            requested_state_id: str,
+            *,
+            token_id: str | None = None,
+        ) -> Any:
+            del requested_state_id, token_id
+            return client
+
+        try:
+            self.__dict__["_get_http_client"] = _fake_get_http_client
+            return self._process_single_with_state(
+                probe_rows[0],
+                state_id,
+                token_id=token_id,
+            )
+        finally:
+            if had_client_override:
+                self.__dict__["_get_http_client"] = original_get_http_client
+            else:
+                self.__dict__.pop("_get_http_client", None)
+            client.close()
+
     def _process_row(
         self,
         row: PipelineRow,
@@ -232,15 +299,13 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
     ) -> TransformResult:
         """Process a single row with explicit state_id.
 
-        Iterates over configured fields, validates presence and type,
-        then delegates to _analyze_field() for API-specific analysis.
+        Validates configured fields before any external call, then delegates
+        to _analyze_field() for API-specific analysis.
         Handles shared exception types (httpx errors, MalformedResponseError).
-
-        Raises:
-            CapacityError: On rate limit errors (for worker pool retry)
         """
         fields_to_scan = get_fields_to_scan(self._fields, row)
         all_mode = self._fields == "all"
+        validated_fields: list[tuple[str, str]] = []
 
         for field_name in fields_to_scan:
             if field_name not in row:
@@ -268,44 +333,137 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
                     retryable=False,
                 )
 
-            # Call subclass-specific analysis
-            try:
-                violation = self._analyze_field(value, field_name, state_id, token_id=token_id)
-            except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code
-                if is_capacity_error(status_code):
-                    # Convert to CapacityError for pooled executor retry (429/503/529)
-                    raise CapacityError(status_code, str(e)) from e
-                return TransformResult.error(
-                    {
-                        "reason": "api_error",
-                        "error_type": "http_error",
-                        "status_code": status_code,
-                        "message": str(e),
-                    },
-                    retryable=False,
-                )
-            except httpx.RequestError as e:
-                # Network errors are transient — re-raise for engine retry.
-                # TransformResult.error(retryable=True) was dead code: the engine
-                # retries by catching PluginRetryableError, not by inspecting results.
-                raise PluginRetryableError(f"Azure API network error: {e}", retryable=True) from e
-            except MalformedResponseError as e:
-                # Malformed API response — fail CLOSED, non-retryable
-                # (response structure won't improve on retry)
-                return TransformResult.error(
-                    {
-                        "reason": "api_error",
-                        "error_type": "malformed_response",
-                        "message": str(e),
-                    },
-                    retryable=False,
-                )
+            validated_fields.append((field_name, value))
 
+        capacity_retry_started_at = time.monotonic()
+        capacity_retry_deadline = capacity_retry_started_at + float(self._max_capacity_retry_seconds)
+
+        for field_name, value in validated_fields:
+            violation = self._analyze_field_with_capacity_retry(
+                value,
+                field_name,
+                state_id,
+                token_id=token_id,
+                retry_started_at=capacity_retry_started_at,
+                retry_deadline=capacity_retry_deadline,
+            )
             if violation is not None:
                 return violation
 
-        return TransformResult.success(row, success_reason={"action": "validated"})
+        return TransformResult.success(
+            self._align_output_row_contract(row),
+            success_reason={"action": "validated"},
+        )
+
+    def _analyze_field_once(
+        self,
+        value: str,
+        field_name: str,
+        state_id: str,
+        *,
+        token_id: str | None = None,
+    ) -> TransformResult | None:
+        """Run one Azure field analysis attempt and classify non-capacity failures."""
+        try:
+            return self._analyze_field(value, field_name, state_id, token_id=token_id)
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            if is_capacity_error(status_code):
+                raise CapacityError(status_code, str(e)) from e
+            return TransformResult.error(
+                {
+                    "reason": "api_error",
+                    "error_type": "http_error",
+                    "status_code": status_code,
+                    "message": str(e),
+                },
+                retryable=False,
+            )
+        except httpx.RequestError as e:
+            # Network errors are transient — re-raise for engine retry.
+            # TransformResult.error(retryable=True) was dead code: the engine
+            # retries by catching PluginRetryableError, not by inspecting results.
+            raise PluginRetryableError(f"Azure API network error: {e}", retryable=True) from e
+        except MalformedResponseError as e:
+            # Malformed API response — fail CLOSED, non-retryable
+            # (response structure won't improve on retry)
+            return TransformResult.error(
+                {
+                    "reason": "api_error",
+                    "error_type": "malformed_response",
+                    "message": str(e),
+                },
+                retryable=False,
+            )
+
+    def _analyze_field_with_capacity_retry(
+        self,
+        value: str,
+        field_name: str,
+        state_id: str,
+        *,
+        token_id: str | None = None,
+        retry_started_at: float | None = None,
+        retry_deadline: float | None = None,
+    ) -> TransformResult | None:
+        """Retry Azure capacity responses within the row-scoped retry budget."""
+        started_at = retry_started_at if retry_started_at is not None else time.monotonic()
+        deadline = retry_deadline if retry_deadline is not None else started_at + float(self._max_capacity_retry_seconds)
+        retry_delay = _CAPACITY_RETRY_INITIAL_DELAY_SECONDS
+
+        while True:
+            if self._capacity_retry_shutdown.is_set():
+                return self._capacity_retry_shutdown_result(started_at)
+
+            try:
+                return self._analyze_field_once(value, field_name, state_id, token_id=token_id)
+            except CapacityError as e:
+                if self._capacity_retry_shutdown.is_set():
+                    return self._capacity_retry_shutdown_result(started_at)
+
+                now = time.monotonic()
+                if now >= deadline:
+                    return self._capacity_retry_timeout_result(e, started_at)
+
+                sleep_seconds = min(retry_delay, deadline - now)
+                if sleep_seconds > 0 and self._capacity_retry_shutdown.wait(timeout=sleep_seconds):
+                    return self._capacity_retry_shutdown_result(started_at)
+                if time.monotonic() >= deadline:
+                    return self._capacity_retry_timeout_result(e, started_at)
+
+                retry_delay = min(retry_delay * 2.0, _CAPACITY_RETRY_MAX_DELAY_SECONDS)
+
+    def _capacity_retry_shutdown_result(self, started_at: float) -> TransformResult:
+        """Build a row result for transform shutdown during capacity backoff."""
+        elapsed = time.monotonic() - started_at
+        return TransformResult.error(
+            {
+                "reason": "shutdown_requested",
+                "error": "Azure safety capacity retry stopped because transform shutdown was requested",
+                "elapsed_seconds": elapsed,
+                "max_seconds": self._max_capacity_retry_seconds,
+            },
+            retryable=False,
+        )
+
+    def _capacity_retry_timeout_result(
+        self,
+        capacity_error: CapacityError,
+        started_at: float,
+    ) -> TransformResult:
+        """Build the same retry_timeout row result shape as the pooled executor."""
+        elapsed = time.monotonic() - started_at
+        return TransformResult.error(
+            {
+                "reason": "retry_timeout",
+                "error": str(capacity_error),
+                "error_type": type(capacity_error).__name__,
+                "elapsed_seconds": elapsed,
+                "max_seconds": self._max_capacity_retry_seconds,
+                "status_code": capacity_error.status_code,
+            },
+            retryable=False,
+        )
 
     def _analyze_field(
         self,
@@ -328,8 +486,8 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
         """Get or create audited HTTP client for a state_id.
 
         Clients are cached to preserve call_index across retries.
-        This ensures uniqueness of (state_id, call_index) even when
-        the worker pool retries after CapacityError.
+        This ensures uniqueness of (state_id, call_index) when the local
+        capacity retry loop retries after CapacityError.
 
         Thread-safe: multiple workers can call this concurrently.
         """
@@ -340,11 +498,11 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
                 if self._recorder is None:
                     raise RuntimeError(f"{self.name}: recorder not initialized — call on_start() before processing")
                 self._http_clients[state_id] = AuditedHTTPClient(
-                    recorder=self._recorder,
+                    execution=self._recorder,
                     state_id=state_id,
                     run_id=self._run_id,
                     telemetry_emit=self._telemetry_emit,
-                    timeout=30.0,
+                    timeout=_AZURE_HTTP_TIMEOUT_SECONDS,
                     headers={
                         "Ocp-Apim-Subscription-Key": self._api_key,
                         "Content-Type": "application/json",
@@ -356,6 +514,8 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
 
     def close(self) -> None:
         """Release resources."""
+        self._capacity_retry_shutdown.set()
+
         # Shutdown batch processing infrastructure first
         if self._batch_initialized:
             self.shutdown_batch_processing()

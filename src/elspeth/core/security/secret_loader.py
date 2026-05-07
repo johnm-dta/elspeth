@@ -230,7 +230,8 @@ class KeyVaultSecretLoader:
 
     def clear_cache(self) -> None:
         """Clear the secret cache, forcing refetch on next access."""
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
 
 class CachedSecretLoader:
@@ -274,7 +275,8 @@ class CachedSecretLoader:
 
     def clear_cache(self) -> None:
         """Clear the cache."""
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
 
 class CompositeSecretLoader:

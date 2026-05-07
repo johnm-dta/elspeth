@@ -11,16 +11,20 @@ Coordinates:
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.contracts import RouteDestination, RowOutcome, RowResult, SourceRow, TokenInfo, TransformResult
+from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
+from elspeth.engine._best_effort import best_effort
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
@@ -34,11 +38,33 @@ if TYPE_CHECKING:
     from elspeth.engine.orchestrator.types import RowPlugin
     from elspeth.telemetry import TelemetryManager
 
-from elspeth.contracts import BatchTransformProtocol, TransformProtocol
-from elspeth.contracts.enums import NodeStateStatus, OutputMode, RoutingKind, RoutingMode, TriggerType
+from elspeth.contracts import BatchTransformProtocol, SourceProtocol, TransformProtocol
+from elspeth.contracts.declaration_contracts import (
+    AggregateDeclarationContractViolation,
+    BatchFlushInputs,
+    BatchFlushOutputs,
+    BoundaryInputs,
+    BoundaryOutputs,
+    DeclarationContractViolation,
+)
+from elspeth.contracts.enums import (
+    NodeStateStatus,
+    OutputMode,
+    RoutingKind,
+    RoutingMode,
+    TerminalOutcome,
+    TerminalPath,
+    TriggerType,
+)
 from elspeth.contracts.errors import (
+    AuditIntegrityError,
+    CapacityError,
+    ExecutionError,
+    FrameworkBugError,
     MaxRetriesExceeded,
     OrchestrationInvariantError,
+    PassThroughContractViolation,
+    PluginContractViolation,
     PluginRetryableError,
     TransformErrorCategory,
     TransformErrorReason,
@@ -46,20 +72,35 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.config import AggregationSettings, GateSettings
-from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape.data_flow_repository import DataFlowRepository
+from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors import (
     AggregationExecutor,
     GateExecutor,
     TransformExecutor,
 )
+from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
+from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
-from elspeth.plugins.infrastructure.pooling import CapacityError
 
-# Iteration guard to prevent infinite loops from bugs
-MAX_WORK_QUEUE_ITERATIONS = 10_000
+# Iteration guard to prevent infinite loops from bugs.
+# This counts dequeued work items, so it must exceed the largest supported
+# single-row fan-out; otherwise legal expansion trips the safety valve before
+# the final child runs.
+MAX_WORK_QUEUE_ITERATIONS = 100_000
+logger = logging.getLogger(__name__)
+
+type _SourceBoundaryFailure = (
+    DeclarationContractViolation
+    | AggregateDeclarationContractViolation
+    | PluginContractViolation
+    | FrameworkBugError
+    | OrchestrationInvariantError
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +171,41 @@ class _FlushContext:
                 f"_FlushContext: coalesce_node_id and coalesce_name must be both set or both None, "
                 f"got node_id={self.coalesce_node_id!r}, name={self.coalesce_name!r}"
             )
+
+
+def _validated_quarantined_indices(result: TransformResult, *, buffered_token_count: int, aggregation_name: str) -> set[int]:
+    """Extract and validate batch-transform quarantine metadata."""
+    if result.success_reason is None or "metadata" not in result.success_reason:
+        return set()
+
+    metadata = result.success_reason["metadata"]
+    if type(metadata) is not dict:
+        raise OrchestrationInvariantError(
+            f"Aggregation {aggregation_name!r} returned success_reason.metadata={metadata!r}; "
+            f"expected dict when quarantine metadata is present"
+        )
+    if "quarantined_indices" not in metadata:
+        return set()
+
+    raw_indices = metadata["quarantined_indices"]
+    if type(raw_indices) is not list:
+        raise OrchestrationInvariantError(
+            f"Aggregation {aggregation_name!r} returned quarantined_indices={raw_indices!r}; expected list[int]"
+        )
+
+    quarantined_index_set: set[int] = set()
+    for position, raw_index in enumerate(raw_indices):
+        if type(raw_index) is not int:
+            raise OrchestrationInvariantError(
+                f"Aggregation {aggregation_name!r} returned quarantined_indices[{position}]={raw_index!r}; expected int"
+            )
+        if raw_index < 0 or raw_index >= buffered_token_count:
+            raise OrchestrationInvariantError(
+                f"Aggregation {aggregation_name!r} returned quarantined_indices[{position}]={raw_index}; "
+                f"valid index range is 0..{buffered_token_count - 1}"
+            )
+        quarantined_index_set.add(raw_index)
+    return quarantined_index_set
 
 
 # --- Discriminated union types for _process_single_token extraction ---
@@ -216,7 +292,7 @@ class RowProcessor:
 
     Example:
         processor = RowProcessor(
-            recorder, span_factory, run_id, source_node_id,
+            execution, data_flow, span_factory, run_id, source_node_id,
             traversal=traversal_context,
         )
 
@@ -230,12 +306,14 @@ class RowProcessor:
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        execution: ExecutionRepository,
+        data_flow: DataFlowRepository,
         span_factory: SpanFactory,
         run_id: str,
         source_node_id: NodeID,
         *,
         source_on_success: str,
+        source_plugin: SourceProtocol | None = None,
         edge_map: dict[tuple[NodeID, str], str] | None = None,
         route_resolution_map: dict[tuple[NodeID, str], RouteDestination] | None = None,
         traversal: DAGTraversalContext,
@@ -255,11 +333,15 @@ class RowProcessor:
         """Initialize processor.
 
         Args:
-            recorder: Landscape recorder
+            execution: Execution repository for node states, routing, operations
+            data_flow: Data flow repository for token outcomes, schema contracts
             span_factory: Span factory for tracing
             run_id: Current run ID
             source_node_id: Source node ID
             source_on_success: Source's on_success sink name for COMPLETED routing
+            source_plugin: Optional source plugin instance. Production
+                orchestrator passes the concrete source so source-boundary
+                contracts can evaluate runtime declarations after token creation.
             edge_map: Map of (node_id, label) -> edge_id
             route_resolution_map: Map of (node_id, label) -> resolved route destination
             traversal: Precomputed DAG traversal context from orchestrator
@@ -279,7 +361,8 @@ class RowProcessor:
             telemetry_manager: Optional TelemetryManager for emitting telemetry events.
                                If None, telemetry emission is disabled.
         """
-        self._recorder = recorder
+        self._execution = execution
+        self._data_flow = data_flow
         self._spans = span_factory
         self._run_id = run_id
         self._source_node_id: NodeID = source_node_id
@@ -288,6 +371,9 @@ class RowProcessor:
         self._node_step_map: Mapping[NodeID, int] = traversal.node_step_map
         self._step_resolver: StepResolver = make_step_resolver(traversal.node_step_map, source_node_id)
         self._node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings] = traversal.node_to_plugin
+        # Traversal metadata intentionally excludes the source node. Callers
+        # that want source-boundary checks must pass the concrete source plugin.
+        self._source_plugin: SourceProtocol | None = source_plugin
         self._first_transform_node_id: NodeID | None = traversal.first_transform_node_id
         self._node_to_next: Mapping[NodeID, NodeID | None] = traversal.node_to_next
         self._retry_manager = retry_manager
@@ -333,19 +419,20 @@ class RowProcessor:
         self._error_edge_ids = error_edge_ids
 
         self._token_manager = TokenManager(
-            recorder,
+            data_flow,
             step_resolver=self._step_resolver,
         )
         self._transform_executor = TransformExecutor(
-            recorder,
+            execution,
             span_factory,
             self._step_resolver,
             max_workers=max_workers,
             error_edge_ids=error_edge_ids,
+            data_flow=data_flow,
         )
-        self._gate_executor = GateExecutor(recorder, span_factory, self._step_resolver, edge_map, route_resolution_map)
+        self._gate_executor = GateExecutor(execution, span_factory, self._step_resolver, edge_map, route_resolution_map)
         self._aggregation_executor = AggregationExecutor(
-            recorder,
+            execution,
             span_factory,
             self._step_resolver,
             run_id,
@@ -354,12 +441,16 @@ class RowProcessor:
         )
         self._telemetry_manager = telemetry_manager
 
-        # Restore aggregation state if provided (crash recovery / resume)
+        # Restore aggregation state if provided (crash recovery / resume).
+        # Multiple node_id keys may map to the same state — deduplicate by
+        # content equality (not id()) to handle both shared references and
+        # independently deserialized copies.
         if restored_aggregation_state:
-            restored_states: dict[int, AggregationCheckpointState] = {}
+            unique_states: list[AggregationCheckpointState] = []
             for state in restored_aggregation_state.values():
-                restored_states.setdefault(id(state), state)
-            for state in restored_states.values():
+                if state not in unique_states:
+                    unique_states.append(state)
+            for state in unique_states:
                 self._aggregation_executor.restore_from_checkpoint(state)
 
     @property
@@ -489,7 +580,9 @@ class RowProcessor:
     def _emit_token_completed(
         self,
         token: TokenInfo,
-        outcome: RowOutcome,
+        *,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         sink_name: str | None = None,
     ) -> None:
         """Emit TokenCompleted telemetry event.
@@ -498,7 +591,8 @@ class RowProcessor:
 
         Args:
             token: Token that reached terminal state
-            outcome: Terminal outcome (completed, routed, failed, etc.)
+            outcome: Lifecycle outcome (None for non-terminal BUFFERED)
+            path: Terminal provenance path
             sink_name: Destination sink if applicable
         """
         if self._telemetry_manager is None:
@@ -515,6 +609,7 @@ class RowProcessor:
                 row_id=token.row_id,
                 token_id=token.token_id,
                 outcome=outcome,
+                path=path,
                 sink_name=sink_name,
             )
         )
@@ -530,6 +625,8 @@ class RowProcessor:
         """
         if outcome.sink_name is not None:
             return (outcome.sink_name,)
+        elif outcome.discarded is True:
+            return ("discard",)
         elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
             # For forks, return the branch names of child tokens
             return tuple(child.branch_name for child in outcome.child_tokens if child.branch_name)
@@ -629,16 +726,368 @@ class RowProcessor:
         failure = FailureInfo(exception_type="TransformError", message=fctx.error_msg)
 
         for token in fctx.buffered_tokens:
-            self._recorder.record_token_outcome(
+            try:
+                self._data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                    error_hash=error_hash,
+                )
+            except LandscapeRecordError as record_failure:
+                raise AuditIntegrityError(
+                    f"Failed to record FAILED outcome for token {token.token_id!r} "
+                    f"during batch flush failure handling "
+                    f"(transform={fctx.transform.name!r}, node={fctx.node_id!r}). "
+                    f"Audit trail is INCOMPLETE — some buffered tokens may already "
+                    f"be terminalized while others remain BUFFERED. "
+                    f"Recorder failure: {type(record_failure).__name__}: {record_failure}. "
+                    f"Original flush error: {fctx.error_msg}"
+                ) from record_failure
+            with best_effort(
+                "TokenCompleted telemetry after batch-flush FAILED audit",
                 run_id=self._run_id,
                 token_id=token.token_id,
-                outcome=RowOutcome.FAILED,
-                error_hash=error_hash,
+                transform_node_id=fctx.node_id,
+                transform_name=fctx.transform.name,
+            ):
+                self._emit_token_completed(
+                    token,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                )
+            results.append(
+                RowResult(
+                    token=token,
+                    final_data=token.row_data,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                    error=failure,
+                )
             )
-            self._emit_token_completed(token, RowOutcome.FAILED)
-            results.append(RowResult(token=token, final_data=token.row_data, outcome=RowOutcome.FAILED, error=failure))
 
         return tuple(results)
+
+    def _cross_check_flush_output(
+        self,
+        fctx: _FlushContext,
+        result: TransformResult,
+    ) -> None:
+        """Batch-flush declaration dispatch before any terminal emissions.
+
+        ADR-009 §Clause 2 — this closes the gap ADR-008 left open. The batch
+        aggregation flush path previously trusted the static annotation; a
+        mis-annotated batch-aware transform (e.g., ``BatchReplicate``) could
+        silently drop fields from emitted rows without any audit record.
+
+        Semantic decisions (ADR-009 §§2.3, 2.4):
+
+        - **PASSTHROUGH mode (1:1).** Each output token pairs with exactly one
+          input token. The cross-check walks pairs and uses that specific
+          input token's contract fields as ``input_fields``. A heterogeneous
+          batch is not a hazard — each pair is checked independently.
+        - **TRANSFORM mode (N:M, batch-homogeneous).** Every output row is
+          checked against the intersection of all buffered input contracts
+          (ADR-007 table line 53). This is the weakest shared guarantee — a
+          transform claiming ``passes_through_input=True`` must preserve what
+          every input contributed.
+
+        Called BEFORE ``_emit_transform_completed`` and the routing methods
+        (§2.5): a failed cross-check must not follow a COMPLETED or
+        CONSUMED_IN_BATCH terminal-state emission on any token, which would
+        violate CLAUDE.md's "every row reaches exactly one terminal state"
+        invariant.
+
+        Raises:
+            FrameworkBugError: A buffered token has no input contract.
+            DeclarationContractViolation | PluginContractViolation:
+                Any batch-flush declaration contract fires.
+                ``_record_flush_violation`` writes per-token FAILED audit
+                entries before re-raising.
+        """
+        # Gather emitted rows uniformly across both output modes.
+        if result.is_multi_row:
+            emitted: list[PipelineRow] = list(result.rows) if result.rows is not None else []
+        elif result.row is not None:
+            emitted = [result.row]
+        else:
+            emitted = []
+        used_success_empty = result.rows is not None and len(result.rows) == 0
+
+        identity_token = fctx.triggering_token or fctx.buffered_tokens[0]
+        transform_node_id_str = str(fctx.node_id)
+
+        try:
+            verify_zero_emission_declaration_path(
+                plugin=fctx.transform,
+                plugin_name=fctx.transform.name,
+                node_id=transform_node_id_str,
+                run_id=self._run_id,
+                row_id=identity_token.row_id,
+                token_id=identity_token.token_id,
+                emitted_count=len(emitted),
+                used_success_empty=used_success_empty,
+            )
+
+            # _FlushContext.__post_init__ guarantees buffered_tokens is non-empty;
+            # no defensive emptiness guard (CLAUDE.md: defensive programming
+            # forbidden for internal paths).
+            for i, token in enumerate(fctx.buffered_tokens):
+                if token.row_data.contract is None:
+                    raise FrameworkBugError(
+                        f"Batch flush: buffered token {i} "
+                        f"(token_id={token.token_id!r}) has no contract "
+                        f"(transform={fctx.transform.name!r}, node={fctx.node_id!r}). "
+                        "Framework invariant violated."
+                    )
+
+            per_input_field_sets = [
+                frozenset(fc.normalized_name for fc in token.row_data.contract.fields) for token in fctx.buffered_tokens
+            ]
+
+            static_contract = fctx.transform.effective_static_contract()
+
+            if fctx.settings.output_mode == OutputMode.PASSTHROUGH:
+                # 1:1 pairing — routing enforces len(emitted) == len(buffered).
+                # Dispatch each pair through the audit-complete batch-flush
+                # dispatcher (ADR-010 §Semantics amendment 2026-04-20). Each
+                # pair's effective_input_fields is derived per-token — the
+                # PASSTHROUGH carve-out preserves per-token identity.
+                if len(emitted) == len(fctx.buffered_tokens):
+                    for token, emitted_row, token_fields in zip(
+                        fctx.buffered_tokens,
+                        emitted,
+                        per_input_field_sets,
+                        strict=True,
+                    ):
+                        run_batch_flush_checks(
+                            inputs=BatchFlushInputs(
+                                plugin=fctx.transform,
+                                node_id=transform_node_id_str,
+                                run_id=self._run_id,
+                                row_id=token.row_id,
+                                token_id=token.token_id,
+                                buffered_tokens=(token,),
+                                static_contract=static_contract,
+                                effective_input_fields=token_fields,
+                            ),
+                            outputs=BatchFlushOutputs(emitted_rows=(emitted_row,)),
+                        )
+                elif len(emitted) == 0:
+                    # Zero-emission success has no 1:1 pairing witness, but the
+                    # dispatcher still must evaluate governance contracts and the
+                    # pass-through empty-emission path. The honest batch-level
+                    # surface is the shared intersection across buffered tokens.
+                    input_fields = frozenset.intersection(*per_input_field_sets)
+                    identity_token = fctx.triggering_token or fctx.buffered_tokens[0]
+                    run_batch_flush_checks(
+                        inputs=BatchFlushInputs(
+                            plugin=fctx.transform,
+                            node_id=transform_node_id_str,
+                            run_id=self._run_id,
+                            row_id=identity_token.row_id,
+                            token_id=identity_token.token_id,
+                            buffered_tokens=tuple(fctx.buffered_tokens),
+                            static_contract=static_contract,
+                            effective_input_fields=input_fields,
+                        ),
+                        outputs=BatchFlushOutputs(emitted_rows=()),
+                    )
+                else:
+                    # Count mismatch is ``_route_passthrough_results``'s
+                    # concern; pass through unchecked so routing can surface
+                    # the OrchestrationInvariantError with its own message.
+                    pass
+            else:
+                # TRANSFORM mode: batch-homogeneous intersection (ADR-009 §Clause 2).
+                # Every emitted row must preserve the intersection of every
+                # buffered token's input contract — the weakest shared guarantee.
+                # The batch-flush dispatcher surfaces the intersection via
+                # ``BatchFlushInputs.effective_input_fields`` (panel F1
+                # resolution: caller-computed; contracts don't re-derive).
+                input_fields = frozenset.intersection(*per_input_field_sets)
+                run_batch_flush_checks(
+                    inputs=BatchFlushInputs(
+                        plugin=fctx.transform,
+                        node_id=transform_node_id_str,
+                        run_id=self._run_id,
+                        row_id=identity_token.row_id,
+                        token_id=identity_token.token_id,
+                        buffered_tokens=tuple(fctx.buffered_tokens),
+                        static_contract=static_contract,
+                        effective_input_fields=input_fields,
+                    ),
+                    outputs=BatchFlushOutputs(emitted_rows=tuple(emitted)),
+                )
+        except PluginContractViolation as violation:
+            self._record_flush_violation(fctx, violation)
+            raise
+        except DeclarationContractViolation as violation:
+            self._record_flush_violation(fctx, violation)
+            raise
+        except AggregateDeclarationContractViolation as aggregate:
+            # Audit-complete multi-fire case: every buffered token gets a
+            # FAILED outcome carrying the aggregate evidence bundle.
+            self._record_flush_violation(fctx, aggregate)
+            raise
+
+    def _record_flush_violation(
+        self,
+        fctx: _FlushContext,
+        violation: DeclarationContractViolation | PluginContractViolation | AggregateDeclarationContractViolation,
+    ) -> None:
+        """Record FAILED audit entries for every buffered token on flush failure.
+
+        The violation is semantically batch-level but the audit trail must
+        capture per-token evidence for every buffered token. ``per_token_audit_payload``
+        is rebuilt inside the loop so ``$.context.token_id`` reflects the
+        row's own token, not the triggering token's.
+
+        If ``record_token_outcome`` raises mid-loop, the audit trail is
+        incomplete. Rather than silently swallow the failure and re-raise the
+        original violation, crash loudly with ``AuditIntegrityError`` so the
+        operator learns about the audit-write failure. The primary violation
+        is preserved via ``__context__`` (Python automatically sets it
+        because this is inside ``except``).
+        """
+        if isinstance(violation, PassThroughContractViolation):
+            violation_summary = f"PassThroughContractViolation:{fctx.transform.name}:{sorted(violation.divergence_set)}"
+        else:
+            violation_summary = f"{type(violation).__name__}:{fctx.transform.name}"
+        error_hash = hashlib.sha256(violation_summary.encode()).hexdigest()[:16]
+        base_audit = violation.to_audit_dict()
+
+        for token in fctx.buffered_tokens:
+            per_token_audit_payload: dict[str, object] = {
+                **base_audit,
+                "token_id": token.token_id,
+                "row_id": token.row_id,
+                "triggering_token_id": (fctx.triggering_token.token_id if fctx.triggering_token is not None else None),
+            }
+            try:
+                self._data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                    error_hash=error_hash,
+                    context=per_token_audit_payload,
+                )
+            except LandscapeRecordError as record_failure:
+                raise AuditIntegrityError(
+                    f"Failed to record {type(violation).__name__} FAILED outcome "
+                    f"for token {token.token_id!r} in batch flush "
+                    f"(transform={fctx.transform.name!r}, node={fctx.node_id!r}). "
+                    f"Audit trail is INCOMPLETE — FAILED records may exist for some "
+                    f"buffered tokens but not others. "
+                    f"Recorder failure: {type(record_failure).__name__}: {record_failure}. "
+                    f"Original violation: {violation!s}"
+                ) from record_failure
+            with best_effort(
+                "TokenCompleted telemetry after batch-flush violation audit",
+                run_id=self._run_id,
+                token_id=token.token_id,
+                transform_node_id=fctx.node_id,
+                transform_name=fctx.transform.name,
+            ):
+                self._emit_token_completed(
+                    token,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                )
+
+    def _record_dropped_by_filter_outcome(
+        self,
+        *,
+        token: TokenInfo,
+        transform_name: str,
+        node_id: NodeID,
+        path_label: str,
+    ) -> None:
+        """Record DROPPED_BY_FILTER or raise AuditIntegrityError on recorder failure."""
+        try:
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.FILTER_DROPPED,
+            )
+        except LandscapeRecordError as record_failure:
+            raise AuditIntegrityError(
+                f"Failed to record DROPPED_BY_FILTER outcome for token {token.token_id!r} "
+                f"{path_label} (transform={transform_name!r}, node={node_id!r}). "
+                f"Audit trail is INCOMPLETE — the transform node state is already COMPLETED "
+                f"but the terminal token_outcome is missing. Recorder failure: "
+                f"{type(record_failure).__name__}: {record_failure}"
+            ) from record_failure
+
+    def _record_gate_discarded_outcome(
+        self,
+        *,
+        token: TokenInfo,
+        gate_name: str,
+        node_id: NodeID,
+    ) -> None:
+        """Record terminal gate discard outcome or raise on audit failure."""
+        try:
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_DISCARDED,
+            )
+        except LandscapeRecordError as record_failure:
+            raise AuditIntegrityError(
+                f"Failed to record GATE_DISCARDED outcome for token {token.token_id!r} "
+                f"(gate={gate_name!r}, node={node_id!r}). "
+                f"Audit trail is INCOMPLETE — the gate node state is already COMPLETED "
+                f"but the terminal token_outcome is missing. Recorder failure: "
+                f"{type(record_failure).__name__}: {record_failure}"
+            ) from record_failure
+
+    def _route_empty_emission_results(
+        self,
+        fctx: _FlushContext,
+    ) -> tuple[tuple[RowResult, ...], list[WorkItem]]:
+        """Record terminal outcomes for a successful batch flush with zero rows.
+
+        If these buffered tokens were fork branches awaiting a downstream
+        coalesce, each dropped branch must still notify the coalesce executor
+        so joins do not strand.
+        """
+        results: list[RowResult] = []
+        child_items: list[WorkItem] = []
+        for token in fctx.buffered_tokens:
+            self._record_dropped_by_filter_outcome(
+                token=token,
+                transform_name=fctx.transform.name,
+                node_id=fctx.node_id,
+                path_label="during empty batch flush",
+            )
+            with best_effort(
+                "TokenCompleted telemetry after empty batch-flush audit",
+                run_id=self._run_id,
+                token_id=token.token_id,
+                transform_node_id=fctx.node_id,
+                transform_name=fctx.transform.name,
+            ):
+                self._emit_token_completed(
+                    token,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
+                )
+            results.append(
+                RowResult(
+                    token=token,
+                    final_data=token.row_data,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
+                )
+            )
+            results.extend(
+                self._notify_coalesce_of_lost_branch(
+                    token,
+                    "dropped_by_filter",
+                    child_items,
+                )
+            )
+        return tuple(results), child_items
 
     def _route_passthrough_results(
         self,
@@ -659,6 +1108,8 @@ class RowProcessor:
             )
         if result.rows is None:
             raise RuntimeError("Multi-row result has rows=None")
+        if len(result.rows) == 0:
+            return self._route_empty_emission_results(fctx)
         if len(result.rows) != len(fctx.buffered_tokens):
             raise OrchestrationInvariantError(
                 f"Passthrough mode requires same number of output rows "
@@ -692,7 +1143,8 @@ class RowProcessor:
                     RowResult(
                         token=updated_token,
                         final_data=enriched_data,
-                        outcome=RowOutcome.COMPLETED,
+                        outcome=TerminalOutcome.SUCCESS,
+                        path=TerminalPath.DEFAULT_FLOW,
                         sink_name=fctx.transform.on_success,
                     )
                 )
@@ -714,35 +1166,11 @@ class RowProcessor:
         get QUARANTINED terminal state instead of CONSUMED_IN_BATCH, identified
         via quarantined_indices in the result's success_reason metadata.
         """
-        # Extract quarantined indices from result metadata.
-        # metadata is optional in TransformSuccessReason — only present when
-        # the batch transform quarantines rows.
-        quarantined_index_set: set[int] = set()
-        if result.success_reason and "metadata" in result.success_reason:
-            metadata = result.success_reason["metadata"]
-            if "quarantined_indices" in metadata:
-                quarantined_index_set = set(metadata["quarantined_indices"])
-
-        # Record terminal outcomes for ALL buffered tokens (deferred from buffer time).
-        # Quarantined tokens get QUARANTINED; valid tokens get CONSUMED_IN_BATCH.
-        for i, token in enumerate(fctx.buffered_tokens):
-            if i in quarantined_index_set:
-                error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
-                self._recorder.record_token_outcome(
-                    run_id=self._run_id,
-                    token_id=token.token_id,
-                    outcome=RowOutcome.QUARANTINED,
-                    error_hash=error_hash,
-                )
-                self._emit_token_completed(token, RowOutcome.QUARANTINED)
-            else:
-                self._recorder.record_token_outcome(
-                    run_id=self._run_id,
-                    token_id=token.token_id,
-                    outcome=RowOutcome.CONSUMED_IN_BATCH,
-                    batch_id=fctx.batch_id,
-                )
-                self._emit_token_completed(token, RowOutcome.CONSUMED_IN_BATCH)
+        quarantined_index_set = _validated_quarantined_indices(
+            result,
+            buffered_token_count=len(fctx.buffered_tokens),
+            aggregation_name=fctx.settings.name,
+        )
 
         # Extract output rows
         if result.is_multi_row:
@@ -758,6 +1186,8 @@ class RowProcessor:
                     f"This is a plugin bug."
                 )
             output_rows = (result.row,)
+        if len(output_rows) == 0:
+            return self._route_empty_emission_results(fctx)
 
         # Enforce expected_output_count if configured
         if fctx.settings.expected_output_count is not None:
@@ -773,9 +1203,20 @@ class RowProcessor:
         child_items: list[WorkItem] = []
 
         if fctx.buffered_tokens:
+            non_quarantined_tokens = tuple(token for index, token in enumerate(fctx.buffered_tokens) if index not in quarantined_index_set)
+            if not non_quarantined_tokens:
+                raise OrchestrationInvariantError(
+                    f"Aggregation {fctx.settings.name!r} emitted {len(output_rows)} output row(s) "
+                    f"but all {len(fctx.buffered_tokens)} buffered token(s) were quarantined"
+                )
+            expand_parent_token = (
+                fctx.expand_parent_token
+                if any(token.token_id == fctx.expand_parent_token.token_id for token in non_quarantined_tokens)
+                else non_quarantined_tokens[0]
+            )
             output_contract = output_rows[0].contract
             expanded_tokens, _expand_group_id = self._token_manager.expand_token(
-                parent_token=fctx.expand_parent_token,
+                parent_token=expand_parent_token,
                 expanded_rows=[row.to_dict() for row in output_rows],
                 output_contract=output_contract,
                 node_id=fctx.node_id,
@@ -783,21 +1224,71 @@ class RowProcessor:
                 record_parent_outcome=False,
             )
 
+            # Record terminal outcomes for ALL buffered tokens AFTER expand_token
+            # succeeds. Recording before validation/expansion would leave parent
+            # tokens in a terminal state (CONSUMED_IN_BATCH/QUARANTINED) with no
+            # child tokens if a later step fails — recovery would skip them.
+            for i, token in enumerate(fctx.buffered_tokens):
+                if i in quarantined_index_set:
+                    error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
+                    self._data_flow.record_token_outcome(
+                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.QUARANTINED_AT_SOURCE,
+                        error_hash=error_hash,
+                    )
+                    self._emit_token_completed(
+                        token,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.QUARANTINED_AT_SOURCE,
+                    )
+                else:
+                    self._data_flow.record_token_outcome(
+                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                        outcome=TerminalOutcome.TRANSIENT,
+                        path=TerminalPath.BATCH_CONSUMED,
+                        batch_id=fctx.batch_id,
+                    )
+                    self._emit_token_completed(
+                        token,
+                        outcome=TerminalOutcome.TRANSIENT,
+                        path=TerminalPath.BATCH_CONSUMED,
+                    )
+
             # Build triggering RowResult if applicable (count-triggered only).
             # The triggering token is always the last buffered token (buffered
             # immediately before flush), so its index is len(buffered_tokens) - 1.
-            # Its outcome must match what the recorder loop already recorded —
+            # Its outcome must match what the recorder loop recorded —
             # QUARANTINED if in quarantined_index_set, CONSUMED_IN_BATCH otherwise.
             if fctx.triggering_token is not None:
                 triggering_index = len(fctx.buffered_tokens) - 1
-                triggering_outcome = RowOutcome.QUARANTINED if triggering_index in quarantined_index_set else RowOutcome.CONSUMED_IN_BATCH
+                if triggering_index in quarantined_index_set:
+                    triggering_outcome = TerminalOutcome.FAILURE
+                    triggering_path = TerminalPath.QUARANTINED_AT_SOURCE
+                else:
+                    triggering_outcome = TerminalOutcome.TRANSIENT
+                    triggering_path = TerminalPath.BATCH_CONSUMED
                 results.append(
                     RowResult(
                         token=fctx.triggering_token,
                         final_data=fctx.triggering_token.row_data,
                         outcome=triggering_outcome,
+                        path=triggering_path,
                     )
                 )
+
+            if quarantined_index_set:
+                triggering_index_val = len(fctx.buffered_tokens) - 1 if fctx.triggering_token is not None else -1
+                for i, token in enumerate(fctx.buffered_tokens):
+                    if i in quarantined_index_set and i != triggering_index_val:
+                        results.append(
+                            RowResult(
+                                token=token,
+                                final_data=token.row_data,
+                                outcome=TerminalOutcome.FAILURE,
+                                path=TerminalPath.QUARANTINED_AT_SOURCE,
+                            )
+                        )
 
             # Route expanded tokens downstream
             has_downstream = self._nav.resolve_next_node(fctx.node_id) is not None
@@ -820,7 +1311,8 @@ class RowProcessor:
                         RowResult(
                             token=token,
                             final_data=token.row_data,
-                            outcome=RowOutcome.COMPLETED,
+                            outcome=TerminalOutcome.SUCCESS,
+                            path=TerminalPath.DEFAULT_FLOW,
                             sink_name=fctx.transform.on_success,
                         )
                     )
@@ -876,6 +1368,12 @@ class RowProcessor:
 
         if result.status != "success":
             return self._handle_flush_error(fctx), []
+
+        # ADR-009 §Clause 2: runtime cross-check for passes_through_input
+        # transforms on the batch-aware flush path. MUST run BEFORE
+        # _emit_transform_completed so a failed cross-check does not follow
+        # a COMPLETED terminal-state emission on any token.
+        self._cross_check_flush_output(fctx, result)
 
         # Emit TransformCompleted telemetry for all buffered tokens
         for token in buffered_tokens:
@@ -946,10 +1444,10 @@ class RowProcessor:
         buf_batch_id = self._aggregation_executor.get_batch_id(node_id)
         if buf_batch_id is None:
             raise OrchestrationInvariantError(f"batch_id is None after buffer_row() for node {node_id}")
-        self._recorder.record_token_outcome(
-            run_id=self._run_id,
-            token_id=current_token.token_id,
-            outcome=RowOutcome.BUFFERED,
+        self._data_flow.record_token_outcome(
+            ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=buf_batch_id,
         )
 
@@ -982,6 +1480,12 @@ class RowProcessor:
             if result.status != "success":
                 return self._handle_flush_error(fctx), child_items
 
+            # ADR-009 §Clause 2: runtime cross-check for passes_through_input
+            # transforms on the batch-aware flush path. MUST run BEFORE
+            # _emit_transform_completed so a failed cross-check does not
+            # follow a COMPLETED terminal-state emission on any token.
+            self._cross_check_flush_output(fctx, result)
+
             # Emit TransformCompleted telemetry for all buffered tokens
             for token in buffered_tokens:
                 self._emit_transform_completed(token=token, transform=transform, transform_result=result)
@@ -1007,7 +1511,8 @@ class RowProcessor:
             RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.BUFFERED,
+                outcome=None,
+                path=TerminalPath.BUFFERED,
             ),
             child_items,
         )
@@ -1019,6 +1524,8 @@ class RowProcessor:
         token: TokenInfo,
         ctx: Any,
         reason: TransformErrorCategory,
+        *,
+        retryable: bool = True,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Convert a retryable exception to a TransformResult.error when no retry manager is configured.
 
@@ -1056,7 +1563,7 @@ class RowProcessor:
                 raise OrchestrationInvariantError(
                     f"ctx.state_id must be set by TransformExecutor before exception propagated (transform={transform.node_id})"
                 )
-            self._recorder.record_routing_event(
+            self._execution.record_routing_event(
                 state_id=ctx.state_id,
                 edge_id=error_edge_id,
                 mode=RoutingMode.DIVERT,
@@ -1064,7 +1571,7 @@ class RowProcessor:
             )
 
         return (
-            TransformResult.error(error_details, retryable=True),
+            TransformResult.error(error_details, retryable=retryable),
             token,
             on_error,
         )
@@ -1105,6 +1612,15 @@ class RowProcessor:
                     ctx=ctx,
                     attempt=0,
                 )
+            except InterruptedError as e:
+                return self._convert_retryable_to_error_result(
+                    e,
+                    transform,
+                    token,
+                    ctx,
+                    reason="shutdown_requested",
+                    retryable=False,
+                )
             except PluginRetryableError as e:
                 return self._convert_retryable_to_error_result(
                     e,
@@ -1136,13 +1652,194 @@ class RowProcessor:
             )
 
         def is_retryable(e: BaseException) -> bool:
+            if isinstance(e, InterruptedError):
+                return False
             if isinstance(e, PluginRetryableError):
                 return e.retryable
             return isinstance(e, ConnectionError | TimeoutError | OSError | CapacityError)
 
-        return self._retry_manager.execute_with_retry(
-            operation=execute_attempt,
-            is_retryable=is_retryable,
+        try:
+            return self._retry_manager.execute_with_retry(
+                operation=execute_attempt,
+                is_retryable=is_retryable,
+                shutdown_event=ctx.shutdown_event,
+            )
+        except InterruptedError as e:
+            return self._convert_retryable_to_error_result(
+                e,
+                transform,
+                token,
+                ctx,
+                reason="shutdown_requested",
+                retryable=False,
+            )
+
+    def _record_source_node_state(
+        self,
+        *,
+        token: TokenInfo,
+        input_data: dict[str, object],
+        status: NodeStateStatus,
+        error: ExecutionError | None = None,
+    ) -> None:
+        """Record the source node state for a token.
+
+        Source "processing" already happened in the plugin iterator, so the
+        state is recorded immediately as COMPLETED or FAILED with duration 0.
+        """
+        source_state = self._execution.begin_node_state(
+            token_id=token.token_id,
+            node_id=self._source_node_id,
+            run_id=self._run_id,
+            step_index=0,
+            input_data=input_data,
+        )
+        if status == NodeStateStatus.COMPLETED:
+            self._execution.complete_node_state(
+                state_id=source_state.state_id,
+                status=NodeStateStatus.COMPLETED,
+                output_data=input_data,
+                duration_ms=0,
+            )
+            return
+        if status == NodeStateStatus.FAILED:
+            self._execution.complete_node_state(
+                state_id=source_state.state_id,
+                status=NodeStateStatus.FAILED,
+                duration_ms=0,
+                error=error,
+            )
+            return
+        raise OrchestrationInvariantError(f"Source node states may only be recorded as COMPLETED or FAILED, not {status!r}.")
+
+    def _record_source_boundary_failure(
+        self,
+        *,
+        token: TokenInfo,
+        input_data: dict[str, object],
+        failure: _SourceBoundaryFailure,
+    ) -> None:
+        """Record terminal audit evidence for a source-boundary failure.
+
+        Source boundary validation runs after token creation so the failure
+        can use the real row/token identity. Because the failure happens before
+        DAG traversal begins, the processor must record BOTH the terminal token
+        outcome and the FAILED source node state before re-raising the Tier 1
+        exception. If either audit write fails, raise ``AuditIntegrityError`` so
+        the recorder failure outranks the original failure.
+
+        AuditEvidenceBase exceptions contribute structured context via
+        ``to_audit_dict()``; framework/orchestration bugs are still recorded
+        as FAILED outcomes and node states, but without a fabricated context
+        payload. ``TokenCompleted`` telemetry is emitted only after both audit
+        writes succeed. Telemetry is operational visibility, not part of the
+        source-boundary audit pair; telemetry failures are logged and never
+        outrank the original failure or a recorder failure.
+        """
+        audit_context = failure.to_audit_dict() if isinstance(failure, AuditEvidenceBase) else None
+        original_label = (
+            "violation"
+            if isinstance(
+                failure,
+                (
+                    DeclarationContractViolation,
+                    AggregateDeclarationContractViolation,
+                    PluginContractViolation,
+                ),
+            )
+            else "failure"
+        )
+        error_hash = hashlib.sha256(f"{type(failure).__name__}:{self._source_node_id}".encode()).hexdigest()[:16]
+        try:
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+                error_hash=error_hash,
+                context=audit_context,
+            )
+        except LandscapeRecordError as record_failure:
+            raise AuditIntegrityError(
+                f"Failed to record {type(failure).__name__} FAILED outcome for token {token.token_id!r} "
+                f"on source boundary (node={self._source_node_id!r}). Audit trail is INCOMPLETE — "
+                f"the FAILED token outcome may be missing. Recorder failure: "
+                f"{type(record_failure).__name__}: {record_failure}. Original {original_label}: {failure!s}"
+            ) from record_failure
+        try:
+            self._record_source_node_state(
+                token=token,
+                input_data=input_data,
+                status=NodeStateStatus.FAILED,
+                error=ExecutionError(
+                    exception=str(failure),
+                    exception_type=type(failure).__name__,
+                    phase="source_boundary_check",
+                    context=audit_context,
+                ),
+            )
+        except LandscapeRecordError as record_failure:
+            raise AuditIntegrityError(
+                f"Failed to record FAILED source node state for token {token.token_id!r} "
+                f"on source boundary (node={self._source_node_id!r}). Audit trail is INCOMPLETE — "
+                f"the FAILED source node state may be missing. Recorder failure: "
+                f"{type(record_failure).__name__}: {record_failure}. Original {original_label}: {failure!s}"
+            ) from record_failure
+        with best_effort(
+            "TokenCompleted telemetry after source-boundary FAILED audit",
+            run_id=self._run_id,
+            token_id=token.token_id,
+            source_node_id=self._source_node_id,
+        ):
+            self._emit_token_completed(
+                token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
+
+    def _record_source_and_start_traversal(
+        self,
+        token: TokenInfo,
+        input_data: dict[str, object],
+        transforms: Sequence[Any],
+        ctx: PluginContext,
+        *,
+        coalesce_node_id: NodeID | None,
+        coalesce_name: CoalesceName | None,
+    ) -> list[RowResult]:
+        """Record source node_state and start pipeline traversal.
+
+        Shared implementation for process_row and process_existing_row.
+        Records the source node as immediately COMPLETED (duration_ms=0)
+        since source "processing" already happened in the plugin iterator.
+
+        Args:
+            token: Token for the row being processed
+            input_data: Row data dict for audit hashing (must be plain dict)
+            transforms: List of transform plugins (for invariant check)
+            ctx: Plugin context
+            coalesce_node_id: Node ID at which fork children should coalesce
+            coalesce_name: Name of the coalesce point for merging
+
+        Returns:
+            List of RowResults, one per terminal token
+        """
+        self._record_source_node_state(
+            token=token,
+            input_data=input_data,
+            status=NodeStateStatus.COMPLETED,
+        )
+
+        if transforms and self._first_transform_node_id is None:
+            raise OrchestrationInvariantError("Traversal context is missing first_transform_node_id for non-empty transform pipeline")
+        initial_node_id = self._first_transform_node_id if self._first_transform_node_id is not None else self._source_node_id
+        return self._drain_work_queue(
+            self._nav.create_work_item(
+                token=token,
+                current_node_id=initial_node_id,
+                coalesce_node_id=coalesce_node_id,
+                coalesce_name=coalesce_name,
+            ),
+            ctx,
         )
 
     def process_row(
@@ -1181,36 +1878,44 @@ class RowProcessor:
             source_row=source_row,
         )
 
-        # Record source node_state (step_index=0) for audit lineage.
-        # Source "processing" already happened in the plugin iterator — we record
-        # the result immediately as COMPLETED with duration_ms=0.
-        # Valid SourceRows always have dict data (SourceRow.valid() takes dict[str, Any]).
-        source_input: dict[str, Any] = source_row.row
-        source_state = self._recorder.begin_node_state(
-            token_id=token.token_id,
-            node_id=self._source_node_id,
-            run_id=self._run_id,
-            step_index=0,
+        # Valid SourceRows always carry mapping-shaped row payloads; once the
+        # row enters the processor we treat the values as opaque objects.
+        source_input = cast(dict[str, object], source_row.row)
+        if self._source_plugin is not None:
+            try:
+                run_boundary_checks(
+                    inputs=BoundaryInputs(
+                        plugin=self._source_plugin,
+                        node_id=str(self._source_node_id),
+                        run_id=self._run_id,
+                        row_id=token.row_id,
+                        token_id=token.token_id,
+                        static_contract=self._source_plugin.declared_guaranteed_fields,
+                        row_data=source_input,
+                        row_contract=source_row.contract,
+                    ),
+                    outputs=BoundaryOutputs(),
+                )
+            except (
+                DeclarationContractViolation,
+                AggregateDeclarationContractViolation,
+                PluginContractViolation,
+                FrameworkBugError,
+                OrchestrationInvariantError,
+            ) as failure:
+                self._record_source_boundary_failure(
+                    token=token,
+                    input_data=source_input,
+                    failure=failure,
+                )
+                raise
+        return self._record_source_and_start_traversal(
+            token=token,
             input_data=source_input,
-        )
-        self._recorder.complete_node_state(
-            state_id=source_state.state_id,
-            status=NodeStateStatus.COMPLETED,
-            output_data=source_input,
-            duration_ms=0,
-        )
-
-        if transforms and self._first_transform_node_id is None:
-            raise OrchestrationInvariantError("Traversal context is missing first_transform_node_id for non-empty transform pipeline")
-        initial_node_id = self._first_transform_node_id if self._first_transform_node_id is not None else self._source_node_id
-        return self._drain_work_queue(
-            self._nav.create_work_item(
-                token=token,
-                current_node_id=initial_node_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
-            ),
-            ctx,
+            transforms=transforms,
+            ctx=ctx,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
         )
 
     def process_existing_row(
@@ -1229,6 +1934,14 @@ class RowProcessor:
         but need to be reprocessed. Unlike process_row(), this does NOT
         create a new row record - only a new token.
 
+        Resume intentionally does NOT re-run source-boundary contracts here.
+        The resumed row payload already crossed the source boundary in the
+        original run, and resume replays persisted ``PipelineRow`` payloads
+        through ``NullSource`` rather than reopening the original source
+        plugin. The resume path therefore inherits source-boundary evidence
+        from the original run and must verify runtime-VAL manifest equality
+        before any resumed rows are loaded.
+
         Args:
             row_id: Existing row ID in the database
             row_data: Row data (retrieved from payload store)
@@ -1246,35 +1959,16 @@ class RowProcessor:
             row_data=row_data,
         )
 
-        # Record source node_state (step_index=0) for resumed token lineage.
         # The row already exists from the original run, but this new token
         # needs its own source state for complete audit lineage.
         resumed_input = row_data.to_dict()
-        source_state = self._recorder.begin_node_state(
-            token_id=token.token_id,
-            node_id=self._source_node_id,
-            run_id=self._run_id,
-            step_index=0,
+        return self._record_source_and_start_traversal(
+            token=token,
             input_data=resumed_input,
-        )
-        self._recorder.complete_node_state(
-            state_id=source_state.state_id,
-            status=NodeStateStatus.COMPLETED,
-            output_data=resumed_input,
-            duration_ms=0,
-        )
-
-        if transforms and self._first_transform_node_id is None:
-            raise OrchestrationInvariantError("Traversal context is missing first_transform_node_id for non-empty transform pipeline")
-        initial_node_id = self._first_transform_node_id if self._first_transform_node_id is not None else self._source_node_id
-        return self._drain_work_queue(
-            self._nav.create_work_item(
-                token=token,
-                current_node_id=initial_node_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
-            ),
-            ctx,
+            transforms=transforms,
+            ctx=ctx,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
         )
 
     def process_token(
@@ -1339,7 +2033,8 @@ class RowProcessor:
                     RowResult(
                         token=coalesce_outcome.merged_token,
                         final_data=coalesce_outcome.merged_token.row_data,
-                        outcome=RowOutcome.COALESCED,
+                        outcome=TerminalOutcome.SUCCESS,
+                        path=TerminalPath.COALESCED,
                         sink_name=sink_name,
                     ),
                 )
@@ -1359,21 +2054,26 @@ class RowProcessor:
 
             # Bug 9z8 fix: Only record if CoalesceExecutor didn't already record
             if not coalesce_outcome.outcomes_recorded:
-                self._recorder.record_token_outcome(
-                    run_id=self._run_id,
-                    token_id=current_token.token_id,
-                    outcome=RowOutcome.FAILED,
+                self._data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error_hash=error_hash,
                 )
             # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(current_token, RowOutcome.FAILED)
+            self._emit_token_completed(
+                current_token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
 
             return (
                 True,
                 RowResult(
                     token=current_token,
                     final_data=current_token.row_data,
-                    outcome=RowOutcome.FAILED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error=FailureInfo(
                         exception_type="CoalesceFailure",
                         message=error_msg,
@@ -1414,9 +2114,10 @@ class RowProcessor:
         if self._coalesce_executor is None or current_token.branch_name is None:
             return []
 
-        coalesce_name = self._branch_to_coalesce.get(BranchName(current_token.branch_name))
-        if coalesce_name is None:
+        branch_name = BranchName(current_token.branch_name)
+        if branch_name not in self._branch_to_coalesce:
             return []
+        coalesce_name = self._branch_to_coalesce[branch_name]
 
         coalesce_node_id = self._coalesce_node_ids[coalesce_name]
         outcome = self._coalesce_executor.notify_branch_lost(
@@ -1443,7 +2144,8 @@ class RowProcessor:
                     RowResult(
                         token=outcome.merged_token,
                         final_data=outcome.merged_token.row_data,
-                        outcome=RowOutcome.COALESCED,
+                        outcome=TerminalOutcome.SUCCESS,
+                        path=TerminalPath.COALESCED,
                         sink_name=sink_name,
                     ),
                 ]
@@ -1462,12 +2164,17 @@ class RowProcessor:
             # These RowResults propagate to the orchestrator for counter accounting.
             sibling_results: list[RowResult] = []
             for consumed_token in outcome.consumed_tokens:
-                self._emit_token_completed(consumed_token, RowOutcome.FAILED)
+                self._emit_token_completed(
+                    consumed_token,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                )
                 sibling_results.append(
                     RowResult(
                         token=consumed_token,
                         final_data=consumed_token.row_data,
-                        outcome=RowOutcome.FAILED,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.UNROUTED,
                         error=FailureInfo(
                             exception_type="CoalesceFailure",
                             message=outcome.failure_reason,
@@ -1564,14 +2271,18 @@ class RowProcessor:
         except MaxRetriesExceeded as e:
             # All retries exhausted - return FAILED outcome
             error_hash = hashlib.sha256(str(e).encode()).hexdigest()[:16]
-            self._recorder.record_token_outcome(
-                run_id=self._run_id,
-                token_id=current_token.token_id,
-                outcome=RowOutcome.FAILED,
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error_hash=error_hash,
             )
             # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(current_token, RowOutcome.FAILED)
+            self._emit_token_completed(
+                current_token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
             # Notify coalesce if this is a forked branch
             sibling_results = self._notify_coalesce_of_lost_branch(
                 current_token,
@@ -1581,7 +2292,8 @@ class RowProcessor:
             current_result = RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error=FailureInfo.from_max_retries_exceeded(e),
             )
             if sibling_results:
@@ -1606,6 +2318,35 @@ class RowProcessor:
         # NOTE: This is ONLY for non-aggregation transforms. Aggregation
         # transforms route through _process_batch_aggregation_node() above.
         if transform_result.is_multi_row:
+            if transform_result.rows is None:
+                raise OrchestrationInvariantError("is_multi_row guarantees rows is not None")
+            if len(transform_result.rows) == 0:
+                self._record_dropped_by_filter_outcome(
+                    token=current_token,
+                    transform_name=transform.name,
+                    node_id=node_id,
+                    path_label="after success_empty()",
+                )
+                self._emit_token_completed(
+                    current_token,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
+                )
+                sibling_results = self._notify_coalesce_of_lost_branch(
+                    current_token,
+                    "dropped_by_filter",
+                    child_items,
+                )
+                current_result = RowResult(
+                    token=current_token,
+                    final_data=current_token.row_data,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
+                )
+                if sibling_results:
+                    return _TransformTerminal(result=(current_result, *sibling_results))
+                return _TransformTerminal(result=current_result)
+
             # Validate transform is allowed to create tokens
             if not transform.creates_tokens:
                 raise RuntimeError(
@@ -1617,10 +2358,6 @@ class RowProcessor:
 
             # Deaggregation: create child tokens for each output row
             # NOTE: Parent EXPANDED outcome is recorded atomically in expand_token()
-
-            # is_multi_row check above guarantees rows is not None
-            if transform_result.rows is None:
-                raise OrchestrationInvariantError("is_multi_row guarantees rows is not None")
             # Contract consistency is enforced by TransformResult.success_multi()
             output_contract = transform_result.rows[0].contract
             child_tokens, _expand_group_id = self._token_manager.expand_token(
@@ -1651,7 +2388,8 @@ class RowProcessor:
                 result=RowResult(
                     token=current_token,
                     final_data=current_token.row_data,
-                    outcome=RowOutcome.EXPANDED,
+                    outcome=TerminalOutcome.TRANSIENT,
+                    path=TerminalPath.EXPAND_PARENT,
                 )
             )
 
@@ -1675,21 +2413,27 @@ class RowProcessor:
             child_items: Mutable list — coalesce notifications may append child work items.
 
         Returns:
-            _TransformTerminal with QUARANTINED or ROUTED outcome.
+            _TransformTerminal with QUARANTINED or ROUTED_ON_ERROR outcome.
         """
-        error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
-
         if error_sink == "discard":
             # Intentionally discarded - QUARANTINED
+            # The QUARANTINED path tolerates an "unknown_error" fallback for
+            # historical reasons; do NOT extend that fallback to ROUTED_ON_ERROR
+            # below — see the offensive guard in the routed branch.
+            error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
             quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
-            self._recorder.record_token_outcome(
-                run_id=self._run_id,
-                token_id=current_token.token_id,
-                outcome=RowOutcome.QUARANTINED,
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
                 error_hash=quarantine_error_hash,
             )
             # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(current_token, RowOutcome.QUARANTINED)
+            self._emit_token_completed(
+                current_token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
+            )
             # Notify coalesce if this is a forked branch
             sibling_results = self._notify_coalesce_of_lost_branch(
                 current_token,
@@ -1699,25 +2443,46 @@ class RowProcessor:
             current_result = RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.QUARANTINED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
             )
             if sibling_results:
                 return _TransformTerminal(result=(current_result, *sibling_results))
             return _TransformTerminal(result=current_result)
 
-        # Routed to error sink
-        # NOTE: Do NOT record ROUTED outcome here - the token hasn't been written yet.
+        # Routed to error sink — emit ROUTED_ON_ERROR (DIVERT semantics).
+        # NOTE: Do NOT record the outcome here - the token hasn't been written yet.
         # SinkExecutor.write() records the outcome AFTER sink durability is achieved.
+        #
+        # Offensive: refuse to fabricate Tier-1 audit data. If the upstream
+        # transform did not provide a reason, that is a producer bug; crashing
+        # here is correct because emitting `FailureInfo.message="unknown_error"`
+        # would create a deterministic error_hash collision across unrelated
+        # falsy-error failures and falsify the audit trail.
+        if not transform_result.reason:
+            raise OrchestrationInvariantError(
+                "ROUTED_ON_ERROR requires transform_result.reason; refusing to "
+                "fabricate FailureInfo.message='unknown_error' for audit hashing"
+            )
+        error_detail = str(transform_result.reason)
+
         sibling_results = self._notify_coalesce_of_lost_branch(
             current_token,
             f"error_routed:{error_detail}",
             child_items,
         )
+        # Capture the originating transform error so the audit trail records both
+        # sink_name and error_hash on the ROUTED_ON_ERROR outcome (mirror of DIVERTED's
+        # contract). The accumulator converts FailureInfo.message -> error_hash before
+        # the pending-sink record is handed to SinkExecutor for durable recording.
+        failure = FailureInfo(exception_type="TransformError", message=error_detail)
         current_result = RowResult(
             token=current_token,
             final_data=current_token.row_data,
-            outcome=RowOutcome.ROUTED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
             sink_name=error_sink,
+            error=failure,
         )
         if sibling_results:
             return _TransformTerminal(result=(current_result, *sibling_results))
@@ -1784,8 +2549,42 @@ class RowProcessor:
             current_result = RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.ROUTED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
                 sink_name=outcome.sink_name,
+            )
+            if sibling_results:
+                return _GateTerminal(result=(current_result, *sibling_results))
+            return _GateTerminal(result=current_result)
+
+        if outcome.discarded:
+            self._record_gate_discarded_outcome(
+                token=current_token,
+                gate_name=gate.name,
+                node_id=node_id,
+            )
+            with best_effort(
+                "TokenCompleted telemetry after gate discard audit",
+                run_id=self._run_id,
+                token_id=current_token.token_id,
+                gate_node_id=node_id,
+                gate_name=gate.name,
+            ):
+                self._emit_token_completed(
+                    current_token,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.GATE_DISCARDED,
+                )
+            sibling_results = self._notify_coalesce_of_lost_branch(
+                current_token,
+                "gate_discarded",
+                child_items,
+            )
+            current_result = RowResult(
+                token=current_token,
+                final_data=current_token.row_data,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_DISCARDED,
             )
             if sibling_results:
                 return _GateTerminal(result=(current_result, *sibling_results))
@@ -1897,7 +2696,8 @@ class RowProcessor:
             result=RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.FORKED,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
             )
         )
 
@@ -1975,7 +2775,8 @@ class RowProcessor:
         return RowResult(
             token=current_token,
             final_data=current_token.row_data,
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name=effective_sink,
         )
 

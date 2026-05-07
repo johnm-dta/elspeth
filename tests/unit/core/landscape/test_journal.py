@@ -47,11 +47,14 @@ def _make_journal(
 
 
 def _make_conn(buffer: list[Any] | None = None) -> MagicMock:
-    """Create a mock SQLAlchemy Connection with info dict."""
+    """Create a mock SQLAlchemy Connection with info dict.
+
+    When buffer is provided, it becomes the root buffer in the stack.
+    """
     conn = MagicMock()
     conn.info = {}
     if buffer is not None:
-        conn.info["landscape_journal_buffer"] = buffer
+        conn.info["landscape_journal_buffer_stack"] = [buffer]
     return conn
 
 
@@ -274,9 +277,10 @@ class TestAfterCursorExecute:
             executemany=False,
         )
 
-        buffer = conn.info["landscape_journal_buffer"]
-        assert len(buffer) == 1
-        assert buffer[0]["statement"] == "INSERT INTO rows (id) VALUES (?)"
+        stack = conn.info["landscape_journal_buffer_stack"]
+        assert len(stack) == 1  # single root buffer
+        assert len(stack[0]) == 1
+        assert stack[0][0]["statement"] == "INSERT INTO rows (id) VALUES (?)"
 
     def test_select_not_buffered(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
@@ -291,7 +295,7 @@ class TestAfterCursorExecute:
             executemany=False,
         )
 
-        assert "landscape_journal_buffer" not in conn.info
+        assert "landscape_journal_buffer_stack" not in conn.info
 
     def test_disabled_journal_still_buffers_for_recovery(self, tmp_path: Path) -> None:
         """When disabled, records still buffer so _append_records can attempt recovery."""
@@ -308,8 +312,8 @@ class TestAfterCursorExecute:
             executemany=False,
         )
 
-        assert "landscape_journal_buffer" in conn.info
-        assert len(conn.info["landscape_journal_buffer"]) == 1
+        assert "landscape_journal_buffer_stack" in conn.info
+        assert len(conn.info["landscape_journal_buffer_stack"][0]) == 1
 
     def test_appends_to_existing_buffer(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
@@ -357,7 +361,9 @@ class TestAfterCommit:
 
         journal._after_commit(conn)
 
-        assert buffer == []
+        # After commit the stack is reset to a single empty root buffer
+        stack = conn.info["landscape_journal_buffer_stack"]
+        assert stack == [[]]
 
     def test_no_buffer_is_noop(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
@@ -388,8 +394,9 @@ class TestAfterCommit:
 
         # Records are counted as dropped (recovery attempts every 100 drops)
         assert journal._total_dropped == 1
-        # Buffer is cleared after commit processes it
-        assert buffer == []
+        # Stack is reset after commit processes it
+        stack = conn.info["landscape_journal_buffer_stack"]
+        assert stack == [[]]
 
 
 class TestAfterRollback:
@@ -402,7 +409,9 @@ class TestAfterRollback:
 
         journal._after_rollback(conn)
 
-        assert buffer == []
+        # After rollback the stack is reset to a single empty root buffer
+        stack = conn.info["landscape_journal_buffer_stack"]
+        assert stack == [[]]
 
     def test_no_buffer_is_noop(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
@@ -501,17 +510,24 @@ class TestAppendRecordsFailureHandling:
 class TestAttach:
     """Tests for attach — registers SQLAlchemy event listeners."""
 
-    def test_registers_three_listeners(self, tmp_path: Path) -> None:
+    def test_registers_six_listeners(self, tmp_path: Path) -> None:
         journal = _make_journal(tmp_path)
         engine = Mock()
 
         with patch("elspeth.core.landscape.journal.event") as mock_event:
             journal.attach(engine)
 
-            assert mock_event.listen.call_count == 3
+            assert mock_event.listen.call_count == 6
             calls = [c.args for c in mock_event.listen.call_args_list]
             event_names = {c[1] for c in calls}
-            assert event_names == {"after_cursor_execute", "commit", "rollback"}
+            assert event_names == {
+                "after_cursor_execute",
+                "commit",
+                "rollback",
+                "savepoint",
+                "rollback_savepoint",
+                "release_savepoint",
+            }
 
 
 # ===========================================================================
@@ -696,6 +712,26 @@ class TestEnrichWithPayloads:
         # No payload keys should be added
         assert "request_ref" not in record
         assert "payloads" not in record
+
+    def test_schema_qualified_calls_table_enriched(self, tmp_path: Path) -> None:
+        """Regression: schema-qualified table names like public.calls must match."""
+        journal = _make_journal(
+            tmp_path,
+            include_payloads=True,
+            payload_base_path=str(tmp_path / "payloads"),
+        )
+        journal._payload_store = Mock()
+        journal._payload_store.retrieve.return_value = b"payload content"
+
+        record = cast(JournalRecord, {"timestamp": "t", "statement": "INSERT", "parameters": {}, "executemany": False})
+        journal._enrich_with_payloads(
+            record,
+            "INSERT INTO public.calls (call_id, request_ref, response_ref) VALUES (?, ?, ?)",
+            {"call_id": "c1", "request_ref": "req-ref", "response_ref": "resp-ref"},
+            executemany=False,
+        )
+        assert record["request_ref"] == "req-ref"
+        assert record["request_payload"] == "payload content"
 
     def test_single_call_enriched(self, tmp_path: Path) -> None:
         journal = _make_journal(

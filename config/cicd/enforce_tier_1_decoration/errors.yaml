@@ -1,0 +1,10 @@
+# All transitional allowlist entries removed in Task 4 commit.
+#
+# Every exception class and error-named dataclass in errors.py now has either:
+# - @tier_1_error(reason=...) decoration (AuditIntegrityError, FrameworkBugError,
+#   OrchestrationInvariantError, PassThroughContractViolation), or
+# - a # TIER-2: <justification> comment (all remaining classes).
+#
+# FrameworkBugError is defined in tier_registry.py and registered via errors.py;
+# it no longer appears as a class in errors.py and is not scanned.
+allow_classes: []

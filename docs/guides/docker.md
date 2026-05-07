@@ -309,14 +309,16 @@ Pipeline configurations in containers should use **absolute container paths**:
 # config/pipeline.yaml
 source:
   plugin: csv
+  on_success: output              # Route rows directly to sink
   options:
-    path: /app/input/data.csv  # Container path, not host path
+    path: /app/input/data.csv     # Container path, not host path
     schema:
-      fields: dynamic
+      mode: observed
 
 sinks:
   output:
     plugin: csv
+    on_write_failure: discard
     options:
       path: /app/output/results.csv  # Container path
 

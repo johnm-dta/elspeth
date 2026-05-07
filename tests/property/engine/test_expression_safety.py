@@ -21,8 +21,6 @@ Properties tested:
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
@@ -128,8 +126,9 @@ injection_patterns = st.sampled_from(
 )
 
 # Additional injection patterns using name manipulation.
-# Note: len, str, int, float, bool, abs are whitelisted safe builtins and
+# Note: len, abs are whitelisted safe builtins (non-coercive) and
 # are tested separately in TestSafeBuiltinProperties below.
+# Coercive builtins (str, int, float, bool) are rejected.
 name_injection_patterns = st.sampled_from(
     [
         "chr(65)",
@@ -195,7 +194,7 @@ class TestInjectionRejectionProperties:
         Only 'row', 'True', 'False', 'None', and safe builtin names
         (len, str, int, float, bool, abs) are allowed.
         """
-        _ALLOWED_NAMES = {"row", "True", "False", "None", "len", "str", "int", "float", "bool", "abs"}
+        _ALLOWED_NAMES = {"row", "True", "False", "None", "len", "abs"}
         assume(name not in _ALLOWED_NAMES)
 
         with pytest.raises((ExpressionSecurityError, ExpressionSyntaxError)):
@@ -285,11 +284,11 @@ class TestValidExpressionProperties:
 
     @given(field=field_names, default=string_literals)
     @settings(max_examples=50)
-    def test_row_get_with_default_accepted(self, field: str, default: str) -> None:
-        """Property: row.get('field', 'default') is always accepted."""
+    def test_row_get_with_default_rejected(self, field: str, default: str) -> None:
+        """Property: row.get('field', 'default') is always rejected (fabrication)."""
         expr = f"row.get('{field}', '{default}')"
-        parser = ExpressionParser(expr)
-        assert parser.expression == expr
+        with pytest.raises(ExpressionSecurityError):
+            ExpressionParser(expr)
 
     @given(field=field_names)
     @settings(max_examples=50)
@@ -380,22 +379,15 @@ class TestEvaluationDeterminismProperties:
         with pytest.raises(ExpressionEvaluationError):
             parser.evaluate({"other_field": 1})
 
-    @given(field=field_names, default=st.one_of(string_literals, int_literals, st.none()))
+    @given(field=field_names)
     @settings(max_examples=50)
-    def test_row_get_returns_default_for_missing(self, field: str, default: Any) -> None:
-        """Property: row.get(field, default) returns default when field is missing."""
+    def test_row_get_returns_none_for_missing(self, field: str) -> None:
+        """Property: row.get(field) returns None when field is missing."""
         assume(field != "existing")
-        if isinstance(default, str):
-            expr = f"row.get('{field}', '{default}')"
-        elif default is None:
-            expr = f"row.get('{field}', None)"
-        else:
-            expr = f"row.get('{field}', {default})"
-
+        expr = f"row.get('{field}')"
         parser = ExpressionParser(expr)
         result = parser.evaluate({"existing": 1})
-
-        assert result == default
+        assert result is None
 
 
 # =============================================================================
@@ -448,25 +440,25 @@ class TestSafeBuiltinProperties:
 
     @given(
         field=field_names,
-        func_name=st.sampled_from(["len", "str", "int", "float", "bool", "abs"]),
+        func_name=st.sampled_from(["len", "abs"]),
     )
     @settings(max_examples=100)
     def test_safe_builtin_on_row_field_accepted(self, field: str, func_name: str) -> None:
-        """Property: Safe builtins applied to row fields are always accepted."""
+        """Property: Non-coercive builtins applied to row fields are always accepted."""
         expr = f"{func_name}(row['{field}'])"
         parser = ExpressionParser(expr)
         assert parser.expression == expr
 
     @given(
         field=field_names,
-        default=string_literals,
+        func_name=st.sampled_from(["str", "int", "float", "bool"]),
     )
-    @settings(max_examples=50)
-    def test_len_with_row_get_default_accepted(self, field: str, default: str) -> None:
-        """Property: len(row.get('field', 'default')) is accepted."""
-        expr = f"len(row.get('{field}', '{default}'))"
-        parser = ExpressionParser(expr)
-        assert parser.expression == expr
+    @settings(max_examples=100)
+    def test_coercive_builtin_on_row_field_rejected(self, field: str, func_name: str) -> None:
+        """Property: Coercive builtins are rejected at parse time."""
+        expr = f"{func_name}(row['{field}'])"
+        with pytest.raises(ExpressionSecurityError):
+            ExpressionParser(expr)
 
     @given(text=st.text(min_size=0, max_size=100))
     @settings(max_examples=50)
@@ -475,14 +467,6 @@ class TestSafeBuiltinProperties:
         parser = ExpressionParser("len(row['x'])")
         result = parser.evaluate({"x": text})
         assert result == len(text)
-
-    @given(value=st.one_of(int_literals, float_literals, st.none(), string_literals))
-    @settings(max_examples=50)
-    def test_str_evaluates_correctly(self, value: Any) -> None:
-        """Property: str(row['x']) matches Python's str()."""
-        parser = ExpressionParser("str(row['x'])")
-        result = parser.evaluate({"x": value})
-        assert result == str(value)
 
     @given(value=st.integers(min_value=-10000, max_value=10000))
     @settings(max_examples=50)
@@ -493,13 +477,13 @@ class TestSafeBuiltinProperties:
         assert result == abs(value)
 
     @given(
-        func_name=st.sampled_from(["len", "str", "int", "float", "bool", "abs"]),
+        func_name=st.sampled_from(["len", "abs"]),
         cmp_op=comparison_ops,
         threshold=int_literals,
     )
     @settings(max_examples=50)
     def test_safe_builtin_in_comparison_accepted(self, func_name: str, cmp_op: str, threshold: int) -> None:
-        """Property: Safe builtins in comparisons are accepted."""
+        """Property: Non-coercive builtins in comparisons are accepted."""
         expr = f"{func_name}(row['x']) {cmp_op} {threshold}"
         parser = ExpressionParser(expr)
         assert parser.expression == expr

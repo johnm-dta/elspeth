@@ -55,10 +55,10 @@ def create_console_formatters(prefix: str = "Run") -> dict[type, Callable[..., N
         }
         symbol = status_symbols[event.status]
         routed_summary = ""
-        if event.routed > 0:
+        if (event.routed_success + event.routed_failure) > 0:
             dest_parts = [f"{name}:{count}" for name, count in event.routed_destinations]
             dest_str = ", ".join(dest_parts) if dest_parts else ""
-            routed_summary = f" | →{event.routed:,} routed"
+            routed_summary = f" | →{event.routed_success + event.routed_failure:,} routed"
             if dest_str:
                 routed_summary += f" ({dest_str})"
         typer.echo(
@@ -73,10 +73,14 @@ def create_console_formatters(prefix: str = "Run") -> dict[type, Callable[..., N
 
     def _format_progress(event: ProgressEvent) -> None:
         rate = event.rows_processed / event.elapsed_seconds if event.elapsed_seconds > 0 else 0
+        # elspeth-5069612f3c — show the routed split inline so the streaming
+        # CLI signal mirrors the terminal RunSummary line. ``↪`` denotes
+        # gate-routed MOVE rows, ``↯`` denotes on_error DIVERT rows.
         typer.echo(
             f"  Processing: {event.rows_processed:,} rows | "
             f"{rate:.0f} rows/sec | "
-            f"✓{event.rows_succeeded:,} ✗{event.rows_failed} ⚠{event.rows_quarantined}"
+            f"✓{event.rows_succeeded:,} ✗{event.rows_failed} ⚠{event.rows_quarantined} "
+            f"↪{event.rows_routed_success:,} ↯{event.rows_routed_failure:,}"
         )
 
     return {
@@ -138,6 +142,9 @@ def create_json_formatters() -> dict[type, Callable[..., None]]:
                     "succeeded": event.succeeded,
                     "failed": event.failed,
                     "quarantined": event.quarantined,
+                    "routed_success": event.routed_success,
+                    "routed_failure": event.routed_failure,
+                    "routed_destinations": dict(event.routed_destinations),
                     "duration_seconds": event.duration_seconds,
                     "exit_code": event.exit_code,
                 }
@@ -146,6 +153,10 @@ def create_json_formatters() -> dict[type, Callable[..., None]]:
 
     def _format_progress_json(event: ProgressEvent) -> None:
         rate = event.rows_processed / event.elapsed_seconds if event.elapsed_seconds > 0 else 0
+        # elspeth-5069612f3c — JSON parity with RunSummary terminal output:
+        # both rows_routed_success (MOVE) and rows_routed_failure (DIVERT)
+        # are emitted on every streaming progress event so a tail-following
+        # JSON consumer sees the same taxonomy in-flight as it does at end.
         typer.echo(
             json.dumps(
                 {
@@ -154,6 +165,8 @@ def create_json_formatters() -> dict[type, Callable[..., None]]:
                     "rows_succeeded": event.rows_succeeded,
                     "rows_failed": event.rows_failed,
                     "rows_quarantined": event.rows_quarantined,
+                    "rows_routed_success": event.rows_routed_success,
+                    "rows_routed_failure": event.rows_routed_failure,
                     "elapsed_seconds": event.elapsed_seconds,
                     "rows_per_second": rate,
                 }

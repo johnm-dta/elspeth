@@ -5,24 +5,24 @@ from datetime import UTC, datetime
 import pytest
 
 
-def test_transform_completed_in_contracts():
-    """TransformCompleted should be importable from contracts."""
-    from elspeth.contracts import TransformCompleted
-    from elspeth.contracts.enums import NodeStateStatus
+class TestTokenCompletedTwoAxis:
+    """ADR-019 Phase 1: TokenCompleted telemetry event carries (outcome, path)."""
 
-    event = TransformCompleted(
-        timestamp=datetime.now(UTC),
-        run_id="run-1",
-        row_id="row-1",
-        token_id="token-1",
-        node_id="node-1",
-        plugin_name="test",
-        status=NodeStateStatus.COMPLETED,
-        duration_ms=100.0,
-        input_hash="abc",
-        output_hash="def",
-    )
-    assert event.run_id == "run-1"
+    def test_token_completed_carries_outcome_and_path(self) -> None:
+        from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+        from elspeth.contracts.events import TokenCompleted
+
+        evt = TokenCompleted(
+            timestamp=datetime.now(UTC),
+            run_id="run_001",
+            row_id="row_001",
+            token_id="tok_001",
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="primary",
+        )
+        assert evt.outcome == TerminalOutcome.SUCCESS
+        assert evt.path == TerminalPath.DEFAULT_FLOW
 
 
 def test_transform_completed_allows_none_hashes():
@@ -73,58 +73,6 @@ def test_transform_completed_allows_none_input_hash():
         output_hash=None,
     )
     assert event.input_hash is None
-
-
-def test_gate_evaluated_in_contracts():
-    """GateEvaluated should be importable from contracts."""
-    from elspeth.contracts import GateEvaluated
-    from elspeth.contracts.enums import RoutingMode
-
-    event = GateEvaluated(
-        timestamp=datetime.now(UTC),
-        run_id="run-1",
-        row_id="row-1",
-        token_id="token-1",
-        node_id="gate-1",
-        plugin_name="test_gate",
-        routing_mode=RoutingMode.MOVE,
-        destinations=("sink1",),
-    )
-    assert event.destinations == ("sink1",)
-
-
-def test_token_completed_in_contracts():
-    """TokenCompleted should be importable from contracts."""
-    from elspeth.contracts import TokenCompleted
-    from elspeth.contracts.enums import RowOutcome
-
-    event = TokenCompleted(
-        timestamp=datetime.now(UTC),
-        run_id="run-1",
-        row_id="row-1",
-        token_id="token-1",
-        outcome=RowOutcome.COMPLETED,
-        sink_name="output",
-    )
-    assert event.outcome == RowOutcome.COMPLETED
-
-
-def test_telemetry_events_inherit_from_contracts_base():
-    """Telemetry-specific events should inherit from contracts TelemetryEvent."""
-    from elspeth.contracts.events import (
-        ExternalCallCompleted,
-        PhaseChanged,
-        RowCreated,
-        RunFinished,
-        RunStarted,
-        TelemetryEvent,
-    )
-
-    assert issubclass(RunStarted, TelemetryEvent)
-    assert issubclass(RunFinished, TelemetryEvent)
-    assert issubclass(PhaseChanged, TelemetryEvent)
-    assert issubclass(RowCreated, TelemetryEvent)
-    assert issubclass(ExternalCallCompleted, TelemetryEvent)
 
 
 class TestExternalCallCompletedSerialization:
@@ -343,10 +291,11 @@ class TestExternalCallCompletedSerialization:
         )
 
         d = event.to_dict()
-        # SSRF-safe path: resolved_ip present, no json/params
+        # SSRF fields are additive — they never suppress other fields.
+        # GET always emits params (even None) for hash stability.
         assert d["request_payload"]["resolved_ip"] == "93.184.216.34"
         assert "json" not in d["request_payload"]
-        assert "params" not in d["request_payload"]
+        assert d["request_payload"]["params"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +363,8 @@ class TestRunSummaryIntValidation:
             quarantined=0,
             duration_seconds=2.5,
             exit_code=1,
-            routed=3,
+            routed_success=3,
+            routed_failure=0,
         )
         assert summary.total_rows == 10
 

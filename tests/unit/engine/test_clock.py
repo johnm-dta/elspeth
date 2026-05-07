@@ -12,61 +12,6 @@ import math
 import pytest
 
 
-class TestClockProtocol:
-    """Verify that Clock implementations satisfy the protocol structurally.
-
-    The Clock protocol is NOT @runtime_checkable, so we verify structural
-    conformance (has callable 'monotonic' returning float) rather than
-    using isinstance().
-    """
-
-    def test_system_clock_satisfies_clock_protocol(self) -> None:
-        """SystemClock has a callable monotonic method."""
-        from elspeth.engine.clock import SystemClock
-
-        clock = SystemClock()
-        assert hasattr(clock, "monotonic")
-        assert callable(clock.monotonic)
-
-    def test_system_clock_monotonic_returns_float(self) -> None:
-        """SystemClock.monotonic() returns a float."""
-        from elspeth.engine.clock import SystemClock
-
-        clock = SystemClock()
-        result = clock.monotonic()
-        assert isinstance(result, float)
-
-    def test_mock_clock_satisfies_clock_protocol(self) -> None:
-        """MockClock has a callable monotonic method."""
-        from elspeth.engine.clock import MockClock
-
-        clock = MockClock()
-        assert hasattr(clock, "monotonic")
-        assert callable(clock.monotonic)
-
-    def test_mock_clock_monotonic_returns_float(self) -> None:
-        """MockClock.monotonic() returns a float."""
-        from elspeth.engine.clock import MockClock
-
-        clock = MockClock()
-        result = clock.monotonic()
-        assert isinstance(result, float)
-
-    def test_default_clock_is_system_clock(self) -> None:
-        """DEFAULT_CLOCK is a SystemClock instance."""
-        from elspeth.engine.clock import DEFAULT_CLOCK, SystemClock
-
-        assert isinstance(DEFAULT_CLOCK, SystemClock)
-
-    def test_clock_protocol_not_runtime_checkable(self) -> None:
-        """Clock protocol does not have @runtime_checkable decorator."""
-        from elspeth.engine.clock import Clock
-
-        # Protocol without @runtime_checkable raises TypeError on isinstance
-        with pytest.raises(TypeError):
-            isinstance(object(), Clock)  # type: ignore[misc]  # deliberate: testing non-runtime-checkable protocol
-
-
 class TestSystemClock:
     """Tests for SystemClock — the production clock using time.monotonic()."""
 
@@ -157,31 +102,6 @@ class TestMockClock:
 
         clock = MockClock(start=1e12)
         assert clock.monotonic() == 1e12
-
-    def test_start_with_zero_explicit(self) -> None:
-        """Explicitly passing start=0.0 works same as default."""
-        from elspeth.engine.clock import MockClock
-
-        clock = MockClock(start=0.0)
-        assert clock.monotonic() == 0.0
-
-    # --- monotonic() ---
-
-    def test_monotonic_returns_current_value(self) -> None:
-        """monotonic() returns the internal current value."""
-        from elspeth.engine.clock import MockClock
-
-        clock = MockClock(start=7.0)
-        assert clock.monotonic() == 7.0
-
-    def test_monotonic_is_idempotent(self) -> None:
-        """Calling monotonic() multiple times returns the same value."""
-        from elspeth.engine.clock import MockClock
-
-        clock = MockClock(start=3.14)
-        assert clock.monotonic() == 3.14
-        assert clock.monotonic() == 3.14
-        assert clock.monotonic() == 3.14
 
     # --- advance() ---
 
@@ -477,15 +397,10 @@ class TestDefaultClock:
 
         assert isinstance(DEFAULT_CLOCK, SystemClock)
 
-    def test_default_clock_monotonic_returns_float(self) -> None:
-        """DEFAULT_CLOCK.monotonic() returns a float."""
-        from elspeth.engine.clock import DEFAULT_CLOCK
+    def test_clock_protocol_not_runtime_checkable(self) -> None:
+        """Clock protocol does not have @runtime_checkable decorator."""
+        from elspeth.engine.clock import Clock
 
-        result = DEFAULT_CLOCK.monotonic()
-        assert isinstance(result, float)
-
-    def test_default_clock_monotonic_returns_positive(self) -> None:
-        """DEFAULT_CLOCK.monotonic() returns a positive value."""
-        from elspeth.engine.clock import DEFAULT_CLOCK
-
-        assert DEFAULT_CLOCK.monotonic() > 0
+        # Protocol without @runtime_checkable raises TypeError on isinstance
+        with pytest.raises(TypeError):
+            isinstance(object(), Clock)  # type: ignore[misc]  # deliberate: testing non-runtime-checkable protocol

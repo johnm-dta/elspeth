@@ -1,6 +1,6 @@
 """TokenManager: High-level token operations for the SDA engine.
 
-Provides a simplified interface over LandscapeRecorder for managing
+Provides a simplified interface over DataFlowRepository for managing
 tokens (row instances flowing through the DAG).
 """
 
@@ -12,10 +12,11 @@ import copy
 from typing import Any
 
 from elspeth.contracts import SourceRow, TokenInfo
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
-from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 
 
 class TokenManager:
@@ -39,7 +40,7 @@ class TokenManager:
         )
 
         # After transform
-        token = manager.update_row_data(token, {"value": 42, "processed": True})
+        token = token.with_updated_data(PipelineRow({"value": 42, "processed": True}))
 
         # Fork to branches (node_id resolved to step internally)
         children = manager.fork_token(
@@ -51,18 +52,18 @@ class TokenManager:
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        data_flow: DataFlowRepository,
         *,
         step_resolver: StepResolver,
     ) -> None:
-        """Initialize with recorder and step resolver.
+        """Initialize with data flow repository and step resolver.
 
         Args:
-            recorder: LandscapeRecorder for audit trail
+            data_flow: DataFlowRepository for audit trail
             step_resolver: Callable that resolves NodeID to 1-indexed audit step position.
                 The canonical implementation is RowProcessor._resolve_audit_step_for_node.
         """
-        self._recorder = recorder
+        self._data_flow = data_flow
         self._step_resolver = step_resolver
 
     def create_initial_token(
@@ -87,7 +88,7 @@ class TokenManager:
             ValueError: If source_row has no contract
 
         Note:
-            Payload persistence is now handled by LandscapeRecorder.create_row(),
+            Payload persistence is now handled by DataFlowRepository.create_row(),
             not by TokenManager. This ensures Landscape owns its audit format.
         """
         # Guard: source must provide contract
@@ -100,7 +101,7 @@ class TokenManager:
         pipeline_row = source_row.to_pipeline_row()
 
         # Create row record - recorder stores dict representation
-        row = self._recorder.create_row(
+        row = self._data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
@@ -108,7 +109,7 @@ class TokenManager:
         )
 
         # Create initial token
-        token = self._recorder.create_token(row_id=row.row_id)
+        token = self._data_flow.create_token(row_id=row.row_id)
 
         return TokenInfo(
             row_id=row.row_id,
@@ -122,6 +123,8 @@ class TokenManager:
         source_node_id: str,
         row_index: int,
         source_row: SourceRow,
+        *,
+        validation_error_id: str | None = None,
     ) -> TokenInfo:
         """Create a token for a quarantined row.
 
@@ -147,9 +150,13 @@ class TokenManager:
         if not source_row.is_quarantined:
             raise OrchestrationInvariantError("create_quarantine_token requires a quarantined SourceRow")
 
-        # For quarantine rows, row may not be a dict (could be malformed external data)
-        # Ensure we have a dict for the audit trail
-        row_data: dict[str, Any] = source_row.row if isinstance(source_row.row, dict) else {"_raw": source_row.row}
+        # For quarantine rows, row may not be a dict (could be malformed external data).
+        # PipelineRow requires exactly builtin dict (type(data) is dict), so normalize
+        # dict subclasses (OrderedDict, etc.) to plain dict for the audit trail.
+        if isinstance(source_row.row, dict):
+            row_data: dict[str, Any] = dict(source_row.row) if type(source_row.row) is not dict else source_row.row
+        else:
+            row_data = {"_raw": source_row.row}
 
         # Create minimal OBSERVED contract for audit consistency
         # Quarantine rows don't go through transforms, but audit trail needs a contract
@@ -166,7 +173,7 @@ class TokenManager:
 
         # Create row record — quarantined=True enables safe hashing for
         # Tier-3 external data that may contain non-canonical values (NaN, Infinity)
-        row = self._recorder.create_row(
+        row = self._data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
@@ -174,8 +181,15 @@ class TokenManager:
             quarantined=True,
         )
 
+        if validation_error_id is not None:
+            self._data_flow.link_validation_error_to_row(
+                run_id=run_id,
+                error_id=validation_error_id,
+                row_id=row.row_id,
+            )
+
         # Create initial token
-        token = self._recorder.create_token(row_id=row.row_id)
+        token = self._data_flow.create_token(row_id=row.row_id)
 
         return TokenInfo(
             row_id=row.row_id,
@@ -201,7 +215,7 @@ class TokenManager:
             TokenInfo with row and token IDs
         """
         # Create token for existing row
-        token = self._recorder.create_token(row_id=row_id)
+        token = self._data_flow.create_token(row_id=row_id)
 
         return TokenInfo(
             row_id=row_id,
@@ -239,11 +253,10 @@ class TokenManager:
         data = row_data if row_data is not None else parent_token.row_data
         step = self._step_resolver(node_id)
 
-        children, fork_group_id = self._recorder.fork_token(
-            parent_token_id=parent_token.token_id,
+        children, fork_group_id = self._data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run_id),
             row_id=parent_token.row_id,
             branches=branches,
-            run_id=run_id,
             step_in_pipeline=step,
         )
 
@@ -267,6 +280,7 @@ class TokenManager:
         parents: list[TokenInfo],
         merged_data: PipelineRow,
         node_id: NodeID,
+        run_id: str,
     ) -> TokenInfo:
         """Coalesce multiple tokens into one.
 
@@ -275,6 +289,7 @@ class TokenManager:
             merged_data: Merged row data as PipelineRow (with merged contract)
             node_id: NodeID of the coalesce node performing the merge (resolved to
                 audit step position internally via step_resolver)
+            run_id: Run ID for constructing TokenRefs
 
         Returns:
             Merged TokenInfo with PipelineRow row_data
@@ -291,8 +306,8 @@ class TokenManager:
 
         step = self._step_resolver(node_id)
 
-        merged = self._recorder.coalesce_tokens(
-            parent_token_ids=[p.token_id for p in parents],
+        merged = self._data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=p.token_id, run_id=run_id) for p in parents],
             row_id=row_id,
             step_in_pipeline=step,
         )
@@ -303,22 +318,6 @@ class TokenManager:
             row_data=merged_data,
             join_group_id=merged.join_group_id,
         )
-
-    def update_row_data(
-        self,
-        token: TokenInfo,
-        new_data: PipelineRow,
-    ) -> TokenInfo:
-        """Update token's row data after a transform.
-
-        Args:
-            token: Token to update
-            new_data: New PipelineRow with updated data
-
-        Returns:
-            Updated TokenInfo (same token_id, new row_data, all lineage preserved)
-        """
-        return token.with_updated_data(new_data)
 
     def expand_token(
         self,
@@ -366,11 +365,10 @@ class TokenManager:
 
         # Delegate to recorder which handles DB operations and parent linking
         step = self._step_resolver(node_id)
-        db_children, expand_group_id = self._recorder.expand_token(
-            parent_token_id=parent_token.token_id,
+        db_children, expand_group_id = self._data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run_id),
             row_id=parent_token.row_id,
             count=len(expanded_rows),
-            run_id=run_id,
             step_in_pipeline=step,
             record_parent_outcome=record_parent_outcome,
         )

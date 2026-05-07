@@ -17,7 +17,7 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult
+from elspeth.plugins.transforms.llm.provider import FinishReason, LLMProvider, LLMQueryResult
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
@@ -116,7 +116,7 @@ def _make_mock_provider(
     import itertools
     import json
 
-    mock_provider = Mock()
+    mock_provider = Mock(spec=LLMProvider)
 
     if responses is None:
 
@@ -226,7 +226,7 @@ class TestSingleQueryProcessing:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = capture_execute
         transform._provider = mock_provider
 
@@ -362,7 +362,7 @@ class TestRowProcessingWithPipelining:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -568,7 +568,7 @@ class TestRowProcessingWithPipelining:
                 finish_reason=FinishReason.STOP,
             )
 
-        mock_provider = Mock()
+        mock_provider = Mock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = fail_on_fourth
         mock_provider.close = Mock()
         transform._provider = mock_provider
@@ -630,7 +630,7 @@ class TestMultiRowPipelining:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder
@@ -731,7 +731,7 @@ class TestMultiQueryWithMockProvider:
 
     @pytest.fixture
     def mock_recorder(self) -> Mock:
-        """Create mock LandscapeRecorder."""
+        """Create mock ExecutionRepository."""
         recorder = Mock()
         recorder.record_call = Mock()
         return recorder

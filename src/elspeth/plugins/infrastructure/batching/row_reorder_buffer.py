@@ -15,27 +15,13 @@ from dataclasses import dataclass, field
 from threading import Condition, Lock
 from typing import Any
 
+from elspeth.contracts.reorder_primitives import UNFILLED
+
 
 class ShutdownError(RuntimeError):
     """Raised when operations are attempted on a shutdown buffer."""
 
     pass
-
-
-class _RowSentinel:
-    """Internal sentinel for unfilled buffer slots.
-
-    Distinguishes "not yet completed" from a legitimate None result.
-    Using a dedicated class so it cannot be confused with any valid T value.
-    """
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<_UNFILLED_ROW>"
-
-
-_UNFILLED_ROW = _RowSentinel()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +72,7 @@ class _PendingEntry[T]:
     submitted_at: float
     completed_at: float | None = None
     # Use sentinel default so None is a valid result value
-    result: Any = field(default=_UNFILLED_ROW)
+    result: Any = field(default=UNFILLED)
     is_complete: bool = False
 
 
@@ -244,6 +230,11 @@ class RowReorderBuffer[T]:
                 raise KeyError(f"Ticket {ticket.sequence} (row_id={ticket.row_id}) was never submitted")
 
             entry = self._pending[ticket.sequence]
+            if entry.row_id != ticket.row_id:
+                raise RuntimeError(
+                    f"Ticket identity mismatch: ticket.row_id={ticket.row_id!r} "
+                    f"but pending entry has row_id={entry.row_id!r} at sequence {ticket.sequence}"
+                )
             if entry.is_complete:
                 raise ValueError(f"Ticket {ticket.sequence} (row_id={ticket.row_id}) already completed")
 
@@ -284,13 +275,17 @@ class RowReorderBuffer[T]:
                     if entry.is_complete:
                         # Ready to release!
                         # Invariants: is_complete implies result and completed_at are set
-                        if entry.result is _UNFILLED_ROW:
+                        if entry.result is UNFILLED:
                             raise RuntimeError("Invariant violation: is_complete=True but result is unfilled")
                         if entry.completed_at is None:
                             raise RuntimeError("Invariant violation: is_complete=True but completed_at is None")
 
                         now = time.perf_counter()
-                        buffer_wait_ms = (now - entry.completed_at) * 1000
+                        # Clamp to zero: perf_counter() is not guaranteed monotonic
+                        # across CPU cores in virtualized/NUMA environments, so
+                        # (now - completed_at) can go negative when the worker and
+                        # release threads run on different cores with clock skew.
+                        buffer_wait_ms = max(0.0, (now - entry.completed_at) * 1000)
 
                         result_entry = RowBufferEntry(
                             sequence=entry.sequence,
@@ -351,6 +346,11 @@ class RowReorderBuffer[T]:
                 return False  # Already released or never submitted
 
             entry = self._pending[ticket.sequence]
+            if entry.row_id != ticket.row_id:
+                raise RuntimeError(
+                    f"Ticket identity mismatch: ticket.row_id={ticket.row_id!r} "
+                    f"but pending entry has row_id={entry.row_id!r} at sequence {ticket.sequence}"
+                )
             if entry.is_complete:
                 return False  # Already complete, will be released soon
 

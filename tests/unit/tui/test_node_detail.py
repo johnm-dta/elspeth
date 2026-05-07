@@ -8,12 +8,6 @@ from elspeth.tui.types import NodeStateInfo
 class TestNodeDetailPanel:
     """Tests for NodeDetailPanel widget."""
 
-    def test_can_import_widget(self) -> None:
-        """NodeDetailPanel can be imported."""
-        from elspeth.tui.widgets.node_detail import NodeDetailPanel
-
-        assert NodeDetailPanel is not None
-
     def test_display_transform_state(self) -> None:
         """Display details for a transform node state."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel

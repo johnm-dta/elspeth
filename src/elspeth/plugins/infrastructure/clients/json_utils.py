@@ -41,12 +41,43 @@ def contains_non_finite(obj: Any) -> bool:
     return False
 
 
+class DuplicateJSONKeyError(ValueError):
+    """Raised when a JSON object contains duplicate keys at a given nesting level."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject JSON objects with duplicate keys at this nesting level.
+
+    Used as ``object_pairs_hook`` for ``json.loads`` to enforce unique keys.
+    Python's default parser silently applies last-wins for duplicates, which
+    means ``{"a": 1, "a": 2}`` becomes ``{"a": 2}`` with no error — data loss
+    that violates Tier 3 recording integrity.
+    """
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateJSONKeyError(f"Duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite(constant: str) -> None:
+    """Reject NaN/Infinity during JSON parsing via parse_constant callback.
+
+    Raises ValueError instead of returning a Python float, so non-finite
+    values are caught during parsing rather than requiring a recursive
+    post-parse walk (which is vulnerable to RecursionError on deep nesting).
+    """
+    raise ValueError(f"JSON contains non-finite value: {constant}")
+
+
 def parse_json_strict(text: str) -> tuple[Any, str | None]:
     """Parse JSON with strict rejection of NaN/Infinity.
 
     Python's stdlib json module accepts non-finite values by default, but
-    these cannot be canonicalized. This function parses and validates in
-    one step at the Tier 3 boundary.
+    these cannot be canonicalized. This function rejects them during parsing
+    via parse_constant, avoiding a recursive post-parse walk that would be
+    vulnerable to RecursionError on deeply nested external payloads.
 
     Args:
         text: JSON string to parse
@@ -57,12 +88,12 @@ def parse_json_strict(text: str) -> tuple[Any, str | None]:
         - On failure: (None, error_message)
     """
     try:
-        parsed = json.loads(text)
-    except JSONDecodeError as e:
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_finite,
+        )
+    except (JSONDecodeError, DuplicateJSONKeyError, ValueError) as e:
         return None, str(e)
-
-    # Check for non-finite values that canonicalization would reject
-    if contains_non_finite(parsed):
-        return None, "JSON contains non-finite values (NaN or Infinity)"
 
     return parsed, None

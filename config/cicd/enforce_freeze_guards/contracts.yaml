@@ -1,28 +1,24 @@
 per_file_rules:
-- pattern: contracts/call_data.py
-  rules:
-  - FG1
-  reason: HTTPCallRequest.headers and HTTPCallResponse.headers use MappingProxyType(dict()) — justified because values are str (scalars, no nested mutables)
-  expires: null
-  max_hits: 2
-- pattern: contracts/call_data.py
+- pattern: contracts/declaration_contracts.py
   rules:
   - FG2
-  reason: isinstance guards on headers (scalar values) and body (Mapping|str|None union — guard is load-bearing)
+  reason: isinstance(self.row_data, Mapping) is a type-validation guard that raises
+    TypeError on wrong type (offensive programming), then calls deep_freeze() on the
+    validated value — not a conditional freeze bypass
   expires: null
-  max_hits: 3
+  max_hits: 1
+- pattern: contracts/diversion.py
+  rules:
+  - FG2
+  reason: isinstance guards validate SinkWriteResult field types at construction (crash on wrong type) — offensive programming, not freeze guards
+  expires: null
+  max_hits: 1
 - pattern: contracts/schema_contract.py
   rules:
   - FG1
   reason: SchemaContract._by_normalized and _by_original use shallow wraps — values are FieldContract (frozen DCs) and str (scalars)
   expires: null
   max_hits: 2
-- pattern: contracts/events.py
-  rules:
-  - FG1
-  reason: FieldResolutionApplied.resolution_mapping uses MappingProxyType(dict()) — values are str (scalars, no nested mutables)
-  expires: null
-  max_hits: 1
 - pattern: contracts/config/runtime.py
   rules:
   - FG1

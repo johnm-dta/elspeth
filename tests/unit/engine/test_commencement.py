@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
+from typing import Any
 
 import pytest
 
@@ -54,7 +55,7 @@ class TestEvaluateCommencementGates:
                 condition="collections['missing']['count'] > 0",
             )
         ]
-        context = {
+        context: dict[str, dict[str, object]] = {
             "dependency_runs": {},
             "collections": {},
             "env": {},
@@ -153,7 +154,7 @@ class TestEvaluateCommencementGates:
     def test_context_mutation_after_evaluation_does_not_affect_snapshot(self) -> None:
         """TOCTOU protection: mutating original context must not change recorded snapshots."""
         gate = CommencementGateConfig(name="always_pass", condition="True")
-        context = {
+        context: dict[str, Any] = {
             "dependency_runs": {"dep1": {"run_id": "r1"}},
             "collections": {"col1": {"count": 5, "reachable": True}},
             "env": {"KEY": "value"},
@@ -175,7 +176,7 @@ class TestEvaluateCommencementGates:
 class TestCommencementGateCrashThrough:
     """Programming errors must crash through, not be wrapped as gate failures."""
 
-    def _make_context(self) -> dict:
+    def _make_context(self) -> dict[str, object]:
         return {
             "dependency_runs": {},
             "collections": {},
@@ -240,3 +241,56 @@ class TestBuildPreflightContext:
         )
         assert "env" in context
         assert isinstance(context["env"], dict)
+
+
+class TestCommencementGateTypeEnforcement:
+    """Regression: non-boolean gate results must be rejected, not coerced."""
+
+    def test_non_boolean_result_rejected(self) -> None:
+        """Gate returning a truthy non-boolean (e.g., int 1) is a config error."""
+        gates = [
+            CommencementGateConfig(
+                name="count_check",
+                condition="collections['data']['count']",
+            ),
+        ]
+        context: dict[str, Any] = {
+            "collections": {"data": {"count": 5}},
+            "dependency_runs": {},
+            "env": {},
+        }
+        with pytest.raises(CommencementGateFailedError, match="not bool"):
+            evaluate_commencement_gates(gates, context)
+
+    def test_string_result_rejected(self) -> None:
+        """Gate returning a truthy string is a config error."""
+        gates = [
+            CommencementGateConfig(
+                name="env_check",
+                condition="env.get('HOME')",
+            ),
+        ]
+        context: dict[str, Any] = {
+            "collections": {},
+            "dependency_runs": {},
+            "env": {"HOME": "/home/user"},
+        }
+        with pytest.raises(CommencementGateFailedError, match="not bool"):
+            evaluate_commencement_gates(gates, context)
+
+    def test_boolean_result_accepted(self) -> None:
+        """Gate returning actual bool passes normally."""
+        gates = [
+            CommencementGateConfig(
+                name="real_check",
+                condition="collections['data']['count'] > 0",
+            ),
+        ]
+        context: dict[str, Any] = {
+            "collections": {"data": {"count": 5}},
+            "dependency_runs": {},
+            "env": {},
+        }
+        results = evaluate_commencement_gates(gates, context)
+        assert len(results) == 1
+        assert results[0].result is True

@@ -1,5 +1,6 @@
 """Unit tests for the CLI purge command."""
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import typer
 from typer.testing import CliRunner
 
 from elspeth.cli import _validate_existing_sqlite_db_url, app
+from elspeth.core.landscape import LandscapeDB
 from elspeth.core.retention.purge import PurgeResult
 
 runner = CliRunner()
@@ -119,11 +121,12 @@ class TestPurgeCommandDatabaseResolution:
         assert not missing_db.exists()
 
     def test_purge_uses_existing_sqlite_file_from_settings(self, tmp_path: Path, monkeypatch) -> None:
-        """settings.yaml SQLite URL works when the DB file already exists."""
+        """settings.yaml SQLite URL works when the file is a real audit database."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         existing_db = state_dir / "audit.db"
-        existing_db.touch()
+        db = LandscapeDB.from_url(f"sqlite:///{existing_db}")
+        db.close()
 
         settings_path = tmp_path / "settings.yaml"
         _write_minimal_settings(settings_path, landscape_url="sqlite:///./state/audit.db")
@@ -301,6 +304,29 @@ class TestPurgeDryRun:
 
 class TestPurgeErrorHandling:
     """Tests for error conditions in the purge command."""
+
+    def test_purge_rejects_non_landscape_db_without_mutating_file(self, tmp_path: Path) -> None:
+        """Wrong SQLite files must fail fast without schema creation side effects."""
+        db_path = tmp_path / "wrong.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        before_tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+        before_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        with patch(_PATCH_RESOLVE_PASSPHRASE, return_value=None):
+            result = runner.invoke(app, ["purge", "--database", str(db_path), "--dry-run"])
+
+        conn = sqlite3.connect(str(db_path))
+        after_tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+        after_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        assert result.exit_code == 1
+        assert "does not appear to be an ELSPETH audit database" in result.output
+        assert after_tables == before_tables
+        assert after_user_version == before_user_version == 0
 
     def test_missing_database_file(self, tmp_path: Path) -> None:
         """--database pointing to nonexistent file fails with clear error."""

@@ -16,8 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
-from elspeth.telemetry.errors import TelemetryExporterError
+from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
 
 if TYPE_CHECKING:
     from ddtrace._trace.tracer import Tracer
@@ -231,10 +230,8 @@ class DatadogExporter:
         try:
             self._create_span_for_event(event)
         except Exception as e:
-            if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                raise
-            if isinstance(e, (TypeError, AttributeError, KeyError, NameError)):
-                raise  # Programming errors must crash
+            if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                raise  # Programming error — must crash
             # Export MUST NOT raise - log and continue
             logger.warning(
                 "Failed to export telemetry event to Datadog",
@@ -359,10 +356,8 @@ class DatadogExporter:
             # ddtrace tracer has a flush method that sends pending spans
             self._tracer.flush()
         except Exception as e:
-            if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                raise
-            if isinstance(e, (TypeError, AttributeError, KeyError, NameError)):
-                raise  # Programming errors must crash
+            if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                raise  # Programming error — must crash
             logger.warning(
                 "Failed to flush Datadog exporter",
                 exporter=self._name,
@@ -382,10 +377,8 @@ class DatadogExporter:
                 # Shutdown the tracer
                 self._tracer.shutdown()
             except Exception as e:
-                if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                    raise
-                if isinstance(e, (TypeError, AttributeError, KeyError, NameError)):
-                    raise  # Programming errors must crash
+                if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                    raise  # Programming error — must crash
                 logger.warning(
                     "Failed to shutdown Datadog tracer",
                     exporter=self._name,

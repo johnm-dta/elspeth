@@ -10,6 +10,8 @@ Tests cover QuerySpec (named variable mapping) used by the unified LLMTransform:
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -131,7 +133,7 @@ class TestQuerySpecContextProperties:
 
         spec = QuerySpec(
             name="test_query",
-            input_fields=input_fields,
+            input_fields=MappingProxyType(input_fields),
         )
 
         ctx = spec.build_template_context(row)
@@ -151,7 +153,7 @@ class TestQuerySpecContextProperties:
 
         spec = QuerySpec(
             name="test_query",
-            input_fields={"var": column_name},
+            input_fields=MappingProxyType({"var": column_name}),
         )
 
         ctx = spec.build_template_context(row)
@@ -161,7 +163,7 @@ class TestQuerySpecContextProperties:
         """Property: Missing row column raises KeyError."""
         spec = QuerySpec(
             name="test_query",
-            input_fields={"template_var": "missing_column"},
+            input_fields=MappingProxyType({"template_var": "missing_column"}),
         )
 
         with pytest.raises(KeyError):
@@ -182,7 +184,7 @@ class TestQuerySpecContextProperties:
 
         spec = QuerySpec(
             name="test_query",
-            input_fields=input_fields,
+            input_fields=MappingProxyType(input_fields),
         )
 
         ctx = spec.build_template_context(row)
@@ -195,7 +197,7 @@ class TestQuerySpecContextProperties:
         with pytest.raises(ValueError, match="non-empty"):
             QuerySpec(
                 name="",
-                input_fields={"var": "col"},
+                input_fields=MappingProxyType({"var": "col"}),
             )
 
     def test_empty_input_fields_rejected(self) -> None:
@@ -203,5 +205,5 @@ class TestQuerySpecContextProperties:
         with pytest.raises(ValueError, match="non-empty"):
             QuerySpec(
                 name="test_query",
-                input_fields={},
+                input_fields=MappingProxyType({}),
             )

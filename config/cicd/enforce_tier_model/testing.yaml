@@ -5,4 +5,19 @@ per_file_rules:
   reason: Test factories accept dict|PipelineRow for convenience - isinstance() for input coercion, not bug masking
   expires: null
   max_hits: 7
-allow_hits: []
+allow_hits:
+- key: testing/pytest_xdist_auto.py:R1:pytest_cmdline_main:fp=4ff2752055e3b85a
+  owner: infrastructure
+  reason: os.environ.get() for CI/PYTEST_XDIST_WORKER detection — environment variables are external (Tier 3), absence means "not in CI"
+  safety: Absence returns None (falsy), plugin does nothing — safe default
+  expires: null
+- key: testing/pytest_xdist_auto.py:R1:pytest_cmdline_main:fp=24415af176ca0560
+  owner: infrastructure
+  reason: os.environ.get() for ELSPETH_PYTEST_WORKERS override — operator-configurable parallelism
+  safety: Absence returns None, falls through to auto-detect; invalid value caught by int() conversion
+  expires: null
+- key: testing/pytest_xdist_auto.py:R2:pytest_cmdline_main:fp=13b2d64afea58737
+  owner: infrastructure
+  reason: getattr() on pytest config for safe option check — pytest API does not guarantee option existence across versions
+  safety: Returns None on absence, plugin does nothing — safe default
+  expires: null

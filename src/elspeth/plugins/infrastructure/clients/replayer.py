@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.row_data import CallDataState
 
 if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.core.landscape.execution_repository import ExecutionRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +112,7 @@ class CallReplayer:
     Matches calls by request_hash (canonical hash of request data).
 
     Example:
-        replayer = CallReplayer(recorder, source_run_id="run-abc123")
+        replayer = CallReplayer(execution, source_run_id="run-abc123")
 
         # Instead of making live call:
         result = replayer.replay(
@@ -128,16 +128,16 @@ class CallReplayer:
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        execution: ExecutionRepository,
         source_run_id: str,
     ) -> None:
         """Initialize replayer.
 
         Args:
-            recorder: LandscapeRecorder for looking up recorded calls
+            execution: ExecutionRepository for looking up recorded calls
             source_run_id: The run_id to replay calls from
         """
-        self._recorder = recorder
+        self._execution = execution
         self._source_run_id = source_run_id
         # Cache: (call_type, request_hash, sequence_index) -> cached data
         # The sequence_index allows multiple calls with same hash to be cached separately
@@ -205,7 +205,7 @@ class CallReplayer:
             )
 
         # Look up in database with sequence index to get Nth occurrence
-        call = self._recorder.find_call_by_request_hash(
+        call = self._execution.find_call_by_request_hash(
             run_id=self._source_run_id,
             call_type=call_type,
             request_hash=request_hash,
@@ -216,7 +216,7 @@ class CallReplayer:
             raise ReplayMissError(request_hash, request_data)
 
         # Get response data from payload store with explicit state
-        call_data = self._recorder.get_call_response_data(call.call_id)
+        call_data = self._execution.get_call_response_data(call.call_id)
 
         # Parse error JSON if present — this is Tier 1 data (we wrote it),
         # so corrupt JSON is an AuditIntegrityError, not a data quality issue.
@@ -235,9 +235,17 @@ class CallReplayer:
         # Determine if this was an error call
         was_error = call.status == CallStatus.ERROR
 
-        # Extract response data based on explicit state
+        # Extract response data based on explicit state.
+        # deep_thaw converts MappingProxyType→dict and tuple→list recursively,
+        # matching the original live-mode payload types that callers expect.
         if call_data.state == CallDataState.AVAILABLE:
-            response_data: dict[str, Any] = dict(call_data.data)  # type: ignore[arg-type]
+            thawed = deep_thaw(call_data.data)
+            if not isinstance(thawed, dict):
+                raise AuditIntegrityError(
+                    f"deep_thaw(call_data.data) must return dict, got {type(thawed).__name__} "
+                    f"for call in run {self._source_run_id} (Tier 1 violation)"
+                )
+            response_data: dict[str, Any] = thawed
         elif call_data.state == CallDataState.HASH_ONLY:
             raise ReplayPayloadMissingError(call.call_id, request_hash)
         elif call_data.state == CallDataState.NEVER_STORED:

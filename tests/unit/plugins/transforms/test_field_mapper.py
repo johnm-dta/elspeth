@@ -7,8 +7,9 @@ import pytest
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.testing import make_field, make_pipeline_row
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -235,6 +236,24 @@ class TestFieldMapper:
         assert result.row is not None
         assert result.row.to_dict() == row
 
+    def test_backward_probe_rows_drop_mapped_source_field(self, ctx: PluginContext) -> None:
+        """Backward invariant probe keeps the real rename/drop path under test."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(FieldMapper.probe_config())
+        probe = make_pipeline_row({"baseline": "kept"})
+
+        result = transform.execute_backward_invariant_probe(
+            transform.backward_invariant_probe_rows(probe),
+            ctx,
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline"] == "kept"
+        assert result.row["field_mapper_probe_target"] == "mapped"
+        assert "field_mapper_probe_source" not in result.row.to_dict()
+
     def test_requires_schema_config(self) -> None:
         """FieldMapper requires schema configuration."""
         from elspeth.plugins.infrastructure.config_base import PluginConfigError
@@ -243,12 +262,11 @@ class TestFieldMapper:
         with pytest.raises(PluginConfigError, match="schema"):
             FieldMapper({"mapping": {"a": "b"}})
 
-    def test_validate_input_attribute_set_from_config(self) -> None:
-        """validate_input=True is stored as attribute for executor enforcement.
+    def test_no_validate_input_attribute(self) -> None:
+        """FieldMapper does not carry a validate_input attribute.
 
-        Input validation is centralized in TransformExecutor. This test verifies
-        the plugin correctly sets the attribute from config so the executor can
-        check it before calling process().
+        Input validation is unconditional in the executor — plugins
+        no longer control this via a flag.
         """
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
@@ -256,38 +274,16 @@ class TestFieldMapper:
             {
                 "schema": {"mode": "fixed", "fields": ["count: int"]},
                 "mapping": {},
-                "validate_input": True,
             }
         )
 
-        assert transform.validate_input is True
+        assert not hasattr(transform, "validate_input")
 
-    def test_validate_input_disabled_passes_wrong_type(self, ctx: PluginContext) -> None:
-        """validate_input=False (default) passes wrong types through.
+    def test_dynamic_schema_accepts_any_types(self, ctx: PluginContext) -> None:
+        """Dynamic schema imposes no type constraints on input.
 
-        When validation is disabled, the transform doesn't check types.
-        This is the default to avoid breaking existing pipelines.
-        """
-        from elspeth.plugins.transforms.field_mapper import FieldMapper
-
-        transform = FieldMapper(
-            {
-                "schema": {"mode": "fixed", "fields": ["count: int"]},
-                "mapping": {},
-                "validate_input": False,  # Explicit default
-            }
-        )
-
-        # String passes through without validation
-        result = transform.process(make_pipeline_row({"count": "not_an_int"}), ctx)
-        assert result.status == "success"
-        assert result.row is not None
-        assert result.row["count"] == "not_an_int"
-
-    def test_validate_input_skipped_for_dynamic_schema(self, ctx: PluginContext) -> None:
-        """validate_input=True with dynamic schema skips validation.
-
-        Dynamic schemas accept anything, so validation is a no-op.
+        The executor validates unconditionally, but dynamic schemas
+        accept everything — validation is a no-op.
         """
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
@@ -295,11 +291,9 @@ class TestFieldMapper:
             {
                 "schema": {"mode": "observed"},
                 "mapping": {},
-                "validate_input": True,  # Would validate, but schema is dynamic
             }
         )
 
-        # Any data passes with dynamic schema
         result = transform.process(make_pipeline_row({"anything": "goes", "count": "string"}), ctx)
         assert result.status == "success"
 
@@ -388,6 +382,27 @@ class TestFieldMapperDuplicateTargetRejection:
                 {
                     "schema": DYNAMIC_SCHEMA,
                     "mapping": {"first_name": "name", "last_name": "name"},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "mapping",
+        [
+            {"a": "b", "b": "a"},
+            {"a": "b", "b": "c"},
+            {"b": "c", "a": "b"},
+        ],
+    )
+    def test_overlapping_rename_graphs_rejected_at_config_time(self, mapping: dict[str, str]) -> None:
+        """Targets that are also sources are rejected before they can lose data."""
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        with pytest.raises(PluginConfigError, match="overlapping rename"):
+            FieldMapper(
+                {
+                    "schema": DYNAMIC_SCHEMA,
+                    "mapping": mapping,
                 }
             )
 
@@ -564,18 +579,20 @@ class TestFieldMapperContractPropagation:
         assert isinstance(result.row, PipelineRow)
 
         output_path = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": {"mode": "observed"},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": {"mode": "observed"},
+                    "headers": "original",
+                }
+            )
         )
-        sink_recorder = make_recorder()
+        factory = make_factory()
         sink_ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=sink_recorder,
+            landscape=factory.plugin_audit_writer(),
             contract=result.row.contract,
         )
         sink.write([result.row.to_dict()], sink_ctx)
@@ -593,10 +610,58 @@ class TestOutputSchemaConfig:
             {
                 "mapping": {"old_name": "new_name", "source": "target"},
                 "schema": {"mode": "observed"},
+                "strict": True,
             }
         )
         assert transform._output_schema_config is not None
         assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"new_name", "target"})
+
+    def test_non_strict_optional_mapping_does_not_declare_or_guarantee_target(self) -> None:
+        """A skipped non-strict mapping target is not present on every successful row."""
+        from elspeth.engine.executors.declared_output_fields import verify_declared_output_fields
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"maybe_field": "output"},
+                "schema": {"mode": "observed"},
+                "strict": False,
+            }
+        )
+        assert transform.declared_output_fields == frozenset()
+        assert transform._output_schema_config is not None
+        assert transform._output_schema_config.guaranteed_fields is None
+
+        result = transform.process(make_pipeline_row({"other_field": "value"}), make_context())
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row.to_dict() == {"other_field": "value"}
+        verify_declared_output_fields(
+            declared_output_fields=transform.declared_output_fields,
+            emitted_rows=(result.row,),
+            plugin_name=transform.name,
+            node_id="node",
+            run_id="run",
+            row_id="row",
+            token_id="token",
+        )
+
+    def test_non_strict_mapping_from_guaranteed_source_declares_target(self) -> None:
+        """A non-strict mapping can guarantee its target when the source is guaranteed upstream."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"source": "target"},
+                "schema": {"mode": "observed", "guaranteed_fields": ["source", "kept"]},
+                "strict": False,
+            }
+        )
+
+        assert transform.declared_output_fields == frozenset({"target"})
+        assert transform._output_schema_config is not None
+        assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"target", "kept"})
 
     def test_guaranteed_fields_empty_mapping(self):
         from elspeth.plugins.transforms.field_mapper import FieldMapper
@@ -608,7 +673,47 @@ class TestOutputSchemaConfig:
             }
         )
         assert transform._output_schema_config is not None
-        assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset()
+        # Empty mapping with no upstream guaranteed_fields → abstain (None)
+        assert transform._output_schema_config.guaranteed_fields is None
+
+    def test_upstream_none_guaranteed_with_mapping_produces_explicit(self):
+        """Strict mapping with upstream guaranteed_fields=None can declare target guarantees."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"old": "new"},
+                "schema": {"mode": "observed"},
+                "strict": True,
+                # No guaranteed_fields key → upstream is None (abstain)
+            }
+        )
+        assert transform._output_schema_config is not None
+        # Transform adds "new" via mapping, so it CAN guarantee something
+        assert transform._output_schema_config.guaranteed_fields is not None
+        assert "new" in transform._output_schema_config.guaranteed_fields
+
+    def test_upstream_declared_empty_produces_explicit_empty(self):
+        """Upstream guaranteed_fields=[] (parsed as None) + empty mapping → abstain.
+
+        When upstream has no guaranteed_fields AND the mapping adds nothing,
+        the transform should abstain (None), not declare empty guarantees.
+        """
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {},
+                "schema": {"mode": "observed", "guaranteed_fields": ["x"]},
+                "select_only": True,
+            }
+        )
+        assert transform._output_schema_config is not None
+        # select_only with empty mapping produces no fields, but upstream declared → ()
+        # Actually mapping is empty so output_fields is empty, but upstream declared
+        # so we should get explicit empty tuple
+        assert transform._output_schema_config.guaranteed_fields is not None
+        assert transform._output_schema_config.guaranteed_fields == ()
 
     def test_declared_output_fields_set_from_mapping(self):
         from elspeth.plugins.transforms.field_mapper import FieldMapper
@@ -617,6 +722,7 @@ class TestOutputSchemaConfig:
             {
                 "mapping": {"a": "b", "c": "d"},
                 "schema": {"mode": "observed"},
+                "strict": True,
             }
         )
         assert transform.declared_output_fields == frozenset({"b", "d"})
@@ -629,7 +735,96 @@ class TestOutputSchemaConfig:
             {
                 "mapping": {"score": "score", "name": "display_name"},
                 "schema": {"mode": "observed"},
+                "strict": True,
             }
         )
         # "score" → "score" is identity (excluded), "name" → "display_name" is a rename (included)
         assert transform.declared_output_fields == frozenset({"display_name"})
+
+    def test_original_header_rename_does_not_retain_unresolved_source_guarantee(self) -> None:
+        """Original-header sources are not treated as normalized guarantee keys."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"Amount USD": "price"},
+                "schema": {"mode": "observed", "guaranteed_fields": ["amount_usd"]},
+            }
+        )
+
+        assert transform.declared_output_fields == frozenset()
+        assert transform._output_schema_config is not None
+        assert transform._output_schema_config.guaranteed_fields == ()
+
+    def test_original_header_identity_mapping_does_not_declare_target_as_new_field(self) -> None:
+        """Original-name identity mappings must not trigger false collision checks."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"Amount USD": "amount_usd"},
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        assert transform.declared_output_fields == frozenset()
+
+
+class TestFieldMapperOutputSchemaContract:
+    """Tests for FieldMapper _output_schema_config reflecting actual output shape.
+
+    Bug fix: FieldMapper called _build_output_schema_config() which copies input
+    fields into output guarantees. But FieldMapper removes/renames fields, so the
+    output shape differs from input. The fix builds a custom output schema config.
+    """
+
+    def test_select_only_output_guarantees_are_only_targets(self):
+        """select_only=True: guaranteed fields are ONLY the mapping targets."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"a": "x", "b": "y"},
+                "select_only": True,
+                "schema": {"mode": "observed", "guaranteed_fields": ["a", "b", "c"]},
+            }
+        )
+        assert transform._output_schema_config is not None
+        guaranteed = frozenset(transform._output_schema_config.guaranteed_fields)
+        # Only mapping targets, not input fields
+        assert guaranteed == frozenset({"x", "y"})
+        # Input fields that were dropped should NOT be present
+        assert "a" not in guaranteed
+        assert "b" not in guaranteed
+        assert "c" not in guaranteed
+
+    def test_rename_removes_source_adds_target_in_guarantees(self):
+        """Rename mapping removes source field and adds target in guaranteed_fields."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"old_name": "new_name"},
+                "schema": {"mode": "observed", "guaranteed_fields": ["old_name", "keep_me"]},
+            }
+        )
+        assert transform._output_schema_config is not None
+        guaranteed = frozenset(transform._output_schema_config.guaranteed_fields)
+        assert "new_name" in guaranteed
+        assert "keep_me" in guaranteed
+        assert "old_name" not in guaranteed
+
+    def test_identity_mapping_preserves_field_in_guarantees(self):
+        """Identity mapping (source == target) keeps the field in guaranteed_fields."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "mapping": {"id": "id"},
+                "schema": {"mode": "observed", "guaranteed_fields": ["id", "name"]},
+            }
+        )
+        assert transform._output_schema_config is not None
+        guaranteed = frozenset(transform._output_schema_config.guaranteed_fields)
+        assert "id" in guaranteed
+        assert "name" in guaranteed

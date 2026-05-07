@@ -14,9 +14,8 @@ Trust-tier notes
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Any
 
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
@@ -55,6 +54,9 @@ class CoalesceMetadata:
         quorum_required: Quorum threshold (for quorum policy failures).
         timeout_seconds: Configured timeout (for timeout-triggered failures).
         union_field_collisions: Field name to contributing branches (union merge).
+        union_field_origins: Field name to originating branch (every union merge).
+        union_field_collision_values: Field name to tuple of ``(branch, value)``
+            entries in merge order (populated only when collisions occurred).
     """
 
     policy: CoalescePolicy
@@ -62,12 +64,24 @@ class CoalesceMetadata:
     def __post_init__(self) -> None:
         if not self.policy:
             raise ValueError("CoalesceMetadata.policy must not be empty")
-        # Freeze container fields — catches direct construction with raw dicts
+        # Freeze all container fields — catches direct construction with raw lists/dicts
         fields_to_freeze = []
+        if self.expected_branches is not None:
+            fields_to_freeze.append("expected_branches")
+        if self.branches_arrived is not None:
+            fields_to_freeze.append("branches_arrived")
+        if self.arrival_order is not None:
+            fields_to_freeze.append("arrival_order")
         if self.branches_lost is not None:
             fields_to_freeze.append("branches_lost")
         if self.union_field_collisions is not None:
             fields_to_freeze.append("union_field_collisions")
+        if self.union_field_origins is not None:
+            fields_to_freeze.append("union_field_origins")
+        if self.union_field_collision_values is not None:
+            fields_to_freeze.append("union_field_collision_values")
+        if self.lost_branch_expected_fields is not None:
+            fields_to_freeze.append("lost_branch_expected_fields")
         if fields_to_freeze:
             freeze_fields(self, *fields_to_freeze)
 
@@ -78,7 +92,7 @@ class CoalesceMetadata:
     merge_strategy: MergeStrategy | None = None
     expected_branches: tuple[str, ...] | None = None
     branches_arrived: tuple[str, ...] | None = None
-    branches_lost: MappingProxyType[str, str] | None = None
+    branches_lost: Mapping[str, str] | None = None
     select_branch: str | None = None
 
     # Timing
@@ -90,7 +104,21 @@ class CoalesceMetadata:
     timeout_seconds: float | None = None
 
     # Union merge collision info
-    union_field_collisions: MappingProxyType[str, tuple[str, ...]] | None = None
+    union_field_collisions: Mapping[str, tuple[str, ...]] | None = None
+
+    # Union merge provenance (populated for every union merge)
+    union_field_origins: Mapping[str, str] | None = None
+
+    # Union merge collision values (populated only when collisions occurred).
+    # Outer key: field name. Inner tuple entries: (branch_name, value) in merge order.
+    # The last entry is the winner under last_wins; first under first_wins.
+    union_field_collision_values: Mapping[str, tuple[tuple[str, Any], ...]] | None = None
+
+    # Lost branch expected fields (populated when branches_lost is non-empty).
+    # Outer key: branch name. Value: tuple of field names that branch would have
+    # contributed. This enables audit queries like "what fields were expected
+    # from lost branch X?" without requiring DAG traversal.
+    lost_branch_expected_fields: Mapping[str, tuple[str, ...]] | None = None
 
     # ------------------------------------------------------------------
     # Serialization
@@ -125,6 +153,14 @@ class CoalesceMetadata:
             result["timeout_seconds"] = self.timeout_seconds
         if self.union_field_collisions is not None:
             result["union_field_collisions"] = {k: list(v) for k, v in self.union_field_collisions.items()}
+        if self.union_field_origins is not None:
+            result["union_field_origins"] = dict(self.union_field_origins)
+        if self.union_field_collision_values is not None:
+            result["union_field_collision_values"] = {
+                field: [list(entry) for entry in entries] for field, entries in self.union_field_collision_values.items()
+            }
+        if self.lost_branch_expected_fields is not None:
+            result["lost_branch_expected_fields"] = {k: list(v) for k, v in self.lost_branch_expected_fields.items()}
         return result
 
     # ------------------------------------------------------------------
@@ -144,6 +180,7 @@ class CoalesceMetadata:
         expected_branches: Sequence[str],
         branches_arrived: Sequence[str],
         branches_lost: dict[str, str] | None = None,
+        lost_branch_expected_fields: dict[str, tuple[str, ...]] | None = None,
         quorum_required: int | None = None,
         timeout_seconds: float | None = None,
     ) -> CoalesceMetadata:
@@ -152,7 +189,8 @@ class CoalesceMetadata:
             policy=policy,
             expected_branches=tuple(expected_branches),
             branches_arrived=tuple(branches_arrived),
-            branches_lost=MappingProxyType(branches_lost) if branches_lost is not None else None,
+            branches_lost=branches_lost,
+            lost_branch_expected_fields=lost_branch_expected_fields,
             quorum_required=quorum_required,
             timeout_seconds=timeout_seconds,
         )
@@ -183,6 +221,7 @@ class CoalesceMetadata:
         expected_branches: Sequence[str],
         branches_arrived: Sequence[str],
         branches_lost: dict[str, str],
+        lost_branch_expected_fields: dict[str, tuple[str, ...]] | None = None,
         arrival_order: Sequence[ArrivalOrderEntry],
         wait_duration_ms: float,
     ) -> CoalesceMetadata:
@@ -192,21 +231,32 @@ class CoalesceMetadata:
             merge_strategy=merge_strategy,
             expected_branches=tuple(expected_branches),
             branches_arrived=tuple(branches_arrived),
-            branches_lost=MappingProxyType(branches_lost),
+            branches_lost=branches_lost,
+            lost_branch_expected_fields=lost_branch_expected_fields,
             arrival_order=tuple(arrival_order),
             wait_duration_ms=wait_duration_ms,
         )
 
     @classmethod
-    def with_collisions(
+    def with_union_result(
         cls,
         base: CoalesceMetadata,
-        collisions: dict[str, list[str]],
+        *,
+        field_origins: Mapping[str, str],
+        collisions: Mapping[str, Sequence[str]] | None = None,
+        collision_values: Mapping[str, Sequence[tuple[str, Any]]] | None = None,
     ) -> CoalesceMetadata:
-        """Add union field collision info to an existing metadata instance.
+        """Layer union-merge provenance onto an existing metadata instance.
 
-        Since CoalesceMetadata is frozen, this creates a new instance
-        via ``dataclasses.replace()``.
+        ``field_origins`` is always populated for union merges. ``collisions``
+        and ``collision_values`` are populated only when at least one field
+        was produced by more than one branch.
         """
-        frozen_collisions = MappingProxyType({k: tuple(v) for k, v in collisions.items()})
-        return replace(base, union_field_collisions=frozen_collisions)
+        return replace(
+            base,
+            union_field_origins=dict(field_origins),
+            union_field_collisions=({k: tuple(v) for k, v in collisions.items()} if collisions is not None else None),
+            union_field_collision_values=(
+                {k: tuple(tuple(entry) for entry in v) for k, v in collision_values.items()} if collision_values is not None else None
+            ),
+        )

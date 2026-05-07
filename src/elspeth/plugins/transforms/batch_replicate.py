@@ -14,17 +14,15 @@ row, with parent linkage to track deaggregation lineage.
 import copy
 from typing import Any
 
-import structlog
 from pydantic import Field, model_validator
 
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.errors import TransformSuccessReason
+from elspeth.contracts.errors import PluginContractViolation, TransformSuccessReason
+from elspeth.contracts.field_collision import detect_field_collisions
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
-from elspeth.plugins.infrastructure.config_base import TransformDataConfig
+from elspeth.plugins.infrastructure.config_base import PluginConfigError, TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
-
-logger = structlog.get_logger(__name__)
 
 
 class BatchReplicateConfig(TransformDataConfig):
@@ -97,11 +95,65 @@ class BatchReplicate(BaseTransform):
 
     name = "batch_replicate"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:fb88a2970208439a"
+    config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
+
+    # Mixed-validity batches can quarantine some input rows (e.g. copies < 1)
+    # while still succeeding for the rest of the batch. That makes the
+    # unconditional pass-through contract dishonest even though every emitted
+    # row deep-copies the originating input before adding copy_index.
+    passes_through_input = False
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Minimal config for the ADR-009 §Clause 4 invariant harness."""
+        return {
+            "schema": {"mode": "observed"},
+            "copies_field": "copies",
+            "default_copies": 1,
+            "max_copies": 10,
+            "include_copy_index": True,
+        }
+
+    def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Drive the backward invariant with a mixed-validity batch.
+
+        ``BatchReplicate`` is non-pass-through because one row can be
+        quarantined while another still emits successfully. A singleton probe
+        row only exercises the happy path. We therefore synthesize a two-row
+        batch:
+
+        - row 0: invalid copies + a unique field that exists nowhere else
+        - row 1: valid copies so the transform still returns success
+
+        The harness can then observe that the success rows do not preserve the
+        unique invalid-row field, proving the class-level
+        ``passes_through_input = False`` declaration is honest.
+        """
+        unique_invalid_field = "quarantined_only_marker"
+
+        invalid_payload = probe.to_dict()
+        invalid_payload[self._copies_field] = 0
+        invalid_payload[unique_invalid_field] = "invalid-branch"
+        invalid_contract = probe.contract.with_field(
+            normalized=unique_invalid_field,
+            original=unique_invalid_field,
+            value=invalid_payload[unique_invalid_field],
+        )
+
+        valid_payload = probe.to_dict()
+        valid_payload[self._copies_field] = 1
+
+        return [
+            PipelineRow(invalid_payload, invalid_contract),
+            PipelineRow(valid_payload, probe.contract),
+        ]
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = BatchReplicateConfig.from_dict(config)
+        cfg = BatchReplicateConfig.from_dict(config, plugin_name=self.name)
+        self._initialize_declared_input_fields(cfg)
 
         # Declare output fields for centralized collision detection.
         self.declared_output_fields = frozenset(["copy_index"] if cfg.include_copy_index else [])
@@ -111,6 +163,7 @@ class BatchReplicate(BaseTransform):
         self._include_copy_index = cfg.include_copy_index
 
         self._schema_config = cfg.schema_config
+        self._reject_explicit_copy_index_collision(cfg)
 
         self.input_schema, self.output_schema = self._create_schemas(
             cfg.schema_config,
@@ -118,6 +171,29 @@ class BatchReplicate(BaseTransform):
             adds_fields=True,
         )
         self._output_schema_config = self._build_output_schema_config(cfg.schema_config)
+
+    def _reject_explicit_copy_index_collision(self, cfg: BatchReplicateConfig) -> None:
+        """Reject explicit schemas that would always collide with copy_index emission."""
+        if not cfg.include_copy_index or cfg.schema_config.fields is None:
+            return
+
+        declared_schema_fields = {field.name for field in cfg.schema_config.fields}
+        collisions = detect_field_collisions(declared_schema_fields, self.declared_output_fields)
+        if collisions is None:
+            return
+
+        cause = (
+            "BatchReplicate schema declares field(s) "
+            f"{collisions!r}, but include_copy_index=True would overwrite them. "
+            "Remove the colliding field from the explicit schema or disable include_copy_index."
+        )
+        raise PluginConfigError(
+            cause,
+            cause=cause,
+            plugin_class=self.config_model.__name__,
+            plugin_name=self.name,
+            component_type="transform",
+        )
 
     def process(  # type: ignore[override] # Batch signature: list[PipelineRow] instead of PipelineRow
         self, rows: list[PipelineRow], ctx: TransformContext
@@ -141,6 +217,7 @@ class BatchReplicate(BaseTransform):
             )
 
         valid_rows: list[dict[str, Any]] = []
+        emitted_contracts: list[SchemaContract] = []
         quarantined: list[dict[str, Any]] = []
         quarantined_indices: list[int] = []
 
@@ -179,7 +256,17 @@ class BatchReplicate(BaseTransform):
 
                 copies = raw_copies
 
+            if self.declared_output_fields:
+                collisions = detect_field_collisions(set(row.keys()), self.declared_output_fields)
+                if collisions is not None:
+                    raise PluginContractViolation(
+                        f"Transform '{self.name}' would overwrite existing input fields "
+                        f"{collisions}. This is a pipeline configuration error — the transform's "
+                        f"output fields collide with fields already present in the row."
+                    )
+
             # Create copies of this row
+            emitted_contracts.append(row.contract)
             for copy_idx in range(copies):
                 # Deep copy ensures each replica is fully independent —
                 # shallow copy would share nested mutable values across copies
@@ -199,36 +286,38 @@ class BatchReplicate(BaseTransform):
                 retryable=False,
             )
 
-        # Build contract from union of ALL valid output row keys (not just first)
-        all_keys: dict[str, None] = {}
-        for r in valid_rows:
-            for key in r:
-                all_keys[key] = None
+        # Build the emitted contract from rows that actually produced output.
+        # Quarantined-only fields must not leak into successful child tokens.
+        first_contract = rows[0].contract
+        for i, row in enumerate(rows[1:], start=1):
+            if row.contract.mode != first_contract.mode:
+                raise ValueError(
+                    f"Heterogeneous contract modes in batch: row 0 has mode "
+                    f"'{first_contract.mode}', row {i} has mode '{row.contract.mode}'. "
+                    f"All rows in a batch must share the same contract mode."
+                )
+        merged_fields: dict[str, FieldContract] = {}
+        for contract in emitted_contracts:
+            for fc in contract.fields:
+                if fc.normalized_name not in merged_fields:
+                    merged_fields[fc.normalized_name] = fc
 
-        fields = tuple(
-            FieldContract(
-                normalized_name=key,
-                original_name=key,
-                python_type=object,  # OBSERVED mode - infer all as object type
+        # Add copy_index as a new inferred field if configured
+        if self._include_copy_index:
+            merged_fields["copy_index"] = FieldContract(
+                normalized_name="copy_index",
+                original_name="copy_index",
+                python_type=int,
                 required=False,
                 source="inferred",
             )
-            for key in all_keys
-        )
-        output_contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
 
-        # Record each quarantine decision in the audit trail so an auditor
-        # can trace which specific source rows were dropped and why.
-        # Without this, quarantined rows are only in success_reason metadata —
-        # invisible to Landscape queries and explain(token_id).
-        if quarantined:
-            logger.warning(
-                "batch_replicate_rows_quarantined",
-                quarantined_count=len(quarantined),
-                total_rows=len(rows),
-                valid_count=len(valid_rows),
-                quarantined_indices=quarantined_indices,
-            )
+        output_contract = SchemaContract(
+            mode=first_contract.mode,
+            fields=tuple(merged_fields.values()),
+            locked=True,
+        )
+        output_contract = self._align_output_contract(output_contract)
 
         success_reason: TransformSuccessReason = {
             "action": "processed",

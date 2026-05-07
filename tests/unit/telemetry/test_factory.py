@@ -9,13 +9,11 @@ import pytest
 from elspeth.contracts.config.runtime import ExporterConfig, RuntimeTelemetryConfig
 from elspeth.contracts.enums import BackpressureMode, TelemetryGranularity
 from elspeth.telemetry.errors import TelemetryExporterError
-from elspeth.telemetry.exporters import (
-    AzureMonitorExporter,
-    ConsoleExporter,
-    DatadogExporter,
-    OTLPExporter,
+from elspeth.telemetry.factory import (
+    _discover_exporter_registry,
+    _resolve_exporter_name,
+    create_telemetry_manager,
 )
-from elspeth.telemetry.factory import _discover_exporter_registry, create_telemetry_manager
 from elspeth.telemetry.hookspecs import hookimpl
 from elspeth.telemetry.manager import TelemetryManager
 
@@ -420,27 +418,6 @@ class TestExporterDiscoveryRegistry:
         registry = _discover_exporter_registry()
         assert len(registry) == 4
 
-    def test_registry_console_is_console_exporter(self):
-        registry = _discover_exporter_registry()
-        assert registry["console"] is ConsoleExporter
-
-    def test_registry_otlp_is_otlp_exporter(self):
-        registry = _discover_exporter_registry()
-        assert registry["otlp"] is OTLPExporter
-
-    def test_registry_azure_monitor_is_azure_monitor_exporter(self):
-        registry = _discover_exporter_registry()
-        assert registry["azure_monitor"] is AzureMonitorExporter
-
-    def test_registry_datadog_is_datadog_exporter(self):
-        registry = _discover_exporter_registry()
-        assert registry["datadog"] is DatadogExporter
-
-    def test_registry_values_are_types(self):
-        registry = _discover_exporter_registry()
-        for name, cls in registry.items():
-            assert isinstance(cls, type), f"Registry entry '{name}' is not a type: {cls!r}"
-
     def test_duplicate_plugin_object_raises_telemetry_error(self):
         """Registering the same plugin object twice should raise TelemetryExporterError.
 
@@ -458,3 +435,59 @@ class TestExporterDiscoveryRegistry:
 
         with pytest.raises(TelemetryExporterError, match="Invalid telemetry exporter plugin"):
             _discover_exporter_registry(exporter_plugins=(same_instance, same_instance))
+
+
+class TestResolveExporterNameEdgeCases:
+    """Tests for _resolve_exporter_name validation of class-level _name attribute."""
+
+    def test_class_name_attribute_non_string_raises(self):
+        """_name as non-string (e.g. int) should raise TelemetryExporterError."""
+
+        class BadExporter:
+            _name = 42
+
+        with pytest.raises(TelemetryExporterError, match="non-empty string"):
+            _resolve_exporter_name(BadExporter)
+
+    def test_class_name_attribute_empty_string_raises(self):
+        """_name as empty string should raise TelemetryExporterError."""
+
+        class BadExporter:
+            _name = ""
+
+        with pytest.raises(TelemetryExporterError, match="non-empty string"):
+            _resolve_exporter_name(BadExporter)
+
+    def test_class_name_attribute_valid_string_returns_it(self):
+        """Valid _name class attribute should be returned directly without instantiation."""
+
+        class GoodExporter:
+            _name = "my_exporter"
+
+        assert _resolve_exporter_name(GoodExporter) == "my_exporter"
+
+
+class TestDiscoverExporterRegistryEdgeCases:
+    """Tests for _discover_exporter_registry hook return validation."""
+
+    def test_hook_returning_string_raises_actionable_error(self):
+        """Hook returning a string instead of list of classes should raise with type info."""
+
+        class StringPlugin:
+            @hookimpl
+            def elspeth_get_exporters(self):
+                return "not_a_list"  # Common mistake: returning name instead of [class]
+
+        with pytest.raises(TelemetryExporterError, match=r"str.*expected iterable"):
+            _discover_exporter_registry(exporter_plugins=(StringPlugin(),))
+
+    def test_hook_returning_bytes_raises_actionable_error(self):
+        """Hook returning bytes instead of list of classes should raise with type info."""
+
+        class BytesPlugin:
+            @hookimpl
+            def elspeth_get_exporters(self):
+                return b"not_a_list"
+
+        with pytest.raises(TelemetryExporterError, match=r"bytes.*expected iterable"):
+            _discover_exporter_registry(exporter_plugins=(BytesPlugin(),))

@@ -274,3 +274,56 @@ class TestCompositeSecretLoader:
 
         assert first.calls == 1
         assert second.calls == 1
+
+
+class TestClearCacheThreadSafety:
+    """Regression: clear_cache() must acquire the lock."""
+
+    def test_keyvault_clear_cache_acquires_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install_fake_azure_modules(monkeypatch)
+        loader = KeyVaultSecretLoader("https://test.vault.azure.net")
+        # Verify lock is acquired by checking that clear_cache
+        # blocks when lock is held
+        import threading
+
+        lock_acquired = threading.Event()
+        clear_started = threading.Event()
+
+        def blocking_test() -> None:
+            clear_started.set()
+            with loader._lock:
+                lock_acquired.set()
+                # Hold lock briefly
+                import time
+
+                time.sleep(0.1)
+
+        t = threading.Thread(target=blocking_test)
+        t.start()
+        clear_started.wait()
+        lock_acquired.wait()
+        # clear_cache should block until lock is released
+        loader.clear_cache()
+        t.join()
+
+    def test_cached_loader_clear_cache_acquires_lock(self) -> None:
+        inner = _MissingLoader()
+        loader = CachedSecretLoader(inner)
+        import threading
+
+        lock_held = threading.Event()
+        clear_done = threading.Event()
+
+        def hold_lock() -> None:
+            with loader._lock:
+                lock_held.set()
+                import time
+
+                time.sleep(0.1)
+
+        t = threading.Thread(target=hold_lock)
+        t.start()
+        lock_held.wait()
+        loader.clear_cache()
+        clear_done.set()
+        t.join()

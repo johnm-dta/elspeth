@@ -23,7 +23,7 @@ from elspeth.contracts.config import RuntimeRetryConfig
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import MaxRetriesExceeded
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import node_states_table
 from elspeth.engine.executors import TransformExecutor
 from elspeth.engine.retry import RetryManager
@@ -31,7 +31,7 @@ from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
 def _make_contract(data: dict[str, Any]) -> SchemaContract:
@@ -102,7 +102,7 @@ class TestRetryAuditTrail:
     def test_env(self) -> dict[str, Any]:
         """Set up test environment with in-memory database."""
         db = make_landscape_db()
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         # Create a noop span factory
         span_factory = Mock(spec=SpanFactory)
@@ -111,13 +111,13 @@ class TestRetryAuditTrail:
 
         return {
             "db": db,
-            "recorder": recorder,
+            "factory": factory,
             "span_factory": span_factory,
         }
 
     def _setup_run_and_node(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         plugin_name: str = "flaky_transform",
     ) -> tuple[str, str]:
         """Create a run and register a transform node.
@@ -128,7 +128,7 @@ class TestRetryAuditTrail:
         from elspeth.contracts.schema import SchemaConfig
 
         # Create a run
-        run = recorder.begin_run(
+        run = factory.run_lifecycle.begin_run(
             config={"test": "config"},
             canonical_version="sha256-rfc8785-v1",
         )
@@ -137,7 +137,7 @@ class TestRetryAuditTrail:
         schema_config = SchemaConfig(mode="observed", fields=None)
 
         # Register transform node
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name=plugin_name,
             node_type=NodeType.TRANSFORM,
@@ -150,7 +150,7 @@ class TestRetryAuditTrail:
 
     def _create_token(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         run_id: str,
         source_node_id: str,
         row_data: dict[str, Any],
@@ -164,7 +164,7 @@ class TestRetryAuditTrail:
         contract = _make_contract(row_data)
 
         # Create the row record
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=0,
@@ -172,7 +172,7 @@ class TestRetryAuditTrail:
         )
 
         # Create the token record
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Wrap in PipelineRow
         pipeline_row = PipelineRow(row_data, contract)
@@ -197,17 +197,17 @@ class TestRetryAuditTrail:
         4. Database contains 3 node_state records with attempts 0, 1, 2
         """
         db = test_env["db"]
-        recorder = test_env["recorder"]
+        factory = test_env["factory"]
         span_factory = test_env["span_factory"]
 
         # Setup run and node
-        run_id, node_id = self._setup_run_and_node(recorder, "flaky_transform")
+        run_id, node_id = self._setup_run_and_node(factory, "flaky_transform")
 
         # Create a source node for the token (required for row creation)
         from elspeth.contracts.schema import SchemaConfig
 
         schema_config = SchemaConfig(mode="observed", fields=None)
-        source_node = recorder.register_node(
+        source_node = factory.data_flow.register_node(
             run_id=run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -218,7 +218,7 @@ class TestRetryAuditTrail:
 
         # Create token
         row_data = {"value": 42}
-        token = self._create_token(recorder, run_id, source_node.node_id, row_data)
+        token = self._create_token(factory, run_id, source_node.node_id, row_data)
 
         # Create flaky transform that fails twice then succeeds
         transform = FlakyTransform({"max_fails": 2})
@@ -226,12 +226,12 @@ class TestRetryAuditTrail:
 
         # Create transform executor
         step_resolver = lambda node_id: 1  # noqa: E731
-        transform_executor = TransformExecutor(recorder, span_factory, step_resolver)
+        transform_executor = TransformExecutor(factory.execution, span_factory, step_resolver, data_flow=factory.data_flow)
 
         # Create retry manager with 3 attempts (enough to succeed)
         retry_manager = RetryManager(RuntimeRetryConfig(max_attempts=3, base_delay=0.01, max_delay=60.0, jitter=0.0, exponential_base=2.0))
 
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(ctx)
 
         # Track attempt number manually since _execute_transform_with_retry
@@ -298,17 +298,17 @@ class TestRetryAuditTrail:
         4. Each attempt has the correct attempt number (0, 1)
         """
         db = test_env["db"]
-        recorder = test_env["recorder"]
+        factory = test_env["factory"]
         span_factory = test_env["span_factory"]
 
         # Setup run and node
-        run_id, node_id = self._setup_run_and_node(recorder, "always_fail_transform")
+        run_id, node_id = self._setup_run_and_node(factory, "always_fail_transform")
 
         # Create a source node for the token
         from elspeth.contracts.schema import SchemaConfig
 
         schema_config = SchemaConfig(mode="observed", fields=None)
-        source_node = recorder.register_node(
+        source_node = factory.data_flow.register_node(
             run_id=run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -319,7 +319,7 @@ class TestRetryAuditTrail:
 
         # Create token
         row_data = {"value": 99}
-        token = self._create_token(recorder, run_id, source_node.node_id, row_data)
+        token = self._create_token(factory, run_id, source_node.node_id, row_data)
 
         # Create transform that always fails
         transform = AlwaysFailTransform({})
@@ -327,12 +327,12 @@ class TestRetryAuditTrail:
 
         # Create transform executor
         step_resolver = lambda node_id: 1  # noqa: E731
-        transform_executor = TransformExecutor(recorder, span_factory, step_resolver)
+        transform_executor = TransformExecutor(factory.execution, span_factory, step_resolver, data_flow=factory.data_flow)
 
         # Create retry manager with only 2 attempts
         retry_manager = RetryManager(RuntimeRetryConfig(max_attempts=2, base_delay=0.01, max_delay=60.0, jitter=0.0, exponential_base=2.0))
 
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(ctx)
 
         # Track attempt number
@@ -402,17 +402,17 @@ class TestRetryAuditTrail:
         node_state should exist with attempt=0.
         """
         db = test_env["db"]
-        recorder = test_env["recorder"]
+        factory = test_env["factory"]
         span_factory = test_env["span_factory"]
 
         # Setup run and node
-        run_id, node_id = self._setup_run_and_node(recorder, "flaky_transform")
+        run_id, node_id = self._setup_run_and_node(factory, "flaky_transform")
 
         # Create a source node for the token
         from elspeth.contracts.schema import SchemaConfig
 
         schema_config = SchemaConfig(mode="observed", fields=None)
-        source_node = recorder.register_node(
+        source_node = factory.data_flow.register_node(
             run_id=run_id,
             plugin_name="test_source",
             node_type=NodeType.SOURCE,
@@ -423,7 +423,7 @@ class TestRetryAuditTrail:
 
         # Create token
         row_data = {"value": 123}
-        token = self._create_token(recorder, run_id, source_node.node_id, row_data)
+        token = self._create_token(factory, run_id, source_node.node_id, row_data)
 
         # Create transform that succeeds immediately (max_fails=0)
         transform = FlakyTransform({"max_fails": 0})
@@ -431,9 +431,9 @@ class TestRetryAuditTrail:
 
         # Create transform executor
         step_resolver = lambda node_id: 1  # noqa: E731
-        transform_executor = TransformExecutor(recorder, span_factory, step_resolver)
+        transform_executor = TransformExecutor(factory.execution, span_factory, step_resolver, data_flow=factory.data_flow)
 
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(ctx)
 
         # Execute without retry manager (single attempt)

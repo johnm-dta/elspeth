@@ -16,6 +16,7 @@ def test_base_sink_configure_for_resume_raises_not_implemented():
     class TestSink(BaseSink):
         name = "test"
         input_schema = None
+        _on_write_failure: str | None = "discard"
 
         def write(self, rows, ctx):
             pass

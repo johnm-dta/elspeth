@@ -14,9 +14,11 @@ from elspeth.contracts import (
     Determinism,
     NodeStateStatus,
     NodeType,
+    ReproducibilityGrade,
     RoutingMode,
     RunStatus,
 )
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     calls_table,
@@ -44,8 +46,9 @@ def _create_run(
     conn: Connection,
     run_id: str,
     *,
-    status: RunStatus,
+    status: RunStatus | str,
     completed_at: datetime | None,
+    reproducibility_grade: ReproducibilityGrade | str = ReproducibilityGrade.REPLAY_REPRODUCIBLE,
 ) -> None:
     conn.execute(
         runs_table.insert().values(
@@ -56,12 +59,20 @@ def _create_run(
             settings_json="{}",
             canonical_version="sha256-rfc8785-v1",
             status=status,
-            reproducibility_grade="replay_reproducible",
+            reproducibility_grade=(
+                reproducibility_grade.value if isinstance(reproducibility_grade, ReproducibilityGrade) else reproducibility_grade
+            ),
         )
     )
 
 
-def _create_node(conn: Connection, run_id: str, node_id: str) -> None:
+def _create_node(
+    conn: Connection,
+    run_id: str,
+    node_id: str,
+    *,
+    determinism: Determinism = Determinism.DETERMINISTIC,
+) -> None:
     conn.execute(
         nodes_table.insert().values(
             node_id=node_id,
@@ -69,7 +80,7 @@ def _create_node(conn: Connection, run_id: str, node_id: str) -> None:
             plugin_name="test",
             node_type=NodeType.TRANSFORM,
             plugin_version="1.0.0",
-            determinism=Determinism.DETERMINISTIC,
+            determinism=determinism,
             config_hash="node_cfg",
             config_json="{}",
             registered_at=datetime.now(UTC),
@@ -304,8 +315,8 @@ class TestPurgeResultValidation:
         from elspeth.core.retention.purge import PurgeResult
 
         result = PurgeResult(
-            deleted_count=0, skipped_count=0, failed_refs=["ref-a", "ref-b"], grade_update_failures=(), duration_seconds=0.0
-        )  # type: ignore[arg-type]
+            deleted_count=0, skipped_count=0, failed_refs=("ref-a", "ref-b"), grade_update_failures=(), duration_seconds=0.0
+        )
         assert isinstance(result.failed_refs, tuple)
         assert result.failed_refs == ("ref-a", "ref-b")
 
@@ -319,6 +330,39 @@ class TestPurgeResultValidation:
 
 
 class TestFindExpiredPayloadRefs:
+    @pytest.mark.parametrize(
+        ("status", "completed_at", "match"),
+        (
+            ("completed", None, "status='completed' but completed_at is NULL"),
+            ("running", datetime(2026, 2, 8, tzinfo=UTC), "status='running' but completed_at is set"),
+            ("not-a-run-status", None, "Invalid run status 'not-a-run-status'"),
+        ),
+    )
+    def test_find_expired_payload_refs_raises_on_corrupt_run_lifecycle(
+        self,
+        db: LandscapeDB,
+        status: str,
+        completed_at: datetime | None,
+        match: str,
+    ) -> None:
+        """Retention must crash on corrupt Tier-1 run lifecycle data."""
+        manager = PurgeManager(db, MockPayloadStore())
+
+        with db.connection() as conn:
+            _create_run(conn, "run-corrupt-lifecycle", status=status, completed_at=completed_at)
+            _create_node(conn, "run-corrupt-lifecycle", "node-corrupt-lifecycle")
+            _create_row(
+                conn,
+                "run-corrupt-lifecycle",
+                "node-corrupt-lifecycle",
+                "row-corrupt-lifecycle",
+                row_index=0,
+                source_data_ref="ref-corrupt-lifecycle",
+            )
+
+        with pytest.raises(AuditIntegrityError, match=match):
+            manager.find_expired_payload_refs(retention_days=30, as_of=datetime(2026, 3, 10, tzinfo=UTC))
+
     def test_find_expired_payload_refs_defaults_as_of_to_now(self, db: LandscapeDB) -> None:
         manager = PurgeManager(db, MockPayloadStore())
         now = datetime.now(UTC)
@@ -620,6 +664,87 @@ class TestFindExpiredPayloadRefs:
 
 
 class TestPurgePayloads:
+    def test_purge_payloads_downgrades_replay_run_when_deleted_ref_is_replay_critical(self, db: LandscapeDB) -> None:
+        """A real blob purge must downgrade replay-only runs that need that response."""
+        store = MockPayloadStore()
+        response_ref = store.store(b'{"answer": 42}')
+        manager = PurgeManager(db, store)
+        old = datetime(2026, 1, 1, tzinfo=UTC)
+
+        with db.connection() as conn:
+            _create_run(
+                conn,
+                "run-replay-critical-purge",
+                status=RunStatus.COMPLETED,
+                completed_at=old,
+                reproducibility_grade=ReproducibilityGrade.REPLAY_REPRODUCIBLE,
+            )
+            _create_node(
+                conn,
+                "run-replay-critical-purge",
+                "node-replay-critical-purge",
+                determinism=Determinism.NON_DETERMINISTIC,
+            )
+            _create_row(
+                conn,
+                "run-replay-critical-purge",
+                "node-replay-critical-purge",
+                "row-replay-critical-purge",
+                row_index=0,
+                source_data_ref=None,
+            )
+            _create_token(conn, "run-replay-critical-purge", "row-replay-critical-purge", "tok-replay-critical-purge")
+            _create_node_state(
+                conn,
+                state_id="state-replay-critical-purge",
+                token_id="tok-replay-critical-purge",
+                run_id="run-replay-critical-purge",
+                node_id="node-replay-critical-purge",
+            )
+            _create_call_for_state(
+                conn,
+                call_id="call-replay-critical-purge",
+                state_id="state-replay-critical-purge",
+                request_ref=None,
+                response_ref=response_ref,
+            )
+
+        result = manager.purge_payloads([response_ref])
+
+        assert result.deleted_count == 1
+        assert result.failed_refs == ()
+        assert store.exists(response_ref) is False
+        with db.connection() as conn:
+            grade = (
+                conn.execute(runs_table.select().where(runs_table.c.run_id == "run-replay-critical-purge")).fetchone().reproducibility_grade
+            )
+        assert grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY
+
+    def test_purge_payloads_counts_delete_false_as_skipped_not_failed(
+        self,
+        db: LandscapeDB,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """PayloadStore.delete(False) means not found, not deletion failure."""
+        store = _ControlledStore()
+        stale_ref = store.store(b"already gone")
+        store._false_delete_for.add(stale_ref)
+        manager = PurgeManager(db, store)
+        affected_lookup_inputs: list[list[str]] = []
+
+        def _record_affected_lookup(refs: list[str]) -> set[str]:
+            affected_lookup_inputs.append(refs)
+            return set()
+
+        monkeypatch.setattr(manager, "_find_affected_run_ids", _record_affected_lookup)
+
+        result = manager.purge_payloads([stale_ref])
+
+        assert result.deleted_count == 0
+        assert result.skipped_count == 1
+        assert result.failed_refs == ()
+        assert affected_lookup_inputs == [[]]
+
     def test_purge_payloads_tracks_deleted_skipped_and_failures(self, db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
         store = _ControlledStore()
         ok_ref = store.store(b"ok")
@@ -637,8 +762,9 @@ class TestPurgePayloads:
 
         grade_updates: list[str] = []
 
-        def _record_grade_update(db_obj: LandscapeDB, run_id: str) -> None:
+        def _record_grade_update(db_obj: LandscapeDB, run_id: str, *, deleted_refs: list[str] | None = None) -> None:
             del db_obj
+            assert deleted_refs == [ok_ref, exists_error_ref]
             grade_updates.append(run_id)
 
         monkeypatch.setattr("elspeth.core.retention.purge.update_grade_after_purge", _record_grade_update)
@@ -648,9 +774,9 @@ class TestPurgePayloads:
 
         result = manager.purge_payloads([ok_ref, "missing-ref", false_ref, exists_error_ref, delete_error_ref])
 
-        assert result.deleted_count == 1
-        assert result.skipped_count == 1
-        assert set(result.failed_refs) == {false_ref, exists_error_ref, delete_error_ref}
+        assert result.deleted_count == 2
+        assert result.skipped_count == 2
+        assert set(result.failed_refs) == {delete_error_ref}
         assert result.duration_seconds == 3.25
         assert grade_updates == ["run-affected"]
 
@@ -671,13 +797,14 @@ class TestPurgePayloads:
         monkeypatch.setattr(manager, "_find_affected_run_ids", _capture_deleted_refs)
         monkeypatch.setattr(
             "elspeth.core.retention.purge.update_grade_after_purge",
-            lambda db_obj, run_id: None,
+            lambda db_obj, run_id, *, deleted_refs=None: None,
         )
 
         result = manager.purge_payloads([deleted_ref, failed_ref])
 
         assert result.deleted_count == 1
-        assert result.failed_refs == (failed_ref,)
+        assert result.skipped_count == 1
+        assert result.failed_refs == ()
         assert captured_refs == [deleted_ref]
 
     def test_purge_payloads_empty_input(self, db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -685,7 +812,7 @@ class TestPurgePayloads:
 
         monkeypatch.setattr(
             "elspeth.core.retention.purge.update_grade_after_purge",
-            lambda db_obj, run_id: None,
+            lambda db_obj, run_id, *, deleted_refs=None: None,
         )
 
         result = manager.purge_payloads([])
@@ -693,6 +820,87 @@ class TestPurgePayloads:
         assert result.skipped_count == 0
         assert result.failed_refs == ()
         assert result.duration_seconds >= 0
+
+    def test_partial_failure_accounting_invariant(self, db: LandscapeDB, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mixed success/skip/failure: accounting invariant holds and grade updates scope correctly.
+
+        Scenario: 7 refs total
+          - 3 deleted successfully
+          - 2 missing refs skipped
+          - 1 delete-call fails (OSError)
+          - 1 delete returns False and is skipped
+
+        Verify:
+          1. deleted_count + skipped_count + len(failed_refs) == 7
+          2. Grade updates run only for runs linked to deleted refs
+          3. Failed refs don't trigger grade updates
+        """
+        store = _ControlledStore()
+
+        # Store payloads that will be deleted, delete-failed, or reported missing by delete()
+        ok_ref_1 = store.store(b"ok-1")
+        ok_ref_2 = store.store(b"ok-2")
+        exists_check_irrelevant_ref = store.store(b"exists-check-irrelevant")
+        delete_fail_ref = store.store(b"delete-fail")
+        false_delete_ref = store.store(b"false-delete")
+
+        store._fail_exists_for.add(exists_check_irrelevant_ref)
+        store._fail_delete_for.add(delete_fail_ref)
+        store._false_delete_for.add(false_delete_ref)
+
+        manager = PurgeManager(db, store)
+
+        # Map deleted refs → affected run IDs
+        def _mock_affected(refs: list[str]) -> set[str]:
+            # Only deleted refs should arrive here
+            affected = set()
+            if ok_ref_1 in refs:
+                affected.add("run-alpha")
+            if ok_ref_2 in refs:
+                affected.add("run-beta")
+            if exists_check_irrelevant_ref in refs:
+                affected.add("run-gamma")
+            # Failed/skipped refs must NOT appear
+            assert delete_fail_ref not in refs
+            assert false_delete_ref not in refs
+            assert "missing-ref-1" not in refs
+            assert "missing-ref-2" not in refs
+            return affected
+
+        monkeypatch.setattr(manager, "_find_affected_run_ids", _mock_affected)
+
+        grade_updates: list[str] = []
+        monkeypatch.setattr(
+            "elspeth.core.retention.purge.update_grade_after_purge",
+            lambda db_obj, run_id, *, deleted_refs=None: grade_updates.append(run_id),
+        )
+
+        all_refs = [
+            ok_ref_1,
+            "missing-ref-1",
+            exists_check_irrelevant_ref,
+            ok_ref_2,
+            delete_fail_ref,
+            "missing-ref-2",
+            false_delete_ref,
+        ]
+
+        result = manager.purge_payloads(all_refs)
+
+        # Accounting invariant
+        assert result.deleted_count == 3
+        assert result.skipped_count == 3
+        assert len(result.failed_refs) == 1
+        assert result.deleted_count + result.skipped_count + len(result.failed_refs) == len(all_refs)
+
+        # Failed refs are only hard delete failures.
+        assert set(result.failed_refs) == {delete_fail_ref}
+
+        # Grade updates ran for all runs linked to successful deletions
+        assert set(grade_updates) == {"run-alpha", "run-beta", "run-gamma"}
+
+        # No grade update failures (all mocked to succeed)
+        assert result.grade_update_failures == ()
 
 
 class TestInterruptedRunNotPurgeEligible:
@@ -726,6 +934,46 @@ class TestInterruptedRunNotPurgeEligible:
 
         refs = set(manager.find_expired_payload_refs(retention_days=30, as_of=now))
         assert "ref-interrupted-all" not in refs
+
+    def test_interrupted_run_protects_shared_blobs(self, db: LandscapeDB) -> None:
+        """Shared blobs between expired and interrupted runs must not be purged.
+
+        Bug: elspeth-d4297f57fa — payloads are content-addressable and shared
+        across runs. The run_active_condition must include "interrupted" so
+        the anti-join protects blobs still needed by interrupted runs.
+        """
+        manager = PurgeManager(db, MockPayloadStore())
+        now = datetime(2026, 2, 14, tzinfo=UTC)
+        old = now - timedelta(days=60)
+
+        with db.connection() as conn:
+            # Expired completed run with a shared blob
+            _create_run(conn, "run-completed-old", status=RunStatus.COMPLETED, completed_at=old)
+            _create_node(conn, "run-completed-old", "node-completed-old")
+            _create_row(
+                conn,
+                "run-completed-old",
+                "node-completed-old",
+                "row-completed-old",
+                row_index=0,
+                source_data_ref="shared-blob-ref",
+            )
+
+            # Interrupted run referencing the SAME blob (content-addressable)
+            _create_run(conn, "run-interrupted-shared", status=RunStatus.INTERRUPTED, completed_at=old)
+            _create_node(conn, "run-interrupted-shared", "node-interrupted-shared")
+            _create_row(
+                conn,
+                "run-interrupted-shared",
+                "node-interrupted-shared",
+                "row-interrupted-shared",
+                row_index=0,
+                source_data_ref="shared-blob-ref",
+            )
+
+        refs = set(manager.find_expired_payload_refs(retention_days=30, as_of=now))
+        # The shared blob must NOT be purged because an interrupted run needs it
+        assert "shared-blob-ref" not in refs
 
 
 class TestPurgeGradeUpdateFailureResilience:
@@ -786,8 +1034,9 @@ class TestPurgeGradeUpdateFailureResilience:
 
         grade_updates: list[str] = []
 
-        def _failing_grade_update(db_obj: LandscapeDB, run_id: str) -> None:
+        def _failing_grade_update(db_obj: LandscapeDB, run_id: str, *, deleted_refs: list[str] | None = None) -> None:
             del db_obj
+            assert deleted_refs == [ref]
             if run_id == "run-bad":
                 raise RuntimeError(f"Transient DB failure for run '{run_id}'")
             grade_updates.append(run_id)
@@ -824,7 +1073,8 @@ class TestPurgeGradeUpdateFailureResilience:
             lambda refs: {"run-corrupt"} if refs else set(),
         )
 
-        def _integrity_failure(db_obj: LandscapeDB, run_id: str) -> None:
+        def _integrity_failure(db_obj: LandscapeDB, run_id: str, *, deleted_refs: list[str] | None = None) -> None:
+            assert deleted_refs == [ref]
             raise AuditIntegrityError(f"NULL reproducibility_grade for run {run_id} — audit data corruption")
 
         monkeypatch.setattr(
@@ -849,7 +1099,8 @@ class TestPurgeGradeUpdateFailureResilience:
             lambda refs: {"run-fail"} if refs else set(),
         )
 
-        def _transient_fail(db_obj: LandscapeDB, run_id: str) -> None:
+        def _transient_fail(db_obj: LandscapeDB, run_id: str, *, deleted_refs: list[str] | None = None) -> None:
+            assert deleted_refs == [ref]
             raise RuntimeError(f"Transient failure for run '{run_id}'")
 
         monkeypatch.setattr(

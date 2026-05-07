@@ -110,6 +110,7 @@ class ActiveLangfuseTracer:
         usage: TokenUsage | None = None,
         latency_ms: float | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         """Record successful LLM call as Langfuse span + generation."""
         # Build metadata and kwargs (OUR CODE — let bugs crash immediately)
@@ -118,13 +119,22 @@ class ActiveLangfuseTracer:
             metadata.update(extra_metadata)
 
         update_kwargs: dict[str, Any] = {"output": response_content}
-        if usage is not None and usage.is_known:
-            update_kwargs["usage_details"] = {
-                "input": usage.prompt_tokens,
-                "output": usage.completion_tokens,
-            }
+        if usage is not None and usage.has_data:
+            usage_details: dict[str, int] = {}
+            if usage.prompt_tokens is not None:
+                usage_details["input"] = usage.prompt_tokens
+            if usage.completion_tokens is not None:
+                usage_details["output"] = usage.completion_tokens
+            if usage_details:
+                update_kwargs["usage_details"] = usage_details
         if latency_ms is not None:
             update_kwargs["metadata"] = {"latency_ms": latency_ms}
+
+        # Build the full message list — include system prompt if present
+        messages: list[dict[str, str]] = []
+        if system_prompt is not None:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
         # Langfuse SDK calls (EXTERNAL boundary — catch SDK/transport errors)
         try:
@@ -138,7 +148,7 @@ class ActiveLangfuseTracer:
                     as_type="generation",
                     name="llm_call",
                     model=model,
-                    input=[{"role": "user", "content": prompt}],
+                    input=messages,
                 ) as generation,
             ):
                 generation.update(**update_kwargs)
@@ -154,6 +164,7 @@ class ActiveLangfuseTracer:
         model: str,
         latency_ms: float | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         """Record failed LLM call as Langfuse span + generation with ERROR level."""
         # Build metadata and kwargs (OUR CODE — let bugs crash immediately)
@@ -168,6 +179,12 @@ class ActiveLangfuseTracer:
         if latency_ms is not None:
             update_kwargs["metadata"] = {"latency_ms": latency_ms}
 
+        # Build the full message list — include system prompt if present
+        messages: list[dict[str, str]] = []
+        if system_prompt is not None:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         # Langfuse SDK calls (EXTERNAL boundary — catch SDK/transport errors)
         try:
             with (
@@ -180,7 +197,7 @@ class ActiveLangfuseTracer:
                     as_type="generation",
                     name="llm_call",
                     model=model,
-                    input=[{"role": "user", "content": prompt}],
+                    input=messages,
                 ) as generation,
             ):
                 generation.update(**update_kwargs)

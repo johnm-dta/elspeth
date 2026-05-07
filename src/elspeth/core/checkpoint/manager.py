@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING
 from sqlalchemy import asc, delete, desc, select
 
 from elspeth.contracts import Checkpoint
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.canonical import compute_full_topology_hash, stable_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import checkpoints_table
+from elspeth.core.landscape.schema import checkpoints_table, tokens_table
 
 if TYPE_CHECKING:
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
@@ -90,6 +91,18 @@ class CheckpointManager:
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
         with self._db.engine.begin() as conn:
+            # Verify token belongs to the specified run (Tier 1 invariant).
+            # Cross-run checkpoint contamination is audit corruption.
+            token_row = conn.execute(select(tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)).fetchone()
+            if token_row is None:
+                raise AuditIntegrityError(f"Cannot create checkpoint: token '{token_id}' does not exist")
+            if token_row.run_id != run_id:
+                raise AuditIntegrityError(
+                    f"Cannot create checkpoint: token '{token_id}' belongs to run "
+                    f"'{token_row.run_id}' but checkpoint targets run '{run_id}'. "
+                    f"Cross-run checkpoint contamination is audit corruption."
+                )
+
             # Generate IDs and timestamps within transaction boundary
             checkpoint_id = f"cp-{uuid.uuid4().hex}"
             created_at = datetime.now(UTC)

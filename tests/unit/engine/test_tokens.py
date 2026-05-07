@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import SourceRow
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
@@ -36,12 +37,12 @@ def _make_pipeline_row(data: dict[str, Any], contract: SchemaContract | None = N
 
 
 def _make_manager_context() -> tuple[Any, Any, str, str]:
-    """Create TokenManager + recorder context for unit tests."""
+    """Create TokenManager + factory context for unit tests."""
     from elspeth.engine.tokens import TokenManager
 
     setup = make_recorder_with_run()
-    manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
-    return manager, setup.recorder, setup.run_id, setup.source_node_id
+    manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
+    return manager, setup.factory, setup.run_id, setup.source_node_id
 
 
 class TestTokenManager:
@@ -51,9 +52,9 @@ class TestTokenManager:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver())
 
         token_info = manager.create_initial_token(
             run_id=run_id,
@@ -71,9 +72,9 @@ class TestTokenManager:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver())
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -94,27 +95,6 @@ class TestTokenManager:
         assert isinstance(children[0].row_data, PipelineRow)
         assert children[0].row_data.to_dict() == {"value": 42}
 
-    def test_update_row_data(self) -> None:
-        from elspeth.engine.tokens import TokenManager
-
-        setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
-
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
-        token_info = manager.create_initial_token(
-            run_id=run_id,
-            source_node_id=source_node_id,
-            row_index=0,
-            source_row=_make_source_row({"x": 1}),
-        )
-
-        new_row = _make_pipeline_row({"x": 1, "y": 2})
-        updated = manager.update_row_data(token_info, new_data=new_row)
-
-        assert isinstance(updated.row_data, PipelineRow)
-        assert updated.row_data.to_dict() == {"x": 1, "y": 2}
-        assert updated.token_id == token_info.token_id
-
 
 class TestTokenManagerCoalesce:
     """Test token coalescing (join operations)."""
@@ -123,9 +103,9 @@ class TestTokenManagerCoalesce:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver())
 
         initial = manager.create_initial_token(
             run_id=run_id,
@@ -141,19 +121,18 @@ class TestTokenManagerCoalesce:
             run_id=run_id,
         )
 
-        stats_token = manager.update_row_data(
-            children[0],
-            new_data=_make_pipeline_row({"value": 42, "mean": 10.5}),
+        stats_token = children[0].with_updated_data(
+            _make_pipeline_row({"value": 42, "mean": 10.5}),
         )
-        classifier_token = manager.update_row_data(
-            children[1],
-            new_data=_make_pipeline_row({"value": 42, "label": "A"}),
+        classifier_token = children[1].with_updated_data(
+            _make_pipeline_row({"value": 42, "label": "A"}),
         )
 
         merged = manager.coalesce_tokens(
             parents=[stats_token, classifier_token],
             merged_data=_make_pipeline_row({"value": 42, "mean": 10.5, "label": "A"}),
             node_id=NodeID("coalesce_node"),
+            run_id=run_id,
         )
 
         assert merged.token_id is not None
@@ -169,20 +148,21 @@ class TestTokenManagerCoalesceValidation:
         """Empty parents list raises OrchestrationInvariantError."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        manager, _recorder, _run_id, _source_node_id = _make_manager_context()
+        manager, _factory, _run_id, _source_node_id = _make_manager_context()
 
         with pytest.raises(OrchestrationInvariantError, match="at least one parent"):
             manager.coalesce_tokens(
                 parents=[],
                 merged_data=_make_pipeline_row({"value": 1}),
                 node_id=NodeID("coalesce_node"),
+                run_id=_run_id,
             )
 
     def test_coalesce_tokens_mismatched_row_ids_raises(self) -> None:
         """Parents with different row_ids raises OrchestrationInvariantError."""
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, _factory, run_id, source_node_id = _make_manager_context()
 
         # Create two separate source rows (different row_ids)
         token_a = manager.create_initial_token(
@@ -205,6 +185,7 @@ class TestTokenManagerCoalesceValidation:
                 parents=[token_a, token_b],
                 merged_data=_make_pipeline_row({"value": 1}),
                 node_id=NodeID("coalesce_node"),
+                run_id=run_id,
             )
 
 
@@ -228,7 +209,7 @@ class TestCoalesceMismatchedRowIdsMutationKill:
         If the mutant is active, the error message will contain parent B's
         row_id instead of parent A's, and this assertion fails.
         """
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, _factory, run_id, source_node_id = _make_manager_context()
 
         token_a = manager.create_initial_token(
             run_id=run_id,
@@ -248,6 +229,7 @@ class TestCoalesceMismatchedRowIdsMutationKill:
                 parents=[token_a, token_b],
                 merged_data=_make_pipeline_row({"value": 1}),
                 node_id=NodeID("coalesce_node"),
+                run_id=run_id,
             )
 
     def test_mismatched_row_id_less_than_reference_detected(self) -> None:
@@ -256,7 +238,7 @@ class TestCoalesceMismatchedRowIdsMutationKill:
         The ``>`` mutant misses parents whose row_id is alphabetically less
         than the reference. We order parents so the second has a lesser row_id.
         """
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, _factory, run_id, source_node_id = _make_manager_context()
 
         token_a = manager.create_initial_token(
             run_id=run_id,
@@ -286,6 +268,7 @@ class TestCoalesceMismatchedRowIdsMutationKill:
                 parents=[first, second],
                 merged_data=_make_pipeline_row({"value": 1}),
                 node_id=NodeID("coalesce_node"),
+                run_id=run_id,
             )
 
 
@@ -298,7 +281,7 @@ class TestTokenManagerForkIsolation:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
 
         initial = manager.create_initial_token(
             run_id=run_id,
@@ -331,7 +314,7 @@ class TestTokenManagerForkIsolation:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -364,7 +347,7 @@ class TestTokenManagerExpandIsolation:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -403,7 +386,7 @@ class TestTokenManagerExpandIsolation:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         parent = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -439,7 +422,7 @@ class TestTokenManagerExpandIsolation:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         parent = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -476,7 +459,7 @@ class TestTokenManagerEdgeCases:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -500,7 +483,7 @@ class TestTokenManagerEdgeCases:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -515,9 +498,8 @@ class TestTokenManagerEdgeCases:
             run_id=run_id,
         )
 
-        updated = manager.update_row_data(
-            children[0],
-            new_data=_make_pipeline_row({"x": 1, "y": 2}),
+        updated = children[0].with_updated_data(
+            _make_pipeline_row({"x": 1, "y": 2}),
         )
 
         assert updated.branch_name == "my_branch"
@@ -528,7 +510,7 @@ class TestTokenManagerEdgeCases:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -547,9 +529,8 @@ class TestTokenManagerEdgeCases:
         assert forked_token.fork_group_id == fork_group_id
         assert forked_token.branch_name == "stats_branch"
 
-        updated = manager.update_row_data(
-            forked_token,
-            new_data=_make_pipeline_row({"x": 1, "y": 2}),
+        updated = forked_token.with_updated_data(
+            _make_pipeline_row({"x": 1, "y": 2}),
         )
 
         assert updated.row_data.to_dict() == {"x": 1, "y": 2}, "row_data should be updated"
@@ -564,7 +545,7 @@ class TestTokenManagerEdgeCases:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         parent = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -583,9 +564,8 @@ class TestTokenManagerEdgeCases:
 
         assert expanded_token.expand_group_id == expand_group_id
 
-        updated = manager.update_row_data(
-            expanded_token,
-            new_data=_make_pipeline_row({"id": 1, "processed": True}),
+        updated = expanded_token.with_updated_data(
+            _make_pipeline_row({"id": 1, "processed": True}),
         )
 
         assert updated.expand_group_id == expand_group_id, "expand_group_id must be preserved"
@@ -596,7 +576,7 @@ class TestTokenManagerEdgeCases:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -615,13 +595,13 @@ class TestTokenManagerEdgeCases:
             parents=children,
             merged_data=_make_pipeline_row({"value": 42, "merged": True}),
             node_id=NodeID("coalesce_node"),
+            run_id=run_id,
         )
 
         assert merged.join_group_id is not None
 
-        updated = manager.update_row_data(
-            merged,
-            new_data=_make_pipeline_row({"value": 42, "merged": True, "enriched": "yes"}),
+        updated = merged.with_updated_data(
+            _make_pipeline_row({"value": 42, "merged": True, "enriched": "yes"}),
         )
 
         assert updated.join_group_id == merged.join_group_id, "join_group_id must be preserved"
@@ -632,7 +612,7 @@ class TestTokenManagerEdgeCases:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
 
         token1 = manager.create_initial_token(
             run_id=run_id,
@@ -658,9 +638,9 @@ class TestTokenManagerStepInPipeline:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver({"fork_gate": 2}))
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver({"fork_gate": 2}))
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -675,8 +655,8 @@ class TestTokenManagerStepInPipeline:
             run_id=run_id,
         )
 
-        token_a = recorder.get_token(children[0].token_id)
-        token_b = recorder.get_token(children[1].token_id)
+        token_a = factory.query.get_token(children[0].token_id)
+        token_b = factory.query.get_token(children[1].token_id)
         assert token_a is not None
         assert token_b is not None
         assert token_a.step_in_pipeline == 2
@@ -686,9 +666,9 @@ class TestTokenManagerStepInPipeline:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver({"gate_node": 1, "coalesce_node": 3}))
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver({"gate_node": 1, "coalesce_node": 3}))
         initial = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -707,9 +687,10 @@ class TestTokenManagerStepInPipeline:
             parents=children,
             merged_data=_make_pipeline_row({"value": 42, "merged": True}),
             node_id=NodeID("coalesce_node"),
+            run_id=run_id,
         )
 
-        merged_token = recorder.get_token(merged.token_id)
+        merged_token = factory.query.get_token(merged.token_id)
         assert merged_token is not None
         assert merged_token.step_in_pipeline == 3
 
@@ -721,9 +702,9 @@ class TestTokenManagerExpand:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver())
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -758,7 +739,7 @@ class TestTokenManagerExpand:
         assert children[2].row_data.to_dict() == {"id": 3, "value": "c"}
 
         for i, child in enumerate(children):
-            parents = recorder.get_token_parents(child.token_id)
+            parents = factory.query.get_token_parents(child.token_id)
             assert len(parents) == 1
             assert parents[0].parent_token_id == parent.token_id
             assert parents[0].ordinal == i
@@ -769,7 +750,7 @@ class TestTokenManagerExpand:
         setup = make_recorder_with_run()
         run_id, source_node_id = setup.run_id, setup.source_node_id
 
-        manager = TokenManager(setup.recorder, step_resolver=_make_step_resolver())
+        manager = TokenManager(setup.data_flow, step_resolver=_make_step_resolver())
 
         initial = manager.create_initial_token(
             run_id=run_id,
@@ -800,9 +781,9 @@ class TestTokenManagerExpand:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver({"expand_node": 5}))
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver({"expand_node": 5}))
         parent = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
@@ -819,7 +800,7 @@ class TestTokenManagerExpand:
         )
 
         for child in children:
-            db_token = recorder.get_token(child.token_id)
+            db_token = factory.query.get_token(child.token_id)
             assert db_token is not None
             assert db_token.step_in_pipeline == 5
 
@@ -828,18 +809,14 @@ class TestTokenManagerBoundaryPaths:
     """Coverage for error guards and quarantine/resume token paths."""
 
     def test_create_initial_token_requires_contract(self) -> None:
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
-
-        with pytest.raises(OrchestrationInvariantError, match="must have contract"):
-            manager.create_initial_token(
-                run_id=run_id,
-                source_node_id=source_node_id,
-                row_index=0,
-                source_row=SourceRow.valid({"value": 42}, contract=None),
-            )
+        # Since elspeth-a27e71979f, SourceRow.__post_init__ rejects contract=None
+        # at construction time, so the engine's guard is now unreachable via
+        # normal construction. Verify the earlier guard fires instead.
+        with pytest.raises(TypeError, match="contract"):
+            SourceRow.valid({"value": 42})
 
     def test_create_quarantine_token_rejects_non_quarantined_source_row(self) -> None:
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, _factory, run_id, source_node_id = _make_manager_context()
 
         with pytest.raises(OrchestrationInvariantError, match="requires a quarantined"):
             manager.create_quarantine_token(
@@ -850,7 +827,7 @@ class TestTokenManagerBoundaryPaths:
             )
 
     def test_create_quarantine_token_preserves_dict_payload(self) -> None:
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, _factory, run_id, source_node_id = _make_manager_context()
 
         token = manager.create_quarantine_token(
             run_id=run_id,
@@ -869,7 +846,7 @@ class TestTokenManagerBoundaryPaths:
         assert token.row_data.contract.locked is False
 
     def test_create_quarantine_token_wraps_non_dict_payload(self) -> None:
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, _factory, run_id, source_node_id = _make_manager_context()
 
         token = manager.create_quarantine_token(
             run_id=run_id,
@@ -886,7 +863,7 @@ class TestTokenManagerBoundaryPaths:
         assert token.row_data.contract.mode == "OBSERVED"
 
     def test_create_token_for_existing_row_creates_new_token(self) -> None:
-        manager, recorder, run_id, source_node_id = _make_manager_context()
+        manager, factory, run_id, source_node_id = _make_manager_context()
 
         original = manager.create_initial_token(
             run_id=run_id,
@@ -904,10 +881,10 @@ class TestTokenManagerBoundaryPaths:
         assert resumed.row_id == original.row_id
         assert resumed.token_id != original.token_id
         assert resumed.row_data is restored_row
-        assert recorder.get_token(resumed.token_id) is not None
+        assert factory.query.get_token(resumed.token_id) is not None
 
     def test_expand_token_requires_locked_output_contract(self) -> None:
-        manager, recorder, run_id, source_node_id = _make_manager_context()
+        manager, factory, run_id, source_node_id = _make_manager_context()
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -917,9 +894,9 @@ class TestTokenManagerBoundaryPaths:
         )
         unlocked_contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
 
-        tokens_before = recorder.get_all_tokens_for_run(run_id)
-        parents_before = recorder.get_all_token_parents_for_run(run_id)
-        outcome_before = recorder.get_token_outcome(parent.token_id)
+        tokens_before = factory.query.get_all_tokens_for_run(run_id)
+        parents_before = factory.query.get_all_token_parents_for_run(run_id)
+        outcome_before = factory.data_flow.get_token_outcome(parent.token_id)
 
         with pytest.raises(OrchestrationInvariantError, match="must be locked"):
             manager.expand_token(
@@ -930,9 +907,9 @@ class TestTokenManagerBoundaryPaths:
                 run_id=run_id,
             )
 
-        tokens_after = recorder.get_all_tokens_for_run(run_id)
-        parents_after = recorder.get_all_token_parents_for_run(run_id)
-        outcome_after = recorder.get_token_outcome(parent.token_id)
+        tokens_after = factory.query.get_all_tokens_for_run(run_id)
+        parents_after = factory.query.get_all_token_parents_for_run(run_id)
+        outcome_after = factory.data_flow.get_token_outcome(parent.token_id)
 
         assert len(tokens_after) == len(tokens_before), "Unlocked contract must not create child tokens"
         assert len(parents_after) == len(parents_before), "Unlocked contract must not create token parent links"
@@ -950,7 +927,7 @@ class TestExpandTokenDefaultOutcome:
 
     def test_expand_without_explicit_record_parent_outcome_records_expanded(self) -> None:
         """Call expand_token WITHOUT record_parent_outcome arg — parent gets EXPANDED."""
-        manager, recorder, run_id, source_node_id = _make_manager_context()
+        manager, factory, run_id, source_node_id = _make_manager_context()
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -968,19 +945,18 @@ class TestExpandTokenDefaultOutcome:
             run_id=run_id,
         )
 
-        outcome = recorder.get_token_outcome(parent.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent.token_id)
         assert outcome is not None, (
             "Parent token must have an outcome when using expand_token default. "
             "If record_parent_outcome default mutant (True→False) is active, "
             "outcome will be None."
         )
-        from elspeth.contracts.enums import RowOutcome
-
-        assert outcome.outcome == RowOutcome.EXPANDED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.EXPAND_PARENT
 
     def test_expand_with_explicit_false_skips_parent_outcome(self) -> None:
         """Call expand_token with record_parent_outcome=False — no EXPANDED outcome."""
-        manager, recorder, run_id, source_node_id = _make_manager_context()
+        manager, factory, run_id, source_node_id = _make_manager_context()
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -998,22 +974,22 @@ class TestExpandTokenDefaultOutcome:
             record_parent_outcome=False,
         )
 
-        outcome = recorder.get_token_outcome(parent.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent.token_id)
         assert outcome is None, "Parent token must NOT have an outcome when record_parent_outcome=False."
 
 
 class TestExpandTokenStrictZip:
     """Kill mutant: ``strict=True`` → ``strict=False`` in zip on line 394.
 
-    The strict zip ensures db_children (from recorder) and expanded_rows
+    The strict zip ensures db_children (from data_flow) and expanded_rows
     have the same length. If strict=False, length mismatches are silently
     ignored — extra rows are dropped or extra children get no data.
     """
 
     def test_zip_strict_catches_length_mismatch(self) -> None:
-        """Recorder returns N children but expanded_rows has M != N items.
+        """DataFlowRepository returns N children but expanded_rows has M != N items.
 
-        We mock the recorder's expand_token to return a different count
+        We mock the data_flow's expand_token to return a different count
         of children than the expanded_rows length.
         """
         from unittest.mock import patch
@@ -1022,8 +998,8 @@ class TestExpandTokenStrictZip:
         from elspeth.engine.tokens import TokenManager
 
         setup = make_recorder_with_run()
-        recorder = setup.recorder
-        manager = TokenManager(recorder, step_resolver=_make_step_resolver())
+        data_flow = setup.data_flow
+        manager = TokenManager(data_flow, step_resolver=_make_step_resolver())
 
         parent = manager.create_initial_token(
             run_id=setup.run_id,
@@ -1032,7 +1008,7 @@ class TestExpandTokenStrictZip:
             source_row=_make_source_row({"x": 1}),
         )
 
-        # Create fake Token objects the recorder would return
+        # Create fake Token objects the data_flow would return
         from datetime import UTC, datetime
 
         fake_children = [
@@ -1046,8 +1022,8 @@ class TestExpandTokenStrictZip:
             for i in range(2)  # Recorder returns 2 children
         ]
 
-        # Patch recorder.expand_token to return 2 children
-        with patch.object(recorder, "expand_token", return_value=(fake_children, "eg-1")), pytest.raises(ValueError):
+        # Patch data_flow.expand_token to return 2 children
+        with patch.object(data_flow, "expand_token", return_value=(fake_children, "eg-1")), pytest.raises(ValueError):
             manager.expand_token(
                 parent_token=parent,
                 expanded_rows=[{"a": 1}, {"a": 2}, {"a": 3}],
@@ -1066,16 +1042,16 @@ class TestCreateQuarantineTokenFlag:
     fail canonical hashing instead of being safely stored.
     """
 
-    def test_quarantine_token_passes_quarantined_flag_to_recorder(self) -> None:
-        """create_quarantine_token must pass quarantined=True to recorder.create_row.
+    def test_quarantine_token_passes_quarantined_flag_to_data_flow(self) -> None:
+        """create_quarantine_token must pass quarantined=True to data_flow.create_row.
 
         Kill mutant: quarantined=True → quarantined=False.
 
-        When quarantined=True, the recorder uses repr_hash fallback for
+        When quarantined=True, the data_flow uses repr_hash fallback for
         data containing NaN/Infinity. If the mutant flips it to False,
         canonical hashing crashes on NaN data.
         """
-        manager, recorder, run_id, source_node_id = _make_manager_context()
+        manager, factory, run_id, source_node_id = _make_manager_context()
 
         # Data with NaN — only works if quarantined=True (repr_hash fallback)
         quarantine_row = SourceRow.quarantined(
@@ -1096,7 +1072,7 @@ class TestCreateQuarantineTokenFlag:
         assert token_info.token_id is not None
 
         # Verify the row was actually stored (proof quarantined=True worked)
-        row_record = recorder.get_row(token_info.row_id)
+        row_record = factory.query.get_row(token_info.row_id)
         assert row_record is not None
         assert row_record.source_data_hash is not None, (
             "Quarantined row must have a hash (via repr_hash fallback). "

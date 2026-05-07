@@ -199,6 +199,35 @@ class TestSanitizedDatabaseUrl:
         with pytest.raises(AttributeError):
             result.sanitized_url = "hacked"  # type: ignore[misc]
 
+    def test_direct_construction_rejects_empty_password(self) -> None:
+        """Direct construction with user:@host (empty password) is rejected.
+
+        Bug: elspeth-ec29cad8c2. urlparse().password returns "" for user:@host,
+        which is falsy. The old `if parsed.password:` guard missed it, allowing
+        credential-bearing URLs to bypass the sanitization invariant.
+        """
+        with pytest.raises(ValueError, match="cannot contain a password"):
+            SanitizedDatabaseUrl(
+                sanitized_url="postgresql://user:@host/db",
+                fingerprint=None,
+            )
+
+    def test_direct_construction_rejects_full_password(self) -> None:
+        """Direct construction with user:pass@host is rejected."""
+        with pytest.raises(ValueError, match="cannot contain a password"):
+            SanitizedDatabaseUrl(
+                sanitized_url="postgresql://user:secret@host/db",
+                fingerprint=None,
+            )
+
+    def test_direct_construction_accepts_no_password(self) -> None:
+        """Direct construction without password is accepted."""
+        result = SanitizedDatabaseUrl(
+            sanitized_url="postgresql://user@host/db",
+            fingerprint=None,
+        )
+        assert result.sanitized_url == "postgresql://user@host/db"
+
 
 class TestSanitizedWebhookUrl:
     """Tests for SanitizedWebhookUrl."""
@@ -452,6 +481,52 @@ class TestSanitizedWebhookUrl:
         assert result.fingerprint is not None
 
 
+class TestSanitizedWebhookUrlPostInit:
+    """Tests for SanitizedWebhookUrl.__post_init__ constructor guards."""
+
+    def test_rejects_username_only_auth(self) -> None:
+        """Direct construction with username-only auth is rejected.
+
+        Bug fix: elspeth-80090f1076. A bearer token in the username field
+        (e.g., https://token@host) bypassed the __post_init__ guard because
+        it only checked `parsed.password`, not `parsed.username`.
+        """
+        with pytest.raises(ValueError, match=r"cannot contain.*userinfo"):
+            SanitizedWebhookUrl(
+                sanitized_url="https://bearer-token@api.example.com/webhook",
+                fingerprint=None,
+            )
+
+    def test_rejects_empty_password_auth(self) -> None:
+        """Direct construction with user:@host (empty password) is rejected.
+
+        Bug fix: elspeth-80090f1076. Empty-password Basic Auth like
+        https://token:@host has parsed.password="" (falsy), so the old
+        `if parsed.password:` guard missed it.
+        """
+        with pytest.raises(ValueError, match=r"cannot contain.*userinfo"):
+            SanitizedWebhookUrl(
+                sanitized_url="https://token:@api.example.com/webhook",
+                fingerprint=None,
+            )
+
+    def test_rejects_full_basic_auth(self) -> None:
+        """Direct construction with user:pass@host is still rejected."""
+        with pytest.raises(ValueError, match="cannot contain"):
+            SanitizedWebhookUrl(
+                sanitized_url="https://user:secret@api.example.com/webhook",
+                fingerprint=None,
+            )
+
+    def test_accepts_clean_url(self) -> None:
+        """Direct construction with no userinfo is accepted."""
+        result = SanitizedWebhookUrl(
+            sanitized_url="https://api.example.com/webhook",
+            fingerprint=None,
+        )
+        assert result.sanitized_url == "https://api.example.com/webhook"
+
+
 class TestExtractRawPort:
     """Tests for _extract_raw_port helper."""
 
@@ -608,6 +683,54 @@ class TestSensitiveParams:
         assert "format=json" in result.sanitized_url
         # Fingerprint computed from non-empty value only
         assert result.fingerprint is not None
+
+
+class TestBracketDotParamSanitization:
+    """Tests for bracket/dot notation param matching.
+
+    SECURITY: parse_qs preserves bracket notation in keys, so api_key[0]=secret
+    produces key "api_key[0]" which must still match "api_key" in SENSITIVE_PARAMS.
+    """
+
+    def test_bracket_notation_sanitized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """api_key[0]=secret must be stripped as sensitive."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        url = "https://api.example.com?api_key[0]=secret&format=json"
+
+        result = SanitizedWebhookUrl.from_raw_url(url)
+
+        assert "secret" not in result.sanitized_url
+        assert "api_key" not in result.sanitized_url
+        assert "format=json" in result.sanitized_url
+        assert result.fingerprint is not None
+
+    def test_dot_notation_sanitized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """token.value=secret must be stripped as sensitive."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        url = "https://api.example.com?token.value=secret&keep=me"
+
+        result = SanitizedWebhookUrl.from_raw_url(url)
+
+        assert "secret" not in result.sanitized_url
+        assert "token" not in result.sanitized_url
+        assert "keep=me" in result.sanitized_url
+        assert result.fingerprint is not None
+
+    def test_bracket_notation_rejected_by_post_init(self) -> None:
+        """__post_init__ must reject bracket-notated sensitive params."""
+        with pytest.raises(ValueError, match="sensitive query parameters"):
+            SanitizedWebhookUrl(
+                sanitized_url="https://api.example.com?api_key[0]=secret",
+                fingerprint=None,
+            )
+
+    def test_dot_notation_rejected_by_post_init(self) -> None:
+        """__post_init__ must reject dot-notated sensitive params."""
+        with pytest.raises(ValueError, match="sensitive query parameters"):
+            SanitizedWebhookUrl(
+                sanitized_url="https://api.example.com?token.value=secret",
+                fingerprint=None,
+            )
 
 
 class TestFragmentTokenSanitization:

@@ -32,7 +32,7 @@ from tests.fixtures.factories import make_context
 from .conftest import (
     ChaosLLMHTTPFixture,
     CollectingOutputPort,
-    create_recorder_and_run,
+    create_factory_and_run,
     generate_multi_query_rows,
     generate_test_rows,
     make_azure_llm_config,
@@ -59,13 +59,13 @@ MULTI_QUERY_JSON_TEMPLATE = '{"score": 5, "rationale": "Test assessment rational
 def _feed_rows(
     transform: LLMTransform,
     rows: list[dict[str, Any]],
-    recorder: object,
+    factory: object,
     run_id: str,
     node_id: str,
 ) -> list[str]:
     """Feed rows through a batch transform, returning input order IDs.
 
-    Creates row records, tokens, and node states in the landscape recorder
+    Creates row records, tokens, and node states in the factory repositories
     for each row, then accepts them into the transform.
 
     Returns:
@@ -74,14 +74,14 @@ def _feed_rows(
     input_order: list[str] = []
     for i, row in enumerate(rows):
         token = make_token(f"row-{i}", f"token-{i}")
-        row_record = recorder.create_row(  # type: ignore[attr-defined]
+        row_record = factory.data_flow.create_row(  # type: ignore[attr-defined]
             run_id=run_id,
             source_node_id=node_id,
             row_index=i,
             data=row,
         )
-        token_record = recorder.create_token(row_id=row_record.row_id)  # type: ignore[attr-defined]
-        state = recorder.begin_node_state(  # type: ignore[attr-defined]
+        token_record = factory.data_flow.create_token(row_id=row_record.row_id)  # type: ignore[attr-defined]
+        state = factory.execution.begin_node_state(  # type: ignore[attr-defined]
             token_id=token_record.token_id,
             node_id=node_id,
             run_id=run_id,
@@ -91,7 +91,7 @@ def _feed_rows(
 
         ctx = make_context(
             run_id=run_id,
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),  # type: ignore[attr-defined]
             state_id=state.state_id,
             token=token,
         )
@@ -123,7 +123,7 @@ class TestAzureLLMStress:
         - All 100 rows eventually complete or error gracefully
         - Pipeline doesn't hang or crash
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -135,11 +135,11 @@ class TestAzureLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=30)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(100)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -166,7 +166,7 @@ class TestAzureLLMStress:
         - AIMD backoff applies correctly
         - Pipeline completes without crashes
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -178,11 +178,11 @@ class TestAzureLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(50)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -211,7 +211,7 @@ class TestAzureLLMStress:
         - Pipeline recovers and continues after bursts
         - Final results include both successes and expected failures
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -223,11 +223,11 @@ class TestAzureLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=15)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(75)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -251,7 +251,7 @@ class TestAzureLLMStress:
         - No deadlocks or race conditions
         - FIFO ordering preserved
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -263,11 +263,11 @@ class TestAzureLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=32)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(100)
-        input_order = _feed_rows(transform, rows, recorder, run_id, node_id)
+        input_order = _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -317,7 +317,7 @@ class TestAzureMultiQueryStress:
         - Rows with any failed query are errored
         - Successful rows have all 4 query outputs
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_multi_query_config(
             chaosllm_http_server.url,
@@ -329,11 +329,11 @@ class TestAzureMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(50)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -373,7 +373,7 @@ class TestAzureMultiQueryStress:
         - AIMD coordinates across queries
         - Total requests > 4x rows due to retries
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_multi_query_config(
             chaosllm_http_server.url,
@@ -385,11 +385,11 @@ class TestAzureMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(30)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -423,7 +423,7 @@ class TestAzureMultiQueryStress:
         - All rows reach terminal state
         - Errors are properly recorded
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_multi_query_config(
             chaosllm_http_server.url,
@@ -435,11 +435,11 @@ class TestAzureMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(50)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -477,7 +477,7 @@ class TestOpenRouterLLMStress:
         - All 100 rows eventually complete or error gracefully
         - Pipeline doesn't hang or crash
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_llm_config(
             chaosllm_http_server.url,
@@ -489,11 +489,11 @@ class TestOpenRouterLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=30)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(100)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -523,7 +523,7 @@ class TestOpenRouterLLMStress:
         - Other rows continue processing
         - No crashes from JSON parse failures
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_llm_config(
             chaosllm_http_server.url,
@@ -535,11 +535,11 @@ class TestOpenRouterLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(50)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -564,7 +564,7 @@ class TestOpenRouterLLMStress:
         - Rows fail gracefully with recorded errors
         - Other rows continue processing
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_llm_config(
             chaosllm_http_server.url,
@@ -577,11 +577,11 @@ class TestOpenRouterLLMStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(75)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -620,7 +620,7 @@ class TestOpenRouterMultiQueryStress:
         - Rows with any failed query are errored
         - Successful rows have all 4 query outputs
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_multi_query_config(
             chaosllm_http_server.url,
@@ -632,11 +632,11 @@ class TestOpenRouterMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(50)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -672,7 +672,7 @@ class TestOpenRouterMultiQueryStress:
         - HTTP 429 responses trigger AIMD
         - Total requests > 4x rows due to retries
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_multi_query_config(
             chaosllm_http_server.url,
@@ -684,11 +684,11 @@ class TestOpenRouterMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(30)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -720,7 +720,7 @@ class TestOpenRouterMultiQueryStress:
         - All rows reach terminal state
         - Mixed error types are handled
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_multi_query_config(
             chaosllm_http_server.url,
@@ -732,11 +732,11 @@ class TestOpenRouterMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(50)
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -762,7 +762,7 @@ class TestOpenRouterMultiQueryStress:
         With concurrent query processing, verify that row output order
         matches input order for successful rows.
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_multi_query_config(
             chaosllm_http_server.url,
@@ -774,11 +774,11 @@ class TestOpenRouterMultiQueryStress:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_multi_query_rows(50)
-        input_order = _feed_rows(transform, rows, recorder, run_id, node_id)
+        input_order = _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -826,7 +826,7 @@ class TestMixedErrors:
         - All rows reach terminal state
         - Pipeline completes within reasonable time
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -838,13 +838,13 @@ class TestMixedErrors:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=30)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(100)
         start_time = time.monotonic()
 
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -876,7 +876,7 @@ class TestMixedErrors:
 
         Verifies HTTP-level error handling with mixed error types.
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_openrouter_llm_config(
             chaosllm_http_server.url,
@@ -888,13 +888,13 @@ class TestMixedErrors:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=30)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(100)
         start_time = time.monotonic()
 
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()
@@ -926,7 +926,7 @@ class TestMixedErrors:
         - All rows traceable
         - Audit records consistent
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -938,7 +938,7 @@ class TestMixedErrors:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(50)
@@ -947,7 +947,7 @@ class TestMixedErrors:
 
         for i, row in enumerate(rows):
             token = make_token(f"row-{i}", f"token-{i}")
-            row_record = recorder.create_row(
+            row_record = factory.data_flow.create_row(
                 run_id=run_id,
                 source_node_id=node_id,
                 row_index=i,
@@ -955,10 +955,10 @@ class TestMixedErrors:
             )
             row_ids.append(row_record.row_id)
 
-            token_record = recorder.create_token(row_id=row_record.row_id)
+            token_record = factory.data_flow.create_token(row_id=row_record.row_id)
             token_ids.append(token_record.token_id)
 
-            state = recorder.begin_node_state(
+            state = factory.execution.begin_node_state(
                 token_id=token_record.token_id,
                 node_id=node_id,
                 run_id=run_id,
@@ -968,7 +968,7 @@ class TestMixedErrors:
 
             ctx = make_context(
                 run_id=run_id,
-                landscape=recorder,
+                landscape=factory.plugin_audit_writer(),
                 state_id=state.state_id,
                 token=token,
             )
@@ -980,15 +980,15 @@ class TestMixedErrors:
         # All rows should be processed
         assert output.total_count == 50
 
-        # Verify audit trail completeness using LandscapeRecorder API
-        db_rows = recorder.get_rows(run_id)
+        # Verify audit trail completeness using QueryRepository API
+        db_rows = factory.query.get_rows(run_id)
         db_row_ids = {r.row_id for r in db_rows}
         assert set(row_ids) == db_row_ids, "Missing rows in audit trail"
 
         # Verify all tokens
         db_token_ids: set[str] = set()
         for row_id in row_ids:
-            tokens_for_row = recorder.get_tokens(row_id)
+            tokens_for_row = factory.query.get_tokens(row_id)
             for t in tokens_for_row:
                 db_token_ids.add(t.token_id)
         assert set(token_ids) == db_token_ids, "Missing tokens in audit trail"
@@ -1008,7 +1008,7 @@ class TestMixedErrors:
         - AIMD backoff kicks in appropriately
         - No sudden crash when error rate spikes
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -1020,7 +1020,7 @@ class TestMixedErrors:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(100)
@@ -1038,14 +1038,14 @@ class TestMixedErrors:
                 chaosllm_http_server.update_config(rate_limit_pct=35.0)
 
             token = make_token(f"row-{i}", f"token-{i}")
-            row_record = recorder.create_row(
+            row_record = factory.data_flow.create_row(
                 run_id=run_id,
                 source_node_id=node_id,
                 row_index=i,
                 data=row,
             )
-            token_record = recorder.create_token(row_id=row_record.row_id)
-            state = recorder.begin_node_state(
+            token_record = factory.data_flow.create_token(row_id=row_record.row_id)
+            state = factory.execution.begin_node_state(
                 token_id=token_record.token_id,
                 node_id=node_id,
                 run_id=run_id,
@@ -1055,7 +1055,7 @@ class TestMixedErrors:
 
             ctx = make_context(
                 run_id=run_id,
-                landscape=recorder,
+                landscape=factory.plugin_audit_writer(),
                 state_id=state.state_id,
                 token=token,
             )
@@ -1083,7 +1083,7 @@ class TestMixedErrors:
         - Recovery after burst period
         - Final completion despite bursts
         """
-        recorder, run_id, node_id = create_recorder_and_run(tmp_path_factory)
+        factory, run_id, node_id = create_factory_and_run(tmp_path_factory)
 
         config = make_azure_llm_config(
             chaosllm_http_server.url,
@@ -1095,13 +1095,13 @@ class TestMixedErrors:
         output = CollectingOutputPort()
         transform.connect_output(output, max_pending=20)
 
-        start_ctx = make_context(run_id=run_id, landscape=recorder)
+        start_ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
         transform.on_start(start_ctx)
 
         rows = generate_test_rows(75)
         start_time = time.monotonic()
 
-        _feed_rows(transform, rows, recorder, run_id, node_id)
+        _feed_rows(transform, rows, factory, run_id, node_id)
 
         transform.flush_batch_processing()
         transform.close()

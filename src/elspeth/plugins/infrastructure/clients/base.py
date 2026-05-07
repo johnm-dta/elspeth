@@ -6,8 +6,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from elspeth.contracts.audit_protocols import CallRecorder
     from elspeth.contracts.events import ExternalCallCompleted
-    from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.rate_limit import NoOpLimiter
     from elspeth.core.rate_limit.limiter import RateLimiter
 
@@ -21,7 +21,7 @@ class AuditedClientBase:
     """Base class for clients that automatically record to audit trail.
 
     Provides common infrastructure for tracking external calls:
-    - Reference to LandscapeRecorder for audit storage and call index allocation
+    - Reference to ExecutionRepository for audit storage and call index allocation
     - State ID linking calls to the current processing state
     - Run ID and telemetry callback for operational visibility
     - Optional rate limiter for throttling external calls
@@ -30,12 +30,12 @@ class AuditedClientBase:
     while inheriting automatic audit recording, telemetry emission, and rate limiting.
 
     Thread Safety:
-        The _next_call_index method delegates to LandscapeRecorder.allocate_call_index(),
+        The _next_call_index method delegates to ExecutionRepository.allocate_call_index(),
         which is thread-safe. Multiple threads and multiple client types can safely
         call this method concurrently without risk of call_index collisions.
 
     Call Index Coordination:
-        Call indices are allocated centrally by the LandscapeRecorder, ensuring
+        Call indices are allocated centrally by the ExecutionRepository, ensuring
         UNIQUE(state_id, call_index) across all client types (HTTP, LLM) and retry
         attempts. This prevents IntegrityError when multiple clients share the same state_id.
 
@@ -52,7 +52,7 @@ class AuditedClientBase:
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        execution: CallRecorder,
         state_id: str,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
@@ -63,14 +63,14 @@ class AuditedClientBase:
         """Initialize audited client.
 
         Args:
-            recorder: LandscapeRecorder for audit trail storage and call index allocation
+            execution: CallRecorder for audit trail storage and call index allocation
             state_id: Node state ID to associate calls with
             run_id: Pipeline run ID for telemetry correlation
             telemetry_emit: Callback to emit telemetry events (no-op when disabled)
             limiter: Optional rate limiter for throttling requests (from RateLimitRegistry)
             token_id: Optional token identity for transform-context correlation
         """
-        self._recorder = recorder
+        self._execution = execution
         self._state_id = state_id
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
@@ -84,13 +84,13 @@ class AuditedClientBase:
     def _next_call_index(self) -> int:
         """Get next call index for this state (thread-safe).
 
-        Delegates to LandscapeRecorder for centralized call index allocation.
+        Delegates to ExecutionRepository for centralized call index allocation.
         This ensures unique indices across all client types sharing the same state_id.
 
         Returns:
             Sequential call index, unique within this state_id (not just this client)
         """
-        return self._recorder.allocate_call_index(self._state_id)
+        return self._execution.allocate_call_index(self._state_id)
 
     def _acquire_rate_limit(self) -> None:
         """Acquire rate limit permission before making external call.
@@ -103,6 +103,20 @@ class AuditedClientBase:
         """
         if self._limiter is not None:
             self._limiter.acquire()
+
+    def update_call_context(self, state_id: str, token_id: str | None = None) -> None:
+        """Update the per-call audit scoping on a shared client.
+
+        Used by providers that reuse a single client instance across multiple
+        rows (e.g., AzureSearchProvider). Safe because row processing is serial
+        within a transform — no concurrent calls to this method.
+
+        Args:
+            state_id: New state_id for subsequent calls
+            token_id: New token_id for subsequent calls (None to clear)
+        """
+        self._state_id = state_id
+        self._token_id = token_id
 
     def close(self) -> None:
         """Release any resources held by the client.

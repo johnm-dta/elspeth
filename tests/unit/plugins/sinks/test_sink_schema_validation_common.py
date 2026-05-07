@@ -19,6 +19,7 @@ from sqlalchemy import Column, MetaData, String, Table, create_engine
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.database_sink import DatabaseSink
 from elspeth.plugins.sinks.json_sink import JSONSink
+from tests.fixtures.base_classes import inject_write_failure
 
 # =============================================================================
 # Type Definitions
@@ -80,7 +81,7 @@ def csv_sink_factory(tmp_path: Path) -> SinkFactory:
         if target_fields:
             _create_csv_with_headers(csv_path, target_fields)
         config = {"path": str(csv_path), "schema": schema_config}
-        return CSVSink(config)
+        return inject_write_failure(CSVSink(config))
 
     return factory
 
@@ -94,7 +95,7 @@ def json_sink_factory(tmp_path: Path) -> SinkFactory:
         if target_fields:
             _create_jsonl_with_record(jsonl_path, target_fields)
         config = {"path": str(jsonl_path), "schema": schema_config, "format": "jsonl"}
-        return JSONSink(config)
+        return inject_write_failure(JSONSink(config))
 
     return factory
 
@@ -109,7 +110,7 @@ def database_sink_factory(tmp_path: Path) -> SinkFactory:
         if target_fields:
             _create_table_with_columns(db_url, table_name, target_fields)
         config = {"url": db_url, "table": table_name, "schema": schema_config}
-        return DatabaseSink(config)
+        return inject_write_failure(DatabaseSink(config))
 
     return factory
 
@@ -296,11 +297,13 @@ class TestCSVSinkOrderValidation:
     def test_validate_strict_mode_order_mismatch(self, tmp_csv_path: Path):
         """Strict mode should fail when same fields but different order."""
         _create_csv_with_headers(tmp_csv_path, ["name", "id"])  # Reversed order
-        sink = CSVSink(
-            {
-                "path": str(tmp_csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -315,11 +318,13 @@ class TestCSVSinkOrderValidation:
     def test_validate_empty_file_returns_success(self, tmp_csv_path: Path):
         """When file exists but is empty, validation should pass."""
         tmp_csv_path.write_text("")
-        sink = CSVSink(
-            {
-                "path": str(tmp_csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -333,12 +338,14 @@ class TestCSVSinkOrderValidation:
             writer = csv.DictWriter(f, fieldnames=["id", "name"], delimiter="\t")
             writer.writeheader()
 
-        sink = CSVSink(
-            {
-                "path": str(tmp_csv_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "delimiter": "\t",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(tmp_csv_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "delimiter": "\t",
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -362,12 +369,14 @@ class TestJSONSinkSpecific:
     def test_validate_empty_file_returns_success(self, tmp_jsonl_path: Path):
         """When file exists but is empty, validation should pass."""
         tmp_jsonl_path.write_text("")
-        sink = JSONSink(
-            {
-                "path": str(tmp_jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(tmp_jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "format": "jsonl",
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -380,12 +389,14 @@ class TestJSONSinkSpecific:
         with open(tmp_json_path, "w") as f:
             json.dump([{"wrong": "fields"}], f)
 
-        sink = JSONSink(
-            {
-                "path": str(tmp_json_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "format": "json",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(tmp_json_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "format": "json",
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -396,12 +407,14 @@ class TestJSONSinkSpecific:
     def test_validate_invalid_json_returns_failure(self, tmp_jsonl_path: Path):
         """Invalid JSON in file should return failure."""
         tmp_jsonl_path.write_text("not valid json\n")
-        sink = JSONSink(
-            {
-                "path": str(tmp_jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(tmp_jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "format": "jsonl",
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -412,12 +425,14 @@ class TestJSONSinkSpecific:
     def test_validate_non_object_record_returns_failure(self, tmp_jsonl_path: Path):
         """JSONL with non-object records should return failure."""
         tmp_jsonl_path.write_text("[1, 2, 3]\n")  # Array instead of object
-        sink = JSONSink(
-            {
-                "path": str(tmp_jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                "format": "jsonl",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(tmp_jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    "format": "jsonl",
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -431,12 +446,14 @@ class TestJSONSinkSpecific:
         with open(jsonl_path, "w") as f:
             f.write(json.dumps({"id": 1, "name": "test"}) + "\n")
 
-        sink = JSONSink(
-            {
-                "path": str(jsonl_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                # format not specified - auto-detect from extension
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(jsonl_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    # format not specified - auto-detect from extension
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -449,12 +466,14 @@ class TestJSONSinkSpecific:
         with open(json_path, "w") as f:
             json.dump([{"wrong": "structure"}], f)
 
-        sink = JSONSink(
-            {
-                "path": str(json_path),
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                # format not specified - auto-detect from extension
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(json_path),
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                    # format not specified - auto-detect from extension
+                }
+            )
         )
 
         result = sink.validate_output_target()
@@ -475,12 +494,14 @@ class TestDatabaseSinkSpecific:
         """Strict mode for databases is order-independent (set comparison)."""
         # Create with different order - should still pass for database
         _create_table_with_columns(sqlite_path, "output_data", ["name", "id"])
-        sink = DatabaseSink(
-            {
-                "url": sqlite_path,
-                "table": "output_data",
-                "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-            }
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": sqlite_path,
+                    "table": "output_data",
+                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
+                }
+            )
         )
 
         result = sink.validate_output_target()

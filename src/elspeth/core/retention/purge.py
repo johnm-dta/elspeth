@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import ColumnElement, CompoundSelect, FromClause, and_, or_, select, union
+from sqlalchemy.engine import Connection
 
-from elspeth.contracts.errors import AuditIntegrityError
+import elspeth.contracts.errors as contract_errors
+from elspeth.contracts import RunStatus
 from elspeth.contracts.payload_store import PayloadStore
 from elspeth.core.landscape.reproducibility import update_grade_after_purge
 from elspeth.core.landscape.schema import (
@@ -35,7 +37,7 @@ class PurgeResult:
 
     deleted_count: int
     skipped_count: int  # Refs that didn't exist (already purged/never stored)
-    failed_refs: tuple[str, ...]  # Refs that existed but failed to delete
+    failed_refs: tuple[str, ...]  # Refs whose delete operation raised
     grade_update_failures: tuple[str, ...]  # Run IDs whose grade update failed after deletion
     duration_seconds: float
 
@@ -69,6 +71,30 @@ class PurgeManager:
         """
         self._db = db
         self._payload_store = payload_store
+
+    def _validate_run_lifecycle_rows(self, conn: Connection) -> None:
+        """Crash on impossible Tier-1 run lifecycle rows before purge queries."""
+        query = select(runs_table.c.run_id, runs_table.c.status, runs_table.c.completed_at)
+        result = conn.execute(query)
+
+        for row in result:
+            try:
+                status = RunStatus(row.status)
+            except ValueError as exc:
+                raise contract_errors.AuditIntegrityError(
+                    f"Invalid run status '{row.status}' for run {row.run_id} — expected one of {[status.value for status in RunStatus]}"
+                ) from exc
+
+            if status == RunStatus.RUNNING and row.completed_at is not None:
+                raise contract_errors.AuditIntegrityError(
+                    f"Run {row.run_id} has status='running' but completed_at is set — "
+                    f"audit integrity violation (running runs must not have completed_at)"
+                )
+            if status == RunStatus.COMPLETED and row.completed_at is None:
+                raise contract_errors.AuditIntegrityError(
+                    f"Run {row.run_id} has status='completed' but completed_at is NULL — "
+                    f"audit integrity violation (completed runs must have completed_at)"
+                )
 
     def _build_ref_union_query(
         self,
@@ -176,6 +202,7 @@ class PurgeManager:
             runs_table.c.completed_at >= cutoff,
             runs_table.c.completed_at.is_(None),
             runs_table.c.status == "running",
+            runs_table.c.status == "interrupted",  # Interrupted runs are recovery candidates
         )
 
         # === Build joins (shared between expired and active queries) ===
@@ -219,6 +246,8 @@ class PurgeManager:
         # 3. Python set operations are clearer for this anti-join pattern
 
         with self._db.connection() as conn:
+            self._validate_run_lifecycle_rows(conn)
+
             # Get all refs from expired runs
             expired_result = conn.execute(expired_refs_query)
             expired_refs = {row[0] for row in expired_result}
@@ -339,7 +368,7 @@ class PurgeManager:
         Returns:
             PurgeResult with deletion statistics. Note that skipped_count
             tracks refs that didn't exist (already purged or never stored),
-            while failed_refs tracks refs that existed but failed to delete.
+            while failed_refs tracks refs whose delete operation raised.
         """
         start_time = perf_counter()
 
@@ -351,10 +380,10 @@ class PurgeManager:
 
         for ref in refs:
             try:
-                exists = self._payload_store.exists(ref)
+                deleted = self._payload_store.delete(ref)
             except OSError as e:
                 logger.warning(
-                    "payload_existence_check_failed",
+                    "payload_deletion_failed",
                     ref=ref,
                     error_type=type(e).__name__,
                     error=str(e),
@@ -362,24 +391,9 @@ class PurgeManager:
                 failed_refs.append(ref)
                 continue
 
-            if exists:
-                try:
-                    deleted = self._payload_store.delete(ref)
-                except OSError as e:
-                    logger.warning(
-                        "payload_deletion_failed",
-                        ref=ref,
-                        error_type=type(e).__name__,
-                        error=str(e),
-                    )
-                    failed_refs.append(ref)
-                    continue
-
-                if deleted:
-                    deleted_count += 1
-                    deleted_refs.append(ref)
-                else:
-                    failed_refs.append(ref)
+            if deleted:
+                deleted_count += 1
+                deleted_refs.append(ref)
             else:
                 # Ref doesn't exist - already purged or never stored
                 # This is not a failure, just skip it
@@ -398,9 +412,9 @@ class PurgeManager:
         grade_update_failures: list[str] = []
         for run_id in sorted(affected_run_ids):
             try:
-                update_grade_after_purge(self._db, run_id)
-            except AuditIntegrityError:
-                raise  # Tier 1 corruption must crash — never swallow
+                update_grade_after_purge(self._db, run_id, deleted_refs=deleted_refs)
+            except contract_errors.TIER_1_ERRORS:
+                raise  # Tier 1 errors must crash — never swallow
             except Exception as exc:
                 logger.warning(
                     "grade_update_failed",

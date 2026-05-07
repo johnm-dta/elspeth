@@ -11,6 +11,7 @@ IMPORTANT:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.node_state_context import NodeStateContext
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     FrameworkBugError,
     OrchestrationInvariantError,
@@ -33,6 +34,18 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.routing import RoutingAction
+
+
+def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
+    """Reject non-PipelineRow output before it can masquerade as valid data."""
+    from elspeth.contracts.schema_contract import PipelineRow
+
+    if not isinstance(value, PipelineRow):
+        raise PluginContractViolation(
+            f"{location} must be a PipelineRow, got {type(value).__name__}. "
+            "Build transform output with PipelineRow(data, contract) before returning it."
+        )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +122,9 @@ class TransformResult:
     Multi-row output:
     - Single-row: success(row) sets row=row, rows=None
     - Multi-row: success_multi(rows) sets row=None, rows=rows
+    - Empty success: success_empty() sets row=None, rows=()
     - Use is_multi_row property to distinguish
-    - Use has_output_data property to check if ANY output exists
+    - Use has_output_data property to check if ANY explicit output carrier exists
     """
 
     status: Literal["success", "error"]
@@ -147,22 +161,40 @@ class TransformResult:
                 "Use TransformResult.success(row, ...) or TransformResult.success_multi(rows, ...) "
                 "to create success results. Missing output data is a plugin bug."
             )
-        if self.status == "error" and self.reason is None:
+        if self.status == "success" and self.row is not None and self.rows is not None:
             raise ValueError(
-                "TransformResult with status='error' MUST provide reason. "
-                "Use TransformResult.error({'reason': '...'}) to create error results. "
-                "Missing reason is a plugin bug."
+                "TransformResult with status='success' MUST provide exactly one of row or rows, not both. "
+                "Use TransformResult.success(row, ...) for single-row or "
+                "TransformResult.success_multi(rows, ...) for multi-row output."
             )
-        if self.status == "error" and (self.row is not None or self.rows is not None):
-            raise ValueError(
-                "TransformResult with status='error' MUST NOT include output data (row or rows). "
-                "Error results carry reason only, not data. This is a plugin bug."
-            )
-        if self.status == "error" and self.success_reason is not None:
-            raise ValueError(
-                "TransformResult with status='error' MUST NOT include success_reason. "
-                "Error results carry reason only. This is a plugin bug."
-            )
+        if self.status == "success" and self.row is not None:
+            _require_pipeline_row(self.row, location="TransformResult.row")
+        if self.status == "success" and self.rows is not None:
+            for i, row in enumerate(self.rows):
+                _require_pipeline_row(row, location=f"TransformResult.rows[{i}]")
+        if self.status == "error":
+            if self.reason is None:
+                raise ValueError(
+                    "TransformResult with status='error' MUST provide reason. "
+                    "Use TransformResult.error({'reason': '...'}) to create error results. "
+                    "Missing reason is a plugin bug."
+                )
+            if "reason" not in self.reason:
+                raise ValueError(
+                    "TransformResult with status='error' MUST include reason['reason']. "
+                    "Use TransformResult.error({'reason': '...'}) to create error results. "
+                    "Missing reason['reason'] is a plugin bug."
+                )
+            if self.row is not None or self.rows is not None:
+                raise ValueError(
+                    "TransformResult with status='error' MUST NOT include output data (row or rows). "
+                    "Error results carry reason only, not data. This is a plugin bug."
+                )
+            if self.success_reason is not None:
+                raise ValueError(
+                    "TransformResult with status='error' MUST NOT include success_reason. "
+                    "Error results carry reason only. This is a plugin bug."
+                )
 
     @property
     def is_multi_row(self) -> bool:
@@ -171,7 +203,7 @@ class TransformResult:
 
     @property
     def has_output_data(self) -> bool:
-        """True if this result has any output data (row or rows)."""
+        """True if this result has any explicit output carrier (row or rows)."""
         return self.row is not None or self.rows is not None
 
     @classmethod
@@ -202,6 +234,7 @@ class TransformResult:
                 success_reason={"action": "processed", "fields_modified": ["amount"]}
             )
         """
+        row = _require_pipeline_row(row, location="TransformResult.success(row)")
         return cls(
             status="success",
             row=row,
@@ -214,7 +247,7 @@ class TransformResult:
     @classmethod
     def success_multi(
         cls,
-        rows: list[PipelineRow] | tuple[PipelineRow, ...],
+        rows: Sequence[PipelineRow],
         *,
         success_reason: TransformSuccessReason,
         context_after: NodeStateContext | None = None,
@@ -241,28 +274,53 @@ class TransformResult:
                 success_reason={"action": "split", "fields_added": ["row_index"]}
             )
         """
-        if not rows:
+        output_rows = tuple(rows)
+        if not output_rows:
             raise ValueError("success_multi requires at least one row")
+        for i, row in enumerate(output_rows):
+            _require_pipeline_row(row, location=f"TransformResult.success_multi(rows[{i}])")
         # All rows must share the same contract identity. Mixed contracts
         # would silently mislabel child tokens, corrupting downstream
         # contract-based validation. Transforms are system-owned code,
         # so mixed contracts = plugin bug.
-        first_contract = rows[0].contract
-        for i in range(1, len(rows)):
-            if rows[i].contract is not first_contract:
+        first_contract = output_rows[0].contract
+        for i in range(1, len(output_rows)):
+            if output_rows[i].contract is not first_contract:
                 raise PluginContractViolation(
                     f"success_multi() received rows with inconsistent contracts: "
                     f"row 0 has {first_contract.mode if first_contract else None} contract "
                     f"with {len(first_contract.fields) if first_contract else 0} fields, "
-                    f"but row {i} has {rows[i].contract.mode if rows[i].contract else None} contract "
-                    f"with {len(rows[i].contract.fields) if rows[i].contract else 0} fields. "
+                    f"but row {i} has {output_rows[i].contract.mode if output_rows[i].contract else None} contract "
+                    f"with {len(output_rows[i].contract.fields) if output_rows[i].contract else 0} fields. "
                     f"All rows in a multi-row result must share the same contract instance."
                 )
         return cls(
             status="success",
             row=None,
             reason=None,
-            rows=tuple(rows),
+            rows=output_rows,
+            success_reason=success_reason,
+            context_after=context_after,
+        )
+
+    @classmethod
+    def success_empty(
+        cls,
+        *,
+        success_reason: TransformSuccessReason,
+        context_after: NodeStateContext | None = None,
+    ) -> TransformResult:
+        """Create successful result with explicit zero-row emission.
+
+        This is distinct from ``success_multi([])`` which remains invalid.
+        ``success_empty()`` is the auditable "the transform intentionally
+        emitted nothing" shape used by the engine's zero-emission pathways.
+        """
+        return cls(
+            status="success",
+            row=None,
+            reason=None,
+            rows=(),
             success_reason=success_reason,
             context_after=context_after,
         )
@@ -341,10 +399,7 @@ class GateResult:
 
 @dataclass(frozen=True, slots=True)
 class RowResult:
-    """Final result of processing a row through the pipeline.
-
-    Uses RowOutcome enum, which is explicitly recorded in the token_outcomes
-    table (AUD-001) at determination time for complete audit traceability.
+    """Final result of processing a row through the pipeline (ADR-019 two-axis).
 
     Frozen to prevent post-construction mutation of outcome/sink_name,
     which would bypass __post_init__ invariant checks.
@@ -352,24 +407,46 @@ class RowResult:
     Fields:
         token: Token identity for this row instance
         final_data: Final row data as PipelineRow (may be original if failed early)
-        outcome: Terminal state (COMPLETED, FAILED, QUARANTINED, etc.)
-        sink_name: For ROUTED outcomes, the destination sink name
-        error: For FAILED outcomes, type-safe error details for audit
+        outcome: Lifecycle answer (None for non-terminal BUFFERED rows)
+        path: Provenance answer (always populated)
+        sink_name: For paths that reach a sink, the destination sink name
+        error: For ON_ERROR_ROUTED, type-safe error details for audit
     """
 
     token: TokenInfo
     final_data: PipelineRow
-    outcome: RowOutcome
+    outcome: TerminalOutcome | None
+    path: TerminalPath
     sink_name: str | None = None
     error: FailureInfo | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome == RowOutcome.COMPLETED and self.sink_name is None:
-            raise OrchestrationInvariantError("COMPLETED outcome requires sink_name to be set")
-        if self.outcome == RowOutcome.ROUTED and self.sink_name is None:
-            raise OrchestrationInvariantError("ROUTED outcome requires sink_name to be set")
-        if self.outcome == RowOutcome.COALESCED and self.sink_name is None:
-            raise OrchestrationInvariantError("COALESCED outcome requires sink_name to be set")
+        if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+            raise OrchestrationInvariantError(f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})")
+        if self.outcome is None and self.path != TerminalPath.BUFFERED:
+            raise OrchestrationInvariantError(f"RowResult: outcome=None requires path=BUFFERED, got path={self.path!r}")
+        if self.outcome is not None and self.path == TerminalPath.BUFFERED:
+            raise OrchestrationInvariantError(f"RowResult: path=BUFFERED requires outcome=None, got outcome={self.outcome!r}")
+        if self.outcome is None and self.path == TerminalPath.BUFFERED and self.sink_name is not None:
+            raise OrchestrationInvariantError("RowResult: BUFFERED rows must not set sink_name before terminal recording")
+
+        if self.path == TerminalPath.DEFAULT_FLOW and self.sink_name is None:
+            raise OrchestrationInvariantError("(SUCCESS, DEFAULT_FLOW) outcome requires sink_name to be set")
+        if self.path == TerminalPath.GATE_ROUTED and self.sink_name is None:
+            raise OrchestrationInvariantError("(SUCCESS, GATE_ROUTED) outcome requires sink_name to be set")
+        if self.path == TerminalPath.ON_ERROR_ROUTED:
+            if self.sink_name is None:
+                raise OrchestrationInvariantError("(FAILURE, ON_ERROR_ROUTED) outcome requires sink_name to be set")
+            if self.error is None:
+                raise OrchestrationInvariantError(
+                    "(FAILURE, ON_ERROR_ROUTED) outcome requires error (FailureInfo) to be set — "
+                    "the originating transform error must be captured on the outcome "
+                    "record for single-hop audit attributability."
+                )
+            if not isinstance(self.error, FailureInfo):
+                raise OrchestrationInvariantError("(FAILURE, ON_ERROR_ROUTED) outcome requires error to be a FailureInfo instance")
+        if self.path == TerminalPath.COALESCED and self.sink_name is None:
+            raise OrchestrationInvariantError("(SUCCESS, COALESCED) outcome requires sink_name to be set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,7 +554,7 @@ class SourceRow:
     """Result from source loading - either valid data or quarantined invalid data.
 
     ALL rows from sources MUST be wrapped in SourceRow:
-    - Valid rows: SourceRow.valid(row_dict)
+    - Valid rows: SourceRow.valid(row_dict, contract=contract)
     - Invalid rows: SourceRow.quarantined(row_data, error, destination)
 
     This makes source outcomes first-class engine concepts:
@@ -489,7 +566,7 @@ class SourceRow:
     Example usage in a source:
         try:
             validated = schema.model_validate(row)
-            yield SourceRow.valid(validated.to_row())
+            yield SourceRow.valid(validated.to_row(), contract=contract)
         except ValidationError as e:
             if on_validation_failure != "discard":
                 yield SourceRow.quarantined(
@@ -526,18 +603,23 @@ class SourceRow:
                 raise ValueError(f"Non-quarantined SourceRow must not have quarantine_error, got: {self.quarantine_error!r}")
             if self.quarantine_destination is not None:
                 raise ValueError(f"Non-quarantined SourceRow must not have quarantine_destination, got: {self.quarantine_destination!r}")
+            # Valid rows MUST have a contract — the engine requires it at
+            # tokenization. Catching it here prevents a misleading crash later.
+            if self.contract is None:
+                raise ValueError("Valid SourceRow must have a contract. Pass contract= to SourceRow.valid().")
 
     @classmethod
     def valid(
         cls,
         row: dict[str, Any],
-        contract: SchemaContract | None = None,
+        *,
+        contract: SchemaContract,
     ) -> SourceRow:
         """Create a valid source row.
 
         Args:
             row: Validated row data
-            contract: Optional schema contract for the row
+            contract: Schema contract for the row
 
         Returns:
             SourceRow with is_quarantined=False

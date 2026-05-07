@@ -36,7 +36,7 @@ and may change between versions without notice.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from elspeth.contracts.token_usage import TokenUsage
 
@@ -50,6 +50,26 @@ LLM_GUARANTEED_SUFFIXES: tuple[str, ...] = (
     "_usage",  # Token usage dict {prompt_tokens, completion_tokens, total_tokens}
     "_model",  # Model identifier that actually responded
 )
+
+# Type alias matching FieldDefinition.field_type
+_FieldType = Literal["str", "int", "float", "bool", "any"]
+
+# Schema types for each guaranteed suffix — used by output schema builders
+# to advertise real types instead of erasing to "any".
+_SUFFIX_SCHEMA_TYPES: dict[str, _FieldType] = {
+    "": "str",  # Response content is always str
+    "_usage": "any",  # Token usage dict — shape varies by provider
+    "_model": "str",  # Model identifier is always str
+}
+
+# Maps OutputFieldType enum values to schema field_type strings
+_OUTPUT_FIELD_TYPE_TO_SCHEMA: dict[str, _FieldType] = {
+    "string": "str",
+    "integer": "int",
+    "number": "float",
+    "boolean": "bool",
+    "enum": "str",  # Enum values are string labels in output rows
+}
 
 # Multi-query transforms emit suffixed fields only (no base field)
 # e.g., category_score, category_rationale, category_usage, category_model
@@ -154,7 +174,7 @@ def build_llm_audit_metadata(
     lookup_hash: str | None,
     lookup_source: str | None,
     system_prompt_source: str | None,
-) -> dict[str, object]:
+) -> dict[str, str | None]:
     """Build audit provenance dict for inclusion in success_reason["metadata"].
 
     Does NOT write to the output row — audit provenance lives in the Landscape only.
@@ -219,13 +239,16 @@ def _build_augmented_output_schema(
     base_fields = base_schema_config.fields or ()
     existing_names = {f.name for f in base_fields}
 
-    # Add LLM fields (guaranteed only) as optional 'any' type fields
+    # Add LLM fields (guaranteed only) with their real types
     # Audit provenance fields go to success_reason["metadata"], not the output schema
-    llm_field_names = [
-        *get_llm_guaranteed_fields(response_field),
-    ]
     extra_fields = tuple(
-        FieldDefinition(name=name, field_type="any", required=False) for name in llm_field_names if name not in existing_names
+        FieldDefinition(
+            name=f"{response_field}{suffix}",
+            field_type=_SUFFIX_SCHEMA_TYPES[suffix],
+            required=False,
+        )
+        for suffix in LLM_GUARANTEED_SUFFIXES
+        if f"{response_field}{suffix}" not in existing_names
     )
 
     augmented_config = SchemaConfig(
@@ -244,26 +267,26 @@ def _build_multi_query_output_schema(
     response_field: str,
     query_names: tuple[str, ...],
     schema_name: str,
-    extracted_fields: dict[str, tuple[str, ...]] | None = None,
+    extracted_fields: dict[str, tuple[tuple[str, _FieldType], ...]] | None = None,
 ) -> type[PluginSchema]:
     """Build an output schema for multi-query mode with prefixed fields.
 
     Multi-query transforms emit query-prefixed fields (e.g., quality_llm_response,
     sentiment_llm_response) instead of the unprefixed single-query fields. The output
-    schema must reflect this for DAG type validation.
+    schema must include these fields for DAG type validation.
 
     For observed schemas this returns the same dynamic schema (no fields to add).
     For explicit schemas this augments the base fields with optional prefixed
-    LLM output fields typed as ``object`` (Any).
+    LLM output fields with their real types.
 
     Args:
         base_schema_config: The base schema config from plugin options.
         response_field: Base field name (e.g., "llm_response").
         query_names: Tuple of query names (e.g., ("quality", "sentiment")).
         schema_name: Name for the generated Pydantic model class.
-        extracted_fields: Mapping of query name to prefixed output field names
+        extracted_fields: Mapping of query name to (field_name, schema_type) tuples
             from structured output_fields config. These are fields extracted from
-            LLM JSON responses (e.g., {"quality": ("quality_score", "quality_label")}).
+            LLM JSON responses (e.g., {"quality": (("quality_score", "int"), ("quality_label", "str"))}).
 
     Returns:
         A PluginSchema subclass with input fields plus prefixed LLM output fields.
@@ -276,25 +299,35 @@ def _build_multi_query_output_schema(
     from elspeth.contracts.schema import FieldDefinition
     from elspeth.contracts.schema import SchemaConfig as _SchemaConfig
 
+    if extracted_fields is not None:
+        unknown_queries = set(extracted_fields) - set(query_names)
+        if unknown_queries:
+            raise ValueError(f"extracted_fields references unknown query names: {unknown_queries}")
+
     base_fields = base_schema_config.fields or ()
     existing_names = {f.name for f in base_fields}
 
-    # Add prefixed LLM fields for each query as optional 'any' type fields
+    # Add prefixed LLM fields for each query with real types
     extra_fields: list[FieldDefinition] = []
     for query_name in query_names:
         prefix = f"{query_name}_{response_field}"
-        # Audit provenance fields go to success_reason["metadata"], not the output schema
-        llm_field_names = [prefix, *get_llm_guaranteed_fields(prefix)]
-        for name in llm_field_names:
+        # The response field itself is str
+        if prefix not in existing_names:
+            extra_fields.append(FieldDefinition(name=prefix, field_type="str", required=False))
+            existing_names.add(prefix)
+        # Guaranteed metadata fields with real types
+        for suffix in MULTI_QUERY_GUARANTEED_SUFFIXES:
+            name = f"{prefix}{suffix}"
             if name not in existing_names:
-                extra_fields.append(FieldDefinition(name=name, field_type="any", required=False))
+                extra_fields.append(FieldDefinition(name=name, field_type=_SUFFIX_SCHEMA_TYPES[suffix], required=False))
                 existing_names.add(name)
 
-        # Add structured output_fields (e.g., quality_score, quality_label)
-        for field_name in (extracted_fields or {}).get(query_name, ()):
-            if field_name not in existing_names:
-                extra_fields.append(FieldDefinition(name=field_name, field_type="any", required=False))
-                existing_names.add(field_name)
+        # Add structured output_fields with their declared types
+        if extracted_fields is not None and query_name in extracted_fields:
+            for field_name, field_type in extracted_fields[query_name]:
+                if field_name not in existing_names:
+                    extra_fields.append(FieldDefinition(name=field_name, field_type=field_type, required=False))
+                    existing_names.add(field_name)
 
     augmented_config = _SchemaConfig(
         mode="flexible",
@@ -310,6 +343,8 @@ __all__ = [
     "LLM_AUDIT_SUFFIXES",
     "LLM_GUARANTEED_SUFFIXES",
     "MULTI_QUERY_GUARANTEED_SUFFIXES",
+    "_OUTPUT_FIELD_TYPE_TO_SCHEMA",
+    "_SUFFIX_SCHEMA_TYPES",
     "_build_augmented_output_schema",
     "_build_multi_query_output_schema",
     "build_llm_audit_metadata",

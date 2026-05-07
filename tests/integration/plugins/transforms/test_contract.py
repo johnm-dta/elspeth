@@ -26,6 +26,7 @@ from elspeth.contracts import (
 from elspeth.contracts.errors import ContractMergeError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.sinks.csv_sink import CSVSink
+from tests.fixtures.base_classes import inject_write_failure
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import ValidationErrorToken
@@ -118,12 +119,14 @@ class TestSourceToSinkContractFlow:
 
         # Configure sink with original headers mode
         output_csv = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_csv),
-                "headers": "original",
-                "schema": {"mode": "fixed", "fields": ["first_name: str", "last_name: str", "email_address: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_csv),
+                    "headers": "original",
+                    "schema": {"mode": "fixed", "fields": ["first_name: str", "last_name: str", "email_address: str"]},
+                }
+            )
         )
 
         # Set the contract on the sink
@@ -367,12 +370,14 @@ class TestContractWithSinkHeaderModes:
 
         # Sink with normalized headers (default)
         output_csv = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_csv),
-                "headers": "normalized",
-                "schema": {"mode": "fixed", "fields": ["first_name: str", "last_name: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_csv),
+                    "headers": "normalized",
+                    "schema": {"mode": "fixed", "fields": ["first_name: str", "last_name: str"]},
+                }
+            )
         )
 
         sink.set_output_contract(contract)
@@ -408,12 +413,14 @@ class TestContractWithSinkHeaderModes:
 
         # Sink with custom header mapping
         output_csv = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_csv),
-                "headers": {"amount": "TRANSACTION_AMOUNT", "currency": "CURRENCY_CODE"},
-                "schema": {"mode": "fixed", "fields": ["amount: str", "currency: str"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_csv),
+                    "headers": {"amount": "TRANSACTION_AMOUNT", "currency": "CURRENCY_CODE"},
+                    "schema": {"mode": "fixed", "fields": ["amount: str", "currency: str"]},
+                }
+            )
         )
 
         sink.set_output_contract(contract)

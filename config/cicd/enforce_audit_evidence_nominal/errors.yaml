@@ -1,0 +1,17 @@
+# Permanent allowlist for classes that legitimately override to_audit_dict
+# without directly inheriting AuditEvidenceBase in their own class statement.
+#
+# The AEN1 scanner checks only direct base classes (AST-level analysis cannot
+# resolve transitive inheritance reliably). See scanner docstring §Transitive-
+# inheritance design note for the rationale.
+allow_classes:
+- key: contracts/errors.py:AEN1:PassThroughContractViolation
+  owner: architecture
+  reason: >-
+    Permanent exception — PassThroughContractViolation overrides to_audit_dict
+    with structured fields, and its base class (PluginContractViolation) inherits
+    AuditEvidenceBase directly.  The scanner cannot follow transitive inheritance
+    from AST; the inheritance chain is correct at runtime (issubclass confirmed by
+    test_pass_through_violation_is_audit_evidence).  This is a legitimate override
+    in a known-good inheritance chain, not an accidental duck-type match.
+  task: ADR-010 Task 4 (permanent — not a transitional entry)

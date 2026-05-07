@@ -16,15 +16,16 @@ import pytest
 import respx
 
 from elspeth.contracts import CallStatus, CallType
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 
 
 @pytest.fixture
-def mock_recorder():
-    """Create mock LandscapeRecorder."""
-    recorder = Mock()
-    recorder.record_call = Mock()
-    return recorder
+def mock_execution():
+    """Create mock ExecutionRepository."""
+    execution = Mock(spec=ExecutionRepository)
+    execution.record_call = Mock()
+    return execution
 
 
 @pytest.fixture
@@ -34,10 +35,10 @@ def mock_telemetry_emit():
 
 
 @pytest.fixture
-def http_client(mock_recorder, mock_telemetry_emit):
+def http_client(mock_execution, mock_telemetry_emit):
     """Create AuditedHTTPClient with mocked dependencies."""
     return AuditedHTTPClient(
-        recorder=mock_recorder,
+        execution=mock_execution,
         state_id="test-state-001",
         run_id="test-run-001",
         telemetry_emit=mock_telemetry_emit,
@@ -51,7 +52,7 @@ def http_client(mock_recorder, mock_telemetry_emit):
 
 
 @respx.mock
-def test_post_records_call_to_landscape(http_client, mock_recorder):
+def test_post_records_call_to_landscape(http_client, mock_execution):
     """POST should record request/response to Landscape."""
     respx.post("https://api.example.com/v1/process").mock(return_value=httpx.Response(200, json={"result": "success"}))
 
@@ -63,8 +64,8 @@ def test_post_records_call_to_landscape(http_client, mock_recorder):
     assert response.status_code == 200
 
     # Verify Landscape recording
-    mock_recorder.record_call.assert_called_once()
-    call_args = mock_recorder.record_call.call_args[1]
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args[1]
 
     assert call_args["state_id"] == "test-state-001"
     assert call_args["call_type"] == CallType.HTTP
@@ -99,7 +100,7 @@ def test_post_handles_json_response(http_client):
 
 
 @respx.mock
-def test_post_handles_text_response(http_client, mock_recorder):
+def test_post_handles_text_response(http_client, mock_execution):
     """POST should handle text responses (non-JSON)."""
     respx.post("https://api.example.com/endpoint").mock(
         return_value=httpx.Response(
@@ -117,12 +118,12 @@ def test_post_handles_text_response(http_client, mock_recorder):
     assert response.text == "Plain text response"
 
     # Verify body stored as text (not dict)
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     assert call_args["response_data"].to_dict()["body"] == "Plain text response"
 
 
 @respx.mock
-def test_post_handles_binary_response(http_client, mock_recorder):
+def test_post_handles_binary_response(http_client, mock_execution):
     """POST should base64-encode binary responses."""
     binary_data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 
@@ -142,14 +143,14 @@ def test_post_handles_binary_response(http_client, mock_recorder):
     assert response.content == binary_data
 
     # Verify body stored as base64
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     assert "_binary" in call_args["response_data"].to_dict()["body"]
     decoded = base64.b64decode(call_args["response_data"].to_dict()["body"]["_binary"])
     assert decoded == binary_data
 
 
 @respx.mock
-def test_post_fingerprints_auth_headers(http_client, mock_recorder):
+def test_post_fingerprints_auth_headers(http_client, mock_execution):
     """POST should fingerprint sensitive headers (not store raw secrets)."""
     with patch.dict("os.environ", {"ELSPETH_FINGERPRINT_KEY": "test-key-12345", "ELSPETH_ALLOW_RAW_SECRETS": ""}):
         respx.post("https://api.example.com/secure").mock(return_value=httpx.Response(200, json={}))
@@ -161,7 +162,7 @@ def test_post_fingerprints_auth_headers(http_client, mock_recorder):
         )
 
         # Verify auth header was fingerprinted (not stored raw)
-        call_args = mock_recorder.record_call.call_args[1]
+        call_args = mock_execution.record_call.call_args[1]
         auth_header = call_args["request_data"].to_dict()["headers"]["Authorization"]
 
         assert "secret-token-xyz" not in auth_header
@@ -170,7 +171,7 @@ def test_post_fingerprints_auth_headers(http_client, mock_recorder):
 
 
 @respx.mock
-def test_post_fingerprints_compact_secret_headers(http_client, mock_recorder):
+def test_post_fingerprints_compact_secret_headers(http_client, mock_execution):
     """Compact secret header names (apikey/authkey) should be fingerprinted."""
     with patch.dict("os.environ", {"ELSPETH_FINGERPRINT_KEY": "test-key-12345", "ELSPETH_ALLOW_RAW_SECRETS": ""}):
         respx.post("https://api.example.com/secure").mock(return_value=httpx.Response(200, json={}))
@@ -181,7 +182,7 @@ def test_post_fingerprints_compact_secret_headers(http_client, mock_recorder):
             headers={"apikey": "api-secret", "authkey": "auth-secret"},
         )
 
-        call_args = mock_recorder.record_call.call_args[1]
+        call_args = mock_execution.record_call.call_args[1]
         recorded_headers = call_args["request_data"].to_dict()["headers"]
 
         assert recorded_headers["apikey"].startswith("<fingerprint:")
@@ -191,7 +192,7 @@ def test_post_fingerprints_compact_secret_headers(http_client, mock_recorder):
 
 
 @respx.mock
-def test_post_telemetry_failure_doesnt_corrupt_audit(http_client, mock_recorder, mock_telemetry_emit):
+def test_post_telemetry_failure_doesnt_corrupt_audit(http_client, mock_execution, mock_telemetry_emit):
     """Telemetry emission failure must not prevent Landscape recording."""
     # Make telemetry callback raise
     mock_telemetry_emit.side_effect = RuntimeError("Telemetry service unavailable")
@@ -204,16 +205,16 @@ def test_post_telemetry_failure_doesnt_corrupt_audit(http_client, mock_recorder,
     assert response.status_code == 200
 
     # Landscape recording must have happened
-    mock_recorder.record_call.assert_called_once()
-    call_args = mock_recorder.record_call.call_args[1]
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args[1]
     assert call_args["status"] == CallStatus.SUCCESS
 
 
 @respx.mock
-def test_post_telemetry_emits_token_id_when_configured(mock_recorder, mock_telemetry_emit):
+def test_post_telemetry_emits_token_id_when_configured(mock_execution, mock_telemetry_emit):
     """Telemetry event should include token_id when client has token context."""
     client = AuditedHTTPClient(
-        recorder=mock_recorder,
+        execution=mock_execution,
         state_id="test-state-001",
         run_id="test-run-001",
         telemetry_emit=mock_telemetry_emit,
@@ -242,7 +243,7 @@ def test_post_telemetry_token_id_none_when_unset(http_client, mock_telemetry_emi
 
 
 @respx.mock
-def test_post_with_error_response(http_client, mock_recorder):
+def test_post_with_error_response(http_client, mock_execution):
     """POST with 4xx/5xx should record as ERROR status."""
     respx.post("https://api.example.com/fail").mock(return_value=httpx.Response(500, text="Internal Server Error"))
 
@@ -251,14 +252,14 @@ def test_post_with_error_response(http_client, mock_recorder):
     assert response.status_code == 500
 
     # Verify recorded as ERROR
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     assert call_args["status"] == CallStatus.ERROR
     assert call_args["error"].type == "HTTPError"
     assert "500" in call_args["error"].message
 
 
 @respx.mock
-def test_post_with_network_error(http_client, mock_recorder):
+def test_post_with_network_error(http_client, mock_execution):
     """POST network failure should record error and re-raise."""
     respx.post("https://api.example.com/unreachable").mock(side_effect=httpx.ConnectError("Connection refused"))
 
@@ -266,16 +267,16 @@ def test_post_with_network_error(http_client, mock_recorder):
         http_client.post("https://api.example.com/unreachable", json={})
 
     # Verify error recorded to Landscape
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     assert call_args["status"] == CallStatus.ERROR
     assert call_args["error"].type == "ConnectError"
 
 
 @respx.mock
-def test_post_with_base_url(mock_recorder, mock_telemetry_emit):
+def test_post_with_base_url(mock_execution, mock_telemetry_emit):
     """POST should properly join base_url with path."""
     client = AuditedHTTPClient(
-        recorder=mock_recorder,
+        execution=mock_execution,
         state_id="test-state",
         run_id="test-run",
         telemetry_emit=mock_telemetry_emit,
@@ -289,12 +290,12 @@ def test_post_with_base_url(mock_recorder, mock_telemetry_emit):
     assert response.status_code == 201
 
     # Verify full URL was constructed correctly
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     assert call_args["request_data"].to_dict()["url"] == "https://api.example.com/v2/users"
 
 
 @respx.mock
-def test_post_malformed_json_response(http_client, mock_recorder):
+def test_post_malformed_json_response(http_client, mock_execution):
     """POST with Content-Type: application/json but invalid body should handle gracefully."""
     # Server claims JSON but sends malformed data
     respx.post("https://api.example.com/broken").mock(
@@ -311,7 +312,7 @@ def test_post_malformed_json_response(http_client, mock_recorder):
     assert response.status_code == 200
 
     # Verify audit trail records the parse failure
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     body = call_args["response_data"].to_dict()["body"]
 
     assert body["_json_parse_failed"] is True
@@ -326,7 +327,7 @@ def test_post_malformed_json_response(http_client, mock_recorder):
 
 
 @respx.mock
-def test_get_records_call_to_landscape(http_client, mock_recorder):
+def test_get_records_call_to_landscape(http_client, mock_execution):
     """GET should record request/response to Landscape."""
     respx.get("https://api.example.com/status").mock(return_value=httpx.Response(200, json={"status": "healthy"}))
 
@@ -335,8 +336,8 @@ def test_get_records_call_to_landscape(http_client, mock_recorder):
     assert response.status_code == 200
 
     # Verify Landscape recording
-    mock_recorder.record_call.assert_called_once()
-    call_args = mock_recorder.record_call.call_args[1]
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args[1]
 
     assert call_args["request_data"].to_dict()["method"] == "GET"
     assert call_args["request_data"].to_dict()["url"] == "https://api.example.com/status"
@@ -344,7 +345,7 @@ def test_get_records_call_to_landscape(http_client, mock_recorder):
 
 
 @respx.mock
-def test_get_with_params(http_client, mock_recorder):
+def test_get_with_params(http_client, mock_execution):
     """GET should include query parameters in request."""
     respx.get("https://api.example.com/search").mock(return_value=httpx.Response(200, json={"results": []}))
 
@@ -356,12 +357,12 @@ def test_get_with_params(http_client, mock_recorder):
     assert response.status_code == 200
 
     # Verify params recorded
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     assert call_args["request_data"].to_dict()["params"] == {"q": "test query", "limit": 10}
 
 
 @respx.mock
-def test_get_telemetry_failure_doesnt_corrupt_audit(http_client, mock_recorder, mock_telemetry_emit):
+def test_get_telemetry_failure_doesnt_corrupt_audit(http_client, mock_execution, mock_telemetry_emit):
     """Telemetry emission failure must not prevent Landscape recording (GET)."""
     mock_telemetry_emit.side_effect = Exception("Telemetry down")
 
@@ -370,7 +371,7 @@ def test_get_telemetry_failure_doesnt_corrupt_audit(http_client, mock_recorder, 
     response = http_client.get("https://api.example.com/data")
 
     assert response.status_code == 200
-    mock_recorder.record_call.assert_called_once()
+    mock_execution.record_call.assert_called_once()
 
 
 # ============================================================================
@@ -379,7 +380,7 @@ def test_get_telemetry_failure_doesnt_corrupt_audit(http_client, mock_recorder, 
 
 
 @respx.mock
-def test_header_fingerprinting_with_missing_key_raises(http_client, mock_recorder, monkeypatch):
+def test_header_fingerprinting_with_missing_key_raises(http_client, mock_execution, monkeypatch):
     """Missing fingerprint key with sensitive headers raises FrameworkBugError.
 
     Regression test for elspeth-780f6e39b1: previously this path silently
@@ -402,7 +403,7 @@ def test_header_fingerprinting_with_missing_key_raises(http_client, mock_recorde
 
 
 @respx.mock
-def test_header_fingerprinting_in_dev_mode(http_client, mock_recorder, monkeypatch):
+def test_header_fingerprinting_in_dev_mode(http_client, mock_execution, monkeypatch):
     """Dev mode (ELSPETH_ALLOW_RAW_SECRETS=true) should remove sensitive headers."""
     monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
@@ -415,7 +416,7 @@ def test_header_fingerprinting_in_dev_mode(http_client, mock_recorder, monkeypat
     )
 
     # Verify sensitive header removed, non-sensitive kept
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     headers = call_args["request_data"].to_dict()["headers"]
 
     assert "Authorization" not in headers
@@ -493,7 +494,7 @@ def test_sensitive_header_detection(http_client):
 
 
 @respx.mock
-def test_response_headers_filter_sensitive(http_client, mock_recorder):
+def test_response_headers_filter_sensitive(http_client, mock_execution):
     """Response headers should have sensitive values filtered."""
     respx.get("https://api.example.com/login").mock(
         return_value=httpx.Response(
@@ -510,7 +511,7 @@ def test_response_headers_filter_sensitive(http_client, mock_recorder):
     http_client.get("https://api.example.com/login")
 
     # Verify Set-Cookie filtered out
-    call_args = mock_recorder.record_call.call_args[1]
+    call_args = mock_execution.record_call.call_args[1]
     headers = call_args["response_data"].to_dict()["headers"]
 
     assert "set-cookie" not in headers
@@ -524,13 +525,13 @@ def test_response_headers_filter_sensitive(http_client, mock_recorder):
 
 
 @respx.mock
-def test_rate_limiting_integration(mock_recorder, mock_telemetry_emit):
+def test_rate_limiting_integration(mock_execution, mock_telemetry_emit):
     """Rate limiter should be invoked before HTTP call."""
     mock_limiter = Mock()
     mock_limiter.acquire.return_value = None  # acquire() blocks and returns None
 
     client = AuditedHTTPClient(
-        recorder=mock_recorder,
+        execution=mock_execution,
         state_id="test-state",
         run_id="test-run",
         telemetry_emit=mock_telemetry_emit,

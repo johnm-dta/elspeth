@@ -15,7 +15,7 @@ import os
 from collections.abc import Sequence
 from typing import IO, TYPE_CHECKING, Any, Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
@@ -24,13 +24,18 @@ if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
 from elspeth.contracts.contexts import SinkContext
 from elspeth.plugins.infrastructure.base import BaseSink
-from elspeth.plugins.infrastructure.config_base import SinkPathConfig
+from elspeth.plugins.infrastructure.config_base import OutputCollisionPolicy, SinkPathConfig
 from elspeth.plugins.infrastructure.display_headers import (
     get_effective_display_headers,
     init_display_headers,
     resolve_contract_from_context_if_needed,
     resolve_display_headers_if_needed,
     set_resume_field_resolution,
+)
+from elspeth.plugins.infrastructure.output_paths import (
+    resolve_output_collision_path,
+    should_create_exclusively,
+    validate_output_collision_policy_mode,
 )
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 
@@ -46,7 +51,6 @@ class CSVSinkConfig(SinkPathConfig):
 
     delimiter: str = ","
     encoding: str = "utf-8"
-    validate_input: bool = False  # Optional runtime validation of incoming rows
     mode: Literal["write", "append"] = "write"
 
     @field_validator("delimiter")
@@ -67,6 +71,15 @@ class CSVSinkConfig(SinkPathConfig):
             raise ValueError(f"unknown encoding: {v!r}") from exc
         return v
 
+    @model_validator(mode="after")
+    def _validate_collision_policy_mode(self) -> CSVSinkConfig:
+        validate_output_collision_policy_mode(
+            plugin_name="CSVSink",
+            mode=self.mode,
+            collision_policy=self.collision_policy,
+        )
+        return self
+
 
 class CSVSink(BaseSink):
     """Write rows to a CSV file.
@@ -82,7 +95,6 @@ class CSVSink(BaseSink):
         schema: Schema configuration (required, via PathConfig)
         delimiter: Field delimiter (default: ",")
         encoding: File encoding (default: "utf-8")
-        validate_input: Validate incoming rows against schema (default: False)
         mode: "write" (truncate, default) or "append" (add to existing file)
 
     The schema can be (all use infer-and-lock pattern):
@@ -97,10 +109,13 @@ class CSVSink(BaseSink):
 
     name = "csv"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:c24ad00a6582427b"
+    config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Resume capability: CSV can append to existing files
     supports_resume: bool = True
+    _collision_policy: OutputCollisionPolicy | None
 
     def configure_for_resume(self) -> None:
         """Configure CSV sink for resume mode.
@@ -109,6 +124,7 @@ class CSVSink(BaseSink):
         add to existing output instead of overwriting.
         """
         self._mode = "append"
+        self._collision_policy = "append_or_create"
 
     def validate_output_target(self) -> OutputValidationResult:
         """Validate existing CSV file headers against configured schema.
@@ -196,13 +212,17 @@ class CSVSink(BaseSink):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = CSVSinkConfig.from_dict(config)
+        cfg = CSVSinkConfig.from_dict(config, plugin_name=self.name)
 
         self._path = cfg.resolved_path()
+        self._requested_path = self._path
         self._delimiter = cfg.delimiter
         self._encoding = cfg.encoding
-        self.validate_input = cfg.validate_input
         self._mode = cfg.mode
+        self._collision_policy = cfg.collision_policy
+        self._write_target_claimed = False
+        if self._mode != "append":
+            self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
 
         # Display header state (shared module handles all modes)
         init_display_headers(self, cfg.headers_mode, cfg.headers_mapping)
@@ -239,6 +259,13 @@ class CSVSink(BaseSink):
         # Incremental hasher — avoids O(N²) full-file re-reads in append mode
         self._hasher: hashlib._Hash | None = None
 
+    def _claim_write_target(self) -> None:
+        """Apply write-mode collision policy before the first filesystem mutation."""
+        if self._write_target_claimed or self._mode == "append":
+            return
+        self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
+        self._write_target_claimed = True
+
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write a batch of rows to the CSV file.
 
@@ -250,8 +277,8 @@ class CSVSink(BaseSink):
             ArtifactDescriptor with content_hash (SHA-256) and size_bytes
 
         Raises:
-            ValidationError: If validate_input=True and a row fails validation.
-                This indicates a bug in an upstream transform.
+            PluginContractViolation: Raised by executor if row fails input schema
+                validation. This indicates a bug in an upstream transform.
         """
         if not rows:
             # Empty batch - return descriptor for empty content
@@ -272,56 +299,135 @@ class CSVSink(BaseSink):
         # Must happen AFTER source iteration begins (when field resolution is recorded)
         resolve_display_headers_if_needed(self, ctx)
 
-        # Lazy initialization - open file on first write
-        if self._file is None:
-            self._open_file(rows)
+        # First-call initialization: compute fieldnames and stage BEFORE
+        # opening the file in write mode.  In write mode, _open_file truncates
+        # the file and writes headers.  If we did that first and staging then
+        # failed (e.g. DictWriter rejects a row with extra/missing fields),
+        # the file would already be truncated — prior contents lost.
+        #
+        # For append mode the file already exists so truncation is not a
+        # concern; we follow the original open-then-stage order.
+        first_call = self._file is None
 
-        # Write all rows in batch
-        # Invariant: _file and _writer are always set together (by _open_file above)
-        file = self._file
-        writer = self._writer
-        if file is None or writer is None:
-            raise RuntimeError("CSVSink writer not initialized - this is a bug")
-        if self._hasher is None:
-            raise RuntimeError("CSVSink hasher not initialized - this is a bug")
+        if first_call and self._mode != "append":
+            # Write mode, first batch: compute fieldnames from schema/row
+            # without touching the filesystem.
+            data_fields, display_fields = self._get_field_names_and_display(rows[0])
+            self._fieldnames = data_fields
 
-        # Stage the entire batch in memory BEFORE writing to file.
-        # This prevents partial writes: if any row fails serialization (e.g.,
-        # extra fields rejected by DictWriter), NO rows are written to disk.
-        # Without this, row N failing after rows 0..N-1 are written causes
-        # audit divergence -- CSV has rows the Landscape marks as FAILED.
-        staging_buffer = io.StringIO()
-        fieldnames = self._fieldnames
-        if fieldnames is None:
-            raise RuntimeError("write() called before _fieldnames set by _write_header()")
-        staging_writer = csv.DictWriter(
-            staging_buffer,
-            fieldnames=fieldnames,
-            delimiter=self._delimiter,
-        )
-        for row in rows:
-            staging_writer.writerow(row)
-        staged_content = staging_buffer.getvalue()
+            # Stage rows in memory — if any row is invalid, we fail here
+            # BEFORE the file is created/truncated.
+            staging_buffer = io.StringIO()
+            staging_writer = csv.DictWriter(
+                staging_buffer,
+                fieldnames=data_fields,
+                delimiter=self._delimiter,
+            )
+            for row in rows:
+                staging_writer.writerow(row)
+            staged_content = staging_buffer.getvalue()
 
-        # Track write position before writing for incremental hashing.
-        # Use file.tell() not stat().st_size — stat() has a TOCTOU race where
-        # another process could append between stat and write, causing the hasher
-        # to incorporate foreign bytes.
-        pre_write_pos = file.tell()
+            # Staging succeeded — now safe to open (truncate) and write.
+            self._open_file_write_mode(data_fields, display_fields)
 
-        # Atomic batch write: all staged rows written at once
-        file.write(staged_content)
+            # Write staged rows after the header
+            file = self._file
+            if file is None or self._hasher is None:
+                raise RuntimeError("CSVSink writer not initialized - this is a bug")
 
-        # Flush to ensure content is on disk for hashing
-        file.flush()
+            # Mutation phase: write, flush, hash, stat.
+            # If anything fails after the file was created by _open_file_write_mode,
+            # clean up the newly-created file entirely — it has no prior content
+            # to preserve, and leaving a partial file violates audit integrity.
+            try:
+                pre_write_pos = file.tell()
+                file.write(staged_content)
+                file.flush()
 
-        # Incremental hash: only read newly written bytes (O(batch) not O(file))
-        with open(self._path, "rb") as bf:
-            bf.seek(pre_write_pos)
-            for chunk in iter(lambda: bf.read(8192), b""):
-                self._hasher.update(chunk)
-        content_hash = self._hasher.hexdigest()
-        size_bytes = self._path.stat().st_size
+                # Incremental hash: only read newly written bytes (O(batch) not O(file))
+                with open(self._path, "rb") as bf:
+                    bf.seek(pre_write_pos)
+                    for chunk in iter(lambda: bf.read(8192), b""):
+                        self._hasher.update(chunk)
+                content_hash = self._hasher.hexdigest()
+                size_bytes = self._path.stat().st_size
+            except Exception:
+                # Write-mode first batch: file was just created by us — no
+                # pre-existing content to preserve.  Remove it entirely so a
+                # partial file doesn't masquerade as a valid artifact.  The
+                # re-raised exception carries all diagnostic context.
+                file.close()
+                self._file = None
+                self._writer = None
+                self._hasher = None
+                if self._path.exists():
+                    self._path.unlink()
+                raise
+        else:
+            # Append mode first call, or any subsequent call
+            if first_call:
+                self._open_file(rows)
+
+            # Write all rows in batch
+            # Invariant: _file and _writer are always set together (by _open_file above)
+            file = self._file
+            writer = self._writer
+            if file is None or writer is None:
+                raise RuntimeError("CSVSink writer not initialized - this is a bug")
+            if self._hasher is None:
+                raise RuntimeError("CSVSink hasher not initialized - this is a bug")
+
+            # Stage the entire batch in memory BEFORE writing to file.
+            # This prevents partial writes: if any row fails serialization (e.g.,
+            # extra fields rejected by DictWriter), NO rows are written to disk.
+            # Without this, row N failing after rows 0..N-1 are written causes
+            # audit divergence -- CSV has rows the Landscape marks as FAILED.
+            staging_buffer = io.StringIO()
+            fieldnames = self._fieldnames
+            if fieldnames is None:
+                raise RuntimeError("write() called before _fieldnames set by _write_header()")
+            staging_writer = csv.DictWriter(
+                staging_buffer,
+                fieldnames=fieldnames,
+                delimiter=self._delimiter,
+            )
+            for row in rows:
+                staging_writer.writerow(row)
+            staged_content = staging_buffer.getvalue()
+
+            # Track write position before writing for incremental hashing.
+            # Use file.tell() not stat().st_size — stat() has a TOCTOU race where
+            # another process could append between stat and write, causing the hasher
+            # to incorporate foreign bytes.
+            pre_write_pos = file.tell()
+
+            # Mutation phase: write, flush, hash, stat.
+            # If anything after write() fails, the file has new bytes with no
+            # corresponding audit record.  Rollback by truncating to pre_write_pos.
+            try:
+                file.write(staged_content)
+                file.flush()
+
+                # Incremental hash: only read newly written bytes (O(batch) not O(file))
+                with open(self._path, "rb") as bf:
+                    bf.seek(pre_write_pos)
+                    for chunk in iter(lambda: bf.read(8192), b""):
+                        self._hasher.update(chunk)
+                content_hash = self._hasher.hexdigest()
+                size_bytes = self._path.stat().st_size
+            except Exception as write_exc:
+                # Rollback: truncate file back to pre-write position so no
+                # bytes exist on disk without a matching audit record.
+                try:
+                    file.seek(pre_write_pos)
+                    file.truncate(pre_write_pos)
+                    file.flush()
+                    os.fsync(file.fileno())
+                except OSError as rollback_err:
+                    raise RuntimeError(
+                        f"CSV append failed and rollback also failed — file may be corrupted at byte {pre_write_pos}"
+                    ) from rollback_err
+                raise write_exc
 
         return SinkWriteResult(
             artifact=ArtifactDescriptor.for_file(
@@ -332,20 +438,15 @@ class CSVSink(BaseSink):
         )
 
     def _open_file(self, rows: list[dict[str, Any]]) -> None:
-        """Open file for writing, handling append mode and display headers.
+        """Open file for append mode.
+
+        Called only from the append-mode path in write(). Write mode uses
+        _open_file_write_mode() instead (called after staging succeeds to
+        avoid truncating the file before we know the batch is valid).
 
         In append mode:
         - If file exists with headers: read headers from it, open in append mode
         - If file doesn't exist or is empty: create with headers (like write mode)
-
-        In write mode:
-        - Always truncate and write headers
-
-        When schema is explicit (not dynamic), fieldnames are derived from schema
-        field definitions. This ensures all defined fields (including optional ones)
-        are present in the CSV header.
-
-        When schema is dynamic, fieldnames are inferred from the first row's keys.
 
         Display Headers:
         When headers mode is CUSTOM or ORIGINAL, the CSV header row uses display
@@ -356,7 +457,7 @@ class CSVSink(BaseSink):
         Args:
             rows: First batch of rows (used to determine fieldnames if dynamic schema)
         """
-        if self._mode == "append" and self._path.exists():
+        if self._path.exists():
             # Try to read existing headers from file
             with open(self._path, encoding=self._encoding, newline="") as f:
                 reader = csv.DictReader(f, delimiter=self._delimiter)
@@ -405,15 +506,27 @@ class CSVSink(BaseSink):
                         self._hasher.update(chunk)
                 return
 
-        # Write mode OR append to non-existent/empty file
-        # Get data field names (for DictWriter row lookup) and display names (for header)
+        # Append to non-existent/empty file — create with headers
         data_fields, display_fields = self._get_field_names_and_display(rows[0])
-
-        # Store data field names for DictWriter
         self._fieldnames = data_fields
+        self._open_file_write_mode(data_fields, display_fields)
+
+    def _open_file_write_mode(self, data_fields: list[str], display_fields: list[str]) -> None:
+        """Open (or create) the file in write mode and write the header row.
+
+        Called AFTER staging succeeds so that the file is never truncated
+        before we know the first batch is valid.
+
+        Args:
+            data_fields: Field names matching row dict keys (for DictWriter).
+            display_fields: Display names for the CSV header row.
+        """
+        self._fieldnames = data_fields
+        self._claim_write_target()
+        file_mode = "x" if should_create_exclusively(self._collision_policy) else "w"
 
         self._file = open(  # noqa: SIM115 - handle kept open for streaming writes, closed in close()
-            self._path, "w", encoding=self._encoding, newline=""
+            self._path, file_mode, encoding=self._encoding, newline=""
         )
         self._writer = csv.DictWriter(
             self._file,

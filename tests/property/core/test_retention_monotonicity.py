@@ -301,7 +301,7 @@ class TestPurgeResultInvariantProperties:
         duration: float,
     ) -> None:
         """Property: PurgeResult fields are non-negative."""
-        failed_refs = [f"ref_{i}" for i in range(num_failed)]
+        failed_refs = tuple(f"ref_{i}" for i in range(num_failed))
 
         result = PurgeResult(
             deleted_count=deleted,
@@ -323,9 +323,9 @@ class TestPurgeResultInvariantProperties:
 
         No refs should be silently dropped during purging.
         """
-        # Create mock store where all refs "don't exist" (skipped)
+        # PayloadStore.delete(False) means the ref was not found (skipped).
         mock_store = MagicMock()
-        mock_store.exists.return_value = False
+        mock_store.delete.return_value = False
 
         with make_landscape_db() as db:
             completed_at = _REFERENCE_TIME - timedelta(days=30)
@@ -347,7 +347,7 @@ class TestPurgeResultInvariantProperties:
     def test_purge_nonexistent_all_skipped(self, num_rows: int) -> None:
         """Property: Purging refs that don't exist in store counts as skipped."""
         mock_store = MagicMock()
-        mock_store.exists.return_value = False
+        mock_store.delete.return_value = False
 
         with make_landscape_db() as db:
             completed_at = _REFERENCE_TIME - timedelta(days=30)
@@ -368,7 +368,6 @@ class TestPurgeResultInvariantProperties:
     def test_purge_existing_all_deleted(self, num_rows: int) -> None:
         """Property: Purging refs that exist and succeed counts as deleted."""
         mock_store = MagicMock()
-        mock_store.exists.return_value = True
         mock_store.delete.return_value = True
 
         with make_landscape_db() as db:

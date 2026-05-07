@@ -1,20 +1,36 @@
 """Lineage tree widget for displaying pipeline lineage."""
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
-from elspeth.tui.types import LineageData
+from elspeth.contracts.freeze import freeze_fields
+from elspeth.tui.types import LineageData, TreeNodeDict
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TreeNode:
-    """Node in the lineage tree."""
+    """Immutable node in the lineage tree.
+
+    Frozen to prevent external mutation via get_node_by_id().
+    Children is a tuple for deep immutability.
+    """
 
     label: str
     node_id: str | None = None
     node_type: str = ""
-    children: list["TreeNode"] = field(default_factory=list)
+    children: tuple["TreeNode", ...] = ()
     expanded: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate construction invariants."""
+        if not isinstance(self.label, str):
+            raise TypeError(f"label must be str, got {type(self.label).__name__}")
+        for i, child in enumerate(self.children):
+            if not isinstance(child, TreeNode):
+                raise TypeError(f"children[{i}] must be TreeNode, got {type(child).__name__}")
+        # deep_freeze is idempotent on already-frozen values (tuple of TreeNode
+        # instances), so no type guard on `children` is needed — it will be a
+        # tuple of opaque frozen dataclasses and deep_freeze returns identity.
+        freeze_fields(self, "children")
 
 
 class LineageTree:
@@ -52,34 +68,13 @@ class LineageTree:
     def _build_tree(self) -> TreeNode:
         """Build tree structure from lineage data.
 
+        Builds bottom-up since TreeNode is frozen (children must be known
+        at construction time).
+
         Returns:
             Root TreeNode
         """
-        run_id = self._data["run_id"]
-        root = TreeNode(label=f"Run: {run_id}", node_type="run")
-
-        # Add source
-        source = self._data["source"]
-        source_name = source["name"]
-        source_node_id = source["node_id"]
-        source_node = TreeNode(
-            label=f"Source: {source_name or '(unknown)'}",
-            node_id=source_node_id,
-            node_type="source",
-        )
-        root.children.append(source_node)
-
-        # Build transform chain (linear rendering).
-        # KNOWN LIMITATION: DAG pipelines with fork/coalesce are rendered as a
-        # linear chain — parallel branches and merge points are not shown.
-        # All data for DAG display is available (branch_name, fork_group_id,
-        # token_parents) but not yet consumed here. For full DAG exploration,
-        # use the Landscape MCP server: elspeth-mcp → explain_token().
-        transforms = self._data["transforms"]
-        current_parent = source_node
-
-        # Label map for processing node types (gate, aggregation, coalesce
-        # are displayed with their specific type, not generic "Transform")
+        # Label map for processing node types
         _TYPE_LABELS = {
             "transform": "Transform",
             "gate": "Gate",
@@ -87,7 +82,52 @@ class LineageTree:
             "coalesce": "Coalesce",
         }
 
-        for transform in transforms:
+        # Step 1: Group tokens by their terminal sink
+        tokens_by_sink: dict[str, list[TreeNode]] = {}
+        for token in self._data["tokens"]:
+            token_id = token["token_id"]
+            row_id = token["row_id"]
+            path = token["path"]
+            token_node = TreeNode(
+                label=f"Token: {token_id} (row: {row_id})",
+                node_id=token_id,
+                node_type="token",
+            )
+            if path:
+                terminal_node_id = path[-1]
+                if terminal_node_id not in tokens_by_sink:
+                    tokens_by_sink[terminal_node_id] = []
+                tokens_by_sink[terminal_node_id].append(token_node)
+
+        # Step 2: Build sink nodes with their token children
+        sink_nodes: list[TreeNode] = []
+        for sink in self._data["sinks"]:
+            sink_name = sink["name"]
+            sink_node_id = sink["node_id"]
+            # Sink without node_id can't have tokens attached
+            token_children = tuple(tokens_by_sink.get(sink_node_id, [])) if sink_node_id is not None else ()
+            sink_node = TreeNode(
+                label=f"Sink: {sink_name}",
+                node_id=sink_node_id,
+                node_type="sink",
+                children=token_children,
+            )
+            sink_nodes.append(sink_node)
+
+        # Step 3: Build transform chain backwards
+        # KNOWN LIMITATION: DAG pipelines with fork/coalesce are rendered as a
+        # linear chain — parallel branches and merge points are not shown.
+        # All data for DAG display is available (branch_name, fork_group_id,
+        # token_parents) but not yet consumed here. For full DAG exploration,
+        # use the Landscape MCP server: elspeth-mcp → explain_token().
+        transforms = self._data["transforms"]
+
+        # Start with sinks as children of the last transform
+        current_children: tuple[TreeNode, ...] = tuple(sink_nodes)
+
+        # Build transforms in reverse order (last transform wraps sinks,
+        # second-to-last wraps last, etc.)
+        for transform in reversed(transforms):
             transform_name = transform["name"]
             transform_node_id = transform["node_id"]
             raw_type = transform["node_type"]
@@ -103,56 +143,42 @@ class LineageTree:
                 label=f"{type_label}: {transform_name}",
                 node_id=transform_node_id,
                 node_type=raw_type,
+                children=current_children,
             )
-            current_parent.children.append(transform_node)
-            current_parent = transform_node
+            # This transform becomes the child of the previous one
+            current_children = (transform_node,)
 
-        # Add sinks as children of last transform (or source if no transforms)
-        sinks = self._data["sinks"]
-        sink_nodes: dict[str, TreeNode] = {}
+        # Step 4: Build source node
+        source = self._data["source"]
+        source_name = source["name"]
+        source_node_id = source["node_id"]
+        source_node = TreeNode(
+            label=f"Source: {source_name or '(unknown)'}",
+            node_id=source_node_id,
+            node_type="source",
+            children=current_children,
+        )
 
-        for sink in sinks:
-            sink_name = sink["name"]
-            sink_node_id = sink["node_id"]
-            sink_node = TreeNode(
-                label=f"Sink: {sink_name}",
-                node_id=sink_node_id,
-                node_type="sink",
-            )
-            current_parent.children.append(sink_node)
-            if sink_node_id:
-                sink_nodes[sink_node_id] = sink_node
+        # Step 5: Build root
+        run_id = self._data["run_id"]
+        return TreeNode(
+            label=f"Run: {run_id}",
+            node_type="run",
+            children=(source_node,),
+        )
 
-        # Add tokens under their terminal nodes
-        tokens = self._data["tokens"]
-        for token in tokens:
-            token_id = token["token_id"]
-            row_id = token["row_id"]
-            path = token["path"]
-            token_node = TreeNode(
-                label=f"Token: {token_id} (row: {row_id})",
-                node_id=token_id,
-                node_type="token",
-            )
-            # Find which sink this token ended at
-            if path:
-                terminal_node_id = path[-1]
-                if terminal_node_id in sink_nodes:
-                    sink_nodes[terminal_node_id].children.append(token_node)
-
-        return root
-
-    def get_tree_nodes(self) -> list[dict[str, Any]]:
+    def get_tree_nodes(self) -> list[TreeNodeDict]:
         """Get flat list of tree nodes for rendering.
 
         Returns:
-            List of dicts with label, node_id, node_type, depth, has_children
+            List of TreeNodeDict with label, node_id, node_type, depth,
+            has_children, expanded.
         """
-        nodes: list[dict[str, Any]] = []
+        nodes: list[TreeNodeDict] = []
         self._flatten_tree(self._root, 0, nodes)
         return nodes
 
-    def _flatten_tree(self, node: TreeNode, depth: int, result: list[dict[str, Any]]) -> None:
+    def _flatten_tree(self, node: TreeNode, depth: int, result: list[TreeNodeDict]) -> None:
         """Recursively flatten tree to list.
 
         Args:
@@ -161,14 +187,14 @@ class LineageTree:
             result: List to append to
         """
         result.append(
-            {
-                "label": node.label,
-                "node_id": node.node_id,
-                "node_type": node.node_type,
-                "depth": depth,
-                "has_children": len(node.children) > 0,
-                "expanded": node.expanded,
-            }
+            TreeNodeDict(
+                label=node.label,
+                node_id=node.node_id,
+                node_type=node.node_type,
+                depth=depth,
+                has_children=len(node.children) > 0,
+                expanded=node.expanded,
+            )
         )
 
         if node.expanded:
@@ -203,18 +229,3 @@ class LineageTree:
             if found:
                 return found
         return None
-
-    def toggle_node(self, node_id: str) -> bool:
-        """Toggle expansion state of a node.
-
-        Args:
-            node_id: Node ID to toggle
-
-        Returns:
-            New expansion state
-        """
-        node = self.get_node_by_id(node_id)
-        if node:
-            node.expanded = not node.expanded
-            return node.expanded
-        return False

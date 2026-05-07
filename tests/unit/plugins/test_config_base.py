@@ -2,12 +2,19 @@
 """Tests for plugin configuration base classes."""
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
 
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.plugins.infrastructure.config_base import PathConfig, PluginConfig, PluginConfigError
+from elspeth.plugins.infrastructure.config_base import (
+    DataPluginConfig,
+    PathConfig,
+    PluginConfig,
+    PluginConfigError,
+    SinkPathConfig,
+)
 
 # Helper to create a dynamic schema for tests
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -39,6 +46,22 @@ class TestPluginConfig:
         assert "Invalid configuration for MyConfig" in str(exc_info.value)
         assert exc_info.value.__cause__ is not None
         assert isinstance(exc_info.value.__cause__, ValidationError)
+
+    def test_from_dict_exposes_sanitized_cause_without_model_banner(self) -> None:
+        """cause omits Pydantic's model banner and docs URL."""
+
+        class MyConfig(PluginConfig):
+            required_field: str
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            MyConfig.from_dict({})
+
+        cause = exc_info.value.cause
+        assert cause is not None
+        assert "required_field" in cause
+        assert "Field required" in cause
+        assert "validation error for MyConfig" not in cause
+        assert "pydantic.dev" not in cause
 
     def test_from_dict_success(self) -> None:
         """from_dict should return valid config on success."""
@@ -91,7 +114,7 @@ class TestPluginConfig:
             name: str
 
         with pytest.raises(PluginConfigError, match=rf"config must be a dict, got {type_name}"):
-            MyConfig.from_dict(payload)  # type: ignore[arg-type]
+            MyConfig.from_dict(payload)
 
 
 class TestPathConfig:
@@ -101,7 +124,7 @@ class TestPathConfig:
         """Empty path should raise validation error."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         with pytest.raises(ValidationError) as exc_info:
             FileConfig(path="", schema_config=DYNAMIC_SCHEMA)
@@ -112,7 +135,7 @@ class TestPathConfig:
         """Whitespace-only path should raise validation error."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         with pytest.raises(ValidationError) as exc_info:
             FileConfig(path="   ", schema_config=DYNAMIC_SCHEMA)
@@ -123,7 +146,7 @@ class TestPathConfig:
         """Valid path should be accepted."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         cfg = FileConfig(path="/path/to/file.csv", schema_config=DYNAMIC_SCHEMA)
 
@@ -133,7 +156,7 @@ class TestPathConfig:
         """Absolute path should not change when resolved."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         cfg = FileConfig(path="/absolute/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path()
@@ -144,7 +167,7 @@ class TestPathConfig:
         """Absolute path should ignore base_dir when provided."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         cfg = FileConfig(path="/absolute/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path(base_dir=Path("/other/base"))
@@ -155,7 +178,7 @@ class TestPathConfig:
         """Relative path without base_dir should return as-is."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         cfg = FileConfig(path="relative/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path()
@@ -166,7 +189,7 @@ class TestPathConfig:
         """Relative path should be resolved against base_dir."""
 
         class FileConfig(PathConfig):
-            pass
+            _plugin_component_type: ClassVar[str | None] = "source"
 
         cfg = FileConfig(path="relative/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path(base_dir=Path("/base"))
@@ -177,6 +200,7 @@ class TestPathConfig:
         """PathConfig subclass can have additional validated fields."""
 
         class CSVConfig(PathConfig):
+            _plugin_component_type: ClassVar[str | None] = "sink"
             delimiter: str = ","
             encoding: str = "utf-8"
 
@@ -195,6 +219,7 @@ class TestPathConfig:
         """PathConfig subclass should still reject extra fields."""
 
         class CSVConfig(PathConfig):
+            _plugin_component_type: ClassVar[str | None] = "sink"
             delimiter: str = ","
 
         with pytest.raises(ValidationError):
@@ -208,6 +233,7 @@ class TestPluginConfigInheritance:
         """Multiple levels of inheritance should work correctly."""
 
         class MiddleConfig(PathConfig):
+            _plugin_component_type: ClassVar[str | None] = "source"
             compression: str = "none"
 
         class SpecificConfig(MiddleConfig):
@@ -229,6 +255,7 @@ class TestPluginConfigInheritance:
         """from_dict should return instance of the subclass, not base class."""
 
         class SpecificConfig(PathConfig):
+            _plugin_component_type: ClassVar[str | None] = "source"
             custom_field: str = "default"
 
         cfg = SpecificConfig.from_dict(
@@ -298,13 +325,14 @@ class TestPluginConfigWithSchema:
 
     def test_data_plugin_config_requires_schema(self) -> None:
         """DataPluginConfig (for sources/sinks) requires schema."""
-        from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 
         class SourceConfig(DataPluginConfig):
+            _plugin_component_type: ClassVar[str | None] = "source"
             path: str
 
         # Should fail without schema - from_dict wraps in PluginConfigError
-        with pytest.raises(PluginConfigError, match=r"schema_config[\s\S]*Field required"):
+        # Error message uses alias "schema" not field name "schema_config"
+        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
             SourceConfig.from_dict({"path": "data.csv"})
 
         # Should succeed with schema
@@ -318,9 +346,9 @@ class TestPluginConfigWithSchema:
 
     def test_data_plugin_config_with_explicit_schema(self) -> None:
         """DataPluginConfig accepts explicit schema definition."""
-        from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 
         class SourceConfig(DataPluginConfig):
+            _plugin_component_type: ClassVar[str | None] = "source"
             path: str
 
         config = SourceConfig.from_dict(
@@ -343,17 +371,19 @@ class TestSourceDataConfig:
 
     def test_on_validation_failure_required(self) -> None:
         """on_validation_failure must be explicitly specified."""
+        from elspeth.contracts.schema import SchemaConfig
         from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 
         with pytest.raises(ValidationError) as exc_info:
             SourceDataConfig(  # type: ignore[call-arg]  # testing missing required arg
                 path="data.csv",
-                schema_config=None,  # Will fail DataPluginConfig validation too
+                schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+                # on_validation_failure is missing - should fail
             )
 
         # Should fail because on_validation_failure is required
         errors = exc_info.value.errors()
-        field_names = [e["loc"][0] for e in errors]
+        field_names = [e["loc"][0] for e in errors if e["loc"]]
         assert "on_validation_failure" in field_names
 
     def test_on_validation_failure_accepts_sink_name(self) -> None:
@@ -408,6 +438,38 @@ class TestSourceDataConfig:
         assert config.path == "data/input.csv"
         assert config.schema_config is not None
         assert config.schema_config.mode == "fixed"
+
+
+class TestSinkPathConfigHeaders:
+    """Tests for SinkPathConfig header output validation."""
+
+    def test_custom_headers_reject_non_normalized_mapping_keys(self) -> None:
+        """CUSTOM header mappings must use normalized field names as keys."""
+        with pytest.raises(
+            PluginConfigError,
+            match=r"headers custom mapping keys\[0\].*not a valid Python identifier",
+        ):
+            SinkPathConfig.from_dict(
+                {
+                    "path": "out.csv",
+                    "schema": {"mode": "observed"},
+                    "headers": {"Customer ID": "CID"},
+                }
+            )
+
+    def test_custom_headers_reject_blank_output_names(self) -> None:
+        """CUSTOM header mappings must not emit blank or whitespace-only headers."""
+        with pytest.raises(
+            PluginConfigError,
+            match=r"headers custom mapping value for 'customer_id' must not be empty or whitespace-only",
+        ):
+            SinkPathConfig.from_dict(
+                {
+                    "path": "out.csv",
+                    "schema": {"mode": "observed"},
+                    "headers": {"customer_id": "   "},
+                }
+            )
 
 
 class TestAzureAuthConfigValidator:
@@ -548,3 +610,98 @@ class TestTransformDataConfig:
 
         with pytest.raises(ValidationError):
             TransformDataConfig()  # type: ignore[call-arg]  # Missing schema_config - testing runtime validation
+
+
+class TestComponentTypeEnforcement:
+    """Tests for __init_subclass__ enforcement of _plugin_component_type.
+
+    DataPluginConfig subclasses must set _plugin_component_type to a non-None
+    value (either directly or via an intermediate base). Only explicitly exempt
+    intermediate bases (PathConfig, DataPluginConfig) may leave it unset.
+    """
+
+    def test_direct_subclass_without_component_type_raises(self) -> None:
+        """Direct DataPluginConfig subclass missing _plugin_component_type raises TypeError."""
+        with pytest.raises(TypeError, match="does not set _plugin_component_type"):
+
+            class BadConfig(DataPluginConfig):
+                pass
+
+    def test_direct_subclass_with_component_type_succeeds(self) -> None:
+        """Direct DataPluginConfig subclass with _plugin_component_type succeeds."""
+
+        class GoodConfig(DataPluginConfig):
+            _plugin_component_type: ClassVar[str | None] = "transform"
+
+        assert GoodConfig._plugin_component_type == "transform"
+
+    def test_path_config_subclass_without_component_type_raises(self) -> None:
+        """PathConfig subclass missing _plugin_component_type raises TypeError.
+
+        PathConfig is exempt, but its exemption does NOT inherit — subclasses
+        must set _plugin_component_type themselves.
+        """
+        with pytest.raises(TypeError, match="does not set _plugin_component_type"):
+
+            class BadPathChild(PathConfig):
+                pass
+
+    def test_inherited_component_type_from_intermediate_base(self) -> None:
+        """Subclass inheriting _plugin_component_type from SourceDataConfig succeeds."""
+        from elspeth.plugins.infrastructure.config_base import SourceDataConfig
+
+        class GoodSource(SourceDataConfig):
+            extra_field: str = "default"
+
+        assert GoodSource._plugin_component_type == "source"
+
+    def test_inherited_component_type_through_chain(self) -> None:
+        """Deeply nested subclass inheriting through chain succeeds."""
+        from elspeth.plugins.infrastructure.config_base import TransformDataConfig
+
+        class MiddleTransform(TransformDataConfig):
+            buffer_size: int = 100
+
+        class LeafTransform(MiddleTransform):
+            mode: str = "fast"
+
+        assert LeafTransform._plugin_component_type == "transform"
+
+    def test_exempt_base_does_not_propagate_exemption(self) -> None:
+        """_component_type_exempt on PathConfig does not propagate to its children.
+
+        This is the critical invariant: exemption is per-class (checked via
+        cls.__dict__), not inherited through the MRO.
+        """
+        # PathConfig itself is exempt — defining it didn't raise
+        assert "_component_type_exempt" in PathConfig.__dict__
+
+        # But a subclass of PathConfig is NOT exempt unless it sets the field
+        with pytest.raises(TypeError, match="does not set _plugin_component_type"):
+
+            class NotExempt(PathConfig):
+                pass
+
+    def test_error_message_includes_class_name(self) -> None:
+        """TypeError message includes the offending class name for debuggability."""
+        with pytest.raises(TypeError, match="MissingTypeConfig") as exc_info:
+
+            class MissingTypeConfig(DataPluginConfig):
+                pass
+
+        assert "source" in str(exc_info.value) or "sink" in str(exc_info.value) or "transform" in str(exc_info.value)
+
+    def test_all_real_config_classes_have_component_type(self) -> None:
+        """Smoke test: all production DataPluginConfig subclasses resolve component_type.
+
+        This catches any class that somehow bypassed the __init_subclass__ hook
+        (e.g. defined before the hook was added and cached in .pyc).
+        """
+        from elspeth.plugins.infrastructure.config_base import (
+            SinkPathConfig,
+            SourceDataConfig,
+            TransformDataConfig,
+        )
+
+        for cls in (SourceDataConfig, SinkPathConfig, TransformDataConfig):
+            assert cls._plugin_component_type is not None, f"{cls.__name__}._plugin_component_type is None"

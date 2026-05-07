@@ -19,8 +19,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.testing import make_token_info
 
 # =============================================================================
@@ -28,7 +30,7 @@ from elspeth.testing import make_token_info
 # =============================================================================
 
 
-def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str]:
+def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str]:
     """Replica of the pending_sort_key closure from _write_pending_to_sinks.
 
     This must stay in sync with the production code. If the production sort key
@@ -36,8 +38,29 @@ def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bo
     """
     pending = pair[1]
     if pending is None:
-        return (True, "", "")
-    return (False, pending.outcome.value, pending.error_hash or "")
+        return (True, "", "", "")
+    outcome_value = pending.outcome.value if pending.outcome is not None else ""
+    return (False, outcome_value, pending.path.value, pending.error_hash or "")
+
+
+def _completed_pending() -> PendingOutcome:
+    return PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+
+
+def _routed_pending() -> PendingOutcome:
+    return PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.GATE_ROUTED)
+
+
+def _quarantined_pending(*, error_hash: str) -> PendingOutcome:
+    return PendingOutcome(
+        outcome=TerminalOutcome.FAILURE,
+        path=TerminalPath.QUARANTINED_AT_SOURCE,
+        error_hash=error_hash,
+    )
+
+
+def _pending_pair(pending: PendingOutcome) -> tuple[TerminalOutcome | None, TerminalPath]:
+    return pending.outcome, pending.path
 
 
 def _group_pairs(
@@ -66,7 +89,7 @@ class TestPendingSortKey:
         tok_completed = make_token_info(token_id="tok-completed")
 
         pair_none = (tok_none, None)
-        pair_completed = (tok_completed, PendingOutcome(RowOutcome.COMPLETED))
+        pair_completed = (tok_completed, _completed_pending())
 
         # None maps to (True, "", "") which sorts after (False, ..., ...)
         assert _pending_sort_key(pair_none) > _pending_sort_key(pair_completed)
@@ -77,7 +100,7 @@ class TestPendingSortKey:
         tok_quarantined = make_token_info(token_id="tok-q")
 
         pair_none = (tok_none, None)
-        pair_quarantined = (tok_quarantined, PendingOutcome(RowOutcome.QUARANTINED, error_hash="abc123" * 10 + "abcd"))
+        pair_quarantined = (tok_quarantined, _quarantined_pending(error_hash="abc123" * 10 + "abcd"))
 
         assert _pending_sort_key(pair_none) > _pending_sort_key(pair_quarantined)
 
@@ -86,8 +109,8 @@ class TestPendingSortKey:
         tok_c = make_token_info(token_id="tok-c")
         tok_q = make_token_info(token_id="tok-q")
 
-        key_completed = _pending_sort_key((tok_c, PendingOutcome(RowOutcome.COMPLETED)))
-        key_quarantined = _pending_sort_key((tok_q, PendingOutcome(RowOutcome.QUARANTINED, error_hash="a" * 64)))
+        key_completed = _pending_sort_key((tok_c, _completed_pending()))
+        key_quarantined = _pending_sort_key((tok_q, _quarantined_pending(error_hash="a" * 64)))
 
         assert key_completed != key_quarantined
 
@@ -96,8 +119,8 @@ class TestPendingSortKey:
         tok_r = make_token_info(token_id="tok-r")
         tok_c = make_token_info(token_id="tok-c")
 
-        key_routed = _pending_sort_key((tok_r, PendingOutcome(RowOutcome.ROUTED)))
-        key_completed = _pending_sort_key((tok_c, PendingOutcome(RowOutcome.COMPLETED)))
+        key_routed = _pending_sort_key((tok_r, _routed_pending()))
+        key_completed = _pending_sort_key((tok_c, _completed_pending()))
 
         assert key_routed != key_completed
 
@@ -107,8 +130,8 @@ class TestPendingSortKey:
         tok2 = make_token_info(token_id="tok-2")
         error_hash = "b" * 64
 
-        key1 = _pending_sort_key((tok1, PendingOutcome(RowOutcome.QUARANTINED, error_hash=error_hash)))
-        key2 = _pending_sort_key((tok2, PendingOutcome(RowOutcome.QUARANTINED, error_hash=error_hash)))
+        key1 = _pending_sort_key((tok1, _quarantined_pending(error_hash=error_hash)))
+        key2 = _pending_sort_key((tok2, _quarantined_pending(error_hash=error_hash)))
 
         assert key1 == key2
 
@@ -117,8 +140,8 @@ class TestPendingSortKey:
         tok1 = make_token_info(token_id="tok-1")
         tok2 = make_token_info(token_id="tok-2")
 
-        key1 = _pending_sort_key((tok1, PendingOutcome(RowOutcome.QUARANTINED, error_hash="a" * 64)))
-        key2 = _pending_sort_key((tok2, PendingOutcome(RowOutcome.QUARANTINED, error_hash="b" * 64)))
+        key1 = _pending_sort_key((tok1, _quarantined_pending(error_hash="a" * 64)))
+        key2 = _pending_sort_key((tok2, _quarantined_pending(error_hash="b" * 64)))
 
         assert key1 != key2
 
@@ -142,10 +165,10 @@ class TestPendingGrouping:
         tok_q2 = make_token_info(token_id="tok-q2")
 
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = [
-            (tok_c1, PendingOutcome(RowOutcome.COMPLETED)),
-            (tok_q1, PendingOutcome(RowOutcome.QUARANTINED, error_hash="e" * 64)),
-            (tok_c2, PendingOutcome(RowOutcome.COMPLETED)),
-            (tok_q2, PendingOutcome(RowOutcome.QUARANTINED, error_hash="e" * 64)),
+            (tok_c1, _completed_pending()),
+            (tok_q1, _quarantined_pending(error_hash="e" * 64)),
+            (tok_c2, _completed_pending()),
+            (tok_q2, _quarantined_pending(error_hash="e" * 64)),
         ]
 
         groups = _group_pairs(pairs)
@@ -153,12 +176,18 @@ class TestPendingGrouping:
         # Must produce exactly 2 groups
         assert len(groups) == 2
 
-        # Extract outcomes and token IDs per group
+        # Extract outcome/path pairs and token IDs per group
         for pending_outcome, tokens in groups:
             token_ids = {t.token_id for t in tokens}
-            if pending_outcome is not None and pending_outcome.outcome == RowOutcome.COMPLETED:
+            if pending_outcome is not None and _pending_pair(pending_outcome) == (
+                TerminalOutcome.SUCCESS,
+                TerminalPath.DEFAULT_FLOW,
+            ):
                 assert token_ids == {"tok-c1", "tok-c2"}
-            elif pending_outcome is not None and pending_outcome.outcome == RowOutcome.QUARANTINED:
+            elif pending_outcome is not None and _pending_pair(pending_outcome) == (
+                TerminalOutcome.FAILURE,
+                TerminalPath.QUARANTINED_AT_SOURCE,
+            ):
                 assert token_ids == {"tok-q1", "tok-q2"}
             else:
                 pytest.fail(f"Unexpected group outcome: {pending_outcome}")
@@ -170,7 +199,7 @@ class TestPendingGrouping:
         tok_completed = make_token_info(token_id="tok-c1")
 
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = [
-            (tok_completed, PendingOutcome(RowOutcome.COMPLETED)),
+            (tok_completed, _completed_pending()),
             (tok_none1, None),
             (tok_none2, None),
         ]
@@ -194,21 +223,25 @@ class TestPendingGrouping:
         tok_q = make_token_info(token_id="tok-q")
 
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = [
-            (tok_r, PendingOutcome(RowOutcome.ROUTED)),
-            (tok_c, PendingOutcome(RowOutcome.COMPLETED)),
-            (tok_q, PendingOutcome(RowOutcome.QUARANTINED, error_hash="f" * 64)),
+            (tok_r, _routed_pending()),
+            (tok_c, _completed_pending()),
+            (tok_q, _quarantined_pending(error_hash="f" * 64)),
         ]
 
         groups = _group_pairs(pairs)
 
         assert len(groups) == 3
-        outcomes = {g[0].outcome if g[0] is not None else None for g in groups}
-        assert outcomes == {RowOutcome.COMPLETED, RowOutcome.ROUTED, RowOutcome.QUARANTINED}
+        pending_pairs = {_pending_pair(g[0]) if g[0] is not None else None for g in groups}
+        assert pending_pairs == {
+            (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
+            (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED),
+            (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE),
+        }
 
     def test_sort_stability_preserves_insertion_order(self) -> None:
         """Tokens with the same PendingOutcome must stay in their original order."""
         tokens = [make_token_info(token_id=f"tok-{i}") for i in range(5)]
-        outcome = PendingOutcome(RowOutcome.COMPLETED)
+        outcome = _completed_pending()
 
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = [(tok, outcome) for tok in tokens]
 
@@ -228,9 +261,9 @@ class TestPendingGrouping:
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = []
         for i in range(5):
             if i % 2 == 0:
-                pairs.append((make_token_info(token_id=f"tok-c{i}"), PendingOutcome(RowOutcome.COMPLETED)))
+                pairs.append((make_token_info(token_id=f"tok-c{i}"), _completed_pending()))
             else:
-                pairs.append((make_token_info(token_id=f"tok-q{i}"), PendingOutcome(RowOutcome.QUARANTINED, error_hash=error_hash)))
+                pairs.append((make_token_info(token_id=f"tok-q{i}"), _quarantined_pending(error_hash=error_hash)))
 
         groups = _group_pairs(pairs)
 
@@ -238,14 +271,14 @@ class TestPendingGrouping:
 
         for pending_outcome, tokens in groups:
             assert pending_outcome is not None
-            if pending_outcome.outcome == RowOutcome.COMPLETED:
+            if _pending_pair(pending_outcome) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW):
                 assert len(tokens) == 3
                 assert all(t.token_id.startswith("tok-c") for t in tokens)
-            elif pending_outcome.outcome == RowOutcome.QUARANTINED:
+            elif _pending_pair(pending_outcome) == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
                 assert len(tokens) == 2
                 assert all(t.token_id.startswith("tok-q") for t in tokens)
             else:
-                pytest.fail(f"Unexpected outcome: {pending_outcome.outcome}")
+                pytest.fail(f"Unexpected pending pair: {_pending_pair(pending_outcome)!r}")
 
     def test_empty_pairs_produces_no_groups(self) -> None:
         """An empty list of pairs should produce no groups."""
@@ -256,7 +289,7 @@ class TestPendingGrouping:
         """A single token produces exactly one group."""
         tok = make_token_info(token_id="tok-solo")
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = [
-            (tok, PendingOutcome(RowOutcome.COMPLETED)),
+            (tok, _completed_pending()),
         ]
 
         groups = _group_pairs(pairs)
@@ -279,15 +312,19 @@ class TestPendingGrouping:
         hash_b = "b" * 64
 
         pairs: list[tuple[TokenInfo, PendingOutcome | None]] = [
-            (tok_q1, PendingOutcome(RowOutcome.QUARANTINED, error_hash=hash_a)),
-            (tok_q2, PendingOutcome(RowOutcome.QUARANTINED, error_hash=hash_b)),
-            (tok_q3, PendingOutcome(RowOutcome.QUARANTINED, error_hash=hash_a)),
+            (tok_q1, _quarantined_pending(error_hash=hash_a)),
+            (tok_q2, _quarantined_pending(error_hash=hash_b)),
+            (tok_q3, _quarantined_pending(error_hash=hash_a)),
         ]
 
         groups = _group_pairs(pairs)
 
         # Two distinct error hashes = two groups (both QUARANTINED)
-        quarantine_groups = [(po, toks) for po, toks in groups if po is not None and po.outcome == RowOutcome.QUARANTINED]
+        quarantine_groups = [
+            (po, toks)
+            for po, toks in groups
+            if po is not None and _pending_pair(po) == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)
+        ]
         assert len(quarantine_groups) == 2
 
         hash_to_tokens: dict[str, list[str]] = {}
@@ -329,15 +366,16 @@ class TestSinkNameValidation:
 
         tok = make_token_info(token_id="tok-1")
         pending_tokens = {
-            "nonexistent_sink": [(tok, PendingOutcome(RowOutcome.COMPLETED))],
+            "nonexistent_sink": [(tok, _completed_pending())],
         }
 
         with pytest.raises(OrchestrationInvariantError, match="nonexistent_sink"):
             orchestrator._write_pending_to_sinks(
-                recorder=recorder,
+                factory=recorder,
                 run_id="test-run",
                 config=config,
                 ctx=ctx,
+                counters=ExecutionCounters(),
                 pending_tokens=pending_tokens,
                 sink_id_map={"output": "node-1"},
                 edge_map={},
@@ -360,10 +398,11 @@ class TestSinkNameValidation:
 
         # Should not raise — empty list triggers `continue` before sink lookup
         orchestrator._write_pending_to_sinks(
-            recorder=recorder,
+            factory=recorder,
             run_id="test-run",
             config=config,
             ctx=ctx,
+            counters=ExecutionCounters(),
             pending_tokens=pending_tokens,
             sink_id_map={},
             edge_map={},

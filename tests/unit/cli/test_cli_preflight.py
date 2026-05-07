@@ -23,7 +23,7 @@ def _make_minimal_config_yaml(tmp_path: Path, *, with_depends_on: bool = False) 
     """Write a minimal valid pipeline YAML and return its path."""
     import yaml
 
-    config = {
+    config: dict[str, object] = {
         "source": {"plugin": "csv", "options": {"path": str(tmp_path / "input.csv")}},
         "transforms": [],
         "sinks": {"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": str(tmp_path / "output.csv")}}},

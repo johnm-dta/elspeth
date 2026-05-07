@@ -17,7 +17,7 @@ from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.testing import make_pipeline_row, make_source_row
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource, PassTransform
 
@@ -161,14 +161,16 @@ class TestOrchestrator:
         graph = build_production_graph(config)
         run_result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: rows_succeeded > 0 alongside rows_quarantined > 0 maps
+        # to `completed_with_failures` under the presence-indicator predicate.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 1
         assert len(default_sink.results) == 1
         assert len(quarantine_sink.results) == 1
 
-        recorder = make_recorder(landscape_db)
-        errors = recorder.get_validation_errors_for_run(run_result.run_id)
+        factory = make_factory(landscape_db)
+        errors = factory.data_flow.get_validation_errors_for_run(run_result.run_id)
         assert len(errors) == 1
         assert errors[0].node_id == source.node_id
         assert errors[0].node_id != transform.node_id
@@ -200,7 +202,11 @@ class TestOrchestrator:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
+        # ADR-019: gate route_to_sink is intentional MOVE provenance on top of
+        # lifecycle SUCCESS. Gate-routed-only run -> COMPLETED.
         assert run_result.status == RunStatus.COMPLETED
+        assert run_result.rows_succeeded == 3
+        assert run_result.rows_routed_success == 3
         # value=10 and value=30 go to default, value=100 goes to high
         assert len(default_sink.results) == 2
         assert len(high_sink.results) == 1
@@ -234,6 +240,13 @@ class TestOrchestrator:
             policy="require_all",
             merge="union",
         )
+        runtime_coalesce = CoalesceSettings(
+            name="merge_paths",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+            on_success="output",
+        )
 
         config = PipelineConfig(
             source=as_source(source),
@@ -253,7 +266,7 @@ class TestOrchestrator:
                 "source_sink": {"plugin": "test", "on_write_failure": "discard"},
             },
             gates=[fork_gate, terminal_gate],
-            coalesce=[coalesce],
+            coalesce=[runtime_coalesce],
         )
 
         orchestrator = Orchestrator(landscape_db)
@@ -264,8 +277,12 @@ class TestOrchestrator:
             payload_store=payload_store,
         )
 
+        # ADR-019: gate route_to_sink is intentional MOVE provenance on top of
+        # lifecycle SUCCESS. Gate-routed-only run -> COMPLETED.
         assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 2
+        assert run_result.rows_routed_success == 2
         assert len(output_sink.results) == 2
         assert len(source_sink.results) == 0
 
@@ -410,7 +427,8 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as EMPTY.
+        assert run_result.status == RunStatus.EMPTY
         assert run_result.rows_processed == 0
         assert len(sink.results) == 0
 
@@ -444,14 +462,17 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # All rows fail source validation and are quarantined: no
+        # success indicator, only failure indicator (rows_quarantined > 0)
+        # — predicate correctly returns FAILED.
+        assert run_result.status == RunStatus.FAILED
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 2
         assert len(default_sink.results) == 0
         assert len(quarantine_sink.results) == 2
 
-        recorder = make_recorder(landscape_db)
-        contract = recorder.get_run_contract(run_result.run_id)
+        factory = make_factory(landscape_db)
+        contract = factory.run_lifecycle.get_run_contract(run_result.run_id)
         assert contract is not None
         assert contract.mode == "FLEXIBLE"
         assert contract.locked is True
@@ -503,6 +524,7 @@ class TestOrchestratorAcceptsGraph:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
+        mock_source.source_file_hash = None
         mock_source._on_validation_failure = "discard"
 
         source_node_id_setter = PropertyMock()
@@ -519,6 +541,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink.name = "csv"
         mock_sink.determinism = Determinism.IO_WRITE
         mock_sink.plugin_version = "1.0.0"
+        mock_sink.source_file_hash = None
         mock_sink._on_write_failure = "discard"
         mock_sink._reset_diversion_log = MagicMock()
 
@@ -592,6 +615,7 @@ class TestOrchestratorAcceptsGraph:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
+        mock_source.source_file_hash = None
         mock_source._on_validation_failure = "discard"
 
         source_node_id_setter = PropertyMock()
@@ -608,6 +632,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink_a.name = "output_a"
         mock_sink_a.determinism = Determinism.IO_WRITE
         mock_sink_a.plugin_version = "1.0.0"
+        mock_sink_a.source_file_hash = None
         mock_sink_a._on_write_failure = "discard"
         mock_sink_a._reset_diversion_log = MagicMock()
 
@@ -622,6 +647,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink_b.name = "output_b"
         mock_sink_b.determinism = Determinism.IO_WRITE
         mock_sink_b.plugin_version = "1.0.0"
+        mock_sink_b.source_file_hash = None
         mock_sink_b._on_write_failure = "discard"
         mock_sink_b._reset_diversion_log = MagicMock()
 

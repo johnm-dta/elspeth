@@ -142,22 +142,20 @@ def parse_tracing_config(config: dict[str, Any] | None) -> TracingConfig | None:
     if config is None:
         return None
 
+    # "provider" absence is a valid shorthand for "no tracing" — the only
+    # key where a .get() default is justified (it's a discriminator, not data).
     provider = config.get("provider", "none")
+
+    # Pass remaining config fields through to the dataclass, which owns all
+    # defaults and required-field validation via __post_init__.  This avoids
+    # duplicating dataclass defaults in .get() calls that can silently diverge.
+    fields = {k: v for k, v in config.items() if k != "provider"}
 
     match provider:
         case "azure_ai":
-            return AzureAITracingConfig(
-                connection_string=config.get("connection_string"),
-                enable_content_recording=config.get("enable_content_recording", True),
-                enable_live_metrics=config.get("enable_live_metrics", False),
-            )
+            return AzureAITracingConfig(**fields)
         case "langfuse":
-            return LangfuseTracingConfig(
-                public_key=config.get("public_key"),
-                secret_key=config.get("secret_key"),
-                host=config["host"],  # infrastructure addressing — no default
-                tracing_enabled=config.get("tracing_enabled", True),
-            )
+            return LangfuseTracingConfig(**fields)
         case "none":
             return TracingConfig(provider="none")
         case _:

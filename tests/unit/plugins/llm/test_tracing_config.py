@@ -76,7 +76,7 @@ class TestTracingConfigParsing:
 
     def test_langfuse_rejects_missing_host(self) -> None:
         """LangfuseTracingConfig crashes without host — infrastructure addressing."""
-        with pytest.raises(KeyError, match="host"):
+        with pytest.raises(ValueError, match="host"):
             parse_tracing_config(
                 {
                     "provider": "langfuse",

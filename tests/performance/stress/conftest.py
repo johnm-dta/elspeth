@@ -4,7 +4,7 @@
 Provides:
 - ChaosLLM HTTP server fixture (real TCP endpoint for stress testing)
 - CollectingOutputPort (thread-safe output collector, consolidated from 5 v1 files)
-- create_recorder_and_run helper (parameterized recorder+run factory)
+- create_factory_and_run helper (parameterized factory+run creator)
 - LLM config factories (Azure, OpenRouter, multi-query variants)
 - Test row generators (single-query and multi-query)
 - StressTestContext / StressTestResult dataclasses
@@ -37,7 +37,7 @@ from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 
 if TYPE_CHECKING:
     import httpx
@@ -425,6 +425,15 @@ def _run_uvicorn_server(
     asyncio.run(serve())
 
 
+@pytest.fixture(autouse=True)
+def _auto_close_telemetry_managers():
+    """Cleanup TelemetryManager instances after each test."""
+    from tests.fixtures.telemetry import telemetry_manager_cleanup
+
+    with telemetry_manager_cleanup():
+        yield
+
+
 @pytest.fixture
 def chaosllm_http_server(
     request: pytest.FixtureRequest,
@@ -572,32 +581,32 @@ class CollectingOutputPort:
 # ---------------------------------------------------------------------------
 
 
-def create_recorder_and_run(
+def create_factory_and_run(
     tmp_path_factory: pytest.TempPathFactory,
     plugin_name: str = "llm",
-) -> tuple[LandscapeRecorder, str, str]:
-    """Create a recorder and start a run, returning (recorder, run_id, node_id).
+) -> tuple[RecorderFactory, str, str]:
+    """Create a factory and start a run, returning (factory, run_id, node_id).
 
     Args:
         tmp_path_factory: Pytest temp path factory for creating audit DB
         plugin_name: Plugin name to register as node (default: "llm")
 
     Returns:
-        Tuple of (recorder, run_id, node_id)
+        Tuple of (factory, run_id, node_id)
     """
     tmp_path = tmp_path_factory.mktemp("stress_audit")
     db_path = tmp_path / "audit.db"
     db = LandscapeDB(f"sqlite:///{db_path}")
-    recorder = LandscapeRecorder(db)
+    factory = RecorderFactory(db)
 
-    run = recorder.begin_run(
+    run = factory.run_lifecycle.begin_run(
         config={"test": f"{plugin_name}_stress"},
         run_id=f"stress-{uuid.uuid4().hex[:8]}",
         canonical_version="v1",
     )
 
     schema = SchemaConfig.from_dict({"mode": "observed"})
-    node = recorder.register_node(
+    node = factory.data_flow.register_node(
         run_id=run.run_id,
         plugin_name=plugin_name,
         node_type=NodeType.TRANSFORM,
@@ -606,7 +615,7 @@ def create_recorder_and_run(
         schema_config=schema,
     )
 
-    return recorder, run.run_id, node.node_id
+    return factory, run.run_id, node.node_id
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +657,7 @@ def make_pipeline_row(data: dict[str, Any]) -> PipelineRow:
 
 
 def make_plugin_context(
-    landscape: LandscapeRecorder,
+    factory: RecorderFactory,
     run_id: str,
     state_id: str | None = None,
     token: TokenInfo | None = None,
@@ -658,7 +667,7 @@ def make_plugin_context(
     Delegates to the shared make_context() factory.
 
     Args:
-        landscape: LandscapeRecorder for audit trail
+        factory: RecorderFactory for audit trail
         run_id: Run ID for context
         state_id: Optional state ID (generated if not provided)
         token: Optional token info (generated if not provided)
@@ -675,7 +684,7 @@ def make_plugin_context(
 
     return make_context(
         run_id=run_id,
-        landscape=landscape,
+        landscape=factory.plugin_audit_writer(),
         state_id=state_id,
         token=token,
     )
@@ -942,7 +951,7 @@ class StressTestContext:
     against ChaosLLM with proper audit recording.
     """
 
-    landscape: LandscapeRecorder
+    factory: RecorderFactory
     run_id: str
     chaosllm_url: str
 
@@ -981,48 +990,48 @@ class StressTestResult:
 
 
 @pytest.fixture
-def stress_landscape_db(tmp_path: Path) -> Generator[LandscapeRecorder, None, None]:
-    """Create a fresh LandscapeRecorder for stress testing.
+def stress_landscape_factory(tmp_path: Path) -> Generator[RecorderFactory, None, None]:
+    """Create a fresh RecorderFactory for stress testing.
 
     Uses SQLite file database for persistence during test.
 
     Yields:
-        LandscapeRecorder ready for use
+        RecorderFactory ready for use
     """
     db_path = tmp_path / "stress-audit.db"
     db = LandscapeDB(f"sqlite:///{db_path}")
-    recorder = LandscapeRecorder(db)
+    factory = RecorderFactory(db)
 
-    yield recorder
+    yield factory
 
 
 @pytest.fixture
 def stress_test_context(
     chaosllm_http_server: ChaosLLMHTTPFixture,
-    stress_landscape_db: LandscapeRecorder,
+    stress_landscape_factory: RecorderFactory,
 ) -> Generator[StressTestContext, None, None]:
     """Create a complete stress test context.
 
-    Combines ChaosLLM server with landscape recorder and begins a run.
+    Combines ChaosLLM server with landscape factory and begins a run.
 
     Yields:
         StressTestContext with all resources ready
     """
-    run = stress_landscape_db.begin_run(
+    run = stress_landscape_factory.run_lifecycle.begin_run(
         config={"test": "stress"},
         run_id=f"stress-run-{uuid.uuid4().hex[:8]}",
         canonical_version="v1",
     )
 
     yield StressTestContext(
-        landscape=stress_landscape_db,
+        factory=stress_landscape_factory,
         run_id=run.run_id,
         chaosllm_url=chaosllm_http_server.url,
     )
 
     from elspeth.contracts import RunStatus
 
-    stress_landscape_db.complete_run(run.run_id, status=RunStatus.COMPLETED)
+    stress_landscape_factory.run_lifecycle.complete_run(run.run_id, status=RunStatus.COMPLETED)
 
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +1040,7 @@ def stress_test_context(
 
 
 def verify_audit_integrity(
-    landscape: LandscapeRecorder,
+    factory: RecorderFactory,
     run_id: str,
     expected_rows: int,
 ) -> bool:
@@ -1043,14 +1052,14 @@ def verify_audit_integrity(
     - Either completed or failed outcome
 
     Args:
-        landscape: LandscapeRecorder with test data
+        factory: RecorderFactory with test data
         run_id: Run ID to verify
         expected_rows: Expected number of source rows
 
     Returns:
         True if audit trail is complete, False otherwise
     """
-    with landscape._db.connection() as conn:
+    with factory._db.connection() as conn:
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import tokens_table
@@ -1065,7 +1074,7 @@ def verify_audit_integrity(
         return False
 
     # Get outcomes
-    with landscape._db.connection() as conn:
+    with factory._db.connection() as conn:
         from elspeth.core.landscape.schema import token_outcomes_table
 
         result = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == run_id))

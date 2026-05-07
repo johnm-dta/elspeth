@@ -1,0 +1,109 @@
+{
+  "verdict": "CHANGES_APPLIED_PENDING_REVIEW",
+  "go_no_go": "ROUND_3_REVIEW_REQUIRED",
+  "summary": "Patch pass applied for the round-2 plan-review findings. The plan now makes Phase 5 the first full-suite gate, gives Phases 1-4 focused gates, fills the Phase 4 resume sweep durability test body, stages ADR/telemetry/fixture paths in the atomic Phase 3 commit, aligns ADR-019 with the audit-store-only migration and batch-status I1b witness, handles SQLite WAL sidecars in deploy/rollback, restores the application ref during rollback, and fixes paste-invalid snippets and ambiguous constants/imports. Rerun plan-review round 3 before execution.",
+  "plan_file": "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md",
+  "plan_files_patched": [
+    "docs/architecture/adr/019-two-axis-terminal-model.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-3-accumulator-predicate.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-4-cross-check-invariants.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md"
+  ],
+  "reviewed_at": "2026-05-05T04:00:29Z",
+  "patched_at": "2026-05-05T04:10:20Z",
+  "review_mode": "round-2 remediation patch pass",
+  "standards_loaded": [
+    "engine-patterns-reference",
+    "tier-model-deep-dive",
+    "logging-telemetry-policy",
+    "config-contracts-guide"
+  ],
+  "issue_counts": {
+    "blocking_open_after_patch": 0,
+    "warnings_open_after_patch": 0,
+    "requires_review": true
+  },
+  "remediated_blocking_issues": [
+    {
+      "id": "B1",
+      "resolution": "Narrowed Phase 3 and Phase 4 to focused gates and made Phase 5 the first full pytest tests/ gate."
+    },
+    {
+      "id": "B2",
+      "resolution": "Replaced the docstring-only resume sweep placeholder with a parametrized public resume() durability test covering I1a/I1b, FAILED finalization, row preservation, and flush-before-sweep ordering."
+    },
+    {
+      "id": "B3",
+      "resolution": "Added rollback commands that restore the saved application ref before restoring pre-ADR-019 audit data."
+    },
+    {
+      "id": "B4",
+      "resolution": "Updated SQLite deploy and rollback commands to checkpoint WAL after stopping writers and copy/delete/restore audit.db, audit.db-wal, and audit.db-shm consistently."
+    },
+    {
+      "id": "B5",
+      "resolution": "Added the ADR, telemetry source/tests, and AST fixture corpus to the Phase 3 atomic staging list."
+    },
+    {
+      "id": "B6",
+      "resolution": "Rewrote the formatter regression snippet to construct a LineageResult and call LineageTextFormatter().format(result), matching current tests."
+    },
+    {
+      "id": "B7",
+      "resolution": "Patched ADR-019 migration policy to preserve sessions.db and scope delete-and-recreate to the Landscape audit store unless a separate session migration proves otherwise."
+    },
+    {
+      "id": "B8",
+      "resolution": "Added mypy, ruff check, and ruff format gates for Phase 4 touched source/tests before the Phase 4 commit."
+    },
+    {
+      "id": "B9",
+      "resolution": "Updated illegal-pair pytest match strings to match the planned stable error text."
+    }
+  ],
+  "remediated_warnings": [
+    {
+      "id": "W1",
+      "resolution": "Made contracts.audit.DISCARD_SINK_NAME the canonical sentinel in the plan and instructed web/engine snippets to import it instead of duplicating literals."
+    },
+    {
+      "id": "W2",
+      "resolution": "Clarified TokenOutcome direct construction covers shape invariants while recorder/loader constraints own required/exact/forbidden discriminator fields."
+    },
+    {
+      "id": "W3",
+      "resolution": "Rewrote the contracts/audit.py import instruction to remove only RowOutcome from the grouped enum import while preserving still-used enums."
+    },
+    {
+      "id": "W4",
+      "resolution": "Added TerminalOutcome and TerminalPath string-compare guards to the Phase 1 inventory Definition of Done."
+    },
+    {
+      "id": "W5",
+      "resolution": "Normalized Phase 4 counts around six cross-table tests and five durability cases, with explicit fresh/resume I1a/I1b plus graceful-shutdown skip coverage."
+    },
+    {
+      "id": "W6",
+      "resolution": "Fixed the final RowOutcome allowlist wording to consistently describe the final 3-entry shape."
+    },
+    {
+      "id": "W7",
+      "resolution": "Made copied snippets ruff-clean by asserting returned outcome IDs and removing unused RecorderFactory imports."
+    },
+    {
+      "id": "W8",
+      "resolution": "Patched ADR-019 I1b wording to make the batch-status witness canonical instead of deferring clarification to a follow-up."
+    },
+    {
+      "id": "W9",
+      "resolution": "Moved the operator migration stub ahead of schema compatibility tests/errors by making it Task 1.1a and the guard Task 1.1b."
+    }
+  ],
+  "recommendations": [
+    "Rerun plan-review round 3 before execution.",
+    "Keep Phase 5 as the first full-suite gate unless the plan deliberately moves all repo-wide test triage earlier.",
+    "Before executing the operator runbook, replace placeholder paths/refs with deployment-specific values and get explicit operator approval for destructive database operations."
+  ]
+}

@@ -20,19 +20,19 @@ from elspeth.plugins.infrastructure.clients.llm import (
 class TestLLMClientTelemetry:
     """Tests for telemetry emission from AuditedLLMClient."""
 
-    def _create_mock_recorder(self) -> MagicMock:
-        """Create a mock LandscapeRecorder that returns recorded calls."""
-        recorder = MagicMock()
+    def _create_mock_execution(self) -> MagicMock:
+        """Create a mock ExecutionRepository that returns recorded calls."""
+        execution = MagicMock()
         counter = itertools.count()
-        recorder.allocate_call_index.side_effect = lambda _: next(counter)
+        execution.allocate_call_index.side_effect = lambda _: next(counter)
 
         # record_call returns a Call object with hashes
         recorded_call = MagicMock()
         recorded_call.request_hash = "req_hash_123"
         recorded_call.response_hash = "resp_hash_456"
-        recorder.record_call.return_value = recorded_call
+        execution.record_call.return_value = recorded_call
 
-        return recorder
+        return execution
 
     def _create_mock_openai_client(
         self,
@@ -66,7 +66,7 @@ class TestLLMClientTelemetry:
 
     def test_successful_call_emits_telemetry(self) -> None:
         """Successful LLM call emits ExternalCallCompleted event."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         # Track emitted events
@@ -76,7 +76,7 @@ class TestLLMClientTelemetry:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="azure",
@@ -122,7 +122,7 @@ class TestLLMClientTelemetry:
 
     def test_failed_call_emits_telemetry_with_error_status(self) -> None:
         """Failed LLM call emits ExternalCallCompleted with ERROR status."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = MagicMock()
         openai_client.chat.completions.create.side_effect = Exception("API error")
 
@@ -132,7 +132,7 @@ class TestLLMClientTelemetry:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",
@@ -169,7 +169,7 @@ class TestLLMClientTelemetry:
 
     def test_noop_callback_works(self) -> None:
         """No-op callback (telemetry disabled) works without error."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         # No-op callback (simulates telemetry disabled)
@@ -177,7 +177,7 @@ class TestLLMClientTelemetry:
             pass
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",
@@ -193,11 +193,11 @@ class TestLLMClientTelemetry:
         # Call succeeds without error
         assert response.content == "Hello!"
         # Audit trail is still recorded
-        recorder.record_call.assert_called_once()
+        execution.record_call.assert_called_once()
 
     def test_telemetry_emitted_after_landscape_recording(self) -> None:
         """Telemetry is emitted AFTER Landscape recording succeeds."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         call_order: list[str] = []
@@ -209,13 +209,13 @@ class TestLLMClientTelemetry:
             recorded_call.response_hash = "resp_hash"
             return recorded_call
 
-        recorder.record_call.side_effect = mock_record_call
+        execution.record_call.side_effect = mock_record_call
 
         def telemetry_emit(event: ExternalCallCompleted) -> None:
             call_order.append("telemetry")
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",
@@ -233,7 +233,7 @@ class TestLLMClientTelemetry:
 
     def test_telemetry_handles_empty_usage(self) -> None:
         """Telemetry emits None token_usage when provider omits usage data."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
 
         # Create response without usage
         message = Mock()
@@ -255,7 +255,7 @@ class TestLLMClientTelemetry:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",
@@ -275,7 +275,7 @@ class TestLLMClientTelemetry:
 
     def test_multiple_calls_emit_multiple_events(self) -> None:
         """Each LLM call emits a separate telemetry event."""
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         emitted_events: list[ExternalCallCompleted] = []
@@ -284,7 +284,7 @@ class TestLLMClientTelemetry:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",
@@ -317,14 +317,14 @@ class TestLLMClientTelemetry:
 
         The fix isolates telemetry emission in its own try/except.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         def failing_telemetry_emit(event: ExternalCallCompleted) -> None:
             raise RuntimeError("Telemetry exporter failed!")
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="azure",
@@ -342,8 +342,8 @@ class TestLLMClientTelemetry:
         assert response.content == "Hello!"
 
         # CRITICAL: Only ONE audit record, with SUCCESS status
-        assert recorder.record_call.call_count == 1
-        call_kwargs = recorder.record_call.call_args.kwargs
+        assert execution.record_call.call_count == 1
+        call_kwargs = execution.record_call.call_args.kwargs
         assert call_kwargs["status"] == CallStatus.SUCCESS
 
     def test_no_telemetry_when_landscape_recording_fails(self) -> None:
@@ -353,11 +353,11 @@ class TestLLMClientTelemetry:
         If audit recording fails, telemetry should NOT be emitted because
         the event was never properly recorded.
         """
-        recorder = self._create_mock_recorder()
+        execution = self._create_mock_execution()
         openai_client = self._create_mock_openai_client()
 
         # Make record_call raise an exception (simulating DB failure)
-        recorder.record_call.side_effect = Exception("Database connection failed")
+        execution.record_call.side_effect = Exception("Database connection failed")
 
         emitted_events: list[ExternalCallCompleted] = []
 
@@ -365,7 +365,7 @@ class TestLLMClientTelemetry:
             emitted_events.append(event)
 
         client = AuditedLLMClient(
-            recorder=recorder,
+            execution=execution,
             state_id="state_123",
             underlying_client=openai_client,
             provider="openai",

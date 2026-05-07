@@ -15,7 +15,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
-from uuid import uuid4
 
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import CoalesceMetadata
@@ -31,8 +30,52 @@ if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.dag import ExecutionGraph, WiredTransform
 
+__all__ = [
+    "make_artifact",
+    "make_batch_checkpoint",
+    "make_coalesce_metadata",
+    "make_context",
+    "make_contract",
+    "make_contract_audit_record",
+    "make_error",
+    "make_error_reason",
+    "make_exception_result",
+    "make_execution_counters",
+    "make_external_call_completed",
+    "make_failure_info",
+    "make_field",
+    "make_flush_result",
+    "make_gate_continue",
+    "make_gate_fork",
+    "make_gate_route",
+    "make_graph_fork",
+    "make_graph_linear",
+    "make_operation_context",
+    "make_phase_completed",
+    "make_phase_started",
+    "make_pipeline_config",
+    "make_pipeline_row",
+    "make_pool_execution_context",
+    "make_row",
+    "make_row_result",
+    "make_run_result",
+    "make_run_summary",
+    "make_source_context",
+    "make_source_row",
+    "make_source_row_quarantined",
+    "make_success",
+    "make_success_multi",
+    "make_success_reason",
+    "make_token_completed",
+    "make_token_info",
+    "make_transform_completed",
+    "make_transform_error_token",
+    "make_validation_error_token",
+    "wire_transforms",
+]
+
 # --- Re-export all production factories for single-import convenience ---
-from elspeth.testing import (  # noqa: F401
+from elspeth.testing import (
     make_artifact,
     make_contract,
     make_contract_audit_record,
@@ -95,14 +138,14 @@ def make_context(
         token = make_token_info()
 
     if landscape is None:
-        landscape = Mock()
-        landscape.record_external_call = Mock()
-        landscape.record_call = Mock()
+        from elspeth.contracts.audit_protocols import PluginAuditWriter
+
+        landscape = Mock(spec=PluginAuditWriter)
         # Configure get_node_state() to return a mock with matching token_id
         # so that PluginContext.record_call() token consistency checks pass.
         node_state_mock = Mock()
         node_state_mock.token_id = token.token_id
-        landscape.get_node_state = Mock(return_value=node_state_mock)
+        landscape.get_node_state.return_value = node_state_mock
 
     return PluginContext(
         run_id=run_id,
@@ -146,7 +189,7 @@ def make_source_context(
         run_id=setup.run_id,
         node_id=setup.source_node_id,
         config={},
-        landscape=setup.recorder,
+        landscape=setup.factory.plugin_audit_writer(),
     )
 
 
@@ -190,7 +233,7 @@ def make_operation_context(
         # then register the actual node type needed
         setup = make_recorder_with_run(run_id=run_id)
         register_test_node(
-            setup.recorder,
+            setup.data_flow,
             setup.run_id,
             node_id,
             node_type=NodeType[node_type],
@@ -198,12 +241,12 @@ def make_operation_context(
         )
         actual_node_id = node_id
 
-    op = setup.recorder.begin_operation(setup.run_id, actual_node_id, operation_type)
+    op = setup.execution.begin_operation(setup.run_id, actual_node_id, operation_type)
     return PluginContext(
         run_id=setup.run_id,
         node_id=actual_node_id,
         config={},
-        landscape=setup.recorder,
+        landscape=setup.factory.plugin_audit_writer(),
         operation_id=op.operation_id,
     )
 
@@ -367,29 +410,6 @@ def wire_transforms(
 # =============================================================================
 # Run/Landscape Setup — Eliminate begin_run()/complete_run() boilerplate
 # =============================================================================
-
-
-def make_run_id() -> str:
-    """Generate a unique run ID for test isolation."""
-    return f"test-run-{uuid4().hex[:12]}"
-
-
-def make_run_record(
-    recorder: Any,
-    *,
-    config: dict[str, Any] | None = None,
-    canonical_version: str = "sha256-rfc8785-v1",
-) -> Any:
-    """Begin a run and return the RunRecord.
-
-    Usage:
-        run = make_run_record(recorder)
-        assert run.run_id is not None
-    """
-    return recorder.begin_run(
-        config=config or {},
-        canonical_version=canonical_version,
-    )
 
 
 # =============================================================================

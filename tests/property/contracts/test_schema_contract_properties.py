@@ -84,12 +84,12 @@ def field_contracts(draw: st.DrawFn) -> FieldContract:
 
 @st.composite
 def schema_contracts(draw: st.DrawFn, max_fields: int = 5) -> SchemaContract:
-    """Generate a valid SchemaContract with unique normalized names."""
+    """Generate a valid SchemaContract with unique normalized and original names."""
     mode = draw(modes)
     locked = draw(st.booleans())
     n_fields = draw(st.integers(min_value=0, max_value=max_fields))
 
-    # Generate unique normalized names first
+    # Generate unique normalized AND original names
     names = draw(
         st.lists(
             normalized_names,
@@ -98,10 +98,17 @@ def schema_contracts(draw: st.DrawFn, max_fields: int = 5) -> SchemaContract:
             unique=True,
         )
     )
+    origs = draw(
+        st.lists(
+            original_names,
+            min_size=n_fields,
+            max_size=n_fields,
+            unique=True,
+        )
+    )
 
     fields = []
-    for name in names:
-        orig = draw(original_names)
+    for name, orig in zip(names, origs, strict=True):
         ptype = draw(allowed_types)
         req = draw(st.booleans())
         src = draw(sources)
@@ -152,6 +159,7 @@ def mergeable_contract_pairs(draw: st.DrawFn) -> tuple[SchemaContract, SchemaCon
                 python_type=ptype,
                 required=draw(st.booleans()),
                 source=draw(sources),
+                nullable=draw(st.booleans()),  # D7 fix: test nullable propagation
             )
         )
         fields_b.append(
@@ -161,6 +169,7 @@ def mergeable_contract_pairs(draw: st.DrawFn) -> tuple[SchemaContract, SchemaCon
                 python_type=ptype,  # SAME type
                 required=draw(st.booleans()),
                 source=draw(sources),
+                nullable=draw(st.booleans()),  # D7 fix: test nullable propagation
             )
         )
 
@@ -173,6 +182,7 @@ def mergeable_contract_pairs(draw: st.DrawFn) -> tuple[SchemaContract, SchemaCon
                 python_type=draw(allowed_types),
                 required=draw(st.booleans()),
                 source=draw(sources),
+                nullable=draw(st.booleans()),  # D7 fix: test nullable propagation
             )
         )
 
@@ -185,6 +195,7 @@ def mergeable_contract_pairs(draw: st.DrawFn) -> tuple[SchemaContract, SchemaCon
                 python_type=draw(allowed_types),
                 required=draw(st.booleans()),
                 source=draw(sources),
+                nullable=draw(st.booleans()),  # D7 fix: test nullable propagation
             )
         )
 
@@ -242,6 +253,82 @@ class TestMergeCommutativityProperties:
         """Property: Merged locked status is the same regardless of order."""
         a, b = pair
         assert a.merge(b).locked == b.merge(a).locked
+
+    @given(pair=mergeable_contract_pairs())
+    @settings(max_examples=200)
+    def test_merge_nullable_is_commutative(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
+        """Property: Merged field nullable is the same regardless of merge order.
+
+        D7 fix: The nullable OR propagation must be commutative. For any shared
+        field, A.merge(B)[field].nullable == B.merge(A)[field].nullable.
+        """
+        a, b = pair
+        ab = a.merge(b)
+        ba = b.merge(a)
+
+        ab_nullable = {fc.normalized_name: fc.nullable for fc in ab.fields}
+        ba_nullable = {fc.normalized_name: fc.nullable for fc in ba.fields}
+        assert ab_nullable == ba_nullable
+
+
+# =============================================================================
+# Merge Nullable OR Semantics Properties
+# =============================================================================
+
+
+class TestMergeNullableOrSemantics:
+    """Property tests for nullable OR propagation in shared fields (D7 fix).
+
+    When two contracts share a field, the merged field's nullable flag uses
+    OR semantics: nullable if EITHER input is nullable. This reflects the
+    runtime behavior where any nullable branch can contribute None via
+    collision resolution.
+    """
+
+    @given(pair=mergeable_contract_pairs())
+    @settings(max_examples=200)
+    def test_shared_field_nullable_uses_or_semantics(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
+        """Property: Shared field nullable = a.nullable OR b.nullable."""
+        a, b = pair
+        merged = a.merge(b)
+
+        a_by_name = {fc.normalized_name: fc for fc in a.fields}
+        b_by_name = {fc.normalized_name: fc for fc in b.fields}
+
+        for fc in merged.fields:
+            in_a = fc.normalized_name in a_by_name
+            in_b = fc.normalized_name in b_by_name
+
+            if in_a and in_b:
+                # Shared field: OR semantics
+                expected_nullable = a_by_name[fc.normalized_name].nullable or b_by_name[fc.normalized_name].nullable
+                assert fc.nullable == expected_nullable, (
+                    f"Shared field '{fc.normalized_name}' nullable should be "
+                    f"{a_by_name[fc.normalized_name].nullable} OR {b_by_name[fc.normalized_name].nullable} = {expected_nullable}, "
+                    f"got {fc.nullable}"
+                )
+
+    @given(pair=mergeable_contract_pairs())
+    @settings(max_examples=200)
+    def test_branch_exclusive_field_forced_nullable(self, pair: tuple[SchemaContract, SchemaContract]) -> None:
+        """Property: Branch-exclusive fields are forced nullable=True.
+
+        A field present in only one branch becomes nullable in the merged
+        contract because the source branch may not arrive (e.g., timeout
+        under best_effort policy). The merged row would have None for that field.
+        """
+        a, b = pair
+        merged = a.merge(b)
+
+        a_names = {fc.normalized_name for fc in a.fields}
+        b_names = {fc.normalized_name for fc in b.fields}
+
+        for fc in merged.fields:
+            in_a = fc.normalized_name in a_names
+            in_b = fc.normalized_name in b_names
+
+            if in_a != in_b:  # Branch-exclusive (XOR)
+                assert fc.nullable is True, f"Branch-exclusive field '{fc.normalized_name}' must be forced nullable=True"
 
 
 # =============================================================================

@@ -93,12 +93,36 @@ def stable_hash(obj: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _stable_repr(obj: Any) -> str:
+    """Produce a deterministic repr by sorting unordered containers.
+
+    Dicts are sorted by key, sets/frozensets are sorted by repr of elements.
+    Applied recursively so nested containers are also deterministic.
+    """
+    if isinstance(obj, dict):
+        items = ", ".join(f"{_stable_repr(k)}: {_stable_repr(v)}" for k, v in sorted(obj.items(), key=lambda kv: repr(kv[0])))
+        return "{" + items + "}"
+    if isinstance(obj, (set, frozenset)):
+        items = ", ".join(sorted(_stable_repr(e) for e in obj))
+        prefix = "frozenset" if isinstance(obj, frozenset) else ""
+        return f"{prefix}{{{items}}}" if items else f"{prefix}()"
+    if isinstance(obj, (list, tuple)):
+        items = ", ".join(_stable_repr(e) for e in obj)
+        if isinstance(obj, tuple):
+            return f"({items},)" if len(obj) == 1 else f"({items})"
+        return f"[{items}]"
+    return repr(obj)
+
+
 def repr_hash(obj: Any) -> str:
     """Generate SHA-256 hash of repr() for non-canonical data.
 
     Used as fallback when canonical_json fails (NaN, Infinity, or other
     non-serializable types). Deterministic within the same Python version
     but NOT stable across versions due to repr() implementation differences.
+
+    Sorts dict keys and set elements before repr() to ensure deterministic
+    hashes regardless of insertion order.
 
     Appropriate for Tier-3 (external data) trust boundary where data is
     already malformed and being quarantined.
@@ -107,6 +131,6 @@ def repr_hash(obj: Any) -> str:
         obj: Any Python object
 
     Returns:
-        SHA-256 hex digest of repr(obj)
+        SHA-256 hex digest of stable repr(obj)
     """
-    return hashlib.sha256(repr(obj).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_stable_repr(obj).encode("utf-8")).hexdigest()

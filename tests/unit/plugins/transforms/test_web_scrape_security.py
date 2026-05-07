@@ -87,10 +87,14 @@ def mock_ctx():
     rate_limit_registry = Mock()
     rate_limit_registry.get_limiter.return_value = None
 
+    payload_store = Mock()
+    payload_store.store.return_value = "test-processed-hash"
+
     ctx = PluginContext(
         run_id="test-run-456",
         config={},
         landscape=landscape,
+        payload_store=payload_store,
         rate_limit_registry=rate_limit_registry,
         state_id="state-123",
     )
@@ -399,6 +403,7 @@ class TestRedirectAllowedRangesBehavior:
             port=80,
             path="/start",
             scheme="http",
+            bare_hostname="example.com",
         )
         redirect_safe = SSRFSafeRequest(
             original_url="http://localhost/redirected",
@@ -407,6 +412,7 @@ class TestRedirectAllowedRangesBehavior:
             port=80,
             path="/redirected",
             scheme="http",
+            bare_hostname="localhost",
         )
 
         with (
@@ -420,6 +426,8 @@ class TestRedirectAllowedRangesBehavior:
             ),
             patch("httpx.Client") as MockClient,
         ):
+            shared_client = Mock()
+            shared_client.close = Mock()
             initial_client = Mock()
             initial_client.__enter__ = Mock(return_value=initial_client)
             initial_client.__exit__ = Mock(return_value=False)
@@ -436,11 +444,13 @@ class TestRedirectAllowedRangesBehavior:
                 text="<html>Local content</html>",
                 request=httpx.Request("GET", "http://127.0.0.1:80/redirected"),
             )
-            MockClient.side_effect = [initial_client, hop_client]
+            MockClient.side_effect = [shared_client, initial_client, hop_client]
 
             result = allowed_loopback_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)
 
         assert result.status == "success"
+        assert result.row["fetch_url_final"] == "http://localhost/redirected"
+        assert result.row["fetch_url_final_ip"] == "127.0.0.1"
 
     def test_redirect_to_non_allowed_private_ip_blocked(self, allowed_loopback_transform, mock_ctx):
         """Redirect chain where hop targets a non-allowed private IP — must block."""
@@ -453,6 +463,7 @@ class TestRedirectAllowedRangesBehavior:
             port=80,
             path="/start",
             scheme="http",
+            bare_hostname="example.com",
         )
 
         with (
@@ -492,6 +503,7 @@ class TestRedirectAllowedRangesBehavior:
             port=80,
             path="/start",
             scheme="http",
+            bare_hostname="example.com",
         )
 
         with (

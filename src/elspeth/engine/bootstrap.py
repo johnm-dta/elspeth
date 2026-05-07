@@ -61,7 +61,17 @@ def resolve_preflight(
         if runner is None:
             raise FrameworkBugError("runner is required when depends_on is configured — caller must inject a PipelineRunner callback")
 
-        # Cycle detection first (cheap, reads only depends_on keys from YAML)
+        # Validate dependency name uniqueness BEFORE any execution.
+        dep_names = [dep.name for dep in config.depends_on]
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for name in dep_names:
+            if name in seen:
+                duplicates.append(name)
+            seen.add(name)
+        if duplicates:
+            raise ValueError(f"Duplicate dependency names: {duplicates}. Each depends_on entry must have a unique name.")
+
         detect_cycles(settings_path)
 
         # Run dependencies sequentially — each calls runner() recursively.
@@ -88,24 +98,16 @@ def resolve_preflight(
         probe_results = {}
         for probe in probes:
             result = probe.probe()
+            if result.collection in probe_results:
+                raise FrameworkBugError(
+                    f"Duplicate collection probe name '{result.collection}' — "
+                    f"earlier probe result would be silently overwritten. "
+                    f"Each probe must target a unique collection name."
+                )
             probe_results[result.collection] = {
                 "reachable": result.reachable,
                 "count": result.count,
             }
-
-        # Validate dependency name uniqueness before building the gate context.
-        # DependencyConfig.name is documented as a unique label. Without this check,
-        # the dict comprehension silently overwrites earlier entries when two deps
-        # share the same name, so gates would evaluate against incomplete data.
-        dep_names = [r.name for r in dependency_results]
-        seen: set[str] = set()
-        duplicates: list[str] = []
-        for name in dep_names:
-            if name in seen:
-                duplicates.append(name)
-            seen.add(name)
-        if duplicates:
-            raise ValueError(f"Duplicate dependency names: {duplicates}. Each depends_on entry must have a unique name.")
 
         # Convert dependency results to gate-accessible dict
         dep_run_dict = {

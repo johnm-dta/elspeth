@@ -1,6 +1,6 @@
 """Tests for field collision detection utility."""
 
-from elspeth.plugins.transforms.field_collision import detect_field_collisions
+from elspeth.contracts.field_collision import detect_field_collisions
 
 
 class TestDetectFieldCollisions:

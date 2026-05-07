@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from elspeth.contracts import CallStatus
 from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseClientError,
     DataversePageResponse,
@@ -111,6 +113,26 @@ def _mock_source_context() -> MagicMock:
     return ctx
 
 
+def _plugin_context_for_operation_calls(*, telemetry_emit: Any) -> Any:
+    """Build a real PluginContext configured for source operation call recording."""
+    from elspeth.contracts.plugin_context import PluginContext
+
+    landscape = MagicMock()
+    landscape.record_operation_call.return_value = SimpleNamespace(
+        request_hash="req-hash",
+        response_hash="resp-hash",
+    )
+
+    return PluginContext(
+        run_id="test-run-123",
+        config={},
+        landscape=landscape,
+        node_id="source-node",
+        operation_id="op-001",
+        telemetry_emit=telemetry_emit,
+    )
+
+
 def _make_source(config: dict[str, Any]) -> Any:
     """Create a DataverseSource with patched dependencies.
 
@@ -149,7 +171,7 @@ def _make_source_unlocked(config: dict[str, Any]) -> Any:
 
     mock_schema_cls = MagicMock()
 
-    def mock_validate(row: dict) -> MagicMock:
+    def mock_validate(row: dict[str, Any]) -> MagicMock:
         m = MagicMock()
         m.to_row.return_value = dict(row)
         return m
@@ -190,7 +212,7 @@ def _make_source_for_load(
         mock_schema_cls.model_validate = schema_validate_side_effect
     else:
 
-        def mock_validate(row: dict) -> MagicMock:
+        def mock_validate(row: dict[str, Any]) -> MagicMock:
             m = MagicMock()
             m.to_row.return_value = dict(row)
             return m
@@ -212,11 +234,77 @@ def _make_source_for_load(
     # Inject mock client
     mock_client = MagicMock()
     if source._entity is not None:
+        metadata_url = (
+            f"{source._environment_url.rstrip('/')}/api/data/{source._api_version}/"
+            f"EntityDefinitions(LogicalName='{source._entity}')?$select=LogicalName"
+        )
+        mock_client.get_page.return_value = DataversePageResponse(
+            status_code=200,
+            rows=[{"LogicalName": source._entity}],
+            latency_ms=5.0,
+            headers={"content-type": "application/json"},
+            request_headers={"Authorization": "<fingerprint:test-fake>"},
+            request_url=metadata_url,
+            next_link=None,
+            paging_cookie=None,
+            more_records=None,
+        )
         mock_client.paginate_odata.return_value = iter(pages)
     else:
         mock_client.paginate_fetchxml.return_value = iter(pages)
     mock_client.get_auth_headers.return_value = {"Authorization": "Bearer test"}
     source._client = mock_client
+
+    return source
+
+
+def _make_source_for_start_and_load(
+    config: dict[str, Any],
+    *,
+    mock_client: MagicMock,
+    schema_validate_side_effect: Any = None,
+) -> Any:
+    """Create DataverseSource for lifecycle + load() tests with a patched client."""
+    from elspeth.plugins.sources.dataverse import DataverseSource
+
+    mock_contract = MagicMock()
+    mock_contract.locked = False
+    mock_contract.with_locked.return_value = MagicMock()
+
+    mock_schema_cls = MagicMock()
+
+    if schema_validate_side_effect is not None:
+        mock_schema_cls.model_validate = schema_validate_side_effect
+    else:
+
+        def mock_validate(row: dict[str, Any]) -> MagicMock:
+            m = MagicMock()
+            m.to_row.return_value = dict(row)
+            return m
+
+        mock_schema_cls.model_validate = mock_validate
+
+    with (
+        patch(
+            "elspeth.plugins.sources.dataverse.create_schema_from_config",
+            return_value=mock_schema_cls,
+        ),
+        patch(
+            "elspeth.contracts.schema_contract_factory.create_contract_from_config",
+            return_value=mock_contract,
+        ),
+    ):
+        source = DataverseSource(config)
+
+    lifecycle_ctx = _mock_lifecycle_context()
+    with (
+        patch("azure.identity.ClientSecretCredential", return_value=MagicMock()),
+        patch(
+            "elspeth.plugins.sources.dataverse.DataverseClient",
+            return_value=mock_client,
+        ),
+    ):
+        source.on_start(lifecycle_ctx)
 
     return source
 
@@ -586,22 +674,23 @@ class TestDataverseSourceConstruction:
         assert source._fetch_xml is not None
 
     def test_on_start_creates_client(self) -> None:
-        """on_start() creates a DataverseClient with credential."""
+        """on_start() creates a DataverseClient without probing entity metadata."""
         source = _make_source(_base_config())
         assert source._client is None
 
         lifecycle_ctx = _mock_lifecycle_context()
+        mock_client = MagicMock()
 
         with (
             patch("azure.identity.ClientSecretCredential") as mock_cred,
             patch("elspeth.plugins.sources.dataverse.DataverseClient") as mock_client_cls,
         ):
             mock_cred.return_value = MagicMock()
-            mock_client_cls.return_value = MagicMock()
+            mock_client_cls.return_value = mock_client
             source.on_start(lifecycle_ctx)
 
         assert source._client is not None
-        assert source._run_id == "test-run-123"
+        mock_client.get_page.assert_not_called()
 
     def test_additional_domains_stored_as_tuple(self) -> None:
         """additional_domains are stored as a tuple for immutability."""
@@ -612,6 +701,75 @@ class TestDataverseSourceConstruction:
         """No additional_domains results in an empty tuple."""
         source = _make_source(_base_config())
         assert source._additional_domains == ()
+
+    def test_load_metadata_probe_404_raises_descriptive_error(self) -> None:
+        """404 metadata probe is audited and raises a descriptive entity-not-found error."""
+        mock_client = MagicMock()
+        mock_client.get_page.side_effect = DataverseClientError(
+            "Not Found",
+            retryable=False,
+            status_code=404,
+        )
+        source = _make_source_for_start_and_load(
+            _base_config(),
+            mock_client=mock_client,
+        )
+        ctx = _mock_source_context()
+
+        with pytest.raises(DataverseClientError, match="Entity 'contacts' not found"):
+            list(source.load(ctx))
+
+        assert ctx.record_call.call_count == 1
+        call_kwargs = ctx.record_call.call_args.kwargs
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"]["status_code"] == 404
+
+    def test_load_metadata_probe_403_records_error_and_continues(self) -> None:
+        """403 metadata probe is audited but remains non-fatal to the load."""
+        mock_client = MagicMock()
+        mock_client.get_page.side_effect = DataverseClientError(
+            "Forbidden",
+            retryable=False,
+            status_code=403,
+        )
+        mock_client.paginate_odata.return_value = iter([_make_page([{"contactid": "1", "fullname": "Alice"}])])
+        source = _make_source_for_start_and_load(
+            _base_config(),
+            mock_client=mock_client,
+        )
+        ctx = _mock_source_context()
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert ctx.record_call.call_count == 2
+        metadata_call = ctx.record_call.call_args_list[0].kwargs
+        assert metadata_call["status"] == CallStatus.ERROR
+        assert metadata_call["error"]["status_code"] == 403
+
+    def test_load_metadata_probe_5xx_reraises(self) -> None:
+        """5xx metadata probe is audited and re-raises the original error."""
+        original_error = DataverseClientError(
+            "Internal Server Error",
+            retryable=True,
+            status_code=500,
+        )
+        mock_client = MagicMock()
+        mock_client.get_page.side_effect = original_error
+        source = _make_source_for_start_and_load(
+            _base_config(),
+            mock_client=mock_client,
+        )
+        ctx = _mock_source_context()
+
+        with pytest.raises(DataverseClientError, match="Internal Server Error") as exc_info:
+            list(source.load(ctx))
+
+        assert exc_info.value is original_error
+        assert ctx.record_call.call_count == 1
+        call_kwargs = ctx.record_call.call_args.kwargs
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"]["status_code"] == 500
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -747,7 +905,7 @@ class TestDataverseSourceLoadStructured:
         assert "@Microsoft.Dynamics.CRM.lookuplogicalname" not in row_data
 
     def test_load_records_page_calls(self) -> None:
-        """Each page fetch is recorded via ctx.record_call."""
+        """Structured load records the metadata probe plus each fetched page."""
         pages = [
             _make_page(
                 [{"contactid": "1"}],
@@ -759,7 +917,39 @@ class TestDataverseSourceLoadStructured:
         ctx = _mock_source_context()
 
         list(source.load(ctx))
+        assert ctx.record_call.call_count == 3
+
+    def test_load_records_entity_metadata_probe_before_structured_page_fetch(self) -> None:
+        """Structured load records the startup entity metadata probe inside load()."""
+        metadata_url = f"{VALID_ENV_URL}/api/data/v9.2/EntityDefinitions(LogicalName='contacts')?$select=LogicalName"
+        metadata_page = DataversePageResponse(
+            status_code=200,
+            rows=[{"LogicalName": "contacts"}],
+            latency_ms=5.0,
+            headers={"content-type": "application/json"},
+            request_headers={"Authorization": "<fingerprint:test-fake>"},
+            request_url=metadata_url,
+            next_link=None,
+            paging_cookie=None,
+            more_records=None,
+        )
+        data_page = _make_page([{"contactid": "1", "fullname": "Alice"}])
+
+        mock_client = MagicMock()
+        mock_client.get_page.return_value = metadata_page
+        mock_client.paginate_odata.return_value = iter([data_page])
+
+        source = _make_source_for_start_and_load(
+            _base_config(),
+            mock_client=mock_client,
+        )
+        ctx = _mock_source_context()
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 1
         assert ctx.record_call.call_count == 2
+        assert "EntityDefinitions(LogicalName='contacts')" in ctx.record_call.call_args_list[0].kwargs["request_data"]["url"]
 
     def test_load_quarantines_on_formatted_value_collision(self) -> None:
         """Formatted value collision quarantines the row."""
@@ -785,6 +975,9 @@ class TestDataverseSourceLoadStructured:
         assert rows[0].is_quarantined
         assert "collision" in rows[0].quarantine_error.lower()
         ctx.record_validation_error.assert_called_once()
+        call_kwargs = ctx.record_validation_error.call_args.kwargs
+        assert call_kwargs["schema_mode"] == "odata_strip"
+        assert "collision" in call_kwargs["error"].lower()
 
     def test_load_discard_does_not_yield_quarantined(self) -> None:
         """When on_validation_failure='discard', quarantined rows are not yielded."""
@@ -817,14 +1010,13 @@ class TestDataverseSourceLoadStructured:
         """Rows failing schema validation are quarantined."""
         from pydantic import ValidationError
 
-        def failing_validate(row: dict) -> None:
+        def failing_validate(row: dict[str, Any]) -> None:
             raise ValidationError.from_exception_data(
                 title="DataverseRowSchema",
                 line_errors=[
                     {
                         "type": "missing",
                         "loc": ("required_field",),
-                        "msg": "Field required",
                         "input": row,
                     }
                 ],
@@ -848,14 +1040,13 @@ class TestDataverseSourceLoadStructured:
         """Schema validation failure with discard yields no rows."""
         from pydantic import ValidationError
 
-        def failing_validate(row: dict) -> None:
+        def failing_validate(row: dict[str, Any]) -> None:
             raise ValidationError.from_exception_data(
                 title="DataverseRowSchema",
                 line_errors=[
                     {
                         "type": "missing",
                         "loc": ("required_field",),
-                        "msg": "Field required",
                         "input": row,
                     }
                 ],
@@ -883,7 +1074,7 @@ class TestDataverseSourceLoadStructured:
             list(source.load(ctx))
 
     def test_load_client_error_records_audit(self) -> None:
-        """DataverseClientError is recorded in audit trail before raising."""
+        """Pagination errors are audited after the structured metadata probe succeeds."""
         source = _make_source_for_load([], _base_config())
         error = DataverseClientError("Server error", retryable=True, status_code=500, latency_ms=100.0)
         source._client.paginate_odata.side_effect = error
@@ -892,7 +1083,10 @@ class TestDataverseSourceLoadStructured:
         with pytest.raises(DataverseClientError):
             list(source.load(ctx))
 
-        ctx.record_call.assert_called_once()
+        assert ctx.record_call.call_count == 2
+        call_kwargs = ctx.record_call.call_args_list[-1].kwargs
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"]["status_code"] == 500
 
     def test_load_empty_pages(self) -> None:
         """Empty pages produce no rows."""
@@ -909,7 +1103,7 @@ class TestDataverseSourceLoadStructured:
 
         call_count = 0
 
-        def sometimes_failing_validate(row: dict) -> MagicMock:
+        def sometimes_failing_validate(row: dict[str, Any]) -> MagicMock:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
@@ -919,7 +1113,6 @@ class TestDataverseSourceLoadStructured:
                         {
                             "type": "missing",
                             "loc": ("field",),
-                            "msg": "Field required",
                             "input": row,
                         }
                     ],
@@ -1210,6 +1403,52 @@ class TestRecordPageCall:
         # Headers passed through as-is (already fingerprinted by client)
         assert call_kwargs.kwargs["request_data"]["headers"] == page.request_headers
 
+    def test_record_success_includes_odata_pagination_metadata(self) -> None:
+        """Success audit payload keeps lightweight pagination metadata."""
+        source = self._make_source_with_client()
+        ctx = _mock_source_context()
+
+        page = DataversePageResponse(
+            status_code=200,
+            rows=[{"id": "1"}],
+            latency_ms=42.0,
+            headers={"content-type": "application/json", "odata-version": "4.0"},
+            request_headers={"Authorization": "<fingerprint:test-fake>"},
+            request_url="https://test.com/api?$skiptoken=abc",
+            next_link="https://test.com/api?$skiptoken=def",
+            paging_cookie=None,
+            more_records=None,
+        )
+        source._record_page_call(ctx, url=page.request_url, page=page)
+
+        response_data = ctx.record_call.call_args.kwargs["response_data"]
+        assert response_data["headers"] == page.headers
+        assert response_data["next_link"] == page.next_link
+        assert response_data["paging_cookie"] is None
+        assert response_data["more_records"] is None
+
+    def test_record_success_includes_fetchxml_pagination_metadata(self) -> None:
+        """FetchXML call records paging cookie and explicit terminal flag."""
+        source = self._make_source_with_client()
+        ctx = _mock_source_context()
+
+        page = DataversePageResponse(
+            status_code=200,
+            rows=[{"id": "1"}],
+            latency_ms=42.0,
+            headers={"content-type": "application/json"},
+            request_headers={"Authorization": "<fingerprint:test-fake>"},
+            request_url="https://test.com/api",
+            next_link=None,
+            paging_cookie="cookie-123",
+            more_records=False,
+        )
+        source._record_page_call(ctx, url=page.request_url, page=page)
+
+        response_data = ctx.record_call.call_args.kwargs["response_data"]
+        assert response_data["paging_cookie"] == "cookie-123"
+        assert response_data["more_records"] is False
+
     def test_record_error(self) -> None:
         """Error page records CallStatus.ERROR with error details."""
         from elspeth.contracts import CallStatus, CallType
@@ -1233,6 +1472,17 @@ class TestRecordPageCall:
 
         source._record_page_call(ctx, url="https://test.com/api")
         ctx.record_call.assert_not_called()
+
+    def test_record_success_emits_single_completion_event_via_plugin_context(self) -> None:
+        """Real PluginContext path emits one completion event per Dataverse page call."""
+        source = self._make_source_with_client()
+        events: list[Any] = []
+        ctx = _plugin_context_for_operation_calls(telemetry_emit=events.append)
+
+        page = _make_page([{"id": "1"}], latency_ms=42.0)
+        source._record_page_call(ctx, url="https://test.com/api", page=page)
+
+        assert len(events) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1267,7 +1517,6 @@ class TestNormalizeFieldQuarantine:
         # Mock client to return a page with a problematic field
         mock_client = MagicMock()
         source._client = mock_client
-        source._run_id = "test-run"
 
         # Page with a row that has an unnormalizable field name
         page = _make_page([{"!!!": "trash-field-name"}])
@@ -1324,8 +1573,6 @@ class TestAuditUrlPerPage:
         source = _make_source(_base_config())
         source._client = MagicMock()
         source._client.get_auth_headers.return_value = {"Authorization": "Bearer test"}
-        source._run_id = "test-run"
-        source._telemetry_emit = None
         return source
 
 
@@ -1386,3 +1633,107 @@ class TestUrlPercentEncoding:
         source = _make_source(_base_config(select=["contactid", "fullname"]))
         url = source._build_query_url()
         assert "$select=contactid,fullname" in url  # literal, no encoding
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: unmapped fields trigger field resolution rebuild (review finding)
+# ---------------------------------------------------------------------------
+
+
+class TestUnmappedFieldsRebuildResolution:
+    """Verify that rows with fields not in the initial mapping trigger a
+    _field_resolution rebuild so new fields are correctly normalized."""
+
+    def test_new_field_on_page2_is_normalized(self) -> None:
+        """When page 2 introduces a field not in page 1, the new field
+        appears correctly normalized in output rows and the field
+        resolution mapping is rebuilt to include it."""
+        pages = [
+            _make_page(
+                [{"contactid": "1", "fullname": "Alice"}],
+                next_link="https://myorg.crm.dynamics.com/api/data/v9.2/contacts?$skiptoken=1",
+            ),
+            _make_page(
+                [{"contactid": "2", "fullname": "Bob", "jobtitle": "Engineer"}],
+            ),
+        ]
+        source = _make_source_for_load(pages, _base_config())
+        ctx = _mock_source_context()
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        # All rows should be valid (not quarantined)
+        assert all(not r.is_quarantined for r in rows)
+
+        # Page 1 row has only contactid and fullname
+        assert "contactid" in rows[0].row
+        assert "fullname" in rows[0].row
+
+        # Page 2 row has the new field "jobtitle" correctly normalized
+        assert "jobtitle" in rows[1].row
+        assert rows[1].row["jobtitle"] == "Engineer"
+
+        # Field resolution should have been rebuilt to include jobtitle
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _ = resolution
+        assert "jobtitle" in mapping
+
+    def test_new_field_with_non_identifier_name_is_normalized(self) -> None:
+        """New fields with non-identifier names (e.g., spaces) are
+        normalized through the same algorithm on rebuild."""
+        pages = [
+            _make_page(
+                [{"contactid": "1", "fullname": "Alice"}],
+                next_link="https://myorg.crm.dynamics.com/next",
+            ),
+            _make_page(
+                [{"contactid": "2", "fullname": "Bob", "Job Title": "Engineer"}],
+            ),
+        ]
+        source = _make_source_for_load(pages, _base_config())
+        ctx = _mock_source_context()
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert all(not r.is_quarantined for r in rows)
+
+        # The new field should be normalized (spaces -> underscore, lowered)
+        row2 = rows[1].row
+        assert "job_title" in row2
+        assert row2["job_title"] == "Engineer"
+
+        # Resolution mapping should include the new field after rebuild
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _ = resolution
+        assert "Job Title" in mapping
+        assert mapping["Job Title"] == "job_title"
+
+    def test_resolution_not_rebuilt_when_fields_match(self) -> None:
+        """Field resolution is NOT rebuilt when a subsequent row has the
+        same fields as the initial mapping."""
+        pages = [
+            _make_page(
+                [{"contactid": "1", "fullname": "Alice"}],
+                next_link="https://myorg.crm.dynamics.com/next",
+            ),
+            _make_page(
+                [{"contactid": "2", "fullname": "Bob"}],
+            ),
+        ]
+        source = _make_source_for_load(pages, _base_config())
+        ctx = _mock_source_context()
+
+        # Process first page to establish initial resolution
+        rows = list(source.load(ctx))
+        assert len(rows) == 2
+
+        # Resolution should not have changed (same fields on both pages)
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _ = resolution
+        # Only the original fields should be in the mapping
+        assert set(mapping.keys()) == {"contactid", "fullname"}

@@ -13,6 +13,7 @@ that class of bug by verifying end-to-end value propagation.
 from __future__ import annotations
 
 import dataclasses
+from types import MappingProxyType
 
 from pydantic import BaseModel
 
@@ -266,7 +267,7 @@ class TestAllFromSettingsMapEveryField:
         settings_fields = self._get_settings_fields(settings_cls)
         runtime_fields = self._get_runtime_fields(runtime_cls)
         internal_fields = self._get_internal_fields(settings_class_name)
-        field_renames = FIELD_MAPPINGS.get(settings_class_name, {})
+        field_renames: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get(settings_class_name, {})
 
         # Check: every Settings field must map to a RuntimeConfig field
         for field_name in settings_fields:

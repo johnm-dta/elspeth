@@ -1,0 +1,78 @@
+=== enforce_tier_model.py CHECK OUTPUT (raw) ===
+
+No bug-hiding patterns detected. Check passed.
+
+=== LAYER SCHEMA (extracted from scripts/cicd/enforce_tier_model.py:190-250) ===
+        "description": "Broad exception handling can suppress bugs",
+        "remediation": "Catch specific exceptions, or re-raise after logging/quarantining",
+    },
+    "TC": {
+        "name": "type-checking-layer",
+        "description": "TYPE_CHECKING import crosses layer boundary (annotation-only, no runtime coupling)",
+        "remediation": "Allowlist if the dependency is accepted, or move the type to a lower layer",
+    },
+    "R5": {
+        "name": "isinstance",
+        "description": "isinstance() checks can mask contract violations outside explicit trust boundaries",
+        "remediation": "Validate at Tier-3 boundaries or rely on contracts; do not use isinstance to hide bugs",
+    },
+    "R6": {
+        "name": "silent-except",
+        "description": "Exception handling that swallows errors without re-raise or explicit error result",
+        "remediation": "Raise the exception or return an explicit error/quarantine result",
+    },
+    "R7": {
+        "name": "contextlib.suppress",
+        "description": "contextlib.suppress() silently ignores exceptions",
+        "remediation": "Handle exceptions explicitly or allow them to raise",
+    },
+    "R8": {
+        "name": "dict.setdefault",
+        "description": "dict.setdefault() hides missing-key bugs by mutating defaults",
+        "remediation": "Access keys directly and fix the schema/contract if KeyError occurs",
+    },
+    "R9": {
+        "name": "dict.pop-default",
+        "description": "dict.pop(key, default) hides missing-key bugs with implicit defaults",
+        "remediation": "Access keys directly and fix the schema/contract if KeyError occurs",
+    },
+    "L1": {
+        "name": "upward-import",
+        "description": "Import from a higher layer violates the dependency hierarchy (contracts→core→engine→plugins)",
+        "remediation": "Move code down, extract primitives, or restructure caller (see CLAUDE.md Layer Dependency Rules)",
+    },
+}
+
+
+# =============================================================================
+# Layer Hierarchy (import direction enforcement)
+# =============================================================================
+
+# Layer numbers: lower = deeper (fewer allowed dependencies)
+LAYER_HIERARCHY: dict[str, int] = {
+    "contracts": 0,  # L0 — leaf, imports nothing above
+    "core": 1,  # L1 — can import contracts only
+    "engine": 2,  # L2 — can import core, contracts
+}
+# Everything else (plugins, mcp, tui, telemetry, testing, cli*) is implicitly L3.
+
+LAYER_NAMES: dict[int, str] = {
+    0: "L0/contracts",
+    1: "L1/core",
+    2: "L2/engine",
+    3: "L3/application",
+}
+
+
+
+=== INTERPRETATION ===
+Rule L1 = runtime upward import (FAIL CI). Rule TC = TYPE_CHECKING upward import (warn).
+Layer assignment per script: contracts=L0, core=L1, engine=L2, everything-else=L3.
+Clean output -> no upward imports. Codebase is layer-conformant at scan time.
+
+Truth-source contract for L1 catalog (derived from layer model):
+  - L0 contracts: outbound = empty; inbound from any L1+
+  - L1 core: outbound subset of {contracts}; inbound from L2+
+  - L2 engine: outbound subset of {contracts, core}; inbound from L3
+  - L3 (plugins, web, mcp, tui, telemetry, testing, composer_mcp, cli root): outbound subset of {contracts, core, engine, other L3}; inbound only from other L3
+  - L3<->L3 edges: layer-permitted but UNCONSTRAINED -> flag deferred to L2 dispatch

@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Annotated, Optional
 
 import pytest
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from elspeth.contracts.data import (
     PluginSchema,
+    _check_field_constraints,
     _types_compatible,
     _unwrap_annotated,
     check_compatibility,
@@ -176,4 +177,143 @@ class TestCheckCompatibilityAnnotated:
             score: float
 
         result = check_compatibility(ProducerSchema, ConsumerSchema)
+        assert result.compatible is True
+
+
+class TestCheckFieldConstraints:
+    """Tests for _check_field_constraints with Pydantic FieldInfo constraints."""
+
+    def test_no_constraints_compatible(self) -> None:
+        """Fields with no constraints are compatible."""
+
+        class Schema(PluginSchema):
+            value: float
+
+        field = Schema.model_fields["value"]
+        assert _check_field_constraints("value", field, field) is None
+
+    def test_both_finite_compatible(self) -> None:
+        """Both fields with allow_inf_nan=False are compatible."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            value: FiniteFloat
+
+        class ConsumerSchema(PluginSchema):
+            value: FiniteFloat
+
+        producer_field = ProducerSchema.model_fields["value"]
+        consumer_field = ConsumerSchema.model_fields["value"]
+        assert _check_field_constraints("value", producer_field, consumer_field) is None
+
+    def test_producer_finite_consumer_plain_compatible(self) -> None:
+        """Producer guarantees finite, consumer accepts anything -- compatible."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            value: FiniteFloat
+
+        class ConsumerSchema(PluginSchema):
+            value: float
+
+        producer_field = ProducerSchema.model_fields["value"]
+        consumer_field = ConsumerSchema.model_fields["value"]
+        assert _check_field_constraints("value", producer_field, consumer_field) is None
+
+    def test_producer_plain_consumer_finite_incompatible(self) -> None:
+        """Producer emits unconstrained float, consumer requires finite -- incompatible."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            value: float
+
+        class ConsumerSchema(PluginSchema):
+            value: FiniteFloat
+
+        producer_field = ProducerSchema.model_fields["value"]
+        consumer_field = ConsumerSchema.model_fields["value"]
+        reason = _check_field_constraints("value", producer_field, consumer_field)
+        assert reason is not None
+        assert "allow_inf_nan" in reason
+
+
+class TestCheckCompatibilityConstraints:
+    """Integration tests for check_compatibility with FieldInfo constraints.
+
+    Regression tests for bug: check_compatibility treated constrained Annotated
+    types (e.g., FiniteFloat) as plain base types, allowing incompatible schemas
+    to pass validation when consumer required stricter constraints than producer.
+    """
+
+    def test_float_producer_finite_consumer_incompatible(self) -> None:
+        """Producer float is incompatible with consumer FiniteFloat."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            score: float
+
+        class ConsumerSchema(PluginSchema):
+            score: FiniteFloat
+
+        result = check_compatibility(ProducerSchema, ConsumerSchema)
+        assert result.compatible is False
+        assert len(result.constraint_mismatches) == 1
+        assert result.constraint_mismatches[0][0] == "score"
+        assert "allow_inf_nan" in result.constraint_mismatches[0][1]
+        assert result.type_mismatches == ()  # types match, only constraint differs
+
+    def test_finite_producer_float_consumer_compatible(self) -> None:
+        """Producer FiniteFloat is compatible with consumer float (stricter is fine)."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            score: FiniteFloat
+
+        class ConsumerSchema(PluginSchema):
+            score: float
+
+        result = check_compatibility(ProducerSchema, ConsumerSchema)
+        assert result.compatible is True
+
+    def test_finite_producer_finite_consumer_compatible(self) -> None:
+        """Producer and consumer both FiniteFloat -- compatible."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            score: FiniteFloat
+
+        class ConsumerSchema(PluginSchema):
+            score: FiniteFloat
+
+        result = check_compatibility(ProducerSchema, ConsumerSchema)
+        assert result.compatible is True
+
+    def test_error_message_includes_constraint_info(self) -> None:
+        """Incompatibility error message mentions constraint mismatch."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            score: float
+
+        class ConsumerSchema(PluginSchema):
+            score: FiniteFloat
+
+        result = check_compatibility(ProducerSchema, ConsumerSchema)
+        assert result.error_message is not None
+        assert "Constraint mismatches" in result.error_message
+        assert "score" in result.error_message
+
+    def test_int_producer_finite_consumer_compatible(self) -> None:
+        """int -> FiniteFloat: compatible because int values are always finite."""
+        FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+        class ProducerSchema(PluginSchema):
+            score: int
+
+        class ConsumerSchema(PluginSchema):
+            score: FiniteFloat
+
+        result = check_compatibility(ProducerSchema, ConsumerSchema)
+        # int -> float coercion is allowed (consumer_strict=False by default),
+        # and int values are always finite, so no constraint issue.
         assert result.compatible is True

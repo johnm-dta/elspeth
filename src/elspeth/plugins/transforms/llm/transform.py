@@ -18,17 +18,25 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from functools import reduce
+from operator import or_
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
 import structlog
+from pydantic import Field as PydanticField
+from pydantic import TypeAdapter
 
 from elspeth.contracts import Determinism, TransformErrorReason, TransformResult, propagate_contract
+from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
+from elspeth.contracts.token_usage import TokenUsage
+from elspeth.contracts.value_source import register_value_source_plugin
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputPort
 from elspeth.plugins.infrastructure.clients.llm import ContextLengthError, LLMClientError
@@ -36,8 +44,10 @@ from elspeth.plugins.infrastructure.pooling import PooledExecutor, RowContext
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.templates import TemplateError
 from elspeth.plugins.transforms.llm import (
+    _OUTPUT_FIELD_TYPE_TO_SCHEMA,
     _build_augmented_output_schema,
     _build_multi_query_output_schema,
+    _FieldType,
     build_llm_audit_metadata,
     get_llm_guaranteed_fields,
     populate_llm_operational_fields,
@@ -45,17 +55,23 @@ from elspeth.plugins.transforms.llm import (
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.langfuse import LangfuseTracer, create_langfuse_tracer
 from elspeth.plugins.transforms.llm.multi_query import QuerySpec, ResponseFormat, resolve_queries
-from elspeth.plugins.transforms.llm.provider import FinishReason, LLMProvider, ParsedFinishReason, UnrecognizedFinishReason
+from elspeth.plugins.transforms.llm.provider import (
+    FinishReason,
+    LLMProvider,
+    LLMQueryResult,
+    ParsedFinishReason,
+    UnrecognizedFinishReason,
+)
 from elspeth.plugins.transforms.llm.providers.azure import AzureLLMProvider, AzureOpenAIConfig, _configure_azure_monitor
 from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig, OpenRouterLLMProvider
 from elspeth.plugins.transforms.llm.templates import PromptTemplate
 from elspeth.plugins.transforms.llm.tracing import AzureAITracingConfig, TracingConfig, parse_tracing_config
 from elspeth.plugins.transforms.llm.validation import reject_nonfinite_constant, strip_markdown_fences, validate_field_value
 
-if TYPE_CHECKING:
-    from elspeth.core.landscape.recorder import LandscapeRecorder
-
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from elspeth.contracts.plugin_semantics import OutputSemanticDeclaration
 
 
 def _warn_telemetry_before_start(event: Any) -> None:
@@ -99,6 +115,26 @@ def _serialize_finish_reason(finish_reason: ParsedFinishReason) -> str | None:
     if isinstance(finish_reason, UnrecognizedFinishReason):
         return finish_reason.raw
     return str(finish_reason)  # type: ignore[unreachable]  # pragma: no cover — exhaustive, but future-proof
+
+
+def _shutdown_event_is_set(shutdown_event: object | None) -> bool:
+    """Return True only for concrete cancellation signals, not arbitrary mocks."""
+    is_set = getattr(shutdown_event, "is_set", None)
+    return callable(is_set) and is_set() is True
+
+
+def _shutdown_requested_result(
+    *,
+    error: str = "Run cancellation requested before LLM provider call",
+    query_name: str | None = None,
+    query_index: int | None = None,
+) -> TransformResult:
+    reason: dict[str, Any] = {"reason": "shutdown_requested", "error": error}
+    if query_name is not None:
+        reason["query_name"] = query_name
+    if query_index is not None:
+        reason["query_index"] = query_index
+    return TransformResult.error(cast(TransformErrorReason, reason), retryable=False)
 
 
 def _finish_reason_error(
@@ -224,6 +260,7 @@ class SingleQueryStrategy:
     temperature: float
     max_tokens: int | None
     response_field: str
+    align_output_contract: Callable[[SchemaContract], SchemaContract]
 
     def execute(
         self,
@@ -240,6 +277,7 @@ class SingleQueryStrategy:
         if ctx.token is None:
             raise RuntimeError("LLMTransform requires ctx.token")
         token_id = ctx.token.token_id
+        shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
         # 1. Render template (THEIR DATA — wrap)
         try:
@@ -259,6 +297,9 @@ class SingleQueryStrategy:
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": rendered.prompt})
+
+        if _shutdown_event_is_set(shutdown_event):
+            return _shutdown_requested_result()
 
         # 3. Call provider (EXTERNAL — errors classified by provider)
         start_time = time.monotonic()
@@ -361,6 +402,7 @@ class SingleQueryStrategy:
             output_row=output,
             transform_adds_fields=True,
         )
+        output_contract = self.align_output_contract(output_contract)
 
         return TransformResult.success(
             PipelineRow(output, output_contract),
@@ -399,8 +441,10 @@ class MultiQueryStrategy:
     temperature: float
     max_tokens: int | None
     response_field: str
+    align_output_contract: Callable[[SchemaContract], SchemaContract]
+    align_output_row_contract: Callable[[PipelineRow], PipelineRow]
     executor: PooledExecutor | None = None
-    _query_templates: dict[str, PromptTemplate] = field(init=False, default_factory=dict)
+    _query_templates: Mapping[str, PromptTemplate] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.query_specs, tuple):
@@ -415,6 +459,7 @@ class MultiQueryStrategy:
             if spec.template is not None:
                 query_templates[spec.name] = self.template.with_template_override(spec.template)
         object.__setattr__(self, "_query_templates", query_templates)
+        freeze_fields(self, "_query_templates")
 
     def execute(
         self,
@@ -431,10 +476,11 @@ class MultiQueryStrategy:
         if ctx.token is None:
             raise RuntimeError("LLMTransform requires ctx.token")
         token_id = ctx.token.token_id
+        shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
         if self.executor is not None:
-            return self._execute_parallel(row, state_id, token_id, provider, tracer)
-        return self._execute_sequential(row, state_id, token_id, provider, tracer)
+            return self._execute_parallel(row, state_id, token_id, provider, tracer, shutdown_event)
+        return self._execute_sequential(row, state_id, token_id, provider, tracer, shutdown_event)
 
     @dataclass(frozen=True, slots=True)
     class _QuerySuccess:
@@ -445,8 +491,16 @@ class MultiQueryStrategy:
         ``_QuerySuccess | TransformResult`` instead of ``dict | TransformResult``.
         """
 
-        fields: dict[str, Any]
-        audit_metadata: dict[str, object]
+        # ``Mapping`` (not ``dict``): ``freeze_fields`` replaces both
+        # fields with ``MappingProxyType``; the annotation must describe
+        # the read-only runtime type callers observe. Consumers needing
+        # a writable dict must ``dict(result.fields)`` (see the
+        # ``PipelineRow(dict(result.fields), ...)`` call below).
+        fields: Mapping[str, Any]
+        audit_metadata: Mapping[str, str | None]
+
+        def __post_init__(self) -> None:
+            freeze_fields(self, "fields", "audit_metadata")
 
     def _execute_one_query(
         self,
@@ -457,6 +511,7 @@ class MultiQueryStrategy:
         token_id: str,
         provider: LLMProvider,
         tracer: LangfuseTracer,
+        shutdown_event: threading.Event | None = None,
     ) -> _QuerySuccess | TransformResult:
         """Execute a single query within a multi-query row.
 
@@ -468,6 +523,9 @@ class MultiQueryStrategy:
             LLMClientError: Retryable errors propagate to caller for retry
                 handling (PooledExecutor AIMD or sequential error capture).
         """
+        if _shutdown_event_is_set(shutdown_event):
+            return _shutdown_requested_result(query_name=spec.name, query_index=query_idx)
+
         # Build template context from named input_fields
         try:
             template_ctx = spec.build_template_context(row)
@@ -484,7 +542,10 @@ class MultiQueryStrategy:
 
         # Use pre-compiled per-query template (already structurally validated
         # in __post_init__), falling back to config-level template.
-        query_template = self._query_templates.get(spec.name, self.template)
+        if spec.template is not None:
+            query_template = self._query_templates[spec.name]
+        else:
+            query_template = self.template
 
         # Render template — use contract=None because template_ctx is a
         # synthetic dict (keys are template variable names from input_fields,
@@ -513,6 +574,9 @@ class MultiQueryStrategy:
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": rendered.prompt})
+
+        if _shutdown_event_is_set(shutdown_event):
+            return _shutdown_requested_result(query_name=spec.name, query_index=query_idx)
 
         # Execute query
         query_max_tokens = spec.max_tokens or self.max_tokens
@@ -717,6 +781,7 @@ class MultiQueryStrategy:
         token_id: str,
         provider: LLMProvider,
         tracer: LangfuseTracer,
+        shutdown_event: threading.Event | None = None,
     ) -> TransformResult:
         """Execute queries sequentially (pool_size=1 fallback).
 
@@ -737,6 +802,7 @@ class MultiQueryStrategy:
                     token_id,
                     provider,
                     tracer,
+                    shutdown_event,
                 )
             except LLMClientError as e:
                 # Sequential mode: no AIMD retry — return retryable error result
@@ -781,6 +847,7 @@ class MultiQueryStrategy:
             output_row=output,
             transform_adds_fields=True,
         )
+        output_contract = self.align_output_contract(output_contract)
 
         return TransformResult.success(
             PipelineRow(output, output_contract),
@@ -799,6 +866,7 @@ class MultiQueryStrategy:
         token_id: str,
         provider: LLMProvider,
         tracer: LangfuseTracer,
+        shutdown_event: threading.Event | None = None,
     ) -> TransformResult:
         """Execute queries in parallel via PooledExecutor with AIMD retry.
 
@@ -812,7 +880,11 @@ class MultiQueryStrategy:
         # Side channel for audit metadata — _process_fn writes here, outer scope reads after pool.
         # Protected by lock: PooledExecutor runs _process_fn across ThreadPoolExecutor
         # workers, so concurrent dict writes require synchronization.
-        audit_metadata_by_index: dict[int, dict[str, object]] = {}
+        # ``Mapping`` value type (not ``dict``): ``_QuerySuccess.audit_metadata``
+        # is frozen via ``freeze_fields`` and surfaces as ``MappingProxyType``.
+        # Declaring the slot as ``dict`` would make the assignment below a
+        # silent type lie (see IM-2: ``dict[str, Any]`` after ``freeze_fields``).
+        audit_metadata_by_index: dict[int, Mapping[str, str | None]] = {}
         audit_metadata_lock = threading.Lock()
 
         # Build RowContext for each query — the pool treats each as a "row"
@@ -833,7 +905,7 @@ class MultiQueryStrategy:
             for i, spec in enumerate(self.query_specs)
         ]
 
-        def _process_fn(work: dict[str, Any], _work_state_id: str) -> TransformResult:
+        def _process_fn(work: Mapping[str, Any], _work_state_id: str) -> TransformResult:
             """Pool process function — wraps _execute_one_query for pool interface."""
             result = self._execute_one_query(
                 work["query_idx"],
@@ -843,6 +915,7 @@ class MultiQueryStrategy:
                 work["token_id"],
                 work["provider"],
                 work["tracer"],
+                shutdown_event,
             )
             if isinstance(result, TransformResult):
                 return result  # Error passthrough
@@ -865,12 +938,20 @@ class MultiQueryStrategy:
                 ),
                 locked=True,
             )
+            # result.fields is a MappingProxyType (deep-frozen in
+            # _QuerySuccess.__post_init__). PipelineRow enforces
+            # ``type(data) is dict`` as a Tier 1 guard against silently coercing
+            # audit/replay data — so materialize a fresh dict here. PipelineRow
+            # re-deep-freezes internally, preserving immutability across the handoff.
             return TransformResult.success(
-                PipelineRow(result.fields, observed),
+                self.align_output_row_contract(PipelineRow(dict(result.fields), observed)),
                 success_reason={"action": "query_completed", "metadata": {"query_name": work["spec"].name}},
             )
 
-        entries = self.executor.execute_batch(contexts=contexts, process_fn=_process_fn)
+        if shutdown_event is None:
+            entries = self.executor.execute_batch(contexts=contexts, process_fn=_process_fn)
+        else:
+            entries = self.executor.execute_batch(contexts=contexts, process_fn=_process_fn, shutdown_event=shutdown_event)
         query_results = [entry.result for entry in entries]
 
         # Check for failures — atomic: any failure fails the row
@@ -926,6 +1007,7 @@ class MultiQueryStrategy:
             output_row=output,
             transform_adds_fields=True,
         )
+        output_contract = self.align_output_contract(output_contract)
 
         return TransformResult.success(
             PipelineRow(output, output_contract),
@@ -959,7 +1041,157 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     """
 
     name = "llm"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:070f87f5e115a2b9"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
+    config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
+    passes_through_input = True
+    _provider: LLMProvider | None
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[LLMConfig]:
+        """Dispatch to provider-specific config class based on config["provider"]."""
+        provider = config.get("provider") if config is not None else None
+        if provider is not None and provider in _PROVIDERS:
+            config_cls, _ = _PROVIDERS[provider]
+            return config_cls
+        elif provider is not None:
+            raise ValueError(f"Unknown LLM provider '{provider}'. Valid providers: {sorted(_PROVIDERS)}")
+        # provider missing — return base LLMConfig so Pydantic catches it with Literal validation
+        return LLMConfig
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Publish the full LLM config contract as a Pydantic discriminated union.
+
+        The runtime dispatches ``get_config_model(config)`` on ``config["provider"]``
+        to select the provider-specific config class registered in
+        :data:`_PROVIDERS`. The catalog needs to advertise the complete
+        contract at schema-discovery time — before any provider has been
+        chosen — so this returns ``oneOf`` + a ``provider`` discriminator
+        over every variant in ``_PROVIDERS``. The variant list is derived
+        from the same registry that drives runtime provider instantiation;
+        the two cannot drift.
+
+        Requires ``len(_PROVIDERS) >= 2`` because a discriminated union with
+        one branch degenerates — Pydantic's ``TypeAdapter`` would emit a
+        non-``oneOf`` schema and downstream consumers (catalog flattener,
+        frontend PluginCard) rely on the ``oneOf`` + ``$defs`` shape to route
+        rendering. The guard here surfaces the contract explicitly instead of
+        letting the shape silently change under a single-provider build.
+        """
+        variants = tuple(cfg for cfg, _ in _PROVIDERS.values())
+        if len(variants) < 2:
+            raise RuntimeError(
+                "LLMTransform.get_config_schema requires at least two providers "
+                f"registered in _PROVIDERS; found {len(variants)}. Discriminated "
+                "union shape requires multiple branches."
+            )
+        # Fold with ``|`` to a single types.UnionType — the form Pydantic's
+        # Annotated[..., Field(discriminator=...)] requires. typing.Union[*variants]
+        # and tuple-of-types do not produce the same schema shape.
+        union_type = reduce(or_, variants[1:], variants[0])
+        adapter: TypeAdapter[Any] = TypeAdapter(Annotated[union_type, PydanticField(discriminator="provider")])
+        schema: dict[str, Any] = adapter.json_schema(ref_template="#/$defs/{model}")
+        # Pydantic emits ``provider`` as ``{const, default}`` on each variant and,
+        # because the field has a default, omits it from the variant's ``required``
+        # set. That disagrees with the runtime contract: ``LLMTransform.__init__``
+        # raises ``ValueError`` when config lacks ``provider`` because the registry
+        # cannot dispatch without it. A JSON-Schema preflight consumer (MCP composer,
+        # PluginCard form generation) must see the same requirement the runtime
+        # enforces — otherwise it accepts configs the pipeline will reject.
+        # Republish ``provider`` as required on every variant defined by ``_PROVIDERS``.
+        # Targeting variants by class name (not by "has a provider property") keeps
+        # the injection scoped to the discriminated union; unrelated nested ``$defs``
+        # (e.g. ``SchemaConfig``) are untouched.
+        provider_variant_names = {cfg.__name__ for cfg, _ in _PROVIDERS.values()}
+        for variant_name in provider_variant_names:
+            variant_schema = schema["$defs"][variant_name]
+            # Each provider variant inherits non-empty required fields from
+            # LLMConfig (``schema``, ``template``, ...) so Pydantic always
+            # emits a ``required`` key on the variant $defs. Access it directly
+            # — a missing key would signal a schema-emission regression worth
+            # crashing on, not silently papering over with setdefault().
+            required = variant_schema["required"]
+            if "provider" not in required:
+                required.append("provider")
+        return schema
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Minimal no-network config for the ADR-009 forward invariant.
+
+        Uses ``openai/gpt-4o`` because it's a stable presence in
+        ``litellm.model_list``'s OpenRouter slice — the probe never
+        actually makes a network call (preflight mode defers all
+        external client setup), but the value-source compliance walker
+        runs at construction time, so the model identifier MUST satisfy
+        the OpenRouter catalog declaration. A model that drops in/out
+        across litellm versions (e.g. ``gpt-4o-mini``) would make probes
+        flaky against the catalog snapshot.
+        """
+        return {
+            "provider": "openrouter",
+            "api_key": "probe-key",
+            "model": "openai/gpt-4o",
+            "template": "{{ row.llm_probe_text }}",
+            "schema": {"mode": "observed"},
+            "required_input_fields": [],
+        }
+
+    def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Inject a deterministic prompt field for invariant probing."""
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name="llm_probe_text",
+                value="probe request",
+            )
+        ]
+
+    def execute_forward_invariant_probe(
+        self,
+        probe_rows: list[PipelineRow],
+        ctx: Any,
+    ) -> TransformResult:
+        """Exercise the real LLM row path with a lifecycle-safe fake provider."""
+        if len(probe_rows) != 1:
+            raise FrameworkBugError(
+                f"{self.__class__.__name__}.execute_forward_invariant_probe() "
+                f"received {len(probe_rows)} rows; LLM invariant probes require exactly 1 row."
+            )
+
+        class _InvariantProvider:
+            def execute_query(
+                self,
+                messages: list[dict[str, str]],
+                *,
+                model: str,
+                temperature: float,
+                max_tokens: int | None,
+                state_id: str,
+                token_id: str,
+                response_format: object | None = None,
+            ) -> LLMQueryResult:
+                del messages, model, temperature, max_tokens, state_id, token_id, response_format
+                return LLMQueryResult(
+                    content="probe response",
+                    usage=TokenUsage.known(1, 1),
+                    model="probe-model",
+                    finish_reason=FinishReason.STOP,
+                )
+
+            def close(self) -> None:
+                return None
+
+        original_provider = self._provider
+        probe_provider = _InvariantProvider()
+        try:
+            self._provider = probe_provider
+            return self._process_row(probe_rows[0], ctx)
+        finally:
+            self._provider = original_provider
+            probe_provider.close()
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -978,8 +1210,9 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         # from_dict() returns Self on the subclass, but mypy sees type[LLMConfig].
         self._config = cast(
             "AzureOpenAIConfig | OpenRouterConfig",
-            config_cls.from_dict(config),
+            config_cls.from_dict(config, plugin_name=self.name),
         )
+        self._initialize_declared_input_fields(self._config)
 
         # Store common LLM settings.
         # AzureOpenAIConfig._set_model_from_deployment ensures model is populated;
@@ -1047,6 +1280,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
                 response_field=self._response_field,
+                align_output_contract=self._align_output_contract,
+                align_output_row_contract=self._align_output_row_contract,
                 executor=self._query_executor,
             )
 
@@ -1068,20 +1303,29 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             # _build_output_schema_config) because multi-query field computation
             # requires prefix interpolation beyond the generic helper's scope.
             # See: docs/superpowers/specs/2026-03-20-output-schema-contract-enforcement-design.md
-            base_guaranteed = schema_config.guaranteed_fields or ()
+            base_guaranteed = set(schema_config.guaranteed_fields or ())
+            output_fields = base_guaranteed | prefixed_guaranteed
+            # Preserve None-vs-empty-tuple semantics: None = abstain, () = explicitly empty.
+            upstream_declared = schema_config.guaranteed_fields is not None
+            if upstream_declared or output_fields:
+                guaranteed_fields_result = tuple(sorted(output_fields))
+            else:
+                guaranteed_fields_result = None
             self._output_schema_config = SchemaConfig(
                 mode=schema_config.mode,
                 fields=schema_config.fields,
-                guaranteed_fields=tuple(set(base_guaranteed) | prefixed_guaranteed),
+                guaranteed_fields=guaranteed_fields_result,
                 required_fields=schema_config.required_fields,
             )
 
             # Pydantic output schema with prefixed LLM fields
-            # Build extracted_fields mapping: query_name → prefixed output field names
-            extracted: dict[str, tuple[str, ...]] = {}
+            # Build extracted_fields mapping: query_name → (field_name, schema_type) tuples
+            extracted: dict[str, tuple[tuple[str, _FieldType], ...]] = {}
             for spec in query_specs:
                 if spec.output_fields:
-                    extracted[spec.name] = tuple(f"{spec.name}_{f.suffix}" for f in spec.output_fields)
+                    extracted[spec.name] = tuple(
+                        (f"{spec.name}_{f.suffix}", _OUTPUT_FIELD_TYPE_TO_SCHEMA[f.type.value]) for f in spec.output_fields
+                    )
             self.output_schema = _build_multi_query_output_schema(
                 base_schema_config=schema_config,
                 response_field=self._response_field,
@@ -1098,6 +1342,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
                 response_field=self._response_field,
+                align_output_contract=self._align_output_contract,
             )
 
             # Single-query emits unprefixed fields (operational only — audit goes to success_reason)
@@ -1107,11 +1352,17 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             # Output schema config with LLM output fields for DAG contract propagation.
             # INVARIANT: guaranteed_fields must be a superset of declared_output_fields.
             # See: docs/superpowers/specs/2026-03-20-output-schema-contract-enforcement-design.md
-            base_guaranteed = schema_config.guaranteed_fields or ()
+            base_guaranteed = set(schema_config.guaranteed_fields or ())
+            output_fields = base_guaranteed | set(guaranteed)
+            upstream_declared = schema_config.guaranteed_fields is not None
+            if upstream_declared or output_fields:
+                guaranteed_fields_result = tuple(sorted(output_fields))
+            else:
+                guaranteed_fields_result = None
             self._output_schema_config = SchemaConfig(
                 mode=schema_config.mode,
                 fields=schema_config.fields,
-                guaranteed_fields=tuple(set(base_guaranteed) | set(guaranteed)),
+                guaranteed_fields=guaranteed_fields_result,
                 required_fields=schema_config.required_fields,
             )
 
@@ -1126,13 +1377,74 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._provider: LLMProvider | None = None
 
         # Recorder, telemetry, rate limit (set in on_start)
-        self._recorder: LandscapeRecorder | None = None
+        self._recorder: PluginAuditWriter | None = None
         self._run_id: str = ""
         self._telemetry_emit: Callable[[Any], None] = _warn_telemetry_before_start
         self._limiter: Any = None
+        self._shutdown_event: threading.Event | None = None
 
         # Batch processing state
         self._batch_initialized = False
+
+    @property
+    def provider_config(self) -> AzureOpenAIConfig | OpenRouterConfig:
+        """Read-only accessor for the typed provider config.
+
+        Exposes the post-validation ``LLMConfig`` subclass so cross-cutting
+        validators (notably the value-source compliance walker) can inspect
+        ``VALUE_SOURCES`` declarations and field values without reaching for
+        ``self._config`` private attribute access.
+
+        Named ``provider_config`` (not ``config``) to avoid colliding with
+        :class:`BaseTransform.config` (the raw ``dict[str, Any]`` configuration
+        passed to ``__init__``) — distinct meanings, distinct names.
+        """
+        return self._config
+
+    def output_semantics(self) -> OutputSemanticDeclaration:
+        """Declare that raw LLM response fields are strings.
+
+        Single-query mode emits ``response_field`` directly. Multi-query mode
+        emits one raw response field per query using ``<query>_<response_field>``.
+        Structured multi-query extracted fields have their own schema types, but
+        this semantic contract only claims the raw response-content fields whose
+        runtime value is mechanically known here.
+        """
+        from elspeth.contracts.plugin_semantics import (
+            ContentKind,
+            FieldSemanticFacts,
+            OutputSemanticDeclaration,
+            SemanticValueType,
+            TextFraming,
+        )
+
+        if isinstance(self._strategy, MultiQueryStrategy):
+            return OutputSemanticDeclaration(
+                fields=tuple(
+                    FieldSemanticFacts(
+                        field_name=f"{spec.name}_{self._response_field}",
+                        content_kind=ContentKind.UNKNOWN,
+                        text_framing=TextFraming.UNKNOWN,
+                        value_type=SemanticValueType.STR,
+                        fact_code="llm.response_field.string",
+                        configured_by=("queries", "response_field"),
+                    )
+                    for spec in self._strategy.query_specs
+                ),
+            )
+
+        return OutputSemanticDeclaration(
+            fields=(
+                FieldSemanticFacts(
+                    field_name=self._response_field,
+                    content_kind=ContentKind.UNKNOWN,
+                    text_framing=TextFraming.UNKNOWN,
+                    value_type=SemanticValueType.STR,
+                    fact_code="llm.response_field.string",
+                    configured_by=("response_field", "queries"),
+                ),
+            ),
+        )
 
     def connect_output(self, output: OutputPort, max_pending: int = 30) -> None:
         """Connect output port and initialize batch processing."""
@@ -1154,6 +1466,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._recorder = ctx.landscape
         self._run_id = ctx.run_id
         self._telemetry_emit = ctx.telemetry_emit
+        self._shutdown_event = ctx.shutdown_event
         limiter_name = "azure_openai" if isinstance(self._config, AzureOpenAIConfig) else "openrouter"
         self._limiter = ctx.rate_limit_registry.get_limiter(limiter_name) if ctx.rate_limit_registry is not None else None
 
@@ -1223,6 +1536,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         """
         if self._provider is None:
             raise RuntimeError("Provider not initialized — _process_row called before on_start()")
+        self._shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
         return self._strategy.execute(
             row,
@@ -1234,15 +1548,29 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     def close(self) -> None:
         """Release resources."""
         self._tracer.flush()
+        shutdown_requested = _shutdown_event_is_set(self._shutdown_event)
 
-        if self._batch_initialized:
-            self.shutdown_batch_processing()
+        if shutdown_requested and self._provider is not None:
+            self._provider.close()
+            self._provider = None
 
         if self._query_executor is not None:
-            self._query_executor.shutdown(wait=True)
+            self._query_executor.shutdown(wait=not shutdown_requested)
+
+        if self._batch_initialized:
+            self.shutdown_batch_processing(wait_for_workers=not shutdown_requested)
 
         if self._provider is not None:
             self._provider.close()
             self._provider = None
 
         self._recorder = None
+        self._shutdown_event = None
+
+
+# Register opt-in for value-source compliance: the typed Pydantic config
+# (OpenRouterConfig | AzureOpenAIConfig) is exposed via the public
+# ``provider_config`` property. The walker (engine/orchestrator/preflight.py)
+# uses this registration to find the typed config without resorting to
+# duck-typing or getattr.
+register_value_source_plugin(LLMTransform, config_attr="provider_config")

@@ -189,6 +189,20 @@ class TestSharedBatchAdapter:
         # After timeout, entry must be cleaned up
         assert ("token-timeout", "state-timeout") not in adapter._entries
 
+    def test_shutdown_event_returns_shutdown_result(self) -> None:
+        """Run cancellation must wake batch waiters instead of waiting for the provider timeout."""
+        adapter = SharedBatchAdapter()
+        waiter = adapter.register("token-cancel", "state-cancel")
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+
+        result = waiter.wait(timeout=60.0, shutdown_event=shutdown_event)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "shutdown_requested"
+        assert ("token-cancel", "state-cancel") not in adapter._entries
+
     def test_late_result_after_timeout_not_stored(self) -> None:
         """Test that late results after timeout are discarded, not stored.
 

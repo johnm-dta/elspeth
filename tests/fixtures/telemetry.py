@@ -8,7 +8,8 @@ dependency on old test conftest.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -144,13 +145,77 @@ class FailingExporter:
         self.export_attempts += 1
         if self._fail_count is None or self._failures < self._fail_count:
             self._failures += 1
-            raise RuntimeError(f"Simulated export failure in {self._name}")
+            raise ConnectionError(f"Simulated export failure in {self._name}")
 
     def flush(self) -> None:
         pass
 
     def close(self) -> None:
         pass
+
+
+@contextmanager
+def telemetry_manager_cleanup() -> Generator[None, None, None]:
+    """Context manager that tracks and closes TelemetryManager instances.
+
+    TelemetryManager starts a non-daemon background thread for async export.
+    Without cleanup, these threads block pytest from exiting. This context
+    manager tracks all instances created during its scope and closes them
+    on exit.
+
+    Usage in conftest.py:
+        from tests.fixtures.telemetry import telemetry_manager_cleanup
+
+        @pytest.fixture(autouse=True)
+        def _auto_close_telemetry_managers():
+            with telemetry_manager_cleanup():
+                yield
+    """
+    import queue as queue_module
+
+    created_managers: list[tuple[TelemetryManager, queue_module.Queue[Any]]] = []
+    original_init = TelemetryManager.__init__
+
+    def tracking_init(self: TelemetryManager, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        created_managers.append((self, self._queue))
+
+    TelemetryManager.__init__ = tracking_init  # type: ignore[method-assign]
+
+    try:
+        yield
+    finally:
+        TelemetryManager.__init__ = original_init  # type: ignore[method-assign]
+        cleanup_errors: list[str] = []
+
+        for manager_index, (manager, original_queue) in enumerate(created_managers):
+            try:
+                manager._shutdown_event.set()
+
+                current_queue = manager._queue
+                if current_queue is not original_queue:
+                    try:
+                        original_queue.put_nowait(None)
+                    except queue_module.Full:
+                        try:
+                            original_queue.get_nowait()
+                            original_queue.put_nowait(None)
+                        except (queue_module.Full, queue_module.Empty):
+                            pass
+
+                if manager._export_thread.is_alive():
+                    manager.close()
+
+                if manager._export_thread.is_alive():
+                    manager._export_thread.join(timeout=1.0)
+            except Exception as exc:
+                cleanup_errors.append(f"manager[{manager_index}] {type(exc).__name__}: {exc}")
+
+        if cleanup_errors:
+            preview = "\n".join(cleanup_errors[:5])
+            if len(cleanup_errors) > 5:
+                preview += f"\n... and {len(cleanup_errors) - 5} more"
+            raise RuntimeError(f"TelemetryManager cleanup failed — {len(cleanup_errors)} error(s).\n{preview}")
 
 
 @pytest.fixture

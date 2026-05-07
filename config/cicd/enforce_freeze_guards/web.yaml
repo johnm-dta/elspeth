@@ -1,0 +1,10 @@
+per_file_rules:
+- pattern: web/composer/_producer_resolver.py
+  rules:
+  - FG3
+  reason: ProducerEntry.options is intentionally not re-frozen because CompositionState
+    already deep-freezes node options in __post_init__ — ProducerEntry holds a reference
+    to the already-frozen Mapping from state; redundant deep-freeze would be expensive
+    and creates a new object that is no longer the original frozen reference
+  expires: null
+  max_hits: 1

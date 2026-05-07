@@ -112,7 +112,7 @@ In this minimal example both paths carry the same data. The real power emerges i
 
 | Strategy | Result Shape |
 |----------|-------------|
-| `union` | `{field_a: val_a, field_b: val_b, ...}` — flat merge (last branch wins on collisions) |
+| `union` | `{field_a: val_a, field_b: val_b, ...}` — flat merge; collision handling is configurable via `union_collision_policy` (see "Union Collision Policy Variants" below) |
 | `nested` | `{path_a: {...}, path_b: {...}}` — branch-keyed (used in this example) |
 | `select` | `{...}` from one chosen branch (`select_branch: path_a`) |
 
@@ -123,6 +123,83 @@ In this minimal example both paths carry the same data. The real power emerges i
 - **Pre-fork transforms**: Shared processing (like truncation) happens before the fork
 - **Post-coalesce routing**: The coalesce name (`merge_results`) becomes a connection for downstream gates
 - **Terminal state**: Parent tokens are marked `FORKED`; merged tokens are `COALESCED`
+
+## Union Collision Policy Variants
+
+Three additional configurations demonstrate `union_collision_policy` — a `CoalesceSettings` field controlling how field-name collisions are resolved when `merge: union` is used. Each variant forks into two paths that run `truncate` on `description` with different cutoffs (20 vs 50 chars), then union-merges the results so every field name collides.
+
+| Variant | Policy | Winner on collision | Exit |
+|---------|--------|---------------------|------|
+| `settings_union_last_wins.yaml` | `last_wins` (default) | last branch in declaration order (`path_b`) | 0 |
+| `settings_union_first_wins.yaml` | `first_wins` | first branch in declaration order (`path_a`) | 0 |
+| `settings_union_fail.yaml` | `fail` | none — raises `CoalesceCollisionError` | non-zero (**deliberate**) |
+
+**Orthogonality note:** `union_collision_policy` is independent of the arrival `policy` (`require_all`, `quorum`, `best_effort`, `first`). Arrival policy decides **when** to merge; collision policy decides **how** to reconcile overlapping field names once merging begins. All three variants use `policy: require_all`.
+
+### `settings_union_last_wins.yaml` — last_wins (default)
+
+On collision the last branch in `branches` declaration order wins. Every row in the merged output carries `path_b`'s 50-char truncated `description`.
+
+```bash
+elspeth run --settings examples/fork_coalesce/settings_union_last_wins.yaml --execute
+```
+
+Expected output excerpt (`output/union_last_wins.json`):
+```json
+{"id": 1, "product": "Widget Pro", "price": 2500, "category": "electronics", "description": "High-performance widget with advanced sensor ar..."}
+```
+
+### `settings_union_first_wins.yaml` — first_wins
+
+On collision the first branch in declaration order wins. The merged output carries `path_a`'s 20-char truncated `description`.
+
+```bash
+elspeth run --settings examples/fork_coalesce/settings_union_first_wins.yaml --execute
+```
+
+Expected output excerpt (`output/union_first_wins.json`):
+```json
+{"id": 1, "product": "Widget Pro", "price": 2500, "category": "electronics", "description": "High-performance ..."}
+```
+
+### `settings_union_fail.yaml` — fail (deliberate failure)
+
+**This pipeline is designed to fail.** Any overlap in field names raises `CoalesceCollisionError`. The orchestrator catches the error, marks the coalesce node `FAILED`, and persists the full collision record to the audit trail. Because both branches emit the same column set, every field collides and the coalesce fails on every row.
+
+```bash
+elspeth run --settings examples/fork_coalesce/settings_union_fail.yaml --execute || echo "expected non-zero exit"
+```
+
+Use this variant when you want the pipeline to reject overlap rather than silently pick a winner — for example, when two enrichment APIs are supposed to return disjoint fields and any overlap indicates a misconfiguration.
+
+Note that `fail` does not distinguish "same value" from "different value" collisions — any duplicate field name is treated as an error. If you only want to fail on divergent values, use `last_wins`/`first_wins` and compare the `union_field_collision_values` record in the audit trail.
+
+### Inspecting the audit trail
+
+All three variants record the full collision provenance on the coalesce `node_states` row via `context_after_json`. The key fields are:
+
+- `union_field_origins` — map of `field_name → winning_branch_name` in the merged row
+- `union_field_collision_values` — map of `field_name → [[branch_name, value], ...]` showing every branch's contribution for each collided field (populated whenever ≥ 2 branches produced the same field name, regardless of value equality)
+
+Open the audit database with the Landscape MCP server:
+```bash
+elspeth-mcp --database sqlite:///examples/fork_coalesce/runs/union_last_wins.db
+```
+
+Or inspect directly via Python:
+```python
+import json, sqlite3
+db = sqlite3.connect("examples/fork_coalesce/runs/union_last_wins.db")
+for (ctx_json,) in db.execute(
+    "SELECT context_after_json FROM node_states WHERE context_after_json LIKE '%union_field_origins%'"
+):
+    ctx = json.loads(ctx_json)
+    print("origins:", ctx["union_field_origins"])
+    print("collisions:", ctx["union_field_collision_values"])
+    break
+```
+
+For the `fail` variant, look for `status = 'failed'` on the `coalesce_merge_results_*` `node_id` — the same collision record is preserved even though the pipeline aborted.
 
 ## See Also
 

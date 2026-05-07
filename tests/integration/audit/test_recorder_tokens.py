@@ -1,27 +1,28 @@
-"""Tests for LandscapeRecorder token operations."""
+"""Tests for RecorderFactory token operations."""
 
 from __future__ import annotations
 
 import pytest
 
-from elspeth.contracts.enums import Determinism, NodeType
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import Determinism, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
-class TestLandscapeRecorderTokens:
+class TestRecorderFactoryTokens:
     """Row and token management."""
 
     def test_create_row(self) -> None:
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -30,7 +31,7 @@ class TestLandscapeRecorderTokens:
             schema_config=DYNAMIC_SCHEMA,
         )
 
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -49,9 +50,9 @@ class TestLandscapeRecorderTokens:
         audit trail while weak tests still pass.
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -61,7 +62,7 @@ class TestLandscapeRecorderTokens:
         )
 
         test_data = {"name": "Alice", "value": 42}
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -74,9 +75,9 @@ class TestLandscapeRecorderTokens:
 
     def test_create_initial_token(self) -> None:
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -84,14 +85,14 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={"value": 42},
         )
 
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         assert token.token_id is not None
         assert token.row_id == row.row_id
@@ -99,9 +100,9 @@ class TestLandscapeRecorderTokens:
 
     def test_fork_token(self) -> None:
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -109,20 +110,19 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Fork to two branches
-        child_tokens, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent_token.token_id,
+        child_tokens, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["stats", "classifier"],
-            run_id=run.run_id,
         )
 
         assert len(child_tokens) == 2
@@ -140,9 +140,9 @@ class TestLandscapeRecorderTokens:
         assertions would still pass.
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -150,38 +150,37 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Fork to two branches
-        child_tokens, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent_token.token_id,
+        child_tokens, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["stats", "classifier"],
-            run_id=run.run_id,
         )
 
         # P1: Verify token_parents entries for each child
-        parents_0 = recorder.get_token_parents(child_tokens[0].token_id)
+        parents_0 = factory.query.get_token_parents(child_tokens[0].token_id)
         assert len(parents_0) == 1, f"Expected 1 parent for child 0, got {len(parents_0)}"
         assert parents_0[0].parent_token_id == parent_token.token_id
         assert parents_0[0].ordinal == 0
 
-        parents_1 = recorder.get_token_parents(child_tokens[1].token_id)
+        parents_1 = factory.query.get_token_parents(child_tokens[1].token_id)
         assert len(parents_1) == 1, f"Expected 1 parent for child 1, got {len(parents_1)}"
         assert parents_1[0].parent_token_id == parent_token.token_id
         assert parents_1[0].ordinal == 1
 
     def test_coalesce_tokens(self) -> None:
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -189,23 +188,22 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
-        children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["a", "b"],
-            run_id=run.run_id,
         )
 
         # Coalesce back together
-        merged = recorder.coalesce_tokens(
-            parent_token_ids=[c.token_id for c in children],
+        merged = factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
         )
 
@@ -215,9 +213,9 @@ class TestLandscapeRecorderTokens:
     def test_fork_token_with_step_in_pipeline(self) -> None:
         """Fork stores step_in_pipeline in tokens table."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -225,20 +223,19 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Fork with step_in_pipeline
-        child_tokens, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent_token.token_id,
+        child_tokens, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["stats", "classifier"],
-            run_id=run.run_id,
             step_in_pipeline=2,
         )
 
@@ -248,7 +245,7 @@ class TestLandscapeRecorderTokens:
         assert child_tokens[1].step_in_pipeline == 2
 
         # Verify retrieval via get_token
-        retrieved = recorder.get_token(child_tokens[0].token_id)
+        retrieved = factory.query.get_token(child_tokens[0].token_id)
         assert retrieved is not None
         assert retrieved.step_in_pipeline == 2
 
@@ -260,9 +257,9 @@ class TestLandscapeRecorderTokens:
         upstream, recorder MUST also validate as defense-in-depth.
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -270,29 +267,28 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Empty branches should be rejected
         with pytest.raises(ValueError, match="at least one branch"):
-            recorder.fork_token(
-                parent_token_id=parent_token.token_id,
+            factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 branches=[],  # Empty!
-                run_id=run.run_id,
             )
 
     def test_coalesce_tokens_with_step_in_pipeline(self) -> None:
         """Coalesce stores step_in_pipeline in tokens table."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -300,24 +296,23 @@ class TestLandscapeRecorderTokens:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
-        children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["a", "b"],
-            run_id=run.run_id,
             step_in_pipeline=1,
         )
 
         # Coalesce with step_in_pipeline
-        merged = recorder.coalesce_tokens(
-            parent_token_ids=[c.token_id for c in children],
+        merged = factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             step_in_pipeline=3,
         )
@@ -326,7 +321,7 @@ class TestLandscapeRecorderTokens:
         assert merged.step_in_pipeline == 3
 
         # Verify retrieval via get_token
-        retrieved = recorder.get_token(merged.token_id)
+        retrieved = factory.query.get_token(merged.token_id)
         assert retrieved is not None
         assert retrieved.step_in_pipeline == 3
 
@@ -337,11 +332,11 @@ class TestExpandToken:
     def test_expand_token_creates_children_with_parent_relationship(self) -> None:
         """expand_token creates child tokens linked to parent via token_parents."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Setup: create run, node, row, and parent token
-        run = recorder.begin_run(config={"test": True}, canonical_version="1.0")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={"test": True}, canonical_version="1.0")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="json_explode",
             node_type=NodeType.TRANSFORM,
@@ -350,20 +345,19 @@ class TestExpandToken:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"items": [1, 2, 3]},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Act: expand parent into 3 children
-        children, _expand_group_id = recorder.expand_token(
-            parent_token_id=parent_token.token_id,
+        children, _expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=3,
-            run_id=run.run_id,
             step_in_pipeline=2,
         )
 
@@ -382,7 +376,7 @@ class TestExpandToken:
 
         # Verify parent relationships recorded
         for i, child in enumerate(children):
-            parents = recorder.get_token_parents(child.token_id)
+            parents = factory.query.get_token_parents(child.token_id)
             assert len(parents) == 1
             assert parents[0].parent_token_id == parent_token.token_id
             assert parents[0].ordinal == i
@@ -390,10 +384,10 @@ class TestExpandToken:
     def test_expand_token_with_zero_count_raises(self) -> None:
         """expand_token raises ValueError for count=0."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="1.0")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv",
             node_type=NodeType.SOURCE,
@@ -402,30 +396,29 @@ class TestExpandToken:
             determinism=Determinism.IO_READ,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         with pytest.raises(ValueError, match="at least 1"):
-            recorder.expand_token(
-                parent_token_id=token.token_id,
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 count=0,
-                run_id=run.run_id,
                 step_in_pipeline=1,
             )
 
     def test_expand_token_stores_step_in_pipeline(self) -> None:
         """expand_token stores step_in_pipeline on child tokens."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="1.0")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="explode",
             node_type=NodeType.TRANSFORM,
@@ -434,19 +427,18 @@ class TestExpandToken:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"list": [1, 2]},
         )
-        parent = recorder.create_token(row_id=row.row_id)
+        parent = factory.data_flow.create_token(row_id=row.row_id)
 
-        children, _expand_group_id = recorder.expand_token(
-            parent_token_id=parent.token_id,
+        children, _expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=2,
-            run_id=run.run_id,
             step_in_pipeline=5,
         )
 
@@ -454,17 +446,17 @@ class TestExpandToken:
         for child in children:
             assert child.step_in_pipeline == 5
             # Verify retrieval via get_token
-            retrieved = recorder.get_token(child.token_id)
+            retrieved = factory.query.get_token(child.token_id)
             assert retrieved is not None
             assert retrieved.step_in_pipeline == 5
 
     def test_expand_token_with_single_child(self) -> None:
         """expand_token works with count=1."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="1.0")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="singleton",
             node_type=NodeType.TRANSFORM,
@@ -473,19 +465,18 @@ class TestExpandToken:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
+        parent = factory.data_flow.create_token(row_id=row.row_id)
 
-        children, expand_group_id = recorder.expand_token(
-            parent_token_id=parent.token_id,
+        children, expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=1,
-            run_id=run.run_id,
             step_in_pipeline=1,
         )
 
@@ -493,7 +484,7 @@ class TestExpandToken:
         assert children[0].expand_group_id is not None
         assert children[0].expand_group_id == expand_group_id
 
-        parents = recorder.get_token_parents(children[0].token_id)
+        parents = factory.query.get_token_parents(children[0].token_id)
         assert len(parents) == 1
         assert parents[0].parent_token_id == parent.token_id
         assert parents[0].ordinal == 0
@@ -501,10 +492,10 @@ class TestExpandToken:
     def test_expand_token_preserves_expand_group_id_through_retrieval(self) -> None:
         """expand_group_id is preserved when retrieving tokens via get_token."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
-        run = recorder.begin_run(config={}, canonical_version="1.0")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="explode",
             node_type=NodeType.TRANSFORM,
@@ -513,25 +504,24 @@ class TestExpandToken:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
+        parent = factory.data_flow.create_token(row_id=row.row_id)
 
-        children, _expand_group_id = recorder.expand_token(
-            parent_token_id=parent.token_id,
+        children, _expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=2,
-            run_id=run.run_id,
             step_in_pipeline=3,
         )
 
         # Retrieve each child and verify expand_group_id matches
         for child in children:
-            retrieved = recorder.get_token(child.token_id)
+            retrieved = factory.query.get_token(child.token_id)
             assert retrieved is not None
             assert retrieved.expand_group_id == child.expand_group_id
 
@@ -550,12 +540,10 @@ class TestAtomicTokenOperations:
         the parent outcome isn't recorded, recovery can't identify the fork.
         """
 
-        from elspeth.contracts.enums import RowOutcome
-
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -563,37 +551,37 @@ class TestAtomicTokenOperations:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Fork to two branches
-        _children, fork_group_id = recorder.fork_token(
-            parent_token_id=parent_token.token_id,
+        _children, fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["stats", "classifier"],
-            run_id=run.run_id,
         )
 
         # Verify parent has FORKED outcome recorded atomically
-        outcome = recorder.get_token_outcome(parent_token.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is not None, "Parent token should have FORKED outcome"
-        assert outcome.outcome == RowOutcome.FORKED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.FORK_PARENT
         assert outcome.fork_group_id == fork_group_id
-        assert outcome.is_terminal == 1
+        assert outcome.completed is True
 
     def test_fork_token_stores_expected_branches_contract(self) -> None:
         """fork_token stores branch names in expected_branches_json for contract validation."""
         import json
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -601,24 +589,23 @@ class TestAtomicTokenOperations:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Fork to three branches
-        recorder.fork_token(
-            parent_token_id=parent_token.token_id,
+        factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["alpha", "beta", "gamma"],
-            run_id=run.run_id,
         )
 
         # Verify expected_branches_json is stored correctly
-        outcome = recorder.get_token_outcome(parent_token.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is not None
         assert outcome.expected_branches_json is not None
         expected = json.loads(outcome.expected_branches_json)
@@ -631,12 +618,10 @@ class TestAtomicTokenOperations:
         same transaction as creating children, eliminating the crash window.
         """
 
-        from elspeth.contracts.enums import RowOutcome
-
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="explode",
             node_type=NodeType.TRANSFORM,
@@ -645,38 +630,38 @@ class TestAtomicTokenOperations:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Expand to 3 children (default: record_parent_outcome=True)
-        _children, expand_group_id = recorder.expand_token(
-            parent_token_id=parent_token.token_id,
+        _children, expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=3,
-            run_id=run.run_id,
             step_in_pipeline=2,
         )
 
         # Verify parent has EXPANDED outcome recorded atomically
-        outcome = recorder.get_token_outcome(parent_token.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is not None, "Parent token should have EXPANDED outcome"
-        assert outcome.outcome == RowOutcome.EXPANDED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.EXPAND_PARENT
         assert outcome.expand_group_id == expand_group_id
-        assert outcome.is_terminal == 1
+        assert outcome.completed is True
 
     def test_expand_token_stores_expected_count_contract(self) -> None:
         """expand_token stores count in expected_branches_json for contract validation."""
         import json
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="explode",
             node_type=NodeType.TRANSFORM,
@@ -685,25 +670,24 @@ class TestAtomicTokenOperations:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Expand to 5 children
-        recorder.expand_token(
-            parent_token_id=parent_token.token_id,
+        factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=5,
-            run_id=run.run_id,
             step_in_pipeline=2,
         )
 
         # Verify expected_branches_json stores count
-        outcome = recorder.get_token_outcome(parent_token.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is not None
         assert outcome.expected_branches_json is not None
         expected = json.loads(outcome.expected_branches_json)
@@ -719,9 +703,9 @@ class TestAtomicTokenOperations:
         (2) parent-link records in token_parents table.
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -729,23 +713,22 @@ class TestAtomicTokenOperations:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
-        children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["a", "b"],
-            run_id=run.run_id,
         )
 
         # Coalesce the two fork children
-        merged = recorder.coalesce_tokens(
-            parent_token_ids=[c.token_id for c in children],
+        merged = factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
         )
 
@@ -754,7 +737,7 @@ class TestAtomicTokenOperations:
         assert merged.row_id == row.row_id
 
         # Verify parent links created atomically with merged token
-        parents = recorder.get_token_parents(merged.token_id)
+        parents = factory.query.get_token_parents(merged.token_id)
         assert len(parents) == 2
         parent_ids = {p.parent_token_id for p in parents}
         assert parent_ids == {c.token_id for c in children}
@@ -766,12 +749,10 @@ class TestAtomicTokenOperations:
         coalesce_tokens first, then record_token_outcome for each parent.
         """
 
-        from elspeth.contracts.enums import RowOutcome
-
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -779,42 +760,43 @@ class TestAtomicTokenOperations:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
-        children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["a", "b"],
-            run_id=run.run_id,
         )
 
         # Step 1: Coalesce creates merged token + parent links
-        merged = recorder.coalesce_tokens(
-            parent_token_ids=[c.token_id for c in children],
+        merged = factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
         )
 
         # Step 2: Record COALESCED outcomes on each parent (as CoalesceExecutor does)
         for child in children:
-            recorder.record_token_outcome(
-                run_id=run.run_id,
-                token_id=child.token_id,
-                outcome=RowOutcome.COALESCED,
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=child.token_id, run_id=run.run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
                 join_group_id=merged.join_group_id,
             )
 
         # Verify each parent has COALESCED outcome with correct join_group_id
         for child in children:
-            outcome = recorder.get_token_outcome(child.token_id)
+            outcome = factory.data_flow.get_token_outcome(child.token_id)
             assert outcome is not None, f"Parent {child.token_id} should have COALESCED outcome"
-            assert outcome.outcome == RowOutcome.COALESCED
+            assert outcome.outcome == TerminalOutcome.SUCCESS
+            assert outcome.path == TerminalPath.COALESCED
+            assert outcome.sink_name is None
             assert outcome.join_group_id == merged.join_group_id
-            assert outcome.is_terminal == 1
+            assert outcome.completed is True
 
     def test_coalesce_tokens_creates_parent_links(self) -> None:
         """coalesce_tokens records parent-child relationships in token_parents table.
@@ -823,9 +805,9 @@ class TestAtomicTokenOperations:
         each parent token with correct ordinals, enabling lineage traversal.
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -833,28 +815,27 @@ class TestAtomicTokenOperations:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
-        children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["x", "y", "z"],
-            run_id=run.run_id,
         )
 
         # Coalesce all three fork children
-        merged = recorder.coalesce_tokens(
-            parent_token_ids=[c.token_id for c in children],
+        merged = factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
         )
 
         # Verify token_parents entries
-        parents = recorder.get_token_parents(merged.token_id)
+        parents = factory.query.get_token_parents(merged.token_id)
         assert len(parents) == 3, f"Expected 3 parent links, got {len(parents)}"
 
         # Verify ordinals are sequential and parent IDs match
@@ -868,9 +849,9 @@ class TestAtomicTokenOperations:
     def test_coalesce_tokens_stores_join_group_id_on_merged_token(self) -> None:
         """coalesce_tokens stores join_group_id on the merged token for lineage queries."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -878,22 +859,21 @@ class TestAtomicTokenOperations:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={},
         )
-        parent = recorder.create_token(row_id=row.row_id)
-        children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["a", "b"],
-            run_id=run.run_id,
         )
 
-        merged = recorder.coalesce_tokens(
-            parent_token_ids=[c.token_id for c in children],
+        merged = factory.data_flow.coalesce_tokens(
+            parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
         )
 
@@ -901,7 +881,7 @@ class TestAtomicTokenOperations:
         assert merged.join_group_id is not None
 
         # Verify it survives DB roundtrip
-        retrieved = recorder.get_token(merged.token_id)
+        retrieved = factory.query.get_token(merged.token_id)
         assert retrieved is not None
         assert retrieved.join_group_id == merged.join_group_id
 
@@ -912,9 +892,9 @@ class TestAtomicTokenOperations:
         CONSUMED_IN_BATCH separately for the parent (different semantics).
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="aggregator",
             node_type=NodeType.TRANSFORM,
@@ -923,20 +903,19 @@ class TestAtomicTokenOperations:
             determinism=Determinism.DETERMINISTIC,
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={},
         )
-        parent_token = recorder.create_token(row_id=row.row_id)
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Expand with record_parent_outcome=False (batch aggregation pattern)
-        children, _expand_group_id = recorder.expand_token(
-            parent_token_id=parent_token.token_id,
+        children, _expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             count=2,
-            run_id=run.run_id,
             step_in_pipeline=2,
             record_parent_outcome=False,  # Don't record EXPANDED
         )
@@ -945,5 +924,5 @@ class TestAtomicTokenOperations:
         assert len(children) == 2
 
         # But parent should NOT have an outcome yet
-        outcome = recorder.get_token_outcome(parent_token.token_id)
+        outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is None, "Parent should not have outcome when record_parent_outcome=False"

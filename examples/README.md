@@ -27,6 +27,7 @@ These examples run locally with no credentials or external services.
 | [`deep_routing`](deep_routing/) | 5 chained gates, 3 transforms, 7 sinks — complex decision tree |
 | [`fork_coalesce`](fork_coalesce/) | Fork/join DAG pattern — parallel paths merged with configurable policy (includes ARCH-15 per-branch transforms variant) |
 | [`batch_aggregation`](batch_aggregation/) | Count-triggered aggregation with group-by statistics |
+| [`statistical_batch_plugins`](statistical_batch_plugins/) | Statistical batch QA: distributions, experiments, classifier metrics, paired preferences, drift, outliers, data quality, top-k, thresholds, and effect sizes |
 | [`deaggregation`](deaggregation/) | 1-to-N row expansion via `batch_replicate` |
 | [`json_explode`](json_explode/) | Expand nested JSON arrays into individual rows |
 | [`database_sink`](database_sink/) | Write pipeline output to a SQLite database |
@@ -96,6 +97,7 @@ These examples use ELSPETH's built-in fault injection servers to test pipeline r
 | **Fork/join patterns** | [`fork_coalesce`](fork_coalesce/) — parallel paths with merge policies |
 | **Error handling / quarantine** | [`error_routing`](error_routing/) — `on_error` diversion pattern |
 | **Aggregation (N to 1)** | [`batch_aggregation`](batch_aggregation/) — count triggers, group-by stats |
+| **Statistical batch QA** | [`statistical_batch_plugins`](statistical_batch_plugins/) — prompt/model score comparisons, classifier metrics, drift, outlier annotation, data quality, top-k, thresholds, and effect sizes |
 | **Deaggregation (1 to N)** | [`deaggregation`](deaggregation/) or [`json_explode`](json_explode/) |
 | **LLM integration (quick start)** | [`openrouter_sentiment`](openrouter_sentiment/) — simplest real LLM pipeline |
 | **LLM without API keys** | [`chaosllm_sentiment`](chaosllm_sentiment/) — same pipeline, local ChaosLLM server |

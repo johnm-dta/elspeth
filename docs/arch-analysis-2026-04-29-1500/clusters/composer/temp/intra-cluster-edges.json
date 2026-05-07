@@ -1,0 +1,885 @@
+{
+  "cluster": "composer (web + composer_mcp)",
+  "cross_cluster_inbound_edges": [],
+  "cross_cluster_outbound_edges": [
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 39,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/dependencies.py",
+          "line": 48
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/catalog",
+      "oracle_idx": 53,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/catalog/service.py",
+          "line": 8
+        },
+        {
+          "file": "web/catalog/service.py",
+          "line": 9
+        },
+        {
+          "file": "web/catalog/service.py",
+          "line": 9
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "oracle_idx": 54,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/_semantic_validator.py",
+          "line": 47
+        },
+        {
+          "file": "web/composer/_semantic_validator.py",
+          "line": 52
+        },
+        {
+          "file": "web/composer/_semantic_validator.py",
+          "line": 53
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 22
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 60,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/service.py",
+          "line": 30
+        },
+        {
+          "file": "web/execution/service.py",
+          "line": 805
+        },
+        {
+          "file": "web/execution/validation.py",
+          "line": 24
+        }
+      ],
+      "to": ".",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 61,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/_semantic_helpers.py",
+          "line": 66
+        },
+        {
+          "file": "web/execution/_semantic_helpers.py",
+          "line": 67
+        },
+        {
+          "file": "web/execution/validation.py",
+          "line": 30
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": true,
+      "from": "web/execution",
+      "oracle_idx": 62,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/service.py",
+          "line": 781
+        }
+      ],
+      "to": "telemetry",
+      "type_checking_only": false,
+      "weight": 1
+    }
+  ],
+  "filter_rule": "node == 'web' OR startswith 'web/' OR node == 'composer_mcp' OR startswith 'composer_mcp/'",
+  "intra_cluster_edges": [
+    {
+      "conditional": false,
+      "from": "composer_mcp",
+      "oracle_idx": 4,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "composer_mcp/server.py",
+          "line": 524
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "composer_mcp",
+      "oracle_idx": 5,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "composer_mcp/server.py",
+          "line": 27
+        }
+      ],
+      "to": "web/catalog",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "composer_mcp",
+      "oracle_idx": 6,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "composer_mcp/server.py",
+          "line": 28
+        },
+        {
+          "file": "composer_mcp/server.py",
+          "line": 29
+        },
+        {
+          "file": "composer_mcp/server.py",
+          "line": 29
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 12
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 40,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 27
+        },
+        {
+          "file": "web/app.py",
+          "line": 28
+        },
+        {
+          "file": "web/app.py",
+          "line": 29
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 41,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 31
+        },
+        {
+          "file": "web/app.py",
+          "line": 32
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 42,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 33
+        },
+        {
+          "file": "web/dependencies.py",
+          "line": 19
+        },
+        {
+          "file": "web/dependencies.py",
+          "line": 49
+        }
+      ],
+      "to": "web/catalog",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 43,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 34
+        },
+        {
+          "file": "web/app.py",
+          "line": 35
+        },
+        {
+          "file": "web/app.py",
+          "line": 36
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 44,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 39
+        },
+        {
+          "file": "web/app.py",
+          "line": 40
+        },
+        {
+          "file": "web/app.py",
+          "line": 41
+        }
+      ],
+      "to": "web/execution",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 45,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 42
+        },
+        {
+          "file": "web/app.py",
+          "line": 43
+        }
+      ],
+      "to": "web/middleware",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 46,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 44
+        },
+        {
+          "file": "web/app.py",
+          "line": 45
+        },
+        {
+          "file": "web/app.py",
+          "line": 46
+        }
+      ],
+      "to": "web/secrets",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "oracle_idx": 47,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 48
+        },
+        {
+          "file": "web/app.py",
+          "line": 49
+        },
+        {
+          "file": "web/app.py",
+          "line": 50
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/auth",
+      "oracle_idx": 48,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/auth/local.py",
+          "line": 17
+        },
+        {
+          "file": "web/auth/models.py",
+          "line": 14
+        },
+        {
+          "file": "web/auth/oidc.py",
+          "line": 20
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web/auth",
+      "oracle_idx": 49,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/auth/routes.py",
+          "line": 21
+        }
+      ],
+      "to": "web/middleware",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/blobs",
+      "oracle_idx": 50,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/blobs/service.py",
+          "line": 19
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/blobs",
+      "oracle_idx": 51,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/blobs/routes.py",
+          "line": 17
+        },
+        {
+          "file": "web/blobs/routes.py",
+          "line": 18
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/blobs",
+      "oracle_idx": 52,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/blobs/service.py",
+          "line": 41
+        },
+        {
+          "file": "web/blobs/service.py",
+          "line": 41
+        },
+        {
+          "file": "web/blobs/service.py",
+          "line": 41
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "oracle_idx": 55,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/service.py",
+          "line": 29
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 47
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 47
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "oracle_idx": 56,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/tools.py",
+          "line": 30
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 31
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 31
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "oracle_idx": 57,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/prompts.py",
+          "line": 17
+        },
+        {
+          "file": "web/composer/service.py",
+          "line": 30
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 32
+        }
+      ],
+      "to": "web/catalog",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "oracle_idx": 58,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/prompts.py",
+          "line": 19
+        },
+        {
+          "file": "web/composer/prompts.py",
+          "line": 19
+        }
+      ],
+      "to": "web/composer/skills",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "oracle_idx": 59,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/service.py",
+          "line": 49
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 48
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 48
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 63,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/diagnostics.py",
+          "line": 25
+        },
+        {
+          "file": "web/execution/discard_summary.py",
+          "line": 17
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 26
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 15
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 64,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/protocol.py",
+          "line": 8
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 27
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 28
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 65,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/routes.py",
+          "line": 30
+        },
+        {
+          "file": "web/execution/service.py",
+          "line": 45
+        },
+        {
+          "file": "web/execution/service.py",
+          "line": 45
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 66,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/_semantic_helpers.py",
+          "line": 25
+        },
+        {
+          "file": "web/execution/errors.py",
+          "line": 16
+        },
+        {
+          "file": "web/execution/protocol.py",
+          "line": 9
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 9
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "oracle_idx": 67,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/diagnostics.py",
+          "line": 35
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 51
+        },
+        {
+          "file": "web/execution/schemas.py",
+          "line": 16
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 7
+    },
+    {
+      "conditional": false,
+      "from": "web/secrets",
+      "oracle_idx": 68,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/secrets/routes.py",
+          "line": 18
+        },
+        {
+          "file": "web/secrets/routes.py",
+          "line": 21
+        },
+        {
+          "file": "web/secrets/schemas.py",
+          "line": 22
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web/secrets",
+      "oracle_idx": 69,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/secrets/routes.py",
+          "line": 19
+        },
+        {
+          "file": "web/secrets/routes.py",
+          "line": 20
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/secrets",
+      "oracle_idx": 70,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/secrets/user_store.py",
+          "line": 32
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "oracle_idx": 71,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 20
+        },
+        {
+          "file": "web/sessions/schemas.py",
+          "line": 25
+        },
+        {
+          "file": "web/sessions/service.py",
+          "line": 23
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "oracle_idx": 72,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 21
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 22
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "oracle_idx": 73,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 23
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 23
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "oracle_idx": 74,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/converters.py",
+          "line": 15
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 24
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 24
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 15
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "oracle_idx": 75,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 1224
+        },
+        {
+          "file": "web/sessions/schemas.py",
+          "line": 23
+        }
+      ],
+      "to": "web/execution",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "oracle_idx": 76,
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 39
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 39
+        }
+      ],
+      "to": "web/middleware",
+      "type_checking_only": false,
+      "weight": 2
+    }
+  ],
+  "intra_cluster_scc_membership": [
+    {
+      "all_in_cluster": true,
+      "members": [
+        "web",
+        "web/auth",
+        "web/blobs",
+        "web/composer",
+        "web/execution",
+        "web/secrets",
+        "web/sessions"
+      ],
+      "scc_index": 4
+    }
+  ],
+  "scope_roots": [
+    "web",
+    "composer_mcp"
+  ],
+  "summary": {
+    "inbound_edges": 0,
+    "intra_edges": 35,
+    "outbound_edges": 6,
+    "scc_count_touching_cluster": 1
+  }
+}

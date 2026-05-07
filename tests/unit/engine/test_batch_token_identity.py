@@ -18,11 +18,11 @@ from typing import Any
 
 from elspeth.contracts import Determinism, NodeType, SourceRow
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.config import AggregationSettings, TriggerConfig
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.database import LandscapeDB
 from elspeth.engine.processor import DAGTraversalContext, RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -38,17 +38,17 @@ from tests.unit.engine.conftest import _TestSchema
 
 
 def _assert_all_batch_members_consumed(
-    recorder: LandscapeRecorder,
+    db: LandscapeDB,
     run_id: str,
     batch_id: str,
 ) -> None:
     """Assert ALL tokens in a batch have CONSUMED_IN_BATCH as their terminal outcome.
 
     T26: Tokens now have two outcome records — BUFFERED (non-terminal, at buffer time)
-    and CONSUMED_IN_BATCH (terminal, at flush time). We filter by is_terminal=1 to
+    and CONSUMED_IN_BATCH (terminal, at flush time). We filter by completed=1 to
     check the final outcome.
     """
-    with recorder._db.connection() as conn:
+    with db.connection() as conn:
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import batch_members_table, token_outcomes_table
@@ -66,17 +66,16 @@ def _assert_all_batch_members_consumed(
             ordinal = member.ordinal
 
             outcome_row = conn.execute(
-                select(token_outcomes_table.c.outcome)
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path)
                 .where(token_outcomes_table.c.token_id == token_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchone()
 
             assert outcome_row is not None, f"Batch member {token_id} (ordinal {ordinal}) has no terminal outcome recorded"
 
-            actual = RowOutcome(outcome_row.outcome)
-            assert actual == RowOutcome.CONSUMED_IN_BATCH, (
-                f"Batch member {token_id} (ordinal {ordinal}) has terminal outcome {actual}, expected CONSUMED_IN_BATCH."
-            )
+            actual = (outcome_row.outcome, outcome_row.path)
+            expected = (TerminalOutcome.TRANSIENT.value, TerminalPath.BATCH_CONSUMED.value)
+            assert actual == expected, f"Batch member {token_id} (ordinal {ordinal}) has terminal pair {actual}, expected {expected}."
 
 
 def _assert_output_token_distinct_from_inputs(
@@ -139,9 +138,9 @@ class TestBatchTokenIdentity:
         COMPLETED instead of CONSUMED_IN_BATCH.
         """
         setup = make_recorder_with_run()
-        recorder, run_id = setup.recorder, setup.run_id
+        factory, run_id = setup.factory, setup.run_id
         source_node_id = setup.source_node_id
-        agg_node_id = register_test_node(recorder, run_id, "agg", node_type=NodeType.AGGREGATION, plugin_name="summer")
+        agg_node_id = register_test_node(setup.data_flow, run_id, "agg", node_type=NodeType.AGGREGATION, plugin_name="summer")
 
         aggregation_settings = {
             NodeID(agg_node_id): AggregationSettings(
@@ -156,7 +155,8 @@ class TestBatchTokenIdentity:
 
         transform = SumTransform(agg_node_id)
         processor = RowProcessor(
-            recorder=recorder,
+            execution=setup.execution,
+            data_flow=setup.data_flow,
             span_factory=SpanFactory(),
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
@@ -164,14 +164,17 @@ class TestBatchTokenIdentity:
             traversal=_single_node_traversal(NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
         )
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
         # Process 3 rows to trigger batch flush
         all_results = []
         input_token_ids = []
         # T26: Buffer-time returns BUFFERED; flush-time returns CONSUMED_IN_BATCH
         # for the triggering token. Collect both to get all input tokens.
-        _batch_outcomes = {RowOutcome.BUFFERED, RowOutcome.CONSUMED_IN_BATCH}
+        _batch_outcomes = {
+            (None, TerminalPath.BUFFERED),
+            (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
+        }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})  # 10, 20, 30
             source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
@@ -183,24 +186,24 @@ class TestBatchTokenIdentity:
             )
             all_results.extend(results)
             for r in results:
-                if r.outcome in _batch_outcomes:
+                if (r.outcome, r.path) in _batch_outcomes:
                     input_token_ids.append(r.token.token_id)
 
-        # Get the batch_id from the recorder
+        # Get the batch_id from the database
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import batches_table
 
-        with recorder._db.connection() as conn:
+        with setup.db.connection() as conn:
             batch = conn.execute(select(batches_table).where(batches_table.c.run_id == run_id)).fetchone()
             assert batch is not None, "Batch record should exist"
             batch_id = batch.batch_id
 
         # CRITICAL ASSERTION: All batch members must be CONSUMED_IN_BATCH
-        _assert_all_batch_members_consumed(recorder, run_id, batch_id)
+        _assert_all_batch_members_consumed(setup.db, run_id, batch_id)
 
         # Get output token
-        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+        completed = [r for r in all_results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
         assert len(completed) == 1, f"Expected 1 COMPLETED, got {len(completed)}"
         output_token_id = completed[0].token.token_id
 
@@ -218,9 +221,9 @@ class TestBatchTokenIdentity:
         the batch flush. Its token_id must NOT appear in the output.
         """
         setup = make_recorder_with_run()
-        recorder, run_id = setup.recorder, setup.run_id
+        factory, run_id = setup.factory, setup.run_id
         source_node_id = setup.source_node_id
-        agg_node_id = register_test_node(recorder, run_id, "agg", node_type=NodeType.AGGREGATION, plugin_name="summer")
+        agg_node_id = register_test_node(setup.data_flow, run_id, "agg", node_type=NodeType.AGGREGATION, plugin_name="summer")
 
         aggregation_settings = {
             NodeID(agg_node_id): AggregationSettings(
@@ -235,7 +238,8 @@ class TestBatchTokenIdentity:
 
         transform = SumTransform(agg_node_id)
         processor = RowProcessor(
-            recorder=recorder,
+            execution=setup.execution,
+            data_flow=setup.data_flow,
             span_factory=SpanFactory(),
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
@@ -243,7 +247,7 @@ class TestBatchTokenIdentity:
             traversal=_single_node_traversal(NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
         )
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
         # Process row 0 - buffered, returns BUFFERED (T26: non-terminal at buffer time)
         pipeline_row_0 = make_pipeline_row({"value": 10})
@@ -255,7 +259,8 @@ class TestBatchTokenIdentity:
             ctx=ctx,
         )
         assert len(results_0) == 1
-        assert results_0[0].outcome == RowOutcome.BUFFERED
+        assert results_0[0].outcome is None
+        assert results_0[0].path == TerminalPath.BUFFERED
         first_token_id = results_0[0].token.token_id
 
         # Process row 1 - triggers flush
@@ -269,8 +274,8 @@ class TestBatchTokenIdentity:
         )
 
         # Should have: CONSUMED_IN_BATCH (triggering token) + COMPLETED (output)
-        consumed = [r for r in results_1 if r.outcome == RowOutcome.CONSUMED_IN_BATCH]
-        completed = [r for r in results_1 if r.outcome == RowOutcome.COMPLETED]
+        consumed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
+        completed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
 
         assert len(consumed) == 1, "Triggering token must be CONSUMED_IN_BATCH"
         assert len(completed) == 1, "Must have exactly 1 COMPLETED output"
@@ -297,9 +302,9 @@ class TestBatchTokenIdentity:
         in the audit trail, which is essential for explaining lineage.
         """
         setup = make_recorder_with_run()
-        recorder, run_id = setup.recorder, setup.run_id
+        factory, run_id = setup.factory, setup.run_id
         source_node_id = setup.source_node_id
-        agg_node_id = register_test_node(recorder, run_id, "agg", node_type=NodeType.AGGREGATION, plugin_name="summer")
+        agg_node_id = register_test_node(setup.data_flow, run_id, "agg", node_type=NodeType.AGGREGATION, plugin_name="summer")
 
         aggregation_settings = {
             NodeID(agg_node_id): AggregationSettings(
@@ -314,7 +319,8 @@ class TestBatchTokenIdentity:
 
         transform = SumTransform(agg_node_id)
         processor = RowProcessor(
-            recorder=recorder,
+            execution=setup.execution,
+            data_flow=setup.data_flow,
             span_factory=SpanFactory(),
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
@@ -322,14 +328,17 @@ class TestBatchTokenIdentity:
             traversal=_single_node_traversal(NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
         )
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
         # Process 3 rows to trigger batch flush
         all_results = []
         input_token_ids = []
         # T26: Buffer-time returns BUFFERED; flush-time returns CONSUMED_IN_BATCH
         # for the triggering token. Collect both to get all input tokens.
-        _batch_outcomes = {RowOutcome.BUFFERED, RowOutcome.CONSUMED_IN_BATCH}
+        _batch_outcomes = {
+            (None, TerminalPath.BUFFERED),
+            (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
+        }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})
             source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
@@ -341,7 +350,7 @@ class TestBatchTokenIdentity:
             )
             all_results.extend(results)
             for r in results:
-                if r.outcome in _batch_outcomes:
+                if (r.outcome, r.path) in _batch_outcomes:
                     input_token_ids.append(r.token.token_id)
 
         # Verify we got all 3 batch member tokens
@@ -352,7 +361,7 @@ class TestBatchTokenIdentity:
 
         from elspeth.core.landscape.schema import batch_members_table, batches_table
 
-        with recorder._db.connection() as conn:
+        with setup.db.connection() as conn:
             # Find the batch
             batch = conn.execute(select(batches_table).where(batches_table.c.run_id == run_id)).fetchone()
             assert batch is not None, "Batch should exist in audit trail"

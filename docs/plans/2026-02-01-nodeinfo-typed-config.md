@@ -724,7 +724,7 @@ def test_plugin_config_must_be_json_safe():
     """
     # Test with various plugin configs from real plugins
     for config in [
-        {"path": "/tmp/test.csv", "schema": {"fields": "dynamic"}},
+        {"path": "/tmp/test.csv", "schema": {"mode": "observed"}},
         {"model": "gpt-4", "temperature": 0.7},
         {"branches": ["a", "b"], "policy": "require_all"},
     ]:
@@ -799,12 +799,12 @@ def test_typed_config_hash_matches_original():
     from elspeth.core.canonical import stable_hash
 
     # Current dict (only explicit fields)
-    current_config = {"routes": {"true": "sink"}, "schema": {"fields": "dynamic"}}
+    current_config = {"routes": {"true": "sink"}, "schema": {"mode": "observed"}}
 
     # Typed config (with None for optional fields)
     typed_config = GateNodeConfig(
         routes={"true": "sink"},
-        schema={"fields": "dynamic"},
+        schema={"mode": "observed"},
         condition=None, fork_to=None, plugin_config=None
     )
 

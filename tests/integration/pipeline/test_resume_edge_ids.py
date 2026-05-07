@@ -16,10 +16,10 @@ from elspeth.contracts import Determinism, NodeType
 from elspeth.core.checkpoint import CheckpointManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import edges_table
 from elspeth.core.payload_store import FilesystemPayloadStore
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
 class TestResumeEdgeIDs:
@@ -31,13 +31,13 @@ class TestResumeEdgeIDs:
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
         checkpoint_mgr = CheckpointManager(db)
-        recorder = make_recorder(db)
+        factory = make_factory(db)
 
         return {
             "db": db,
             "payload_store": payload_store,
             "checkpoint_manager": checkpoint_mgr,
-            "recorder": recorder,
+            "factory": factory,
             "tmp_path": tmp_path,
         }
 
@@ -115,12 +115,12 @@ class TestResumeEdgeIDs:
 
             conn.commit()
 
-    def _register_edges(self, recorder: LandscapeRecorder, run_id: str, graph: ExecutionGraph) -> dict[tuple[str, str], str]:
+    def _register_edges(self, factory: RecorderFactory, run_id: str, graph: ExecutionGraph) -> dict[tuple[str, str], str]:
         """Register edges and return edge_map for verification."""
         edge_map: dict[tuple[str, str], str] = {}
 
         for edge_info in graph.get_edges():
-            edge = recorder.register_edge(
+            edge = factory.data_flow.register_edge(
                 run_id=run_id,
                 from_node_id=edge_info.from_node,
                 to_node_id=edge_info.to_node,
@@ -147,15 +147,15 @@ class TestResumeEdgeIDs:
         This is Bug #3 fix: resume must use real edge IDs to avoid
         FK violations when recording routing events.
         """
-        recorder = test_env["recorder"]
+        factory = test_env["factory"]
         db = test_env["db"]
 
         # 1. Create run and register nodes
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         self._register_nodes_raw(db, run.run_id)
 
         # 2. Register edges (simulating original run)
-        original_edge_map = self._register_edges(recorder, run.run_id, gate_graph)
+        original_edge_map = self._register_edges(factory, run.run_id, gate_graph)
 
         # 3. Verify edges were registered in database
         with db.engine.connect() as conn:
@@ -198,16 +198,16 @@ class TestResumeEdgeIDs:
         This is the critical test for Bug #3: synthetic edge IDs would
         cause FK constraint failures here.
         """
-        recorder = test_env["recorder"]
+        factory = test_env["factory"]
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
 
         # 1. Create run and register nodes
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         self._register_nodes_raw(db, run.run_id)
 
         # 2. Register edges
-        edge_map = self._register_edges(recorder, run.run_id, gate_graph)
+        edge_map = self._register_edges(factory, run.run_id, gate_graph)
 
         # 3. Create rows and tokens (simulating original run processing)
         row_data_list = [
@@ -217,13 +217,13 @@ class TestResumeEdgeIDs:
 
         tokens = []
         for i, row_data in enumerate(row_data_list):
-            row = recorder.create_row(
+            row = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id="source",
                 row_index=i,
                 data=row_data,
             )
-            token = recorder.create_token(row_id=row.row_id)
+            token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
 
         # 4. Create checkpoint (simulating partial run)

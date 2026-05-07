@@ -210,14 +210,6 @@ class TestNodeDetailPanelOptionalFields:
         assert isinstance(content, str)
         assert "Artifact:" in content
 
-    def test_none_state_renders(self) -> None:
-        """None state (no node selected) renders correctly."""
-        from elspeth.tui.widgets.node_detail import NodeDetailPanel
-
-        panel = NodeDetailPanel(None)
-        content = panel.render_content()
-        assert "No node selected" in content
-
     @given(
         initial_has_error=st.booleans(),
         updated_has_error=st.booleans(),

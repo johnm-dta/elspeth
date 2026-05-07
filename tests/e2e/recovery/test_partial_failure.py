@@ -21,14 +21,15 @@ from elspeth.contracts import (
     Determinism,
     PipelineRow,
     PluginSchema,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.core.config import SourceSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.core.landscape.schema import (
     token_outcomes_table,
     tokens_table,
@@ -145,7 +146,7 @@ class TestPartialFailure:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # 1. Pipeline completes
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # 2. 7 rows reach the sink
         assert len(sink.results) == 7
@@ -169,18 +170,19 @@ class TestPartialFailure:
                 select(
                     token_outcomes_table.c.token_id,
                     token_outcomes_table.c.outcome,
+                    token_outcomes_table.c.path,
                 )
                 .where(token_outcomes_table.c.run_id == result.run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchall()
 
         assert len(outcomes) == 10
-        outcome_values = {o.outcome for o in outcomes}
+        outcome_values = {(o.outcome, o.path) for o in outcomes}
         # Should contain both COMPLETED and QUARANTINED/FAILED outcomes
-        assert RowOutcome.COMPLETED in outcome_values
+        assert (TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value) in outcome_values
 
         # 5. Explain query works for both successful and failed rows
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
         # Get all tokens to test explain
         with db.engine.connect() as conn:
@@ -197,7 +199,8 @@ class TestPartialFailure:
         explained_count = 0
         for token_row in token_rows:
             lineage = explain(
-                recorder,
+                factory.query,
+                factory.data_flow,
                 result.run_id,
                 token_id=token_row.token_id,
             )
@@ -235,7 +238,7 @@ class TestPartialFailure:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # All 4 remaining rows reach sink
         assert len(sink.results) == 4
@@ -279,7 +282,7 @@ class TestPartialFailure:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # 4 rows reach sink (all except last)
         assert len(sink.results) == 4
@@ -300,7 +303,7 @@ class TestPartialFailure:
             outcomes = conn.execute(
                 select(token_outcomes_table.c.outcome)
                 .where(token_outcomes_table.c.run_id == result.run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchall()
 
         assert len(outcomes) == 5

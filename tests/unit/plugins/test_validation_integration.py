@@ -1,7 +1,7 @@
 """Integration tests for validation subsystem.
 
 These tests are written BEFORE implementation and will fail until
-PluginConfigValidator and PluginManager integration are complete.
+plugin validation and PluginManager integration are complete.
 
 They serve as completion criteria for the migration.
 """
@@ -9,15 +9,6 @@ They serve as completion criteria for the migration.
 import pytest
 
 from elspeth.plugins.infrastructure.manager import PluginManager
-
-
-def test_plugin_manager_has_validator():
-    """PluginManager has PluginConfigValidator instance."""
-    manager = PluginManager()
-    manager.register_builtin_plugins()
-
-    assert hasattr(manager, "_validator")
-    assert manager._validator is not None
 
 
 def test_manager_validates_source_config_before_creation():
@@ -100,3 +91,40 @@ def test_validator_provides_field_level_errors():
     assert "skip_rows" in error_msg  # Field name present
     # Should have human-readable message about type
     assert "int" in error_msg.lower() or "type" in error_msg.lower()  # Type mismatch mentioned
+
+
+class TestValidatorRecognisesMissingPluginTypes:
+    """Validator dispatch tables must include all shipped plugins.
+
+    These tests verify that get_source/transform/sink_config_model()
+    return a config class (not None, not UnknownPluginTypeError) for
+    plugin types that were previously missing from the if/elif chains.
+    """
+
+    def test_source_dataverse_recognised(self) -> None:
+        from elspeth.plugins.infrastructure.validation import get_source_config_model
+
+        model = get_source_config_model("dataverse")
+        assert model is not None
+        assert model.__name__ == "DataverseSourceConfig"
+
+    def test_transform_rag_retrieval_recognised(self) -> None:
+        from elspeth.plugins.infrastructure.validation import get_transform_config_model
+
+        model = get_transform_config_model("rag_retrieval")
+        assert model is not None
+        assert model.__name__ == "RAGRetrievalConfig"
+
+    def test_sink_dataverse_recognised(self) -> None:
+        from elspeth.plugins.infrastructure.validation import get_sink_config_model
+
+        model = get_sink_config_model("dataverse")
+        assert model is not None
+        assert model.__name__ == "DataverseSinkConfig"
+
+    def test_sink_chroma_sink_recognised(self) -> None:
+        from elspeth.plugins.infrastructure.validation import get_sink_config_model
+
+        model = get_sink_config_model("chroma_sink")
+        assert model is not None
+        assert model.__name__ == "ChromaSinkConfig"

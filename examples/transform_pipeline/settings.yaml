@@ -1,0 +1,76 @@
+# Transform Pipeline Example
+#
+# Demonstrates the type_coerce + value_transform pattern:
+# 1. Read CSV with mixed string/numeric types
+# 2. Normalize types with type_coerce (str -> float, str -> int, str -> bool)
+# 3. Compute derived fields with value_transform (total, discounted_price)
+# 4. Write enriched output
+#
+# This pattern is common when processing data from sources that don't preserve
+# type information (CSV, JSON from external APIs, etc.).
+
+source:
+  plugin: csv
+  on_success: normalize_types
+  options:
+    path: examples/transform_pipeline/input.csv
+    on_validation_failure: quarantine
+    schema:
+      mode: observed
+
+transforms:
+  # Step 1: Normalize types from string representations
+  - name: normalize_types
+    plugin: type_coerce
+    input: normalize_types
+    on_success: compute_fields
+    on_error: quarantine
+    options:
+      schema:
+        mode: observed
+      conversions:
+        - field: price
+          to: float
+        - field: quantity
+          to: int
+        - field: in_stock
+          to: bool
+
+  # Step 2: Compute derived fields using expressions
+  - name: compute_fields
+    plugin: value_transform
+    input: compute_fields
+    on_success: output
+    on_error: quarantine
+    options:
+      schema:
+        mode: observed
+      operations:
+        # Calculate line total
+        - target: total
+          expression: "row['price'] * row['quantity']"
+        # Apply a 10% discount
+        - target: discounted_price
+          expression: "row['price'] * 0.9"
+        # Compute discounted total (uses the newly computed discounted_price)
+        - target: discounted_total
+          expression: "row['discounted_price'] * row['quantity']"
+
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: examples/transform_pipeline/output/enriched.csv
+      schema:
+        mode: observed
+  quarantine:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: examples/transform_pipeline/output/quarantine.csv
+      schema:
+        mode: observed
+
+landscape:
+  url: sqlite:///examples/transform_pipeline/runs/audit.db

@@ -19,6 +19,11 @@ Bug ref: docs/bugs/open/mcp/P1-2026-02-05-query-read-only-guard-allows-non-selec
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 
 from elspeth.mcp.analyzers.queries import _validate_readonly_sql
@@ -246,3 +251,98 @@ class TestEmptyAndMalformed:
     def test_block_comment_only(self) -> None:
         with pytest.raises(ValueError):
             _validate_readonly_sql("/* nothing here */")
+
+
+class TestReadOnlyConnectionDefenseInDepth:
+    """Defense-in-depth: even if the analyzer is bypassed, the database
+    connection itself must reject writes via PRAGMA query_only.
+
+    These tests call db.read_only_connection() directly, bypassing the
+    analyzer, to prove the database-level guard works independently.
+    """
+
+    def test_read_only_connection_allows_select(self, tmp_path: Path) -> None:
+        """SELECT queries work through read-only connections."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'test.db'}")
+        with db.read_only_connection() as conn:
+            from sqlalchemy import text
+
+            result = conn.execute(text("SELECT 1 AS val")).fetchone()
+            assert result is not None
+            assert result[0] == 1
+        db.close()
+
+    def test_read_only_connection_blocks_insert(self, tmp_path: Path) -> None:
+        """INSERT is rejected at the database level, not just the analyzer."""
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'test.db'}")
+        with pytest.raises(OperationalError, match="readonly"), db.read_only_connection() as conn:
+            conn.execute(text("CREATE TABLE evil (id INTEGER)"))
+        db.close()
+
+    def test_read_only_connection_blocks_drop(self, tmp_path: Path) -> None:
+        """DROP TABLE is rejected at the database level."""
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'test.db'}")
+        with pytest.raises(OperationalError, match="readonly"), db.read_only_connection() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS runs"))
+        db.close()
+
+    def test_read_only_does_not_affect_normal_connections(self, tmp_path: Path) -> None:
+        """PRAGMA query_only is connection-scoped — normal connections still write."""
+        from sqlalchemy import text
+
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'test.db'}")
+        # Normal connection can write
+        with db.connection() as conn:
+            conn.execute(text("CREATE TABLE test_rw (id INTEGER)"))
+            conn.execute(text("INSERT INTO test_rw VALUES (1)"))
+
+        # Read-only connection can read the data
+        with db.read_only_connection() as conn:
+            result = conn.execute(text("SELECT * FROM test_rw")).fetchall()
+            assert len(result) == 1
+
+        # Normal connection still works after read-only was used
+        with db.connection() as conn:
+            conn.execute(text("INSERT INTO test_rw VALUES (2)"))
+            count_row = conn.execute(text("SELECT COUNT(*) FROM test_rw")).fetchone()
+            assert count_row is not None
+            assert count_row[0] == 2
+        db.close()
+
+    def test_read_only_connection_marks_postgresql_transactions_read_only(self) -> None:
+        """PostgreSQL defense-in-depth must not silently fall back to a writable transaction."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        conn = Mock()
+
+        @contextmanager
+        def begin() -> object:
+            yield conn
+
+        db = LandscapeDB.__new__(LandscapeDB)
+        db.connection_string = "postgresql://user:pass@host/db"
+        db._passphrase = None
+        db._journal = None
+        db._engine = SimpleNamespace(begin=begin, dialect=SimpleNamespace(name="postgresql"))
+        db._require_existing_schema = False
+
+        with db.read_only_connection():
+            pass
+
+        assert conn.execute.call_count == 1
+        statement = conn.execute.call_args.args[0]
+        assert str(statement) == "SET TRANSACTION READ ONLY"

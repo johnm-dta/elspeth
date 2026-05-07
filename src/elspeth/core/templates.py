@@ -22,6 +22,9 @@ Limitations (documented so developers know when to override):
 - Cannot analyze dynamic keys (row[variable] is ignored)
 - Cannot analyze macro internals from imports
 - May include fields only used in optional branches
+- Bracket syntax (row["Original Name"]) returns names verbatim, which may be
+  non-identifier original headers. Use extract_jinja2_fields_with_names() for
+  contract-aware resolution of original → normalized names.
 
 For templates with conditional logic, developers should review extracted
 fields and declare only the truly required subset in required_input_fields.
@@ -87,6 +90,22 @@ def extract_jinja2_fields(
     return frozenset(fields)
 
 
+# PipelineRow API names that can never be valid data field names — excluded
+# from field extraction. Only includes names that are unambiguously API:
+# - "get" is already handled as a Call pattern (row.get("field"))
+# - "contract" is a @property exposing the SchemaContract
+# - "to_dict" is a serialization method
+# Note: "keys", "items", "values" are NOT excluded because they can be
+# legitimate column names in user data (e.g., row.items in a for loop).
+_PIPELINE_ROW_API_NAMES: frozenset[str] = frozenset(
+    {
+        "get",
+        "contract",
+        "to_dict",
+    }
+)
+
+
 def _walk_ast(node: Node, namespace: str, fields: set[str]) -> None:
     """Recursively walk AST to find namespace attribute/item accesses.
 
@@ -109,8 +128,14 @@ def _walk_ast(node: Node, namespace: str, fields: set[str]) -> None:
         fields.add(node.args[0].value)
 
     # Handle row.field_name syntax (Getattr node)
-    # Exclude the mapping method row.get itself (handled via Call above).
-    if isinstance(node, Getattr) and isinstance(node.node, Name) and node.node.name == namespace and node.attr != "get":
+    # Exclude PipelineRow API names (get, keys, contract, etc.) — these are
+    # object methods/properties, not row data fields.
+    if (
+        isinstance(node, Getattr)
+        and isinstance(node.node, Name)
+        and node.node.name == namespace
+        and node.attr not in _PIPELINE_ROW_API_NAMES
+    ):
         fields.add(node.attr)
 
     # Handle row["field_name"] syntax (Getitem node with string constant)
@@ -171,7 +196,12 @@ def extract_jinja2_fields_with_details(
         ):
             append_access(node.args[0].value, "item")
 
-        if isinstance(node, Getattr) and isinstance(node.node, Name) and node.node.name == namespace and node.attr != "get":
+        if (
+            isinstance(node, Getattr)
+            and isinstance(node.node, Name)
+            and node.node.name == namespace
+            and node.attr not in _PIPELINE_ROW_API_NAMES
+        ):
             append_access(node.attr, "attr")
 
         if (

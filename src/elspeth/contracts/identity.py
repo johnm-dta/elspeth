@@ -40,10 +40,21 @@ class TokenInfo:
         the system — every audit trail record references them. Empty strings
         would produce valid-looking but meaningless audit entries.
         """
+        if not isinstance(self.row_id, str):
+            raise TypeError(f"TokenInfo.row_id must be str, got {type(self.row_id).__name__}: {self.row_id!r}")
         if not self.row_id:
             raise ValueError("TokenInfo.row_id must not be empty")
+        if not isinstance(self.token_id, str):
+            raise TypeError(f"TokenInfo.token_id must be str, got {type(self.token_id).__name__}: {self.token_id!r}")
         if not self.token_id:
             raise ValueError("TokenInfo.token_id must not be empty")
+        for _field_name in ("branch_name", "fork_group_id", "join_group_id", "expand_group_id"):
+            _value = getattr(self, _field_name)
+            if _value is not None:
+                if not isinstance(_value, str):
+                    raise TypeError(f"TokenInfo.{_field_name} must be str or None, got {type(_value).__name__}: {_value!r}")
+                if not _value:
+                    raise ValueError(f"TokenInfo.{_field_name} must be None or non-empty string, got {_value!r}")
 
     def with_updated_data(self, new_data: PipelineRow) -> TokenInfo:
         """Return a new TokenInfo with updated row_data, preserving all lineage fields.

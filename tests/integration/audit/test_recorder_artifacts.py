@@ -1,8 +1,9 @@
 # tests/integration/audit/test_recorder_artifacts.py
-"""Tests for LandscapeRecorder artifact operations."""
+"""Tests for RecorderFactory artifact operations."""
 
 from __future__ import annotations
 
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.schema import SchemaConfig
 
@@ -10,18 +11,18 @@ from elspeth.contracts.schema import SchemaConfig
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
-class TestLandscapeRecorderArtifacts:
+class TestRecorderFactoryArtifacts:
     """Artifact registration and queries."""
 
     def test_register_artifact(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        sink = recorder.register_node(
+        sink = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_sink",
             node_type=NodeType.SINK,
@@ -29,14 +30,14 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=sink.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=sink.node_id,
             run_id=run.run_id,
@@ -44,7 +45,7 @@ class TestLandscapeRecorderArtifacts:
             input_data={},
         )
 
-        artifact = recorder.register_artifact(
+        artifact = factory.execution.register_artifact(
             run_id=run.run_id,
             state_id=state.state_id,
             sink_node_id=sink.node_id,
@@ -59,12 +60,12 @@ class TestLandscapeRecorderArtifacts:
 
     def test_get_artifacts_for_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        sink = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        sink = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_sink",
             node_type=NodeType.SINK,
@@ -72,14 +73,14 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=sink.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=sink.node_id,
             run_id=run.run_id,
@@ -87,7 +88,7 @@ class TestLandscapeRecorderArtifacts:
             input_data={},
         )
 
-        recorder.register_artifact(
+        factory.execution.register_artifact(
             run_id=run.run_id,
             state_id=state.state_id,
             sink_node_id=sink.node_id,
@@ -96,7 +97,7 @@ class TestLandscapeRecorderArtifacts:
             content_hash="hash1",
             size_bytes=100,
         )
-        recorder.register_artifact(
+        factory.execution.register_artifact(
             run_id=run.run_id,
             state_id=state.state_id,
             sink_node_id=sink.node_id,
@@ -106,7 +107,7 @@ class TestLandscapeRecorderArtifacts:
             size_bytes=200,
         )
 
-        artifacts = recorder.get_artifacts(run.run_id)
+        artifacts = factory.execution.get_artifacts(run.run_id)
         assert len(artifacts) == 2
 
     def test_register_artifact_with_idempotency_key(self) -> None:
@@ -120,13 +121,13 @@ class TestLandscapeRecorderArtifacts:
         written, enabling safe retries without duplicate outputs.
         """
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        sink = recorder.register_node(
+        sink = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_sink",
             node_type=NodeType.SINK,
@@ -134,14 +135,14 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=sink.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=sink.node_id,
             run_id=run.run_id,
@@ -151,7 +152,7 @@ class TestLandscapeRecorderArtifacts:
 
         # Register artifact with idempotency key
         idem_key = f"{run.run_id}:{row.row_id}:csv_sink"
-        artifact = recorder.register_artifact(
+        artifact = factory.execution.register_artifact(
             run_id=run.run_id,
             state_id=state.state_id,
             sink_node_id=sink.node_id,
@@ -168,7 +169,7 @@ class TestLandscapeRecorderArtifacts:
         )
 
         # Verify it's persisted and returned by get_artifacts
-        artifacts = recorder.get_artifacts(run.run_id)
+        artifacts = factory.execution.get_artifacts(run.run_id)
         assert len(artifacts) == 1
         assert artifacts[0].idempotency_key == idem_key, (
             "get_artifacts should return Artifact with idempotency_key populated. "
@@ -182,13 +183,13 @@ class TestLandscapeRecorderArtifacts:
         When not provided, the field should be None (not missing or error).
         """
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
-        sink = recorder.register_node(
+        sink = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_sink",
             node_type=NodeType.SINK,
@@ -196,14 +197,14 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=sink.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=sink.node_id,
             run_id=run.run_id,
@@ -212,7 +213,7 @@ class TestLandscapeRecorderArtifacts:
         )
 
         # Register artifact WITHOUT idempotency key
-        artifact = recorder.register_artifact(
+        artifact = factory.execution.register_artifact(
             run_id=run.run_id,
             state_id=state.state_id,
             sink_node_id=sink.node_id,
@@ -226,12 +227,12 @@ class TestLandscapeRecorderArtifacts:
 
     def test_get_rows_for_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -241,26 +242,26 @@ class TestLandscapeRecorderArtifacts:
         )
 
         for i in range(3):
-            recorder.create_row(
+            factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=i,
                 data={"idx": i},
             )
 
-        rows = recorder.get_rows(run.run_id)
+        rows = factory.query.get_rows(run.run_id)
         assert len(rows) == 3
         assert rows[0].row_index == 0
         assert rows[2].row_index == 2
 
     def test_get_tokens_for_row(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -268,7 +269,7 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -276,26 +277,25 @@ class TestLandscapeRecorderArtifacts:
         )
 
         # Create initial token and fork
-        parent = recorder.create_token(row_id=row.row_id)
-        _children, _fork_group_id = recorder.fork_token(
-            parent_token_id=parent.token_id,
+        parent = factory.data_flow.create_token(row_id=row.row_id)
+        _children, _fork_group_id = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
             branches=["a", "b"],
-            run_id=run.run_id,
         )
 
-        tokens = recorder.get_tokens(row.row_id)
+        tokens = factory.query.get_tokens(row.row_id)
         # Should have parent + 2 children
         assert len(tokens) == 3
 
     def test_get_node_states_for_token(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node1 = recorder.register_node(
+        factory = RecorderFactory(db)
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node1 = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -303,7 +303,7 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        node2 = recorder.register_node(
+        node2 = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="transform",
             node_type=NodeType.TRANSFORM,
@@ -311,23 +311,23 @@ class TestLandscapeRecorderArtifacts:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node1.node_id,
             row_index=0,
             data={},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Create states at two nodes
-        recorder.begin_node_state(
+        factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node1.node_id,
             run_id=run.run_id,
             step_index=0,
             input_data={},
         )
-        recorder.begin_node_state(
+        factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node2.node_id,
             run_id=run.run_id,
@@ -335,7 +335,7 @@ class TestLandscapeRecorderArtifacts:
             input_data={},
         )
 
-        states = recorder.get_node_states_for_token(token.token_id)
+        states = factory.query.get_node_states_for_token(token.token_id)
         assert len(states) == 2
         assert states[0].step_index == 0
         assert states[1].step_index == 1

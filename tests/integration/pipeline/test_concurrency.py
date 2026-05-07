@@ -21,7 +21,7 @@ from elspeth.engine.executors import TransformExecutor
 from elspeth.engine.orchestrator import Orchestrator
 from elspeth.engine.processor import DAGTraversalContext, RowProcessor
 from elspeth.engine.spans import SpanFactory
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 from tests.fixtures.pipeline import build_linear_pipeline
 
 if TYPE_CHECKING:
@@ -84,18 +84,18 @@ class TestConcurrencyConfigInTransformExecutor:
 
     def test_executor_accepts_max_workers(self, landscape_db: LandscapeDB) -> None:
         """TransformExecutor constructor accepts max_workers parameter."""
-        recorder = make_recorder(landscape_db)
+        factory = make_factory(landscape_db)
         span_factory = SpanFactory()
 
-        executor = TransformExecutor(recorder, span_factory, lambda node_id: 1, max_workers=8)
+        executor = TransformExecutor(factory.execution, span_factory, lambda node_id: 1, max_workers=8)
         assert executor._max_workers == 8
 
     def test_executor_without_max_workers(self, landscape_db: LandscapeDB) -> None:
         """TransformExecutor works without max_workers (no cap)."""
-        recorder = make_recorder(landscape_db)
+        factory = make_factory(landscape_db)
         span_factory = SpanFactory()
 
-        executor = TransformExecutor(recorder, span_factory, lambda node_id: 1)
+        executor = TransformExecutor(factory.execution, span_factory, lambda node_id: 1)
         assert executor._max_workers is None
 
 
@@ -104,12 +104,13 @@ class TestConcurrencyConfigInRowProcessor:
 
     def test_processor_accepts_max_workers(self, landscape_db: LandscapeDB) -> None:
         """RowProcessor constructor accepts and forwards max_workers."""
-        recorder = make_recorder(landscape_db)
+        factory = make_factory(landscape_db)
         span_factory = SpanFactory()
         source_node_id, source_on_success, traversal = _build_traversal_from_graph()
 
         processor = RowProcessor(
-            recorder=recorder,
+            execution=factory.execution,
+            data_flow=factory.data_flow,
             span_factory=span_factory,
             run_id="test-run",
             source_node_id=source_node_id,
@@ -122,12 +123,13 @@ class TestConcurrencyConfigInRowProcessor:
 
     def test_processor_without_max_workers(self, landscape_db: LandscapeDB) -> None:
         """RowProcessor works without max_workers."""
-        recorder = make_recorder(landscape_db)
+        factory = make_factory(landscape_db)
         span_factory = SpanFactory()
         source_node_id, source_on_success, traversal = _build_traversal_from_graph()
 
         processor = RowProcessor(
-            recorder=recorder,
+            execution=factory.execution,
+            data_flow=factory.data_flow,
             span_factory=span_factory,
             run_id="test-run",
             source_node_id=source_node_id,

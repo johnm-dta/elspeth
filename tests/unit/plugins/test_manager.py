@@ -230,37 +230,46 @@ class TestMissingPluginRaises:
     """Verify PluginManager raises on unknown plugins."""
 
     def test_get_source_by_name_raises_on_unknown_plugin(self) -> None:
-        """Verify PluginManager raises ValueError for unknown source plugins."""
+        """Verify PluginManager raises PluginNotFoundError for unknown source plugins."""
         import pytest
 
-        from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.plugins.infrastructure.manager import (
+            PluginManager,
+            PluginNotFoundError,
+        )
 
         manager = PluginManager()
 
         # Try to get plugin that doesn't exist
-        with pytest.raises(ValueError, match="Unknown source plugin: nonexistent"):
+        with pytest.raises(PluginNotFoundError, match="Unknown source plugin: nonexistent"):
             manager.get_source_by_name("nonexistent")
 
     def test_get_transform_by_name_raises_on_unknown_plugin(self) -> None:
-        """Verify PluginManager raises ValueError for unknown transform plugins."""
+        """Verify PluginManager raises PluginNotFoundError for unknown transform plugins."""
         import pytest
 
-        from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.plugins.infrastructure.manager import (
+            PluginManager,
+            PluginNotFoundError,
+        )
 
         manager = PluginManager()
 
-        with pytest.raises(ValueError, match="Unknown transform plugin: nonexistent"):
+        with pytest.raises(PluginNotFoundError, match="Unknown transform plugin: nonexistent"):
             manager.get_transform_by_name("nonexistent")
 
     def test_get_sink_by_name_raises_on_unknown_plugin(self) -> None:
-        """Verify PluginManager raises ValueError for unknown sink plugins."""
+        """Verify PluginManager raises PluginNotFoundError for unknown sink plugins."""
         import pytest
 
-        from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.plugins.infrastructure.manager import (
+            PluginManager,
+            PluginNotFoundError,
+        )
 
         manager = PluginManager()
 
-        with pytest.raises(ValueError, match="Unknown sink plugin: nonexistent"):
+        with pytest.raises(PluginNotFoundError, match="Unknown sink plugin: nonexistent"):
             manager.get_sink_by_name("nonexistent")
 
 

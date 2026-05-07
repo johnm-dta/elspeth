@@ -35,19 +35,25 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
-from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 
 if TYPE_CHECKING:
     from elspeth.contracts.contexts import LifecycleContext, SinkContext, SourceContext, TransformContext
     from elspeth.contracts.header_modes import HeaderMode
+    from elspeth.contracts.plugin_assistance import PluginAssistance
+    from elspeth.contracts.plugin_semantics import (
+        InputSemanticRequirements,
+        OutputSemanticDeclaration,
+    )
     from elspeth.contracts.schema import SchemaConfig
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
+    from elspeth.plugins.infrastructure.config_base import PluginConfig, TransformDataConfig
 from elspeth.plugins.infrastructure.results import (
     TransformResult,
 )
@@ -139,10 +145,43 @@ class BaseTransform(ABC):
     # Audit metadata
     determinism: Determinism = Determinism.DETERMINISTIC
     plugin_version: str = "0.0.0"
+    source_file_hash: str | None = None
+
+    # Config model — each subclass sets this to its Pydantic config class.
+    # get_config_model() is the public API; override it for dynamic dispatch
+    # (e.g. provider-based LLM config selection).
+    config_model: ClassVar[type[PluginConfig] | None] = None
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfig] | None:
+        """Return the Pydantic config model for this plugin type.
+
+        Override in subclasses that need dynamic dispatch (e.g. LLMTransform
+        selects a provider-specific model based on config["provider"]).
+        """
+        return cls.config_model
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Default ``get_config_schema`` — renders a single Pydantic model.
+
+        See :meth:`~elspeth.contracts.plugin_protocols.TransformProtocol.get_config_schema`
+        for the canonical contract, including the MUST-override rule for
+        plugins whose effective configuration is a discriminated union.
+        """
+        if cls.config_model is None:
+            return {}
+        schema: dict[str, Any] = cls.config_model.model_json_schema()
+        return schema
 
     # Batch support - override to True for batch-aware transforms
     # When True, engine may pass list[dict] instead of single dict to process()
     is_batch_aware: bool = False
+
+    # Batch-aware transforms are aggregation-stage by default. A plugin that
+    # intentionally supports both list-mode and row-mode dispatch must opt in
+    # explicitly so composer/tool validation can reject accidental placement.
+    supports_row_mode_when_batch_aware: bool = False
 
     # Token creation flag for deaggregation transforms
     # When True AND process() returns success_multi(), the processor creates
@@ -152,15 +191,35 @@ class BaseTransform(ABC):
     # Default: False (most transforms don't create new tokens)
     creates_tokens: bool = False
 
+    # Pass-through contract flag (ADR-007).
+    # True iff process() UNCONDITIONALLY emits rows containing every field
+    # present on the input row plus declared_output_fields, regardless of
+    # row content or runtime state. False if the transform may drop, rename,
+    # filter, or conditionally omit input fields. Conditional drops based on
+    # row content are forbidden under this annotation — they would pass static
+    # and Hypothesis tests and crash production via PassThroughContractViolation.
+    # Annotation is verified at runtime by TransformExecutor's pass-through
+    # cross-check; mis-annotation raises PassThroughContractViolation (TIER_1).
+    passes_through_input: bool = False
+
+    # Empty-emission governance declaration (ADR-012).
+    # True means the transform may intentionally emit zero rows on success.
+    # False means empty success output is governance-significant for
+    # passes_through_input=True transforms and is checked by the
+    # can_drop_rows declaration contract.
+    can_drop_rows: bool = False
+
     # Field collision enforcement (centralized in TransformExecutor).
     # Transforms that add fields to the output row declare WHAT fields they add
     # at init time. The executor checks these against input keys BEFORE running
     # the transform. Empty frozenset = no fields added = no check needed.
     declared_output_fields: frozenset[str] = frozenset()
 
-    # Input validation (centralized in TransformExecutor).
-    # When True, executor validates input against input_schema before process().
-    validate_input: bool = False
+    # Input-field declaration for ADR-013.
+    # Normalized from TransformDataConfig.required_input_fields at construction
+    # time via _initialize_declared_input_fields(). Empty frozenset means the
+    # transform declares no pre-emission required-input contract.
+    declared_input_fields: frozenset[str] = frozenset()
 
     # Error routing configuration.
     # Transforms extending TransformDataConfig override this from config.
@@ -180,7 +239,7 @@ class BaseTransform(ABC):
     # Transforms that add fields must set this via _build_output_schema_config()
     # so the DAG builder can validate downstream required_input_fields.
     # None = no output contract provided (acceptable for shape-preserving transforms).
-    _output_schema_config: SchemaConfig | None = None
+    _output_schema_config: SchemaConfig | None
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.
@@ -189,10 +248,214 @@ class BaseTransform(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Lifecycle guard (centralized in TransformExecutor).
-        # Set to True by on_start(). The executor checks this before process().
-        # Per-instance, not per-class — class-level bool would be shared across instances.
+        # Per-instance, not per-class — class-level defaults would be shared across instances.
         self._on_start_called: bool = False
+        self.declared_input_fields = frozenset()
+        self._output_schema_config: SchemaConfig | None = None
+
+    def _initialize_declared_input_fields(self, validated_config: TransformDataConfig) -> None:
+        """Populate ADR-013's runtime input-field declaration from config.
+
+        Call from the transform's authoritative config-validation path —
+        immediately after ``<Config>.from_dict(...)`` succeeds. This preserves
+        existing per-plugin validation/error semantics while centralizing the
+        runtime normalization and batch-aware fail-closed guard.
+        """
+        declared_input_fields = validated_config.declared_input_fields
+        if declared_input_fields and self.is_batch_aware:
+            raise FrameworkBugError(
+                f"Transform {self.name!r} declares declared_input_fields "
+                f"{sorted(declared_input_fields)!r} but is batch-aware. No "
+                f"batch-pre-execution dispatch site exists; ADR-013 scopes "
+                f"DeclaredRequiredFieldsContract to non-batch transforms until "
+                f"an ADR-010 amendment lands."
+            )
+        self.declared_input_fields = declared_input_fields
+
+    def effective_static_contract(self) -> frozenset[str]:
+        """Return the transform's public static output guarantee surface.
+
+        Runtime declaration checks record this value in audit evidence. Missing
+        output schema config is acceptable only for shape-preserving transforms
+        that declare no added fields. A field-adding transform without a schema
+        config would falsely state its static guarantees and must crash.
+        """
+        output_schema_config = self._output_schema_config
+        if output_schema_config is None:
+            if not self.declared_output_fields:
+                return frozenset()
+            raise FrameworkBugError(
+                f"Cannot derive effective static contract for transform {self.name!r}: "
+                "_output_schema_config is missing. Concrete transforms must "
+                "initialize their output schema config during construction "
+                "before the engine can run declaration-contract checks."
+            )
+        return output_schema_config.get_effective_guaranteed_fields()
+
+    def _align_output_contract(self, contract: SchemaContract) -> SchemaContract:
+        """Normalize emitted contract mode/lock state to declared output semantics.
+
+        ADR-014 compares emitted ``PipelineRow.contract`` semantics to the
+        transform's ``_output_schema_config`` declaration. Once a contract is
+        attached to an emitted row it is expected to be locked, even for
+        ``flexible``/``observed`` config modes whose pre-emission builders may
+        begin unlocked.
+        """
+        output_schema_config = self._output_schema_config
+        if output_schema_config is None:
+            return contract
+
+        from elspeth.contracts.schema_contract import SchemaContract
+        from elspeth.contracts.schema_contract_factory import map_schema_mode
+
+        expected_mode = map_schema_mode(output_schema_config.mode)
+        if contract.mode == expected_mode and contract.locked:
+            return contract
+
+        return SchemaContract(
+            mode=expected_mode,
+            fields=contract.fields,
+            locked=True,
+        )
+
+    def _apply_declared_output_field_contracts(self, contract: SchemaContract) -> SchemaContract:
+        """Apply declared output field metadata to an emitted row contract.
+
+        Contract propagation infers newly added fields from runtime values, which
+        marks them as ``source="inferred"`` and ``required=False``. When a
+        transform has an explicit ``_output_schema_config`` field declaration,
+        ADR-014 expects emitted contracts to carry that declared metadata.
+        """
+        output_schema_config = self._output_schema_config
+        if output_schema_config is None or output_schema_config.fields is None:
+            return contract
+
+        from elspeth.contracts.schema_contract_factory import create_contract_from_config
+
+        declared_fields = {field.normalized_name: field for field in create_contract_from_config(output_schema_config).fields}
+        fields: list[FieldContract] = []
+        changed = False
+        for field in contract.fields:
+            if field.normalized_name in declared_fields:
+                fields.append(declared_fields[field.normalized_name])
+                changed = True
+            else:
+                fields.append(field)
+
+        if not changed:
+            return contract
+
+        return SchemaContract(
+            mode=contract.mode,
+            fields=tuple(fields),
+            locked=contract.locked,
+        )
+
+    def _align_output_row_contract(self, row: PipelineRow) -> PipelineRow:
+        """Return ``row`` with contract semantics aligned to this transform."""
+        if row.contract is None:
+            raise FrameworkBugError(f"Transform {self.name!r} emitted PipelineRow with no contract. Framework invariant violated.")
+
+        aligned_contract = self._align_output_contract(row.contract)
+        if aligned_contract is row.contract:
+            return row
+        return PipelineRow(row.to_dict(), aligned_contract)
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Return a minimal config dict sufficient to instantiate this transform
+        for invariant probing (ADR-009 §Clause 4).
+
+        Transforms annotated with ``passes_through_input=True`` MUST override
+        this method. The default raises ``NotImplementedError`` so that a
+        transform that later gains the annotation is caught immediately by
+        the skip-rate budget test, not silently excluded from governance.
+
+        The returned dict is passed directly to ``cls(...)`` using the same
+        positional constructor contract as ``PluginManager.create_transform()``.
+        It must not require external services, network calls, or credentials —
+        the invariant harness runs in CI and probes transforms in isolation.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__}.probe_config() is not implemented. "
+            "Transforms with passes_through_input=True must declare how to "
+            "instantiate in isolation. Implement probe_config() or remove the annotation."
+        )
+
+    def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Return representative input rows for ADR-009's forward invariant.
+
+        The default harness drives annotated pass-through transforms with a
+        single scalar ``probe`` row. Config-sensitive transforms can override
+        this to add the specific fields/values their ``probe_config()``
+        requires while preserving the randomized background row shape.
+        """
+        return [probe]
+
+    def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        """Return representative input rows for ADR-009's backward invariant.
+
+        The default harness drives non-pass-through transforms with a single
+        scalar ``probe`` row. Batch-aware transforms whose non-pass-through
+        semantics only appear under mixed-validity batches can override this
+        to supply a more representative shape.
+        """
+        return [probe]
+
+    def execute_forward_invariant_probe(
+        self,
+        probe_rows: list[PipelineRow],
+        ctx: Any,
+    ) -> TransformResult:
+        """Execute the forward invariant probe using the production path.
+
+        Default behavior mirrors runtime dispatch:
+        - batch-aware transforms receive the full probe row list
+        - single-row transforms must receive exactly one probe row
+
+        Transforms with transport or concurrency seams that cannot be exercised
+        via plain ``process()`` override this hook rather than teaching the
+        invariant harness about plugin-specific internals.
+        """
+        if self.is_batch_aware:
+            return self.process(probe_rows, ctx)  # type: ignore[arg-type]
+        if len(probe_rows) != 1:
+            raise FrameworkBugError(
+                f"{self.__class__.__name__}.execute_forward_invariant_probe() received {len(probe_rows)} rows for a non-batch transform."
+            )
+        return self.process(probe_rows[0], ctx)
+
+    def execute_backward_invariant_probe(
+        self,
+        probe_rows: list[PipelineRow],
+        ctx: Any,
+    ) -> TransformResult:
+        """Execute the backward invariant probe.
+
+        Defaults to the same execution path as the forward probe. Non-pass-through
+        transforms can override this when their representative drop path needs a
+        special local seam.
+        """
+        return self.execute_forward_invariant_probe(probe_rows, ctx)
+
+    @staticmethod
+    def _augment_invariant_probe_row(
+        probe: PipelineRow,
+        *,
+        field_name: str,
+        value: Any,
+    ) -> PipelineRow:
+        """Return ``probe`` plus one guaranteed field for invariant helpers."""
+        from elspeth.contracts.contract_propagation import propagate_contract
+
+        output = probe.to_dict().copy()
+        output[field_name] = value
+        contract = propagate_contract(
+            probe.contract,
+            output,
+            transform_adds_fields=True,
+        )
+        return PipelineRow(output, contract)
 
     @staticmethod
     def _create_schemas(
@@ -240,6 +503,13 @@ class BaseTransform(ABC):
         Merges the transform's declared_output_fields into guaranteed_fields
         so the DAG builder can validate downstream field requirements.
 
+        Default assumes output ⊇ input fields (additive transforms). Subclasses
+        with reductive output — where emitted rows do NOT carry the user's
+        input ``fields``/``required_fields``/``guaranteed_fields`` — MUST
+        override this method to drop input-side declarations. See
+        ``BatchStats._build_output_schema_config`` (elspeth-f5f798f797) for the
+        canonical override pattern.
+
         Args:
             schema_config: The transform's input schema config (base fields).
 
@@ -248,11 +518,21 @@ class BaseTransform(ABC):
         """
         from elspeth.contracts.schema import SchemaConfig
 
-        base_guaranteed = schema_config.guaranteed_fields or ()
+        base_guaranteed = set(schema_config.guaranteed_fields or ())
+        output_fields = base_guaranteed | self.declared_output_fields
+
+        # Preserve None-vs-empty-tuple semantics: None = abstain, () = explicitly empty.
+        # If upstream declared guarantees or we computed non-empty output, declare explicitly.
+        upstream_declared = schema_config.guaranteed_fields is not None
+        if upstream_declared or output_fields:
+            guaranteed_fields_result = tuple(sorted(output_fields))
+        else:
+            guaranteed_fields_result = None
+
         return SchemaConfig(
             mode=schema_config.mode,
             fields=schema_config.fields,
-            guaranteed_fields=tuple(set(base_guaranteed) | self.declared_output_fields),
+            guaranteed_fields=guaranteed_fields_result,
             audit_fields=schema_config.audit_fields,
             required_fields=schema_config.required_fields,
         )
@@ -337,6 +617,49 @@ class BaseTransform(ABC):
         """
         pass
 
+    # ── Plugin-declared semantics (Phase 1: optional, default empty) ──
+    # Override on a subclass to declare what the plugin emits / requires.
+    # The generic semantic validator compares producer facts to consumer
+    # requirements when the configured field names match.
+
+    def output_semantics(self) -> OutputSemanticDeclaration:
+        """Return semantic facts for the fields this transform emits.
+
+        Default returns an empty declaration: the transform makes no
+        semantic claims beyond what the schema contract already
+        expresses. Override to declare ContentKind/TextFraming for
+        configured output fields.
+        """
+        from elspeth.contracts.plugin_semantics import OutputSemanticDeclaration
+
+        return OutputSemanticDeclaration()
+
+    def input_semantic_requirements(self) -> InputSemanticRequirements:
+        """Return semantic requirements for fields this transform consumes.
+
+        Default returns no requirements. Override to declare that a
+        configured input field must satisfy specific ContentKind /
+        TextFraming acceptance sets.
+        """
+        from elspeth.contracts.plugin_semantics import InputSemanticRequirements
+
+        return InputSemanticRequirements()
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        """Return deterministic guidance keyed by an issue code.
+
+        Default returns None: the plugin offers no specific guidance.
+        Override to return a PluginAssistance instance describing fixes
+        for this plugin's issue codes. Validators attach the issue
+        code; the plugin owns the prose.
+        """
+        return None
+
 
 class BaseSink(ABC):
     """Base class for sink plugins.
@@ -401,6 +724,28 @@ class BaseSink(ABC):
     # Audit metadata
     determinism: Determinism = Determinism.IO_WRITE
     plugin_version: str = "0.0.0"
+    source_file_hash: str | None = None
+
+    # Config model — each subclass sets this to its Pydantic config class.
+    config_model: ClassVar[type[PluginConfig] | None] = None
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfig] | None:
+        """Return the Pydantic config model for this plugin type."""
+        return cls.config_model
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Default ``get_config_schema`` — renders a single Pydantic model.
+
+        See :meth:`~elspeth.contracts.plugin_protocols.SinkProtocol.get_config_schema`
+        for the canonical contract, including the MUST-override rule for
+        plugins whose effective configuration is a discriminated union.
+        """
+        if cls.config_model is None:
+            return {}
+        schema: dict[str, Any] = cls.config_model.model_json_schema()
+        return schema
 
     # Default: sinks don't support resume. Override in subclasses that can append.
     supports_resume: bool = False
@@ -410,13 +755,9 @@ class BaseSink(ABC):
     # Empty frozenset = no required-field check.
     declared_required_fields: frozenset[str] = frozenset()
 
-    # Input validation (centralized in SinkExecutor).
-    # When True, executor validates input against input_schema before write().
-    validate_input: bool = False
-
     # Failsink infrastructure — set by orchestrator from SinkSettings.on_write_failure.
     # None until injected at pipeline startup; "discard" or sink name at runtime.
-    _on_write_failure: str | None = None
+    _on_write_failure: str | None
 
     def configure_for_resume(self) -> None:
         """Configure sink for resume mode (append instead of truncate).
@@ -494,6 +835,7 @@ class BaseSink(ABC):
             config: Plugin configuration
         """
         self.config = config
+        self._on_write_failure: str | None = None
         self._output_contract = None
         self._needs_resume_field_resolution = False
         self._diversion_log: list[RowDiversion] = []
@@ -649,7 +991,7 @@ class BaseSource(ABC):
                 with open(self.config["path"]) as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        yield SourceRow.valid(row)
+                        yield SourceRow.valid(row, contract=contract)
 
             def close(self) -> None:
                 pass  # File already closed by context manager
@@ -662,6 +1004,32 @@ class BaseSource(ABC):
     # Audit metadata
     determinism: Determinism = Determinism.IO_READ
     plugin_version: str = "0.0.0"
+    source_file_hash: str | None = None
+
+    # Config model — each subclass sets this to its Pydantic config class.
+    # NullSource sets this to None (no config validation needed).
+    config_model: ClassVar[type[PluginConfig] | None] = None
+
+    @classmethod
+    def get_config_model(cls, config: dict[str, Any] | None = None) -> type[PluginConfig] | None:
+        """Return the Pydantic config model for this plugin type.
+
+        Returns None for sources with no config (e.g. NullSource).
+        """
+        return cls.config_model
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        """Default ``get_config_schema`` — renders a single Pydantic model.
+
+        See :meth:`~elspeth.contracts.plugin_protocols.SourceProtocol.get_config_schema`
+        for the canonical contract, including the MUST-override rule for
+        plugins whose effective configuration is a discriminated union.
+        """
+        if cls.config_model is None:
+            return {}
+        schema: dict[str, Any] = cls.config_model.model_json_schema()
+        return schema
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -670,6 +1038,11 @@ class BaseSource(ABC):
     # Success routing: sink name for rows that pass source validation
     # All sources must set this - config-based sources get it from SourceDataConfig
     on_success: str
+
+    # Guaranteed-field enforcement (centralized in the source boundary contract).
+    # Sources set this from schema_config.get_effective_guaranteed_fields() at init.
+    # Empty frozenset = no guaranteed-field contract.
+    declared_guaranteed_fields: frozenset[str] = frozenset()
 
     # Schema contract for row validation
     _schema_contract: SchemaContract | None = None
@@ -682,6 +1055,7 @@ class BaseSource(ABC):
         """
         self.config = config
         self._schema_contract = None
+        self.declared_guaranteed_fields = frozenset()
 
     @abstractmethod
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
@@ -719,6 +1093,17 @@ class BaseSource(ABC):
         """
         return self._schema_contract
 
+    def require_schema_contract(self) -> SchemaContract:
+        """Return the current schema contract or crash on framework invariant failure."""
+        contract = self.get_schema_contract()
+        if contract is None:
+            raise FrameworkBugError(
+                f"{type(self).__name__} attempted to yield SourceRow.valid() before establishing "
+                "a schema contract. Source plugins must call set_schema_contract() before "
+                "emitting valid rows."
+            )
+        return contract
+
     def set_schema_contract(self, contract: SchemaContract) -> None:
         """Set or update the schema contract.
 
@@ -729,6 +1114,15 @@ class BaseSource(ABC):
             contract: The schema contract to use for validation
         """
         self._schema_contract = contract
+
+    def _initialize_declared_guaranteed_fields(self, schema_config: SchemaConfig) -> None:
+        """Normalize the source's runtime guarantee declaration from SchemaConfig.
+
+        Call this after any source-specific schema rewrite so the runtime
+        contract surface matches the source's effective guarantees, not the
+        caller's raw config dict.
+        """
+        self.declared_guaranteed_fields = schema_config.get_effective_guaranteed_fields()
 
     # === Lifecycle Hooks ===
     # Call ordering: on_start -> load -> on_complete -> close

@@ -213,6 +213,7 @@ def test_edge_validation_timing_from_plugin_instances() -> None:
         config: ClassVar[dict[str, Any]] = {}
         input_schema: ClassVar[type[PluginSchema]] = ConsumerSchema  # Needs: id, name, email
         _on_write_failure: str = "discard"
+        declared_required_fields: ClassVar[frozenset[str]] = frozenset()
 
         def _reset_diversion_log(self) -> None:
             pass

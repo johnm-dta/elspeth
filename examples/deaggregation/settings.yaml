@@ -22,7 +22,12 @@ aggregations:
   output_mode: transform
   options:
     schema:
-      mode: observed
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'name: str'
+      - 'copies: int'
+      - 'category: str'
     copies_field: copies
     default_copies: 1
     include_copy_index: true

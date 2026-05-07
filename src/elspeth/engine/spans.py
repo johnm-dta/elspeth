@@ -3,13 +3,13 @@
 Provides structured span creation for pipeline execution.
 Falls back to no-op mode when no tracer is configured.
 
-Span Hierarchy (span names are static; IDs are set as attributes):
+Span Hierarchy (span names are static; plugin identity is in attributes):
     run                          [run.id=<run_id>]
-    ├── source:<source_name>
+    ├── source                   [plugin.name=<name>]
     ├── row                      [row.id=<row_id>, token.id=<token_id>]
-    │   ├── transform:<name>
-    │   └── sink:<name>
-    └── aggregation:<name>
+    │   ├── transform            [plugin.name=<name>]
+    │   └── sink                 [plugin.name=<name>]
+    └── aggregation              [plugin.name=<name>]
 """
 
 from collections.abc import Iterator, Sequence
@@ -72,6 +72,28 @@ class SpanFactory:
         return self._tracer is not None
 
     @contextmanager
+    def _make_span(
+        self,
+        name: str,
+        attributes: dict[str, Any],
+    ) -> Iterator["Span | NoOpSpan"]:
+        """Create a span with attributes, or yield no-op if tracing is disabled.
+
+        Args:
+            name: Span name (e.g., "run", "source:csv", "transform:field_mapper")
+            attributes: Key-value pairs to set on the span. Values must already
+                be in their final form (e.g., token_ids already converted to tuple).
+        """
+        if self._tracer is None:
+            yield self._NOOP_SPAN
+            return
+
+        with self._tracer.start_as_current_span(name) as span:
+            for key, value in attributes.items():
+                span.set_attribute(key, value)
+            yield span
+
+    @contextmanager
     def run_span(self, run_id: str) -> Iterator["Span | NoOpSpan"]:
         """Create a span for the entire run.
 
@@ -81,12 +103,7 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan if tracing disabled (never None - uniform interface)
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span("run") as span:
-            span.set_attribute("run.id", run_id)
+        with self._make_span("run", {"run.id": run_id}) as span:
             yield span
 
     @contextmanager
@@ -99,13 +116,7 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span(f"source:{source_name}") as span:
-            span.set_attribute("plugin.name", source_name)
-            span.set_attribute("plugin.type", "source")
+        with self._make_span("source", {"plugin.name": source_name, "plugin.type": "source"}) as span:
             yield span
 
     @contextmanager
@@ -123,13 +134,7 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span("row") as span:
-            span.set_attribute("row.id", row_id)
-            span.set_attribute("token.id", token_id)
+        with self._make_span("row", {"row.id": row_id, "token.id": token_id}) as span:
             yield span
 
     @contextmanager
@@ -162,22 +167,17 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span(f"transform:{transform_name}") as span:
-            span.set_attribute("plugin.name", transform_name)
-            span.set_attribute("plugin.type", "transform")
-            if node_id is not None:
-                span.set_attribute("node.id", node_id)
-            if input_hash is not None:
-                span.set_attribute("input.hash", input_hash)
-            # Token tracking for accurate child token attribution
-            if token_ids is not None:
-                span.set_attribute("token.ids", tuple(token_ids))
-            elif token_id is not None:
-                span.set_attribute("token.id", token_id)
+        attrs: dict[str, Any] = {"plugin.name": transform_name, "plugin.type": "transform"}
+        if node_id is not None:
+            attrs["node.id"] = node_id
+        if input_hash is not None:
+            attrs["input.hash"] = input_hash
+        # Token tracking for accurate child token attribution
+        if token_ids is not None:
+            attrs["token.ids"] = tuple(token_ids)
+        elif token_id is not None:
+            attrs["token.id"] = token_id
+        with self._make_span("transform", attrs) as span:
             yield span
 
     @contextmanager
@@ -200,19 +200,14 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span(f"gate:{gate_name}") as span:
-            span.set_attribute("plugin.name", gate_name)
-            span.set_attribute("plugin.type", "gate")
-            if node_id is not None:
-                span.set_attribute("node.id", node_id)
-            if input_hash is not None:
-                span.set_attribute("input.hash", input_hash)
-            if token_id is not None:
-                span.set_attribute("token.id", token_id)
+        attrs: dict[str, Any] = {"plugin.name": gate_name, "plugin.type": "gate"}
+        if node_id is not None:
+            attrs["node.id"] = node_id
+        if input_hash is not None:
+            attrs["input.hash"] = input_hash
+        if token_id is not None:
+            attrs["token.id"] = token_id
+        with self._make_span("gate", attrs) as span:
             yield span
 
     @contextmanager
@@ -241,21 +236,16 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span(f"aggregation:{aggregation_name}") as span:
-            span.set_attribute("plugin.name", aggregation_name)
-            span.set_attribute("plugin.type", "aggregation")
-            if node_id is not None:
-                span.set_attribute("node.id", node_id)
-            if input_hash is not None:
-                span.set_attribute("input.hash", input_hash)
-            if batch_id is not None:
-                span.set_attribute("batch.id", batch_id)
-            if token_ids is not None:
-                span.set_attribute("token.ids", tuple(token_ids))
+        attrs: dict[str, Any] = {"plugin.name": aggregation_name, "plugin.type": "aggregation"}
+        if node_id is not None:
+            attrs["node.id"] = node_id
+        if input_hash is not None:
+            attrs["input.hash"] = input_hash
+        if batch_id is not None:
+            attrs["batch.id"] = batch_id
+        if token_ids is not None:
+            attrs["token.ids"] = tuple(token_ids)
+        with self._make_span("aggregation", attrs) as span:
             yield span
 
     @contextmanager
@@ -280,15 +270,10 @@ class SpanFactory:
         Yields:
             Span or NoOpSpan
         """
-        if self._tracer is None:
-            yield self._NOOP_SPAN
-            return
-
-        with self._tracer.start_as_current_span(f"sink:{sink_name}") as span:
-            span.set_attribute("plugin.name", sink_name)
-            span.set_attribute("plugin.type", "sink")
-            if node_id is not None:
-                span.set_attribute("node.id", node_id)
-            if token_ids is not None:
-                span.set_attribute("token.ids", tuple(token_ids))
+        attrs: dict[str, Any] = {"plugin.name": sink_name, "plugin.type": "sink"}
+        if node_id is not None:
+            attrs["node.id"] = node_id
+        if token_ids is not None:
+            attrs["token.ids"] = tuple(token_ids)
+        with self._make_span("sink", attrs) as span:
             yield span

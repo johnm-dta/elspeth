@@ -1,0 +1,219 @@
+// ============================================================================
+// ProgressView
+//
+// Live progress display for an active execution run. Shows:
+// - Indeterminate progress bar (using .progress-bar CSS classes from App.css)
+// - Explicit source/token counters
+// - Recent errors list (scrolling, newest first, capped at 50)
+// - Cancel button (disabled once run reaches terminal state)
+// - "Pipeline execution was cancelled" message on cancelled event
+// - WebSocket disconnect banner with reconnect status
+// ============================================================================
+
+import { useState } from "react";
+import { useExecutionStore } from "@/stores/executionStore";
+import { useWebSocket } from "@/hooks/useWebSocket";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+
+export function ProgressView() {
+  const { progress, wsDisconnected, activeRunId } = useWebSocket();
+  const cancel = useExecutionStore((s) => s.cancel);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+
+  if (!progress || !activeRunId) return null;
+
+  // Phase 2.2 (elspeth-0de989c56d): the operator-completion subset
+  // (completed / completed_with_failures / empty) is also terminal — the
+  // older 3-value tuple ("completed", "cancelled", "failed") would leave the
+  // progress view appearing active for the two new terminal statuses.
+  const isTerminal =
+    progress.status === "completed" ||
+    progress.status === "completed_with_failures" ||
+    progress.status === "empty" ||
+    progress.status === "cancelled" ||
+    progress.status === "failed";
+  const cancelRequested = progress.cancel_requested === true && !isTerminal;
+
+  return (
+    <div className="progress-container">
+      {/* WebSocket disconnect banner */}
+      {wsDisconnected && !isTerminal && (
+        <div
+          role="status"
+          className="progress-ws-banner"
+        >
+          Live progress connection lost. Reconnecting...
+        </div>
+      )}
+
+      {/* Status header with cancel button */}
+      <div className="progress-status-header">
+        <span className="progress-status-label">
+          {/* Render underscored identifiers like ``completed_with_failures``
+              as space-separated for human reading; CSS handles uppercasing. */}
+          {cancelRequested ? "cancelling" : progress.status.replace(/_/g, " ")}
+        </span>
+        {!isTerminal && !cancelRequested && (
+          <button
+            onClick={() => setShowCancelConfirm(true)}
+            aria-label="Cancel pipeline execution"
+            className="btn btn-danger progress-cancel-btn"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+
+      {showCancelConfirm && (
+        <ConfirmDialog
+          title="Cancel pipeline"
+          message="Cancel the running pipeline? This cannot be undone."
+          confirmLabel="Cancel pipeline"
+          variant="danger"
+          onConfirm={() => {
+            cancel(activeRunId);
+            setShowCancelConfirm(false);
+          }}
+          onCancel={() => setShowCancelConfirm(false)}
+        />
+      )}
+
+      {/* Progress bar -- indeterminate mode (no percentage, animated stripe) */}
+      <div
+        className="progress-bar progress-bar-outer"
+        role="progressbar"
+        aria-label="Pipeline execution in progress"
+      >
+        <div
+          className={isTerminal ? "progress-bar-complete" : "progress-bar-stripe"}
+          style={
+            isTerminal
+              ? {
+                  // Phase 2.2 colour mapping:
+                  //   completed                  → success (green)
+                  //   completed_with_failures    → warning (the run produced
+                  //                                output but had failures)
+                  //   empty                      → muted text (clean run that
+                  //                                consumed no rows)
+                  //   failed                     → error (red)
+                  //   cancelled                  → warning (orange)
+                  backgroundColor:
+                    progress.status === "completed"
+                      ? "var(--color-success)"
+                      : progress.status === "failed"
+                        ? "var(--color-error)"
+                        : progress.status === "empty"
+                          ? "var(--color-text-muted)"
+                          : "var(--color-warning)",
+                }
+              : {}
+          }
+        />
+      </div>
+
+      {/* Source/token counters -- large and prominent */}
+      <div className="progress-counters">
+        <div>
+          <div className="progress-counter-label">
+            Source Rows
+          </div>
+          <div className="progress-counter-value">
+            {progress.source_rows_processed.toLocaleString()}
+          </div>
+        </div>
+        <div>
+          <div className="progress-counter-label">
+            Tokens Succeeded
+          </div>
+          <div className="progress-counter-value">
+            {progress.tokens_succeeded.toLocaleString()}
+          </div>
+        </div>
+        <div>
+          <div className="progress-counter-label">
+            Tokens Failed
+          </div>
+          <div
+            className="progress-counter-value"
+            style={{
+              color:
+                progress.tokens_failed > 0
+                  ? "var(--color-error)"
+                  : "var(--color-text)",
+            }}
+          >
+            {progress.tokens_failed.toLocaleString()}
+          </div>
+        </div>
+      </div>
+
+      {(progress.tokens_quarantined > 0 ||
+        progress.tokens_routed_success > 0 ||
+        progress.tokens_routed_failure > 0) && (
+        <div className="progress-routing-summary">
+          {progress.tokens_routed_success > 0 && (
+            <span>{progress.tokens_routed_success.toLocaleString()} routed success</span>
+          )}
+          {progress.tokens_routed_failure > 0 && (
+            <span>{progress.tokens_routed_failure.toLocaleString()} routed failure</span>
+          )}
+          {progress.tokens_quarantined > 0 && (
+            <span>{progress.tokens_quarantined.toLocaleString()} quarantined</span>
+          )}
+        </div>
+      )}
+
+      {/* Cancellation message */}
+      {progress.status === "cancelled" && (
+        <div
+          role="status"
+          className="progress-cancelled-msg"
+        >
+          Pipeline execution was cancelled.
+        </div>
+      )}
+
+      {progress.status === "failed" && progress.recent_errors.length === 0 && (
+        <div
+          role="alert"
+          className="progress-failed-msg"
+        >
+          Pipeline execution failed.
+        </div>
+      )}
+
+      {/* Recent errors */}
+      {progress.recent_errors.length > 0 && (
+        <div>
+          <div className="progress-errors-title">
+            Recent errors ({progress.recent_errors.length})
+          </div>
+          <div className="progress-errors-container">
+            {progress.recent_errors.map((err, i) => (
+              <div
+                key={`${err.node_id}-${i}`}
+                className="progress-error-item"
+                style={{
+                  borderBottom:
+                    i < progress.recent_errors.length - 1
+                      ? "1px solid var(--color-error-border)"
+                      : "none",
+                }}
+              >
+                {err.node_id && <strong>{err.node_id}</strong>}
+                {err.node_id && ": "}
+                {err.message}
+                {err.row_id && (
+                  <span className="progress-error-row-id">
+                    {" "}
+                    (row: {err.row_id})
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

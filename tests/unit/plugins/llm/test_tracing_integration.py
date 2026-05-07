@@ -21,6 +21,7 @@ import pytest
 
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.plugins.transforms.llm.langfuse import ActiveLangfuseTracer, NoOpLangfuseTracer
+from elspeth.plugins.transforms.llm.provider import LLMProvider
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 
 
@@ -376,7 +377,7 @@ class TestProcessRowErrorTracing:
         transform, _mock_langfuse, captured_observations = self._create_transform_with_langfuse()
 
         # Set up provider mock (LLMTransform delegates to _provider.execute_query)
-        mock_provider = MagicMock()
+        mock_provider = MagicMock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = LLMClientError("Content policy violation", retryable=False)
         transform._provider = mock_provider
 
@@ -407,7 +408,7 @@ class TestProcessRowErrorTracing:
         transform, _mock_langfuse, captured_observations = self._create_transform_with_langfuse()
 
         # Set up provider mock (LLMTransform delegates to _provider.execute_query)
-        mock_provider = MagicMock()
+        mock_provider = MagicMock(spec=LLMProvider)
         mock_provider.execute_query.side_effect = LLMClientError("Rate limit exceeded", retryable=True)
         transform._provider = mock_provider
 

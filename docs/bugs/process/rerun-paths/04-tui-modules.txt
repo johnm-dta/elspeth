@@ -1,9 +1,0 @@
-src/elspeth/tui/__init__.py
-src/elspeth/tui/constants.py
-src/elspeth/tui/explain_app.py
-src/elspeth/tui/screens/__init__.py
-src/elspeth/tui/screens/explain_screen.py
-src/elspeth/tui/types.py
-src/elspeth/tui/widgets/__init__.py
-src/elspeth/tui/widgets/lineage_tree.py
-src/elspeth/tui/widgets/node_detail.py

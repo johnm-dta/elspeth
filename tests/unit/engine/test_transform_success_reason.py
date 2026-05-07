@@ -15,8 +15,8 @@ from elspeth.contracts import TransformSuccessReason
 from elspeth.contracts.audit import NodeStateCompleted
 from elspeth.contracts.enums import NodeStateStatus, NodeType
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.core.landscape.recorder import LandscapeRecorder
-from tests.fixtures.landscape import make_recorder
+from elspeth.core.landscape.factory import RecorderFactory
+from tests.fixtures.landscape import make_factory
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -26,18 +26,18 @@ class TestTransformSuccessReasonAudit:
     """Tests for success_reason in audit trail."""
 
     @pytest.fixture
-    def recorder(self) -> LandscapeRecorder:
-        """Create recorder with in-memory database."""
-        return make_recorder()
+    def factory(self) -> RecorderFactory:
+        """Create factory with in-memory database."""
+        return make_factory()
 
     def test_success_reason_stored_in_node_state(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
     ) -> None:
         """success_reason is stored in node_states table."""
         # Setup run
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -45,7 +45,7 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             node_id="transform_1",
             run_id=run.run_id,
             node_type=NodeType.TRANSFORM,
@@ -54,16 +54,16 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={"amount": 100},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Create and complete node state with success_reason
-        state = recorder.begin_node_state(
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id="transform_1",
             run_id=run.run_id,
@@ -76,7 +76,7 @@ class TestTransformSuccessReasonAudit:
             "fields_added": ["processed", "amount_usd"],
         }
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"amount": 100, "processed": True, "amount_usd": 100.0},
@@ -93,11 +93,11 @@ class TestTransformSuccessReasonAudit:
 
     def test_success_reason_none_when_not_provided(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
     ) -> None:
         """success_reason_json is NULL when transform doesn't provide it."""
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -105,7 +105,7 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             node_id="transform_1",
             run_id=run.run_id,
             node_type=NodeType.TRANSFORM,
@@ -114,14 +114,14 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id="transform_1",
             run_id=run.run_id,
@@ -130,7 +130,7 @@ class TestTransformSuccessReasonAudit:
         )
 
         # Complete WITHOUT success_reason
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"x": 1},
@@ -142,11 +142,11 @@ class TestTransformSuccessReasonAudit:
 
     def test_validation_warnings_captured(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
     ) -> None:
         """validation_warnings flow through to audit trail."""
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -154,7 +154,7 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             node_id="transform_1",
             run_id=run.run_id,
             node_type=NodeType.TRANSFORM,
@@ -163,14 +163,14 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={"amount": 950},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id="transform_1",
             run_id=run.run_id,
@@ -183,7 +183,7 @@ class TestTransformSuccessReasonAudit:
             "validation_warnings": ["amount near threshold (950 of 1000 limit)"],
         }
 
-        completed = recorder.complete_node_state(
+        completed = factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"amount": 950},
@@ -200,11 +200,11 @@ class TestTransformSuccessReasonAudit:
 
     def test_success_reason_round_trips_through_repository(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
     ) -> None:
         """success_reason survives write -> read via repository."""
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
@@ -212,7 +212,7 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        recorder.register_node(
+        factory.data_flow.register_node(
             node_id="transform_1",
             run_id=run.run_id,
             node_type=NodeType.TRANSFORM,
@@ -221,14 +221,14 @@ class TestTransformSuccessReasonAudit:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id="transform_1",
             run_id=run.run_id,
@@ -243,7 +243,7 @@ class TestTransformSuccessReasonAudit:
         }
 
         # Write
-        recorder.complete_node_state(
+        factory.execution.complete_node_state(
             state_id=state.state_id,
             status=NodeStateStatus.COMPLETED,
             output_data={"x": 1, "enrichment_score": 0.95},
@@ -252,7 +252,7 @@ class TestTransformSuccessReasonAudit:
         )
 
         # Read back via get_node_state (uses repository)
-        loaded = recorder.get_node_state(state.state_id)
+        loaded = factory.execution.get_node_state(state.state_id)
         assert isinstance(loaded, NodeStateCompleted)
         assert loaded.success_reason_json is not None
         parsed = json.loads(loaded.success_reason_json)

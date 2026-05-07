@@ -182,8 +182,13 @@ class TestSourceQuarantineRouting:
         config_file.write_text(yaml.dump(config))
         return config_file
 
-    def test_invalid_rows_routed_to_quarantine_sink(self, quarantine_pipeline_config: Path, tmp_path: Path) -> None:
+    def test_invalid_rows_routed_failure_to_quarantine_sink(self, quarantine_pipeline_config: Path, tmp_path: Path) -> None:
         """Invalid source rows are written to the quarantine sink.
+
+        Post elspeth-5069612f3c (rows_routed counter split): invalid source rows
+        traverse the on_validation_failure DIVERT path, which increments
+        rows_routed_failure (NOT rows_routed_success).  The test name reflects
+        the new failure-side semantics.
 
         This is the key acceptance test for the source quarantine routing feature.
         Before this fix, route_to_sink() was a stub and invalid rows were dropped.

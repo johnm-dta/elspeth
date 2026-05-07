@@ -3,10 +3,15 @@
 # Multi-stage build for minimal runtime image.
 # All plugins (LLM, Azure) are bundled - activation is via configuration.
 #
+# No default command - explicit command required (web, run, etc.).
+# Container orchestrators should configure appropriate health checks per deployment.
+#
 # Usage:
 #   docker build -t elspeth .
-#   docker run -v ./config:/app/config:ro elspeth --version
-#   docker run -v ./config:/app/config:ro elspeth run --settings /app/config/pipeline.yaml
+#   docker run elspeth --help                                                # Show available commands
+#   docker run elspeth --version                                             # Show version
+#   docker run elspeth run --settings /app/config/pipeline.yaml              # Run batch pipeline
+#   docker run -p 8451:8451 -e ELSPETH_WEB__SECRET_KEY=<key> elspeth web     # Start web server
 
 # =============================================================================
 # Stage 1: Builder
@@ -72,13 +77,23 @@ RUN mkdir -p /app/config /app/input /app/output /app/state /app/secrets && \
 # Switch to non-root user
 USER elspeth
 
-# Health check - verify CLI is functional
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD ["elspeth", "--version"]
+# Expose web interface port (used when running `elspeth web`)
+EXPOSE 8451
+
+# No image-level HEALTHCHECK - container orchestrators should configure
+# appropriate health checks per deployment type:
+#
+#   Web containers:     elspeth health --port 8451
+#   Batch pipelines:    process exit code (no persistent health endpoint)
+#
+# Using `elspeth health` at image level would mark batch containers as
+# unhealthy (no web server) even when the pipeline is working correctly.
 
 # Entry point is the elspeth CLI
 # Arguments after image name are passed directly to elspeth
 ENTRYPOINT ["elspeth"]
 
-# Default command shows help if no arguments provided
+# Default command shows help - explicit command required for all operations.
+# The web server requires ELSPETH_WEB__SECRET_KEY for non-loopback hosts,
+# so we don't default to `web` which would fail without configuration.
 CMD ["--help"]

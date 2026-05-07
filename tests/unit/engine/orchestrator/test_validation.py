@@ -79,6 +79,22 @@ class TestValidateRouteDestinations:
             transforms=[],
         )
 
+    def test_gate_discard_route_passes_without_matching_sink(self) -> None:
+        """Gate route target 'discard' is a virtual terminal destination, not a sink."""
+        config_gate = Mock()
+        config_gate.name = "quality_gate"
+        gate_id_map = {GateName("quality_gate"): NodeID("cfg-gate-1")}
+        route_map = {(NodeID("cfg-gate-1"), "false"): RouteDestination.discard()}
+
+        validate_route_destinations(
+            route_resolution_map=route_map,
+            available_sinks={"output"},
+            transform_id_map={},
+            transforms=[],
+            config_gate_id_map=gate_id_map,
+            config_gates=[config_gate],
+        )
+
 
 # =============================================================================
 # validate_transform_error_sinks

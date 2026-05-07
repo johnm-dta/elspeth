@@ -46,11 +46,12 @@ The fastest path to a working plugin:
 ```python
 # src/elspeth/plugins/transforms/double_value.py
 from typing import Any
+
+from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
-from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts import PipelineRow, TransformResult
-from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.results import TransformResult
 
 
 class DoubleValueConfig(TransformDataConfig):
@@ -62,50 +63,49 @@ class DoubleValueTransform(BaseTransform):
     """Double a numeric field value."""
 
     name = "double_value"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:0000000000000000"
+    config_model = DoubleValueConfig
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = DoubleValueConfig.from_dict(config)
+        cfg = DoubleValueConfig.from_dict(config, plugin_name=self.name)
+        self._initialize_declared_input_fields(cfg)
         self._field = cfg.field
-        self.on_error = cfg.on_error
 
-        if cfg.schema_config is None:
-            raise RuntimeError("schema_config is required")
-        schema = create_schema_from_config(
-            cfg.schema_config, "DoubleValueSchema", allow_coercion=False
+        self._schema_config = cfg.schema_config
+        self._output_schema_config = self._build_output_schema_config(cfg.schema_config)
+        self.input_schema, self.output_schema = self._create_schemas(
+            cfg.schema_config,
+            "DoubleValue",
         )
-        self.input_schema = schema
-        self.output_schema = schema
 
     def process(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
         if self._field not in row:
             return TransformResult.error({"reason": "missing_field", "field": self._field})
 
         try:
-            result = float(row[self._field]) * 2
-        except (TypeError, ValueError) as e:
-            return TransformResult.error({"reason": "conversion_failed", "error": str(e)})
+            result = row[self._field] * 2
+        except TypeError as e:
+            return TransformResult.error({"reason": "invalid_input", "error": str(e)})
 
         output = row.to_dict()
         output[self._field] = result
-        return TransformResult.success(output, success_reason={"action": "doubled_value"})
+        return TransformResult.success(
+            PipelineRow(output, self._align_output_contract(row.contract)),
+            success_reason={"action": "doubled_value", "fields_modified": [self._field]},
+        )
 
     def close(self) -> None:
         pass
 ```
 
-**Register it:**
+**Make it discoverable:**
 
-```python
-# Registration via pluggy hookimpl (see plugins/infrastructure/hookspecs.py)
-from elspeth.plugins.infrastructure.hookspecs import hookimpl
-from elspeth.plugins.transforms.double_value import DoubleValueTransform
-
-class ElspethBuiltinTransforms:
-    @hookimpl
-    def elspeth_get_transforms(self) -> list[type[Any]]:
-        return [..., DoubleValueTransform]
-```
+Put the file under `src/elspeth/plugins/transforms/`. Built-in plugin discovery
+scans that top-level directory automatically. If you add a new subdirectory,
+add that subdirectory to `PLUGIN_SCAN_CONFIG` in
+`src/elspeth/plugins/infrastructure/discovery.py`.
 
 **Use it:**
 
@@ -117,21 +117,23 @@ transforms:
   on_success: doubled        # Named output connection
   options:
     schema:
-      fields: dynamic
+      mode: observed
     field: price
 ```
 
 **Test it:**
 
 ```python
-# tests/contracts/transform_contracts/test_double_value_contract.py
+# tests/unit/contracts/transform_contracts/test_double_value_contract.py
+import pytest
+
 from elspeth.plugins.transforms.double_value import DoubleValueTransform
 from .test_transform_protocol import TransformContractPropertyTestBase
 
 class TestDoubleValueContract(TransformContractPropertyTestBase):
     @pytest.fixture
     def transform(self):
-        return DoubleValueTransform({"schema": {"fields": "dynamic"}, "field": "value"})
+        return DoubleValueTransform({"schema": {"mode": "observed"}, "field": "value"})
 
     @pytest.fixture
     def valid_input(self):
@@ -159,10 +161,13 @@ SOURCE (Sense) → TRANSFORM (Decide) → SINK (Act)
 | Plugin Type | Coercion Allowed? | Why |
 |-------------|-------------------|-----|
 | **Source** | ✅ Yes | External data boundary - normalize incoming data |
-| **Transform** | ❌ No | Wrong types = upstream bug → crash |
+| **Transform** | ❌ No for pipeline row data; ✅ only for new external responses fetched by the transform | Pipeline data types are already validated; any HTTP/LLM/DB/file response is a fresh external boundary |
 | **Sink** | ❌ No | Wrong types = upstream bug → crash |
 
-**Rule:** Only sources touch untrusted external data. Everything else trusts upstream.
+**Rule:** Trust follows data flow, not plugin type. A transform that calls an
+HTTP API, LLM, database, or file creates a new Tier 3 boundary inside the
+transform: wrap the external call, validate/coerce the response immediately, and
+then treat the validated result as pipeline data.
 
 ---
 
@@ -174,16 +179,17 @@ Transforms process rows one at a time (or in batches for aggregation).
 
 ```python
 from typing import Any
+
+from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
-from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts import PipelineRow, TransformResult
-from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.results import TransformResult
 
 
 class MyTransformConfig(TransformDataConfig):
     """Config with your custom fields."""
-    multiplier: float = 1.0
+    multiplier: int = 2
     target_field: str = "value"
 
 
@@ -191,21 +197,23 @@ class MyTransform(BaseTransform):
     """Multiply a field by a configured factor."""
 
     name = "my_transform"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:0000000000000000"
+    config_model = MyTransformConfig
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = MyTransformConfig.from_dict(config)
+        cfg = MyTransformConfig.from_dict(config, plugin_name=self.name)
+        self._initialize_declared_input_fields(cfg)
         self._multiplier = cfg.multiplier
         self._target_field = cfg.target_field
-        self.on_error = cfg.on_error
 
-        if cfg.schema_config is None:
-            raise RuntimeError("schema_config is required")
-        schema = create_schema_from_config(
-            cfg.schema_config, "MyTransformSchema", allow_coercion=False
+        self._schema_config = cfg.schema_config
+        self._output_schema_config = self._build_output_schema_config(cfg.schema_config)
+        self.input_schema, self.output_schema = self._create_schemas(
+            cfg.schema_config,
+            "MyTransform",
         )
-        self.input_schema = schema
-        self.output_schema = schema
 
     def process(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
         if self._target_field not in row:
@@ -216,16 +224,22 @@ class MyTransform(BaseTransform):
 
         # Wrap operations on row values (their data can fail)
         try:
-            result = float(row[self._target_field]) * self._multiplier
-        except (TypeError, ValueError) as e:
+            result = row[self._target_field] * self._multiplier
+        except TypeError as e:
             return TransformResult.error({
-                "reason": "conversion_failed",
+                "reason": "invalid_input",
                 "error": str(e),
             })
 
         output = row.to_dict()
         output[self._target_field] = result
-        return TransformResult.success(output, success_reason={"action": "multiplied_field"})
+        return TransformResult.success(
+            PipelineRow(output, self._align_output_contract(row.contract)),
+            success_reason={
+                "action": "multiplied_field",
+                "fields_modified": [self._target_field],
+            },
+        )
 
     def close(self) -> None:
         pass
@@ -236,12 +250,17 @@ class MyTransform(BaseTransform):
 | Attribute | Type | Purpose |
 |-----------|------|---------|
 | `name` | `str` | Unique plugin identifier (class attribute) |
+| `config_model` | `type[PluginConfig] \| None` | Pydantic config class rendered by `get_config_schema()` |
 | `input_schema` | `type[PluginSchema]` | Expected input row schema |
 | `output_schema` | `type[PluginSchema]` | Produced output row schema |
-| `on_error` | `str \| None` | Sink name for error routing (plain attribute, set in `__init__`) |
-| `on_success` | `str \| None` | Output connection name (plain attribute, set in `__init__`) |
+| `declared_input_fields` | `frozenset[str]` | Required input fields from `required_input_fields` |
+| `declared_output_fields` | `frozenset[str]` | Fields added to every emitted row, used for collision checks |
+| `_output_schema_config` | `SchemaConfig \| None` | Static output guarantee surface for DAG validation |
+| `on_error` | `str \| None` | Sink name for error routing; injected by runtime settings |
+| `on_success` | `str \| None` | Output connection name; injected by runtime settings |
 | `determinism` | `Determinism` | Reproducibility level (default: `DETERMINISTIC`) |
 | `plugin_version` | `str` | Plugin version for audit trail (default: `"0.0.0"`) |
+| `source_file_hash` | `str \| None` | Entry-point file hash for audit identity; CI enforces concrete plugin values |
 
 **Determinism levels:**
 
@@ -254,35 +273,66 @@ class MyTransform(BaseTransform):
 
 ```python
 # Success - transformed row (success_reason is REQUIRED)
-TransformResult.success(row, success_reason={"action": "classified"})
+TransformResult.success(
+    PipelineRow(output_dict, output_contract),
+    success_reason={"action": "classified"},
+)
 
 # Error - row failed processing (routes to on_error sink)
 TransformResult.error({"reason": "division_by_zero"})
 
 # Multiple outputs (requires creates_tokens=True)
-TransformResult.success_multi([row1, row2, row3], success_reason={"action": "expanded"})
+TransformResult.success_multi(
+    [PipelineRow(row1, output_contract), PipelineRow(row2, output_contract)],
+    success_reason={"action": "expanded"},
+)
+
+# Intentional zero emission for filters
+TransformResult.success_empty(success_reason={"action": "filtered"})
 ```
 
 <details>
 <summary><strong>Advanced: Batch-Aware Transforms</strong></summary>
 
-For aggregation transforms that process multiple rows together:
+For aggregation transforms that process multiple rows together, build an output
+contract for the aggregate shape in `__init__` and return a `PipelineRow` with
+that contract:
 
 ```python
+from typing import Any
+
+from elspeth.contracts.schema import FieldDefinition, SchemaConfig
+from elspeth.contracts.schema_contract_factory import create_contract_from_config
+
+
 class BatchStatsTransform(BaseTransform):
     name = "batch_stats"
     is_batch_aware = True  # Receives list[PipelineRow] instead of PipelineRow
 
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+        self._output_schema_config = SchemaConfig(
+            mode="fixed",
+            fields=(
+                FieldDefinition(name="count", field_type="int", required=True),
+                FieldDefinition(name="sum", field_type="float", required=True),
+                FieldDefinition(name="mean", field_type="float", required=True),
+            ),
+        )
+        self._aggregate_output_contract = create_contract_from_config(self._output_schema_config)
+
     def process(self, rows: list[PipelineRow], ctx: TransformContext) -> TransformResult:
         if not rows:
-            return TransformResult.success({"count": 0, "sum": 0}, success_reason={"action": "empty_batch"})
+            return TransformResult.error({"reason": "invalid_input", "error": "empty batch"})
 
-        total = sum(r["value"] for r in rows)
-        return TransformResult.success({
-            "count": len(rows),
-            "sum": total,
-            "mean": total / len(rows),
-        }, success_reason={"action": "batch_stats_computed"})
+        total = float(sum(r["value"] for r in rows))
+        return TransformResult.success(
+            PipelineRow(
+                {"count": len(rows), "sum": total, "mean": total / len(rows)},
+                self._aggregate_output_contract,
+            ),
+            success_reason={"action": "batch_stats_computed"},
+        )
 ```
 
 **Pipeline config:**
@@ -307,20 +357,35 @@ aggregations:
 For transforms that expand one row into multiple rows:
 
 ```python
+from elspeth.contracts.contract_propagation import propagate_contract
+
+
 class ExpandItemsTransform(BaseTransform):
     name = "expand_items"
     creates_tokens = True  # Engine creates new tokens for each output
+    declared_output_fields = frozenset({"item", "item_index"})
 
     def process(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
         items = row["items"]  # Trust: source validated this is a list
 
-        output_rows = [
-            {**row.to_dict(), "item": item, "item_index": i}
-            for i, item in enumerate(items)
-        ]
+        output_rows = []
+        for i, item in enumerate(items):
+            output = {**row.to_dict(), "item": item, "item_index": i}
+            output_contract = propagate_contract(
+                row.contract,
+                output,
+                transform_adds_fields=True,
+            )
+            output_contract = self._apply_declared_output_field_contracts(output_contract)
+            output_contract = self._align_output_contract(output_contract)
+            output_rows.append(PipelineRow(output, output_contract))
 
         return TransformResult.success_multi(output_rows, success_reason={"action": "expanded_items"})
 ```
+
+For production deaggregation code, use `line_explode` as the reference pattern:
+it declares output fields, builds `_output_schema_config`, propagates contracts,
+and returns homogeneous `PipelineRow` outputs.
 
 **Token semantics:**
 
@@ -333,7 +398,8 @@ class ExpandItemsTransform(BaseTransform):
 
 ## Creating a Source Plugin
 
-Sources load data from external systems. **Only sources can coerce data.**
+Sources load data from external systems. **Sources can coerce input data at the
+ingestion boundary.**
 
 ```python
 from collections.abc import Iterator
@@ -341,6 +407,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 from elspeth.contracts.contexts import SourceContext
@@ -356,17 +424,19 @@ class MySource(BaseSource):
     """Load data from a custom format."""
 
     name = "my_source"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:0000000000000000"
+    config_model = MySourceConfig
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = MySourceConfig.from_dict(config)
+        cfg = MySourceConfig.from_dict(config, plugin_name=self.name)
         self._path = cfg.resolved_path()
         self._skip_header = cfg.skip_header
         self._on_validation_failure = cfg.on_validation_failure
 
-        if cfg.schema_config is None:
-            raise RuntimeError("schema_config is required")
         self._schema_config = cfg.schema_config
+        self._initialize_declared_guaranteed_fields(self._schema_config)
 
         # CRITICAL: allow_coercion=True for sources
         self._schema_class: type[PluginSchema] = create_schema_from_config(
@@ -374,9 +444,18 @@ class MySource(BaseSource):
         )
         self.output_schema = self._schema_class
 
+        initial_contract = create_contract_from_config(self._schema_config)
+        if initial_contract.locked:
+            self.set_schema_contract(initial_contract)
+            self._contract_builder: ContractBuilder | None = None
+        else:
+            self._contract_builder = ContractBuilder(initial_contract)
+        self._first_valid_row_processed = False
+
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         if not self._path.exists():
             raise FileNotFoundError(f"File not found: {self._path}")
+        self._first_valid_row_processed = False
 
         with open(self._path) as f:
             lines = f.readlines()
@@ -389,13 +468,40 @@ class MySource(BaseSource):
 
             try:
                 validated = self._schema_class.model_validate(row)
-                yield SourceRow.valid(validated.to_row())
+                validated_row = validated.to_row()
+
+                if self._contract_builder is not None and not self._first_valid_row_processed:
+                    field_resolution = {field: field for field in validated_row}
+                    self._contract_builder.process_first_row(validated_row, field_resolution)
+                    self.set_schema_contract(self._contract_builder.contract)
+                    self._first_valid_row_processed = True
+
+                contract = self.require_schema_contract()
+                if contract.locked:
+                    violations = contract.validate(validated_row)
+                    if violations:
+                        error_msg = "; ".join(str(v) for v in violations)
+                        ctx.record_validation_error(
+                            row=validated_row,
+                            error=error_msg,
+                            schema_mode=self._schema_config.mode,
+                            destination=self._on_validation_failure,
+                        )
+                        if self._on_validation_failure != "discard":
+                            yield SourceRow.quarantined(
+                                row=validated_row,
+                                error=error_msg,
+                                destination=self._on_validation_failure,
+                            )
+                        continue
+
+                yield SourceRow.valid(validated_row, contract=contract)
 
             except ValidationError as e:
                 ctx.record_validation_error(
                     row=row,
                     error=str(e),
-                    schema_mode=self._schema_config.mode or "dynamic",
+                    schema_mode=self._schema_config.mode or "observed",
                     destination=self._on_validation_failure,
                 )
                 if self._on_validation_failure != "discard":
@@ -417,11 +523,15 @@ class MySource(BaseSource):
 
 ```python
 # Valid row - proceed to processing
-SourceRow.valid({"id": 1, "value": 100})
+SourceRow.valid({"id": 1, "value": 100}, contract=source_contract)
 
 # Quarantined - route to on_validation_failure sink
 SourceRow.quarantined(row=raw_row, error="Invalid type", destination="quarantine_sink")
 ```
+
+Valid source rows must carry a `SchemaContract`. Create the contract from the
+effective source schema, update it through `ContractBuilder` for observed or
+flexible first-row inference, then pass it to `SourceRow.valid(..., contract=...)`.
 
 ---
 
@@ -435,6 +545,7 @@ from pathlib import Path
 from typing import Any
 
 from elspeth.contracts import ArtifactDescriptor
+from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import PathConfig
 from elspeth.contracts.contexts import LifecycleContext, SinkContext
@@ -449,20 +560,22 @@ class MySink(BaseSink):
     """Write data to a custom format."""
 
     name = "my_sink"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:0000000000000000"
+    config_model = MySinkConfig
     idempotent = False  # Appends are not idempotent
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = MySinkConfig.from_dict(config)
+        cfg = MySinkConfig.from_dict(config, plugin_name=self.name)
         self._path = Path(cfg.path)
         self._append = cfg.append
 
-        if cfg.schema_config is None:
-            raise RuntimeError("schema_config is required")
         schema = create_schema_from_config(
             cfg.schema_config, "MySinkSchema", allow_coercion=False
         )
         self.input_schema = schema
+        self.declared_required_fields = cfg.schema_config.get_effective_required_fields()
 
         self._file = None
         self._bytes_written = 0
@@ -474,7 +587,7 @@ class MySink(BaseSink):
         self._bytes_written = 0
         self._hasher = hashlib.sha256()
 
-    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> ArtifactDescriptor:
+    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         for row in rows:
             line = ",".join(str(v) for v in row.values()) + "\n"
             self._file.write(line)
@@ -482,10 +595,13 @@ class MySink(BaseSink):
             self._bytes_written += len(line.encode())
 
         # REQUIRED: Return artifact with content hash for audit
-        return ArtifactDescriptor.for_file(
-            path=str(self._path),
-            content_hash=self._hasher.hexdigest(),
-            size_bytes=self._bytes_written,
+        return SinkWriteResult(
+            artifact=ArtifactDescriptor.for_file(
+                path=str(self._path),
+                content_hash=self._hasher.hexdigest(),
+                size_bytes=self._bytes_written,
+            ),
+            diversions=self._get_diversions(),
         )
 
     def flush(self) -> None:
@@ -498,9 +614,13 @@ class MySink(BaseSink):
             self._file = None
 ```
 
-### ArtifactDescriptor Requirements
+### SinkWriteResult and ArtifactDescriptor Requirements
 
-The audit trail requires:
+`write()` returns `SinkWriteResult`. The `artifact` inside it gives the audit
+trail proof of work, and `diversions` carries any per-row write failures created
+with `BaseSink._divert_row()`.
+
+The artifact requires:
 
 - `content_hash` - SHA-256 hex digest of output content
 - `size_bytes` - Output size in bytes
@@ -509,32 +629,23 @@ The audit trail requires:
 
 ## Plugin Registration
 
-Register in **two places**:
+Built-in plugins are discovered dynamically by scanning configured plugin
+directories. For a new top-level built-in plugin, put the file in one of these
+directories and make the class inherit the correct base:
 
-### 1. Hook Implementation (pluggy)
+| Plugin type | Directory |
+|-------------|-----------|
+| Source | `src/elspeth/plugins/sources/` |
+| Transform | `src/elspeth/plugins/transforms/` |
+| Sink | `src/elspeth/plugins/sinks/` |
 
-```python
-# Registration via pluggy hookimpl (see plugins/infrastructure/hookspecs.py)
-from elspeth.plugins.infrastructure.hookspecs import hookimpl
-from elspeth.plugins.transforms.my_transform import MyTransform
+Discovery is non-recursive. If you add a new subdirectory, update
+`PLUGIN_SCAN_CONFIG` in `src/elspeth/plugins/infrastructure/discovery.py`.
+`PluginManager.register_builtin_plugins()` turns discovered classes into pluggy
+hook implementations at startup, so there is no separate CLI registry to edit.
 
-class ElspethBuiltinTransforms:
-    @hookimpl
-    def elspeth_get_transforms(self) -> list[type[Any]]:
-        return [..., MyTransform]  # Add here
-```
-
-### 2. CLI Registry
-
-```python
-# src/elspeth/cli.py (in _execute_pipeline and _resume_run)
-from elspeth.plugins.transforms.my_transform import MyTransform
-
-TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
-    ...,
-    "my_transform": MyTransform,  # Add here
-}
-```
+After adding a plugin, run discovery-focused tests. Some tests assert the exact
+built-in plugin count, so a new plugin may require updating those expectations.
 
 ---
 
@@ -546,20 +657,20 @@ All data-processing plugins require schema configuration.
 
 | Mode | Behavior | Extra Fields |
 |------|----------|--------------|
-| `dynamic` | Accept any fields | Allowed |
-| `strict` | Only declared fields | Rejected |
-| `free` | Declared required, extras allowed | Allowed |
+| `observed` | Accept any fields (types inferred from data) | Allowed |
+| `fixed` | Only declared fields | Rejected |
+| `flexible` | Declared required, extras allowed | Allowed |
 
 ### YAML Examples
 
 ```yaml
 # Accept anything
 schema:
-  fields: dynamic
+  mode: observed
 
-# Strict - only these fields
+# Fixed - only these fields
 schema:
-  mode: strict
+  mode: fixed
   fields:
     - "id: int"
     - "name: str"
@@ -567,7 +678,7 @@ schema:
 
 # At least these, allow more
 schema:
-  mode: free
+  mode: flexible
   fields:
     - "id: int"
     - "value: float"
@@ -586,7 +697,7 @@ Every plugin **must** pass protocol contract tests.
 ### Quick Test Setup
 
 ```python
-# tests/contracts/transform_contracts/test_my_transform_contract.py
+# tests/unit/contracts/transform_contracts/test_my_transform_contract.py
 import pytest
 from elspeth.plugins.transforms.my_transform import MyTransform
 from .test_transform_protocol import TransformContractPropertyTestBase
@@ -596,8 +707,8 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
     @pytest.fixture
     def transform(self):
         return MyTransform({
-            "schema": {"fields": "dynamic"},
-            "multiplier": 2.0,
+            "schema": {"mode": "observed"},
+            "multiplier": 2,
         })
 
     @pytest.fixture
@@ -611,19 +722,19 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
 
 ```bash
 # All contract tests
-.venv/bin/python -m pytest tests/contracts/ -v
+.venv/bin/python -m pytest tests/unit/contracts/ -v
 
 # Specific plugin
-.venv/bin/python -m pytest tests/contracts/transform_contracts/test_my_transform_contract.py -v
+.venv/bin/python -m pytest tests/unit/contracts/transform_contracts/test_my_transform_contract.py -v
 ```
 
 ### Test Base Classes
 
 | Base Class | Location | Inherited Tests |
 |------------|----------|-----------------|
-| `SourceContractPropertyTestBase` | `tests/contracts/source_contracts/` | 14 tests |
-| `TransformContractPropertyTestBase` | `tests/contracts/transform_contracts/` | 15 tests |
-| `SinkDeterminismContractTestBase` | `tests/contracts/sink_contracts/` | 17 tests |
+| `SourceContractPropertyTestBase` | `tests/unit/contracts/source_contracts/` | 14 tests |
+| `TransformContractPropertyTestBase` | `tests/unit/contracts/transform_contracts/` | 15 tests |
+| `SinkDeterminismContractTestBase` | `tests/unit/contracts/sink_contracts/` | 17 tests |
 
 <details>
 <summary><strong>Contract Tests Reference</strong></summary>
@@ -654,7 +765,7 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
 |----------|------|
 | Has `name` attribute | `test_sink_has_name` |
 | Has `input_schema` attribute | `test_sink_has_input_schema` |
-| `write()` returns `ArtifactDescriptor` | `test_write_returns_artifact_descriptor` |
+| `write()` returns `SinkWriteResult` with an `ArtifactDescriptor` | `test_write_returns_artifact_descriptor` |
 | `content_hash` is valid SHA-256 | `test_content_hash_is_sha256_hex` |
 | Same data → same hash | `test_same_data_same_hash` |
 
@@ -670,7 +781,10 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
 KeyError: 'my_transform'
 ```
 
-**Fix:** Register via pluggy hookimpl (see `plugins/infrastructure/hookspecs.py`) AND `cli.py`.
+**Fix:** Confirm the plugin file lives in a scanned directory and the class
+inherits the correct base class. For plugins in new subdirectories, add the
+subdirectory to `PLUGIN_SCAN_CONFIG` in
+`src/elspeth/plugins/infrastructure/discovery.py`.
 
 ### "schema is required"
 
@@ -707,6 +821,7 @@ class MyTransform(BaseTransform):
 ```python
 # Source: allow_coercion=True (external boundary)
 # Transform/Sink: allow_coercion=False (trust upstream)
+# Transform external response: validate/coerce immediately at that call boundary
 ```
 
 ---
@@ -714,12 +829,17 @@ class MyTransform(BaseTransform):
 ## Checklist for New Plugins
 
 - [ ] Has `name` class attribute
+- [ ] Has `plugin_version`, `source_file_hash`, and `config_model` class attributes
 - [ ] Has required schema attributes (`input_schema`, `output_schema`)
-- [ ] `on_error` and `on_success` set as plain attributes in `__init__`
-- [ ] Config extends correct base class (`TransformDataConfig`, `SourceDataConfig`)
+- [ ] Config extends the correct data config base (`TransformDataConfig`, `SourceDataConfig`, `PathConfig`, or a narrower sink/source config)
 - [ ] Schema created with correct `allow_coercion`
-- [ ] Registered via pluggy hookimpl (see `plugins/infrastructure/hookspecs.py`)
-- [ ] Registered in `cli.py`
+- [ ] Source valid rows call `SourceRow.valid(row, contract=contract)`
+- [ ] Transform successes return `PipelineRow` values, never raw dicts
+- [ ] Sink `write()` returns `SinkWriteResult(artifact=ArtifactDescriptor, diversions=...)`
+- [ ] Transform field declarations are set (`declared_input_fields`, `declared_output_fields`, `_output_schema_config`) when the plugin requires or adds fields
+- [ ] Sink required fields are set with `declared_required_fields`
+- [ ] Plugin file lives in a scanned discovery directory, or `PLUGIN_SCAN_CONFIG` was updated
+- [ ] `scripts/cicd/enforce_plugin_hashes.py check --root src/elspeth --fix` has refreshed `source_file_hash`
 - [ ] Contract tests pass
 - [ ] `close()` is idempotent
 
@@ -728,5 +848,6 @@ class MyTransform(BaseTransform):
 ## See Also
 
 - [CLAUDE.md](CLAUDE.md) - Three-Tier Trust Model and data handling philosophy
+- [Data Trust and Error Handling](docs/guides/data-trust-and-error-handling.md) - External boundaries, quarantine, and plugin error handling
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture and plugin integration points
 - [Configuration Reference](docs/reference/configuration.md) - Full configuration options

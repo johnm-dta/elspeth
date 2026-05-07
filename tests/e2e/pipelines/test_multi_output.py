@@ -59,6 +59,8 @@ class TestMultiOutput:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # -- Assert --
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
         assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 10
 
@@ -110,6 +112,8 @@ class TestMultiOutput:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # -- Assert: audit trail --
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
         assert result.status == RunStatus.COMPLETED
 
         with db.engine.connect() as conn:
@@ -123,7 +127,7 @@ class TestMultiOutput:
                 .select_from(token_outcomes_table)
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
             assert terminal_count == 5
@@ -135,7 +139,7 @@ class TestMultiOutput:
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
                     token_outcomes_table.c.sink_name == "sink_a",
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
 
@@ -145,7 +149,7 @@ class TestMultiOutput:
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
                     token_outcomes_table.c.sink_name == "sink_b",
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
 

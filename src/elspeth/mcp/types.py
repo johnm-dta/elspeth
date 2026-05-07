@@ -56,6 +56,24 @@ class TokenRecord(TypedDict):
     created_at: str | None
 
 
+class TokenChildRecord(TypedDict):
+    """Forward lineage record: what child tokens were created from a parent.
+
+    Used by ``get_token_children`` to trace what a COALESCED parent merged into.
+    The child_token_id is the merged token; ordinal is this parent's position
+    in the merge (0-indexed).
+    """
+
+    child_token_id: str
+    """The token created from this parent (e.g., the coalesced result)."""
+
+    parent_token_id: str
+    """The parent token being queried."""
+
+    ordinal: int
+    """This parent's position in the child's parent list (0-indexed)."""
+
+
 class OperationRecord(TypedDict):
     """A source/sink operation record as returned by ``list_operations``."""
 
@@ -85,20 +103,69 @@ class OperationCallRecord(TypedDict):
     created_at: str | None
 
 
-class NodeStateRecord(TypedDict):
-    """A node state record as returned by ``get_node_states``."""
+class NodeStateRecord(TypedDict, total=False):
+    """A node state record as returned by ``get_node_states``.
 
-    state_id: str
-    token_id: str
-    node_id: str
-    step_index: int
-    attempt: int
-    status: str
-    input_hash: str
+    Core fields are always present. Context fields (context_after, error,
+    success_reason) are included only when ``include_context=True``.
+    """
+
+    # Always present
+    state_id: Required[str]
+    token_id: Required[str]
+    node_id: Required[str]
+    step_index: Required[int]
+    attempt: Required[int]
+    status: Required[str]
+    input_hash: Required[str]
     output_hash: str | None
     duration_ms: float | None
     started_at: str | None
     completed_at: str | None
+
+    # Optional context fields (when include_context=True)
+    context_after: dict[str, Any] | None
+    error: dict[str, Any] | None
+    success_reason: dict[str, Any] | None
+
+
+class CollisionFieldRecord(TypedDict):
+    """Details of a single field collision during coalesce.
+
+    When the coalesce node status is FAILED (e.g., union_collision_policy='fail'),
+    ``winner_branch`` and ``winner_value`` are None because no winner was selected.
+    """
+
+    field: str
+    """Field name where collision occurred."""
+
+    winner_branch: str | None
+    """Branch whose value was kept (last_wins or first_wins), or None if merge failed."""
+
+    winner_value: Any
+    """The value that won, or None if merge failed."""
+
+    competing_values: list[tuple[str, Any]]
+    """List of (branch_name, value) entries in merge order."""
+
+
+class CollisionRecord(TypedDict):
+    """A collision event from a coalesce merge operation.
+
+    Returned by ``list_collisions`` for quick identification of merge conflicts.
+    When ``status`` is FAILED, the merge aborted and no winner was selected.
+    """
+
+    run_id: str
+    token_id: str
+    node_id: str
+    plugin_name: str
+    status: str
+    """Node state status: COMPLETED if merge succeeded, FAILED if it aborted."""
+    completed_at: str | None
+    collision_fields: list[CollisionFieldRecord]
+    union_field_origins: dict[str, str]
+    """Field name → originating branch for all union-merged fields."""
 
 
 # Dataclass mirror types: dict[str, Any] aliases for dataclass_to_dict()
@@ -134,6 +201,15 @@ class RunSummaryErrors(TypedDict):
     total: int
 
 
+class OutcomeDistributionEntry(TypedDict):
+    """Single entry in outcome distribution (ADR-019 two-axis terminal model)."""
+
+    outcome: str | None
+    path: str
+    completed: bool
+    count: int
+
+
 class RunSummaryReport(TypedDict):
     """Return type for ``get_run_summary``."""
 
@@ -144,7 +220,7 @@ class RunSummaryReport(TypedDict):
     run_duration_seconds: float | None
     counts: RunSummaryCounts
     errors: RunSummaryErrors
-    outcome_distribution: dict[str, int]  # dynamic outcome names
+    outcome_distribution: list[OutcomeDistributionEntry]
     avg_state_duration_ms: float | None
 
 
@@ -290,14 +366,6 @@ class OutcomeSummary(TypedDict):
     join_operations: int
 
 
-class OutcomeDistributionEntry(TypedDict):
-    """Single entry in outcome distribution."""
-
-    outcome: str
-    is_terminal: bool
-    count: int
-
-
 class OutcomeAnalysisReport(TypedDict):
     """Return type for ``get_outcome_analysis``."""
 
@@ -429,7 +497,7 @@ class FailureTransformError(TypedDict):
 class FailureValidationError(TypedDict):
     """A validation error in failure context."""
 
-    plugin: str
+    plugin: str | None
     row_hash: str | None
     sample_data: dict[str, Any] | None
 
@@ -484,6 +552,7 @@ class ContractField(TypedDict):
     original_name: str
     python_type: str
     required: bool
+    nullable: bool
     source: str
 
 
@@ -506,6 +575,7 @@ class FieldExplanation(TypedDict):
     original_name: str
     python_type: str
     required: bool
+    nullable: bool
     source: str
     contract_mode: str
 

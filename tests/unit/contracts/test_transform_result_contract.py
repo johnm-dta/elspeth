@@ -1,104 +1,164 @@
-"""Tests for TransformResult with PipelineRow.
+"""Tests for TransformResult results that carry PipelineRow contracts."""
 
-Verifies that TransformResult correctly accepts and carries PipelineRow
-objects, which bundle row data with their schema contract.
-"""
+from __future__ import annotations
+
+from typing import Any, cast
 
 import pytest
 
+from elspeth.contracts.errors import (
+    PluginContractViolation,
+    TransformErrorReason,
+    TransformSuccessReason,
+)
 from elspeth.contracts.results import TransformResult
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-from elspeth.testing import make_field, make_pipeline_row
+from elspeth.testing import make_field
+
+
+@pytest.fixture
+def output_contract() -> SchemaContract:
+    """Locked output contract with distinct original and normalized names."""
+    return SchemaContract(
+        mode="FIXED",
+        fields=(
+            make_field("record_id", int, original_name="Record ID", required=True, source="declared"),
+            make_field("result", str, original_name="Result Label", required=True, source="declared"),
+        ),
+        locked=True,
+    )
+
+
+def _output_row(record_id: int, result: str, contract: SchemaContract) -> PipelineRow:
+    return PipelineRow({"record_id": record_id, "result": result}, contract)
 
 
 class TestTransformResultWithPipelineRow:
-    """Test TransformResult carrying PipelineRow with embedded contract."""
+    """TransformResult must preserve schema-bearing PipelineRow output."""
 
-    @pytest.fixture
-    def sample_contract(self) -> SchemaContract:
-        """Sample output contract."""
-        return SchemaContract(
-            mode="FIXED",
-            fields=(
-                make_field("id", int, original_name="id", required=True, source="declared"),
-                make_field("result", str, original_name="result", required=True, source="declared"),
-            ),
-            locked=True,
-        )
+    def test_success_preserves_single_pipeline_row_contract_and_reason(
+        self,
+        output_contract: SchemaContract,
+    ) -> None:
+        pipeline_row = _output_row(1, "ok", output_contract)
+        success_reason: TransformSuccessReason = {"action": "processed", "fields_added": ["result"]}
 
-    def test_success_with_pipeline_row(self, sample_contract: SchemaContract) -> None:
-        """TransformResult.success() accepts PipelineRow carrying contract."""
-        pipeline_row = PipelineRow({"id": 1, "result": "ok"}, sample_contract)
         result = TransformResult.success(
             row=pipeline_row,
-            success_reason={"action": "processed"},
+            success_reason=success_reason,
         )
 
-        assert isinstance(result.row, PipelineRow)
-        assert result.row.contract is sample_contract
-        assert result.row["id"] == 1
-        assert result.row["result"] == "ok"
+        assert result.status == "success"
+        assert result.row is pipeline_row
+        assert result.rows is None
+        assert result.reason is None
+        assert result.retryable is False
+        assert result.success_reason == success_reason
+        assert result.is_multi_row is False
+        assert result.has_output_data is True
+        assert result.row.contract is output_contract
+        assert result.row["Record ID"] == 1
+        assert result.row["Result Label"] == "ok"
 
-    def test_success_with_dict(self) -> None:
-        """TransformResult.success() still accepts plain dicts (internal use)."""
-        result = TransformResult.success(
-            row=make_pipeline_row({"id": 1}),
-            success_reason={"action": "processed"},
-        )
+    def test_success_rejects_plain_dict_rows(self) -> None:
+        with pytest.raises(PluginContractViolation, match="PipelineRow"):
+            TransformResult.success(
+                row=cast(Any, {"record_id": 1, "result": "ok"}),
+                success_reason={"action": "processed"},
+            )
 
-        assert result.row is not None
-        assert result.row.to_dict() == {"id": 1}
+    def test_direct_success_construction_rejects_plain_dict_rows(self) -> None:
+        with pytest.raises(PluginContractViolation, match="PipelineRow"):
+            TransformResult(
+                status="success",
+                row=cast(Any, {"record_id": 1, "result": "ok"}),
+                reason=None,
+                success_reason={"action": "processed"},
+            )
 
-    def test_success_multi_with_pipeline_rows(self, sample_contract: SchemaContract) -> None:
-        """success_multi() accepts list of PipelineRow objects."""
+    def test_success_multi_preserves_tuple_of_pipeline_rows_with_shared_contract(
+        self,
+        output_contract: SchemaContract,
+    ) -> None:
         rows = [
-            PipelineRow({"id": 1, "result": "a"}, sample_contract),
-            PipelineRow({"id": 2, "result": "b"}, sample_contract),
+            _output_row(1, "alpha", output_contract),
+            _output_row(2, "beta", output_contract),
         ]
+        success_reason: TransformSuccessReason = {"action": "split", "metadata": {"strategy": "fanout"}}
+
         result = TransformResult.success_multi(
             rows=rows,
-            success_reason={"action": "split"},
+            success_reason=success_reason,
         )
+        rows.append(_output_row(3, "late mutation", output_contract))
 
-        assert result.rows is not None
-        assert len(result.rows) == 2
-        assert all(isinstance(r, PipelineRow) for r in result.rows)
-        assert result.rows[0]["id"] == 1
-        assert result.rows[1]["id"] == 2
+        assert result.status == "success"
+        assert result.row is None
+        assert result.rows == (rows[0], rows[1])
+        assert isinstance(result.rows, tuple)
+        assert result.success_reason == success_reason
+        assert result.is_multi_row is True
+        assert result.has_output_data is True
+        assert [row["Record ID"] for row in result.rows] == [1, 2]
+        assert all(row.contract is output_contract for row in result.rows)
 
-    def test_error_has_no_row(self) -> None:
-        """Error results have no row data."""
-        result = TransformResult.error(
-            reason={"reason": "test_error"},
-            retryable=False,
+    def test_success_multi_rejects_mixed_contract_instances_even_when_structurally_equal(
+        self,
+        output_contract: SchemaContract,
+    ) -> None:
+        structurally_equal_contract = SchemaContract(
+            mode=output_contract.mode,
+            fields=output_contract.fields,
+            locked=output_contract.locked,
         )
+        assert structurally_equal_contract == output_contract
+        assert structurally_equal_contract is not output_contract
 
+        with pytest.raises(PluginContractViolation, match="same contract instance"):
+            TransformResult.success_multi(
+                rows=[
+                    _output_row(1, "alpha", output_contract),
+                    _output_row(2, "beta", structurally_equal_contract),
+                ],
+                success_reason={"action": "split"},
+            )
+
+    def test_success_multi_rejects_non_pipeline_row_elements(
+        self,
+        output_contract: SchemaContract,
+    ) -> None:
+        with pytest.raises(PluginContractViolation, match=r"rows\[1\].*PipelineRow"):
+            TransformResult.success_multi(
+                rows=[
+                    _output_row(1, "alpha", output_contract),
+                    cast(Any, {"record_id": 2, "result": "beta"}),
+                ],
+                success_reason={"action": "split"},
+            )
+
+    def test_success_empty_is_explicit_zero_row_success(self) -> None:
+        success_reason: TransformSuccessReason = {"action": "filtered", "metadata": {"predicate": "keyword_filter"}}
+
+        result = TransformResult.success_empty(success_reason=success_reason)
+
+        assert result.status == "success"
+        assert result.row is None
+        assert result.rows == ()
+        assert result.reason is None
+        assert result.success_reason == success_reason
+        assert result.is_multi_row is True
+        assert result.has_output_data is True
+
+    def test_error_result_carries_only_structured_reason_and_retryability(self) -> None:
+        reason: TransformErrorReason = {"reason": "api_error", "error": "upstream unavailable"}
+
+        result = TransformResult.error(reason, retryable=True)
+
+        assert result.status == "error"
         assert result.row is None
         assert result.rows is None
-
-    def test_pipeline_row_contract_accessible(self, sample_contract: SchemaContract) -> None:
-        """Contract is accessible through PipelineRow in result.row."""
-        pipeline_row = PipelineRow({"id": 1, "result": "ok"}, sample_contract)
-        result = TransformResult.success(
-            row=pipeline_row,
-            success_reason={"action": "processed"},
-        )
-
-        assert result.row is not None
-        assert result.row.contract.mode == "FIXED"
-        assert len(result.row.contract.fields) == 2
-
-    def test_multi_row_contract_accessible(self, sample_contract: SchemaContract) -> None:
-        """Contract is accessible through each PipelineRow in result.rows."""
-        rows = [
-            PipelineRow({"id": 1, "result": "a"}, sample_contract),
-            PipelineRow({"id": 2, "result": "b"}, sample_contract),
-        ]
-        result = TransformResult.success_multi(
-            rows=rows,
-            success_reason={"action": "split"},
-        )
-
-        assert result.rows is not None
-        for row in result.rows:
-            assert row.contract is sample_contract
+        assert result.reason == reason
+        assert result.retryable is True
+        assert result.success_reason is None
+        assert result.is_multi_row is False
+        assert result.has_output_data is False

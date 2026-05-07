@@ -105,6 +105,91 @@ class TestValidateCommand:
             f"Expected 'Pipeline configuration valid' in output, got: {result.stdout}"
         )
 
+    def test_validate_allows_export_enabled_post_run_sink(self, tmp_path: Path) -> None:
+        """Export sink should be excluded from execution-graph validation."""
+        input_csv = tmp_path / "input.csv"
+        input_csv.write_text("id,name\n1,Alice\n")
+
+        config = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {
+                    "path": str(input_csv),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            },
+            "sinks": {
+                "output": {
+                    "plugin": "json",
+                    "on_write_failure": "discard",
+                    "options": {
+                        "path": str(tmp_path / "output.json"),
+                        "schema": {"mode": "observed"},
+                        "format": "jsonl",
+                    },
+                },
+                "audit_export": {
+                    "plugin": "json",
+                    "on_write_failure": "discard",
+                    "options": {
+                        "path": str(tmp_path / "audit_export.json"),
+                        "schema": {"mode": "observed"},
+                    },
+                },
+            },
+            "landscape": {
+                "url": f"sqlite:///{tmp_path / 'audit.db'}",
+                "export": {
+                    "enabled": True,
+                    "sink": "audit_export",
+                    "format": "json",
+                    "sign": False,
+                },
+            },
+        }
+        config_file = tmp_path / "export_enabled.yaml"
+        config_file.write_text(yaml.dump(config))
+
+        result = runner.invoke(app, ["validate", "-s", str(config_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "pipeline configuration valid" in result.stdout.lower()
+
+    def test_validate_allows_null_secrets_section(self, tmp_path: Path) -> None:
+        """A null secrets section should behave like an omitted section."""
+        config = {
+            "secrets": None,
+            "source": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {
+                    "path": str(tmp_path / "input.csv"),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            },
+            "sinks": {
+                "output": {
+                    "plugin": "json",
+                    "on_write_failure": "discard",
+                    "options": {
+                        "path": str(tmp_path / "output.json"),
+                        "schema": {"mode": "observed"},
+                        "format": "jsonl",
+                    },
+                },
+            },
+        }
+        config_file = tmp_path / "null_secrets.yaml"
+        config_file.write_text(yaml.dump(config))
+
+        result = runner.invoke(app, ["validate", "-s", str(config_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "pipeline configuration valid" in result.stdout.lower()
+
     def test_validate_file_not_found(self) -> None:
         """Nonexistent file shows error."""
         result = runner.invoke(app, ["validate", "-s", "/nonexistent/file.yaml"])

@@ -39,6 +39,14 @@ Use it to locate the source of any audit gap.
 - Recorder: RowProcessor
 - Primary location: `src/elspeth/engine/processor.py` (config-driven gates)
 
+## Gate discard (GATE_DISCARDED)
+
+- Path: Gate route value resolves to the virtual target `"discard"`
+- Recorder: RowProcessor
+- Primary location: `src/elspeth/engine/processor.py` (config-driven gates)
+  - Records `(SUCCESS, GATE_DISCARDED)` with no sink_name.
+  - No routing edge or sink named `discard` is required.
+
 ## Gate fork (FORKED)
 
 - Path: Gate returns RoutingAction.fork_to_paths

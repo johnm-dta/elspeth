@@ -59,12 +59,18 @@ class TestTriggerConfig:
         assert trigger.timeout_seconds == 3600.0
         assert trigger.condition == "row['batch_count'] >= 1000 and row['batch_age_seconds'] < 30.0"
 
-    def test_at_least_one_trigger_required(self) -> None:
-        """At least one trigger must be specified."""
+    def test_empty_trigger_means_end_of_source_only(self) -> None:
+        """No configured early trigger means flush only when the source completes."""
         from elspeth.core.config import TriggerConfig
 
-        with pytest.raises(ValidationError, match="at least one trigger"):
-            TriggerConfig()
+        trigger = TriggerConfig()
+
+        assert trigger.count is None
+        assert trigger.timeout_seconds is None
+        assert trigger.condition is None
+        assert trigger.has_count is False
+        assert trigger.has_timeout is False
+        assert trigger.has_condition is False
 
     def test_condition_validates_expression(self) -> None:
         """Condition trigger validates expression syntax."""
@@ -73,6 +79,13 @@ class TestTriggerConfig:
         # Invalid Python syntax
         with pytest.raises(ValidationError, match=r"Invalid.*syntax"):
             TriggerConfig(condition="batch_count >=")
+
+    def test_condition_rejects_end_of_source_keyword_with_guidance(self) -> None:
+        """end_of_source is an implicit trigger, not a boolean condition."""
+        from elspeth.core.config import TriggerConfig
+
+        with pytest.raises(ValidationError, match="end_of_source"):
+            TriggerConfig(condition="end_of_source")
 
     def test_count_must_be_positive(self) -> None:
         """Count threshold must be positive."""
@@ -197,6 +210,21 @@ class TestAggregationSettings:
             on_error="discard",
         )
         assert settings.output_mode == "transform"
+
+    def test_aggregation_settings_default_trigger_is_end_of_source_only(self) -> None:
+        """Omitted trigger defaults to the implicit end-of-source flush."""
+        from elspeth.core.config import AggregationSettings
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            input="source_out",
+            on_error="discard",
+        )
+
+        assert settings.trigger.count is None
+        assert settings.trigger.timeout_seconds is None
+        assert settings.trigger.condition is None
 
     def test_aggregation_settings_passthrough_mode(self) -> None:
         """Passthrough output mode is valid."""

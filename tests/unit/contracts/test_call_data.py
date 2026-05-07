@@ -318,31 +318,33 @@ class TestHTTPCallRequest:
         assert stable_hash(new_dict) == stable_hash(old_dict)
 
     def test_ssrf_request_hash_stability(self) -> None:
-        old_dict = {
+        expected = {
             "method": "GET",
             "url": "https://example.com/page",
             "resolved_ip": "93.184.216.34",
             "headers": {"Host": "example.com"},
+            "params": None,  # GET always emits params for hash stability
         }
-        new_dict = HTTPCallRequest(
+        actual = HTTPCallRequest(
             method="GET",
             url="https://example.com/page",
             headers={"Host": "example.com"},
             resolved_ip="93.184.216.34",
         ).to_dict()
-        assert new_dict == old_dict
-        assert stable_hash(new_dict) == stable_hash(old_dict)
+        assert actual == expected
+        assert stable_hash(actual) == stable_hash(expected)
 
     def test_redirect_hop_hash_stability(self) -> None:
-        old_dict = {
+        expected = {
             "method": "GET",
             "url": "https://new.example.com/page",
             "resolved_ip": "1.2.3.4",
             "hop_number": 1,
             "redirect_from": "https://old.example.com/page",
             "headers": {"Host": "new.example.com"},
+            "params": None,  # GET always emits params for hash stability
         }
-        new_dict = HTTPCallRequest(
+        actual = HTTPCallRequest(
             method="GET",
             url="https://new.example.com/page",
             headers={"Host": "new.example.com"},
@@ -350,8 +352,8 @@ class TestHTTPCallRequest:
             hop_number=1,
             redirect_from="https://old.example.com/page",
         ).to_dict()
-        assert new_dict == old_dict
-        assert stable_hash(new_dict) == stable_hash(old_dict)
+        assert actual == expected
+        assert stable_hash(actual) == stable_hash(expected)
 
     def test_standard_post_always_includes_json(self) -> None:
         d = HTTPCallRequest(
@@ -373,15 +375,78 @@ class TestHTTPCallRequest:
         assert "params" in d
         assert d["params"] is None
 
-    def test_ssrf_request_excludes_json_params(self) -> None:
+    def test_put_with_json_includes_payload(self) -> None:
+        """PUT with json body must include it in to_dict() — not silently drop.
+
+        Regression test for elspeth-c083584007: only POST got json serialized,
+        PUT/PATCH/DELETE payloads were silently dropped from audit records.
+        """
+        d = HTTPCallRequest(
+            method="PUT",
+            url="https://api.example.com/v1/resource/42",
+            headers={"Content-Type": "application/json"},
+            json={"name": "updated"},
+        ).to_dict()
+        assert "json" in d
+        assert d["json"] == {"name": "updated"}
+
+    def test_patch_with_json_includes_payload(self) -> None:
+        """PATCH with json body must include it in to_dict()."""
+        d = HTTPCallRequest(
+            method="PATCH",
+            url="https://api.example.com/v1/resource/42",
+            headers={"Content-Type": "application/json"},
+            json={"status": "active"},
+        ).to_dict()
+        assert "json" in d
+        assert d["json"] == {"status": "active"}
+
+    def test_delete_with_params_includes_payload(self) -> None:
+        """DELETE with query params must include them in to_dict()."""
+        d = HTTPCallRequest(
+            method="DELETE",
+            url="https://api.example.com/v1/resource/42",
+            headers={},
+            params={"force": "true"},
+        ).to_dict()
+        assert "params" in d
+        assert d["params"] == {"force": "true"}
+
+    def test_ssrf_get_includes_params_for_hash_stability(self) -> None:
+        """GET with resolved_ip still emits params (None) for hash stability."""
         d = HTTPCallRequest(
             method="GET",
             url="https://example.com",
             headers={},
             resolved_ip="1.2.3.4",
         ).to_dict()
-        assert "json" not in d
-        assert "params" not in d
+        assert "json" not in d  # GET doesn't emit json unless explicitly set
+        assert d["params"] is None  # GET always emits params for hash stability
+
+    def test_ssrf_post_includes_json(self) -> None:
+        """POST with resolved_ip must not silently drop json body."""
+        d = HTTPCallRequest(
+            method="POST",
+            url="https://example.com/api",
+            headers={"Content-Type": "application/json"},
+            json={"query": "test data"},
+            resolved_ip="1.2.3.4",
+        ).to_dict()
+        assert d["json"] == {"query": "test data"}
+        assert d["resolved_ip"] == "1.2.3.4"
+        assert "params" not in d  # POST doesn't emit params unless explicitly set
+
+    def test_audit_metadata_included_when_present(self) -> None:
+        """Audit-only metadata must survive serialization without changing request json."""
+        d = HTTPCallRequest(
+            method="POST",
+            url="https://example.com/api",
+            headers={"Content-Type": "application/json"},
+            json={"query": "test data"},
+            audit_metadata={"variables_hash": "abc123"},
+        ).to_dict()
+        assert d["json"] == {"query": "test data"}
+        assert d["audit_metadata"] == {"variables_hash": "abc123"}
 
     def test_frozen(self) -> None:
         obj = HTTPCallRequest(method="GET", url="https://x.com", headers={})
@@ -389,7 +454,7 @@ class TestHTTPCallRequest:
             obj.method = "POST"  # type: ignore[misc]
 
     def test_hop_number_without_resolved_ip_raises(self) -> None:
-        with pytest.raises(ValueError, match="hop_number requires resolved_ip"):
+        with pytest.raises(ValueError, match="hop_number without resolved_ip requires redirect_from"):
             HTTPCallRequest(
                 method="GET",
                 url="https://example.com",
@@ -417,6 +482,18 @@ class TestHTTPCallRequest:
             redirect_from="https://old.example.com",
         )
         assert obj.hop_number == 1
+
+    def test_blocked_redirect_attempt_allows_hop_tracking_without_resolved_ip(self) -> None:
+        """Blocked redirects still need hop lineage even when SSRF resolution never completes."""
+        obj = HTTPCallRequest(
+            method="GET",
+            url="http://169.254.169.254/latest/meta-data/",
+            headers={"Host": "169.254.169.254"},
+            hop_number=1,
+            redirect_from="https://example.com/start",
+        )
+        assert obj.hop_number == 1
+        assert obj.resolved_ip is None
 
 
 # ---------------------------------------------------------------------------
@@ -517,9 +594,35 @@ class TestHTTPCallResponse:
             HTTPCallResponse(status_code=200, headers={}, body_size=-1)
 
     def test_body_size_none_accepted(self) -> None:
-        """None body_size is valid (optional field)."""
+        """None body_size is valid when body is also None (redirect hop)."""
         obj = HTTPCallResponse(status_code=200, headers={}, body_size=None)
         assert obj.body_size is None
+
+    def test_body_without_body_size_rejected(self) -> None:
+        """body present but body_size None would silently drop body in to_dict()."""
+        with pytest.raises(ValueError, match="body requires body_size"):
+            HTTPCallResponse(
+                status_code=200,
+                headers={},
+                body={"data": "value"},
+                body_size=None,
+            )
+
+    def test_body_str_without_body_size_rejected(self) -> None:
+        """String body without body_size is also rejected."""
+        with pytest.raises(ValueError, match="body requires body_size"):
+            HTTPCallResponse(
+                status_code=200,
+                headers={},
+                body="<html>hello</html>",
+                body_size=None,
+            )
+
+    def test_body_none_with_body_size_accepted(self) -> None:
+        """body_size present but body None is valid — response was received but body not captured."""
+        obj = HTTPCallResponse(status_code=200, headers={}, body_size=42, body=None)
+        assert obj.body_size == 42
+        assert obj.body is None
 
 
 # ---------------------------------------------------------------------------
@@ -567,3 +670,75 @@ class TestHTTPCallError:
         obj = HTTPCallError(type="err", message="msg")
         with pytest.raises(AttributeError):
             obj.type = "other"  # type: ignore[misc]
+
+
+class TestHTTPCallResponseListBodyFreeze:
+    """JSON array bodies must be deeply frozen."""
+
+    def test_list_body_frozen_to_tuple(self) -> None:
+        body = [{"id": 1}, {"id": 2}]
+        resp = HTTPCallResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body_size=20,
+            body=body,  # type: ignore[arg-type]
+        )
+        body.append({"id": 3})
+        assert isinstance(resp.body, tuple)
+        assert len(resp.body) == 2
+
+    def test_list_body_nested_dicts_frozen(self) -> None:
+        from types import MappingProxyType
+
+        body = [{"nested": {"key": "value"}}]
+        resp = HTTPCallResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body_size=30,
+            body=body,  # type: ignore[arg-type]
+        )
+        assert isinstance(resp.body, tuple)
+        assert isinstance(resp.body[0], MappingProxyType)
+
+    def test_list_body_round_trips_via_to_dict(self) -> None:
+        resp = HTTPCallResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body_size=20,
+            body=[{"id": 1}, {"id": 2}],  # type: ignore[arg-type]
+        )
+        d = resp.to_dict()
+        assert isinstance(d["body"], list)
+        assert d["body"] == [{"id": 1}, {"id": 2}]
+
+
+class TestHTTPCallResponseTupleBodyFreeze:
+    """Tuple bodies containing mutable dicts must be deeply frozen."""
+
+    def test_tuple_body_dicts_frozen(self) -> None:
+        """tuple[dict, ...] body has inner dicts frozen to MappingProxyType."""
+        from types import MappingProxyType
+
+        mutable_dict = {"mutable": "value"}
+        resp = HTTPCallResponse(
+            status_code=200,
+            headers={},
+            body_size=10,
+            body=(mutable_dict,),
+        )
+        # Inner dict should be frozen — mutation of original must not affect body
+        mutable_dict["injected"] = "bad"
+        assert isinstance(resp.body, tuple)
+        assert isinstance(resp.body[0], MappingProxyType)
+        assert "injected" not in resp.body[0]
+
+    def test_tuple_body_round_trips_via_to_dict(self) -> None:
+        resp = HTTPCallResponse(
+            status_code=200,
+            headers={},
+            body_size=10,
+            body=({"id": 1}, {"id": 2}),
+        )
+        d = resp.to_dict()
+        assert isinstance(d["body"], list)
+        assert d["body"] == [{"id": 1}, {"id": 2}]

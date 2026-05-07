@@ -2,12 +2,16 @@
 
 import pytest
 
-from elspeth.plugins.infrastructure.validation import PluginConfigValidator
+from elspeth.plugins.infrastructure.validation import (
+    validate_schema_config,
+    validate_sink_config,
+    validate_source_config,
+    validate_transform_config,
+)
 
 
 def test_validator_accepts_valid_source_config():
     """Valid source config passes validation."""
-    validator = PluginConfigValidator()
 
     config = {
         "path": "/tmp/test.csv",
@@ -15,13 +19,12 @@ def test_validator_accepts_valid_source_config():
         "on_validation_failure": "quarantine",
     }
 
-    errors = validator.validate_source_config("csv", config)
+    errors = validate_source_config("csv", config)
     assert errors == []
 
 
 def test_validator_rejects_missing_required_field():
     """Missing required field returns error."""
-    validator = PluginConfigValidator()
 
     config = {
         # Missing 'path' - required by CSVSourceConfig
@@ -29,7 +32,7 @@ def test_validator_rejects_missing_required_field():
         "on_validation_failure": "quarantine",
     }
 
-    errors = validator.validate_source_config("csv", config)
+    errors = validate_source_config("csv", config)
     assert len(errors) == 1
     assert "path" in errors[0].field
     assert "required" in errors[0].message.lower()
@@ -37,7 +40,6 @@ def test_validator_rejects_missing_required_field():
 
 def test_validator_rejects_invalid_field_type():
     """Invalid field type returns error."""
-    validator = PluginConfigValidator()
 
     config = {
         "path": "/tmp/test.csv",
@@ -46,76 +48,70 @@ def test_validator_rejects_invalid_field_type():
         "on_validation_failure": "quarantine",
     }
 
-    errors = validator.validate_source_config("csv", config)
+    errors = validate_source_config("csv", config)
     assert len(errors) == 1
     assert "skip_rows" in errors[0].field
 
 
 def test_validator_accepts_null_source_with_empty_config():
     """null_source has no config class, validation should pass with empty dict."""
-    validator = PluginConfigValidator()
 
     config = {}
 
-    errors = validator.validate_source_config("null", config)
+    errors = validate_source_config("null", config)
     assert errors == []
 
 
 def test_validator_accepts_null_source_with_arbitrary_config():
     """null_source ignores config, validation should pass with any dict."""
-    validator = PluginConfigValidator()
 
     config = {
         "arbitrary_field": "ignored",
         "another_field": 42,
     }
 
-    errors = validator.validate_source_config("null", config)
+    errors = validate_source_config("null", config)
     assert errors == []
 
 
 def test_validator_accepts_valid_transform_config():
     """Valid transform config passes validation."""
-    validator = PluginConfigValidator()
 
     config = {
         "schema": {"mode": "observed"},
     }
 
-    errors = validator.validate_transform_config("passthrough", config)
+    errors = validate_transform_config("passthrough", config)
     assert errors == []
 
 
 def test_validator_accepts_valid_sink_config():
     """Valid sink config passes validation."""
-    validator = PluginConfigValidator()
 
     config = {
         "path": "/tmp/output.csv",
         "schema": {"mode": "observed"},
     }
 
-    errors = validator.validate_sink_config("csv", config)
+    errors = validate_sink_config("csv", config)
     assert errors == []
 
 
 def test_validator_rejects_invalid_transform_config():
     """Invalid transform config with missing required field returns error."""
-    validator = PluginConfigValidator()
 
     config = {
-        # Missing 'schema_config' - required by PassThroughConfig (DataPluginConfig)
+        # Missing schema - required by PassThroughConfig (DataPluginConfig)
     }
 
-    errors = validator.validate_transform_config("passthrough", config)
+    errors = validate_transform_config("passthrough", config)
     assert len(errors) == 1
-    # DataPluginConfig validator error reports the field name that failed
-    assert errors[0].field == "schema_config"
+    # DataPluginConfig validator error reports the alias "schema", not field name "schema_config"
+    assert errors[0].field == "schema"
 
 
 def test_validator_rejects_invalid_sink_config():
     """Invalid sink config with missing required field returns error."""
-    validator = PluginConfigValidator()
 
     config = {
         # Missing 'url' - required by DatabaseSinkConfig
@@ -123,7 +119,7 @@ def test_validator_rejects_invalid_sink_config():
         "schema": {"mode": "observed"},
     }
 
-    errors = validator.validate_sink_config("database", config)
+    errors = validate_sink_config("database", config)
     assert len(errors) == 1
     assert "url" in errors[0].field
     assert "required" in errors[0].message.lower()
@@ -131,21 +127,19 @@ def test_validator_rejects_invalid_sink_config():
 
 def test_validator_rejects_unknown_transform_type():
     """Unknown transform type raises ValueError."""
-    validator = PluginConfigValidator()
 
     config = {
         "schema": {"mode": "observed"},
     }
 
     with pytest.raises(ValueError) as exc_info:
-        validator.validate_transform_config("nonexistent_transform", config)
+        validate_transform_config("nonexistent_transform", config)
 
     assert "Unknown transform type" in str(exc_info.value)
 
 
 def test_validator_rejects_unknown_sink_type():
     """Unknown sink type raises ValueError."""
-    validator = PluginConfigValidator()
 
     config = {
         "path": "/tmp/output.txt",
@@ -153,14 +147,13 @@ def test_validator_rejects_unknown_sink_type():
     }
 
     with pytest.raises(ValueError) as exc_info:
-        validator.validate_sink_config("nonexistent_sink", config)
+        validate_sink_config("nonexistent_sink", config)
 
     assert "Unknown sink type" in str(exc_info.value)
 
 
 def test_validator_rejects_unknown_source_type():
     """Unknown source type raises ValueError."""
-    validator = PluginConfigValidator()
 
     config = {
         "path": "/tmp/input.txt",
@@ -168,14 +161,13 @@ def test_validator_rejects_unknown_source_type():
     }
 
     with pytest.raises(ValueError) as exc_info:
-        validator.validate_source_config("nonexistent_source", config)
+        validate_source_config("nonexistent_source", config)
 
     assert "Unknown source type" in str(exc_info.value)
 
 
 def test_validator_accepts_database_sink_config():
     """Valid database sink config passes validation."""
-    validator = PluginConfigValidator()
 
     config = {
         "url": "sqlite:///test.db",
@@ -183,13 +175,12 @@ def test_validator_accepts_database_sink_config():
         "schema": {"mode": "observed"},
     }
 
-    errors = validator.validate_sink_config("database", config)
+    errors = validate_sink_config("database", config)
     assert errors == []
 
 
 def test_validator_accepts_azure_blob_source_config():
     """Valid Azure blob source config passes validation."""
-    validator = PluginConfigValidator()
 
     config = {
         "container": "test-container",
@@ -200,13 +191,12 @@ def test_validator_accepts_azure_blob_source_config():
         "connection_string": "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=test==;EndpointSuffix=core.windows.net",
     }
 
-    errors = validator.validate_source_config("azure_blob", config)
+    errors = validate_source_config("azure_blob", config)
     assert errors == []
 
 
 def test_validator_accepts_azure_blob_sink_config():
     """Valid Azure blob sink config passes validation."""
-    validator = PluginConfigValidator()
 
     config = {
         "container": "test-container",
@@ -216,17 +206,16 @@ def test_validator_accepts_azure_blob_sink_config():
         "connection_string": "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=test==;EndpointSuffix=core.windows.net",
     }
 
-    errors = validator.validate_sink_config("azure_blob", config)
+    errors = validate_sink_config("azure_blob", config)
     assert errors == []
 
 
 def test_validator_validates_schema_config():
     """Valid schema configs pass validation."""
-    validator = PluginConfigValidator()
 
     # Valid dynamic schema
     schema_config = {"mode": "observed"}
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert errors == []
 
     # Valid explicit strict schema
@@ -234,7 +223,7 @@ def test_validator_validates_schema_config():
         "mode": "fixed",
         "fields": ["id: int", "name: str", "score: float?"],
     }
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert errors == []
 
     # Valid explicit free schema
@@ -242,13 +231,12 @@ def test_validator_validates_schema_config():
         "mode": "flexible",
         "fields": ["id: int"],
     }
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert errors == []
 
 
 def test_validator_rejects_invalid_schema_mode():
     """Invalid schema mode returns error."""
-    validator = PluginConfigValidator()
 
     # Invalid mode value
     schema_config = {
@@ -256,7 +244,7 @@ def test_validator_rejects_invalid_schema_mode():
         "fields": ["id: int"],
     }
 
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert len(errors) > 0
     # Error should mention the invalid mode
     assert any("invalid_mode" in err.message.lower() or "mode" in err.message.lower() for err in errors)
@@ -264,51 +252,47 @@ def test_validator_rejects_invalid_schema_mode():
 
 def test_validator_rejects_schema_missing_fields():
     """Schema missing required 'fields' key returns error."""
-    validator = PluginConfigValidator()
 
     schema_config = {"mode": "fixed"}  # Missing 'fields'
 
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert len(errors) > 0
     assert any("fields" in err.message.lower() for err in errors)
 
 
 def test_validator_rejects_schema_empty_fields():
     """Schema with empty fields list returns error."""
-    validator = PluginConfigValidator()
 
     schema_config = {
         "mode": "fixed",
         "fields": [],  # Empty list
     }
 
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert len(errors) > 0
 
 
 def test_validator_rejects_schema_invalid_field_type():
     """Schema with wrong type for 'fields' returns error."""
-    validator = PluginConfigValidator()
 
     schema_config = {
         "mode": "fixed",
         "fields": "not_a_list",  # Should be list
     }
 
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert len(errors) > 0
 
 
 def test_validator_rejects_malformed_field_spec():
     """Schema with malformed field spec returns error."""
-    validator = PluginConfigValidator()
 
     schema_config = {
         "mode": "fixed",
         "fields": ["id-int"],  # Wrong format, should be "id: int"
     }
 
-    errors = validator.validate_schema_config(schema_config)
+    errors = validate_schema_config(schema_config)
     assert len(errors) > 0
 
 
@@ -347,8 +331,12 @@ def test_validator_returns_structured_error_for_invalid_plugin_schema(
     config: dict[str, object],
 ) -> None:
     """Invalid embedded schema config should return ValidationError list, not raise."""
-    validator = PluginConfigValidator()
-    validate = getattr(validator, validator_method)
+    dispatch = {
+        "validate_source_config": validate_source_config,
+        "validate_transform_config": validate_transform_config,
+        "validate_sink_config": validate_sink_config,
+    }
+    validate = dispatch[validator_method]
 
     errors = validate(plugin_type, config)
 
@@ -364,7 +352,6 @@ def test_validator_returns_structured_error_for_unknown_field():
     Since normalize_fields was removed, passing it should trigger a
     validation error for the unknown field.
     """
-    validator = PluginConfigValidator()
 
     config = {
         "path": "/tmp/test.csv",
@@ -373,5 +360,5 @@ def test_validator_returns_structured_error_for_unknown_field():
         "schema": {"mode": "observed"},
     }
 
-    errors = validator.validate_source_config("csv", config)
+    errors = validate_source_config("csv", config)
     assert len(errors) > 0

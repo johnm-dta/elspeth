@@ -9,33 +9,35 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.contracts import NodeType, RowOutcome
+from elspeth.contracts import NodeType
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import CANONICAL_VERSION
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.performance.conftest import benchmark_timer
 
 
-def _make_recorder() -> tuple[LandscapeDB, LandscapeRecorder]:
-    """Create a fresh in-memory DB and recorder."""
+def _make_factory() -> tuple[LandscapeDB, RecorderFactory]:
+    """Create a fresh in-memory DB and factory."""
     db = LandscapeDB.in_memory()
-    recorder = LandscapeRecorder(db)
-    return db, recorder
+    factory = RecorderFactory(db)
+    return db, factory
 
 
-def _begin_run(recorder: LandscapeRecorder) -> str:
+def _begin_run(factory: RecorderFactory) -> str:
     """Begin a run and return its run_id."""
-    run = recorder.begin_run(
+    run = factory.run_lifecycle.begin_run(
         config={"source": "test", "transforms": []},
         canonical_version=CANONICAL_VERSION,
     )
     return run.run_id
 
 
-def _register_source_node(recorder: LandscapeRecorder, run_id: str) -> str:
+def _register_source_node(factory: RecorderFactory, run_id: str) -> str:
     """Register a source node and return its node_id."""
-    node = recorder.register_node(
+    node = factory.data_flow.register_node(
         run_id=run_id,
         plugin_name="list_source",
         node_type=NodeType.SOURCE,
@@ -46,9 +48,9 @@ def _register_source_node(recorder: LandscapeRecorder, run_id: str) -> str:
     return node.node_id
 
 
-def _register_transform_node(recorder: LandscapeRecorder, run_id: str) -> str:
+def _register_transform_node(factory: RecorderFactory, run_id: str) -> str:
     """Register a transform node and return its node_id."""
-    node = recorder.register_node(
+    node = factory.data_flow.register_node(
         run_id=run_id,
         plugin_name="passthrough",
         node_type=NodeType.TRANSFORM,
@@ -71,8 +73,8 @@ def test_begin_run_latency() -> None:
     with benchmark_timer() as timing:
         for _ in range(iterations):
             db = LandscapeDB.in_memory()
-            recorder = LandscapeRecorder(db)
-            recorder.begin_run(
+            factory = RecorderFactory(db)
+            factory.run_lifecycle.begin_run(
                 config={"source": "csv", "transforms": ["passthrough"]},
                 canonical_version=CANONICAL_VERSION,
             )
@@ -91,14 +93,14 @@ def test_create_row_throughput() -> None:
     Measures the overhead of source row recording including
     data hashing and database inserts.
     """
-    _, recorder = _make_recorder()
-    run_id = _begin_run(recorder)
-    source_node_id = _register_source_node(recorder, run_id)
+    _, factory = _make_factory()
+    run_id = _begin_run(factory)
+    source_node_id = _register_source_node(factory, run_id)
     iterations = 1000
 
     with benchmark_timer() as timing:
         for i in range(iterations):
-            recorder.create_row(
+            factory.data_flow.create_row(
                 run_id=run_id,
                 source_node_id=source_node_id,
                 row_index=i,
@@ -119,14 +121,14 @@ def test_create_token_throughput() -> None:
     Measures token creation overhead. Each token links to a row
     and represents an instance in a specific DAG path.
     """
-    _, recorder = _make_recorder()
-    run_id = _begin_run(recorder)
-    source_node_id = _register_source_node(recorder, run_id)
+    _, factory = _make_factory()
+    run_id = _begin_run(factory)
+    source_node_id = _register_source_node(factory, run_id)
 
     # Pre-create rows that tokens will reference
     row_ids = []
     for i in range(1000):
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=i,
@@ -138,7 +140,7 @@ def test_create_token_throughput() -> None:
 
     with benchmark_timer() as timing:
         for i in range(iterations):
-            recorder.create_token(row_id=row_ids[i])
+            factory.data_flow.create_token(row_id=row_ids[i])
 
     tokens_per_sec = iterations / timing.wall_seconds
 
@@ -154,28 +156,28 @@ def test_begin_node_state_throughput() -> None:
     Measures the overhead of recording node processing entries.
     Each node state captures input hash, timestamp, and step info.
     """
-    _, recorder = _make_recorder()
-    run_id = _begin_run(recorder)
-    source_node_id = _register_source_node(recorder, run_id)
-    transform_node_id = _register_transform_node(recorder, run_id)
+    _, factory = _make_factory()
+    run_id = _begin_run(factory)
+    source_node_id = _register_source_node(factory, run_id)
+    transform_node_id = _register_transform_node(factory, run_id)
 
     # Pre-create rows and tokens
     token_ids = []
     for i in range(1000):
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=i,
             data={"id": i},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
         token_ids.append(token.token_id)
 
     iterations = 1000
 
     with benchmark_timer() as timing:
         for i in range(iterations):
-            recorder.begin_node_state(
+            factory.execution.begin_node_state(
                 token_id=token_ids[i],
                 node_id=transform_node_id,
                 run_id=run_id,
@@ -197,30 +199,30 @@ def test_record_outcome_throughput() -> None:
     Measures the overhead of recording terminal row states.
     Each outcome records the final disposition of a token.
     """
-    _, recorder = _make_recorder()
-    run_id = _begin_run(recorder)
-    source_node_id = _register_source_node(recorder, run_id)
+    _, factory = _make_factory()
+    run_id = _begin_run(factory)
+    source_node_id = _register_source_node(factory, run_id)
 
     # Pre-create rows and tokens
     token_ids = []
     for i in range(1000):
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=i,
             data={"id": i},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        token = factory.data_flow.create_token(row_id=row.row_id)
         token_ids.append(token.token_id)
 
     iterations = 1000
 
     with benchmark_timer() as timing:
         for i in range(iterations):
-            recorder.record_token_outcome(
-                run_id=run_id,
-                token_id=token_ids[i],
-                outcome=RowOutcome.COMPLETED,
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_ids[i], run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 

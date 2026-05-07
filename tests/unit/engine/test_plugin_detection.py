@@ -102,7 +102,7 @@ class TestProcessorRejectsDuckTypedPlugins:
                 return TransformResult.success(row.to_dict(), success_reason={"action": "test"})  # type: ignore[attr-defined]
 
         setup = make_recorder_with_run()
-        recorder, run_id, source_node_id = setup.recorder, setup.run_id, setup.source_node_id
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
 
         # The duck-typed object has the method, but processor should reject it
         duck = DuckTypedTransform()
@@ -112,7 +112,8 @@ class TestProcessorRejectsDuckTypedPlugins:
         duck_node_id = NodeID(duck.node_id)
 
         processor = RowProcessor(
-            recorder=recorder,
+            setup.execution,
+            setup.data_flow,
             span_factory=SpanFactory(),
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
@@ -120,7 +121,7 @@ class TestProcessorRejectsDuckTypedPlugins:
             traversal=_single_node_traversal(duck_node_id, duck),
         )
 
-        ctx = make_context(run_id=run_id, landscape=recorder)
+        ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
         with pytest.raises(TypeError, match="Unknown transform type"):
             processor.process_row(

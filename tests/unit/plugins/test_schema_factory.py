@@ -567,6 +567,91 @@ class TestNonFiniteFloatRejection:
         with pytest.raises(ValidationError):
             Schema.model_validate({"value": np.longdouble("inf")})
 
+    def test_observed_schema_rejects_nan_inside_numpy_array(self) -> None:
+        """NaN/Infinity inside NumPy arrays must be detected at source boundary.
+
+        Bug fix for elspeth-214096f76b: _find_non_finite_value_path had no
+        ndarray handling, so rows with NaN in arrays passed source validation
+        and crashed later during audit hashing.
+        """
+        import numpy as np
+
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict({"mode": "observed"})
+        Schema = create_schema_from_config(config, "ObservedSchema")
+
+        with pytest.raises(ValidationError):
+            Schema.model_validate({"values": np.array([1.0, float("nan"), 3.0])})
+
+        with pytest.raises(ValidationError):
+            Schema.model_validate({"values": np.array([1.0, 2.0, float("inf")])})
+
+    def test_observed_schema_accepts_finite_numpy_array(self) -> None:
+        """Finite NumPy arrays pass source validation."""
+        import numpy as np
+
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict({"mode": "observed"})
+        Schema = create_schema_from_config(config, "ObservedSchema")
+
+        instance = Schema.model_validate({"values": np.array([1.0, 2.0, 3.0])})
+        assert instance is not None
+
+    def test_observed_schema_accepts_string_numpy_array(self) -> None:
+        """String NumPy arrays (non-numeric) pass source validation without error."""
+        import numpy as np
+
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict({"mode": "observed"})
+        Schema = create_schema_from_config(config, "ObservedSchema")
+
+        instance = Schema.model_validate({"labels": np.array(["a", "b", "c"])})
+        assert instance is not None
+
+    def test_find_non_finite_path_numpy_array_reports_correct_index(self) -> None:
+        """_find_non_finite_value_path reports useful path for ndarray NaN."""
+        import numpy as np
+
+        from elspeth.plugins.infrastructure.schema_factory import _find_non_finite_value_path
+
+        # 1-D array with NaN at index 2
+        path = _find_non_finite_value_path(np.array([1.0, 2.0, float("nan")]), "$")
+        assert path is not None
+        assert "[2]" in path
+
+    def test_find_non_finite_path_2d_numpy_array(self) -> None:
+        """_find_non_finite_value_path handles multi-dimensional arrays."""
+        import numpy as np
+
+        from elspeth.plugins.infrastructure.schema_factory import _find_non_finite_value_path
+
+        arr = np.array([[1.0, 2.0], [3.0, float("inf")]])
+        path = _find_non_finite_value_path(arr, "$")
+        assert path is not None
+        assert "[1]" in path and "[1]" in path  # row 1, col 1
+
+    def test_find_non_finite_path_longdouble_scalar_uses_native_check(self) -> None:
+        """np.longdouble finite values must not be falsely reported as non-finite.
+
+        Bug fix: the old code used math.isfinite(float(value)) which overflows.
+        """
+        import numpy as np
+
+        from elspeth.plugins.infrastructure.schema_factory import _find_non_finite_value_path
+
+        # Large but finite value in longdouble range
+        large_val = np.longdouble(2.0) ** np.longdouble(1024)
+        assert np.isfinite(large_val), "Test precondition"
+
+        path = _find_non_finite_value_path(large_val, "$")
+        assert path is None, "Finite np.longdouble must not be reported as non-finite"
+
     def test_explicit_schema_no_validator_at_transform_boundary(self) -> None:
         """Transform boundary (allow_coercion=False) does not add non-finite validator.
 

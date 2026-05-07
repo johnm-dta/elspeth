@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy.engine import Row as SARow
 
 from elspeth.contracts.audit import (
+    _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
     Batch,
     BatchMember,
@@ -34,6 +35,7 @@ from elspeth.contracts.audit import (
     ValidationErrorRecord,
 )
 from elspeth.contracts.enums import (
+    _LEGAL_TERMINAL_PAIRS,
     BatchStatus,
     CallStatus,
     CallType,
@@ -43,11 +45,20 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
+
+_COMPLETED_AT_REQUIRED_RUN_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_FAILURES,
+        RunStatus.EMPTY,
+    }
+)
 
 
 class RunLoader:
@@ -56,15 +67,36 @@ class RunLoader:
     def load(self, row: SARow[Any]) -> Run:
         """Load Run from database row.
 
-        Converts string fields to enums. Crashes on invalid data.
+        Converts string fields to enums. Validates status-dependent
+        invariants before construction.
+
+        Raises:
+            AuditIntegrityError: If status/completed_at are inconsistent (Tier 1)
         """
+        status = RunStatus(row.status)
+
+        # Tier 1: status-dependent lifecycle invariants
+        if status == RunStatus.RUNNING:
+            if row.completed_at is not None:
+                raise AuditIntegrityError(
+                    f"Run {row.run_id} has status='running' but completed_at is set — "
+                    f"audit integrity violation (running runs must not have completed_at)"
+                )
+        elif status in _COMPLETED_AT_REQUIRED_RUN_STATUSES and row.completed_at is None:
+            raise AuditIntegrityError(
+                f"Run {row.run_id} has status={status.value!r} but completed_at is NULL — "
+                f"audit integrity violation ({status.value!r} runs must have completed_at)"
+            )
+        # FAILED and INTERRUPTED: completed_at may or may not be set.
+        # complete_run() sets it; update_run_status() (recovery path) does not.
+
         return Run(
             run_id=row.run_id,
             started_at=row.started_at,
             config_hash=row.config_hash,
             settings_json=row.settings_json,
             canonical_version=row.canonical_version,
-            status=RunStatus(row.status),  # Convert HERE
+            status=status,
             completed_at=row.completed_at,
             # Validate reproducibility_grade on read — crash on invalid values (Tier 1)
             reproducibility_grade=ReproducibilityGrade(row.reproducibility_grade) if row.reproducibility_grade is not None else None,
@@ -105,6 +137,7 @@ class NodeLoader:
             plugin_name=row.plugin_name,
             node_type=NodeType(row.node_type),  # Convert HERE
             plugin_version=row.plugin_version,
+            source_file_hash=row.source_file_hash,
             determinism=Determinism(row.determinism),  # Convert HERE
             config_hash=row.config_hash,
             config_json=row.config_json,
@@ -194,8 +227,22 @@ class CallLoader:
         """Load Call from database row.
 
         Handles both state-parented calls (transform processing) and
-        operation-parented calls (source/sink I/O).
+        operation-parented calls (source/sink I/O). Validates XOR
+        constraint before construction.
+
+        Raises:
+            AuditIntegrityError: If state_id/operation_id XOR violated (Tier 1)
         """
+        # Tier 1: XOR constraint — exactly one parent context
+        has_state = row.state_id is not None
+        has_operation = row.operation_id is not None
+        if has_state == has_operation:
+            raise AuditIntegrityError(
+                f"Call {row.call_id} requires exactly one of state_id or operation_id. "
+                f"Got state_id={row.state_id!r}, operation_id={row.operation_id!r} — "
+                f"audit integrity violation"
+            )
+
         return Call(
             call_id=row.call_id,
             call_index=row.call_index,
@@ -244,6 +291,7 @@ class BatchLoader:
             status=BatchStatus(row.status),  # Convert HERE
             created_at=row.created_at,
             aggregation_state_id=row.aggregation_state_id,
+            retry_of_batch_id=row.retry_of_batch_id,
             trigger_type=TriggerType(row.trigger_type) if row.trigger_type is not None else None,
             trigger_reason=row.trigger_reason,
             completed_at=row.completed_at,
@@ -370,12 +418,14 @@ class NodeStateLoader:
             )
 
         elif status == NodeStateStatus.FAILED:
-            # FAILED states must have completed_at, duration_ms.
+            # FAILED states must have completed_at, duration_ms, and error_json.
             # success_reason_json must be NULL — success and failure are mutually exclusive.
             if row.duration_ms is None:
                 raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation")
             if row.completed_at is None:
                 raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL completed_at - audit integrity violation")
+            if row.error_json is None:
+                raise AuditIntegrityError(f"FAILED state {row.state_id} has NULL error_json - audit integrity violation")
             if row.success_reason_json is not None:
                 raise AuditIntegrityError(f"FAILED state {row.state_id} has non-NULL success_reason_json - audit integrity violation")
             return NodeStateFailed(
@@ -426,7 +476,13 @@ class ValidationErrorLoader:
             schema_mode=row.schema_mode,
             destination=row.destination,
             created_at=row.created_at,
+            row_id=row.row_id,
             row_data_json=row.row_data_json,
+            violation_type=row.violation_type,
+            original_field_name=row.original_field_name,
+            normalized_field_name=row.normalized_field_name,
+            expected_type=row.expected_type,
+            actual_type=row.actual_type,
         )
 
 
@@ -462,46 +518,93 @@ class TransformErrorLoader:
 class TokenOutcomeLoader:
     """Loader for TokenOutcome records.
 
-    Handles terminal token states. Converts outcome string to RowOutcome enum.
+    Handles token outcomes under the ADR-019 two-axis terminal model.
     """
 
     def load(self, row: SARow[Any]) -> TokenOutcome:
-        """Load TokenOutcome from database row.
+        """Load a TokenOutcome row with Tier 1 ADR-019 cross-checks."""
+        oid = row.outcome_id
 
-        Converts outcome string to RowOutcome enum.
-        Converts is_terminal from DB integer (0/1) to bool.
-
-        Args:
-            row: Database row from token_outcomes table
-
-        Returns:
-            TokenOutcome with outcome converted to RowOutcome enum
-
-        Raises:
-            AuditIntegrityError: If is_terminal is not 0 or 1 (Tier 1 audit integrity violation)
-            AuditIntegrityError: If outcome and is_terminal disagree (Tier 1 audit integrity violation)
-        """
-        # Tier 1 validation: is_terminal must be exactly int 0 or 1
-        # Per Data Manifesto: audit DB is OUR data - crash on any anomaly
-        # Note: bool is a subclass of int in Python, so `True in (0, 1)` is True.
-        # We use `type() is int` to reject booleans explicitly.
-        if type(row.is_terminal) is not int or row.is_terminal not in (0, 1):
+        if type(row.completed) is not int or row.completed not in (0, 1):
             raise AuditIntegrityError(
-                f"TokenOutcome {row.outcome_id} has invalid is_terminal={row.is_terminal!r} (expected 0 or 1) - audit integrity violation"
+                f"TokenOutcome {oid}: invalid completed={row.completed!r} (expected int 0 or 1) — audit integrity violation"
             )
-        outcome = RowOutcome(row.outcome)
-        is_terminal = row.is_terminal == 1
-        if is_terminal != outcome.is_terminal:
+        completed = row.completed == 1
+
+        if row.outcome is None:
+            outcome: TerminalOutcome | None = None
+        else:
+            try:
+                outcome = TerminalOutcome(row.outcome)
+            except ValueError as exc:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: invalid outcome={row.outcome!r} not in TerminalOutcome — audit integrity violation"
+                ) from exc
+
+        if row.path is None:
             raise AuditIntegrityError(
-                f"TokenOutcome {row.outcome_id} has inconsistent is_terminal={row.is_terminal!r} for outcome={outcome.value!r} "
-                f"(expected {1 if outcome.is_terminal else 0}) - audit integrity violation"
+                f"TokenOutcome {oid}: path is NULL — audit integrity violation (path is always populated under ADR-019)"
             )
+        try:
+            path = TerminalPath(row.path)
+        except ValueError as exc:
+            raise AuditIntegrityError(
+                f"TokenOutcome {oid}: invalid path={row.path!r} not in TerminalPath — audit integrity violation"
+            ) from exc
+
+        if completed != (outcome is not None):
+            raise AuditIntegrityError(
+                f"TokenOutcome {oid}: completed={completed} but outcome={outcome!r} — "
+                "completed must be true iff outcome is non-NULL (ADR-019 invariant)"
+            )
+
+        if completed:
+            assert outcome is not None
+            if (outcome, path) not in _LEGAL_TERMINAL_PAIRS:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) not in _LEGAL_TERMINAL_PAIRS — audit integrity violation"
+                )
+        elif path != TerminalPath.BUFFERED:
+            raise AuditIntegrityError(
+                f"TokenOutcome {oid}: completed=False requires path=BUFFERED, got {path!r} — audit integrity violation"
+            )
+
+        pair: tuple[TerminalOutcome | None, TerminalPath] = (outcome, path)
+        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+        field_values = {
+            "sink_name": row.sink_name,
+            "batch_id": row.batch_id,
+            "fork_group_id": row.fork_group_id,
+            "join_group_id": row.join_group_id,
+            "expand_group_id": row.expand_group_id,
+            "error_hash": row.error_hash,
+        }
+        for field_name in constraints.required:
+            if field_values[field_name] is None:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires {field_name} but DB has NULL — audit integrity violation"
+                )
+        for field_name, expected in constraints.exact.items():
+            if field_values[field_name] != expected:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires "
+                    f"{field_name}={expected!r}, got {field_values[field_name]!r} — "
+                    "audit integrity violation"
+                )
+        for field_name in constraints.forbidden:
+            if field_values[field_name] is not None:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) forbids {field_name}, "
+                    f"got {field_values[field_name]!r} — audit integrity violation"
+                )
+
         return TokenOutcome(
-            outcome_id=row.outcome_id,
+            outcome_id=oid,
             run_id=row.run_id,
             token_id=row.token_id,
             outcome=outcome,
-            is_terminal=is_terminal,  # DB stores as Integer, now fully validated
+            path=path,
+            completed=completed,
             recorded_at=row.recorded_at,
             sink_name=row.sink_name,
             batch_id=row.batch_id,
@@ -562,6 +665,7 @@ class BatchMemberLoader:
         """
         return BatchMember(
             batch_id=row.batch_id,
+            run_id=row.run_id,
             token_id=row.token_id,
             ordinal=row.ordinal,
         )
@@ -578,14 +682,51 @@ class OperationLoader:
     def load(self, row: SARow[Any]) -> Operation:
         """Load Operation from database row.
 
-        Args:
-            row: Database row from operations table
+        Validates operation_type, status, and status-dependent lifecycle
+        invariants before construction.
 
-        Returns:
-            Operation with all fields mapped and lifecycle invariants validated
+        Raises:
+            AuditIntegrityError: If operation_type/status invalid or lifecycle
+                invariants violated (Tier 1)
         """
+        oid = row.operation_id
+
+        # Tier 1: validate constrained literal fields
+        allowed_types = ("source_load", "sink_write")
+        if row.operation_type not in allowed_types:
+            raise AuditIntegrityError(
+                f"Operation {oid} has invalid operation_type={row.operation_type!r} "
+                f"(expected one of {allowed_types}) — audit integrity violation"
+            )
+
+        allowed_statuses = ("open", "completed", "failed", "pending")
+        if row.status not in allowed_statuses:
+            raise AuditIntegrityError(
+                f"Operation {oid} has invalid status={row.status!r} (expected one of {allowed_statuses}) — audit integrity violation"
+            )
+
+        # Tier 1: status-dependent lifecycle invariants
+        if row.status == "open":
+            if row.completed_at is not None:
+                raise AuditIntegrityError(f"Operation {oid}: status='open' but completed_at is set — audit integrity violation")
+            if row.duration_ms is not None:
+                raise AuditIntegrityError(f"Operation {oid}: status='open' but duration_ms is set — audit integrity violation")
+            if row.error_message is not None:
+                raise AuditIntegrityError(f"Operation {oid}: status='open' but error_message is set — audit integrity violation")
+        elif row.status in ("completed", "failed", "pending"):
+            if row.completed_at is None:
+                raise AuditIntegrityError(f"Operation {oid}: status={row.status!r} but completed_at is NULL — audit integrity violation")
+            if row.duration_ms is None:
+                raise AuditIntegrityError(f"Operation {oid}: status={row.status!r} but duration_ms is NULL — audit integrity violation")
+            if row.status == "failed" and row.error_message is None:
+                raise AuditIntegrityError(f"Operation {oid}: status='failed' but error_message is NULL — audit integrity violation")
+            if row.status == "failed" and row.error_message == "":
+                raise AuditIntegrityError(f"Operation {oid}: status='failed' but error_message is empty — audit integrity violation")
+            if row.status == "completed" and row.error_message is not None:
+                raise AuditIntegrityError(f"Operation {oid}: status='completed' but error_message is set — audit integrity violation")
+
         return Operation(
-            operation_id=row.operation_id,
+            operation_id=oid,
             run_id=row.run_id,
             node_id=row.node_id,
             operation_type=row.operation_type,

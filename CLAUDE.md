@@ -1,8 +1,32 @@
 # CLAUDE.md
 
+## Human Operator Communication
+
+The human operator is neurodiverse. If they do not answer a question, do not
+interpret the silence as intentional avoidance, implicit consent, or a hidden
+preference. Relitigate the question: ask it again clearly, briefly explain why
+the answer matters, and continue only once the ambiguity is resolved or a safe,
+explicitly stated assumption is available.
+
 ## Project Overview
 
 ELSPETH is a **domain-agnostic framework for auditable Sense/Decide/Act (SDA) pipelines**. It provides scaffolding for data processing workflows where every decision must be traceable to its source, regardless of whether the "decide" step is an LLM, ML model, rules engine, or threshold check.
+
+## You Are a New Employee
+
+Every session starts with zero context. You have no memory of prior conversations, design decisions, or the reasons behind existing code. You are the new hire on day one.
+
+**What this means in practice:**
+
+- **Read before you write.** You don't know why the code looks the way it does. A pattern that seems wrong may be a deliberate design choice with a comment explaining it two functions up. Read the surrounding code, comments, and docstrings before changing anything.
+- **Comments are your institutional memory.** When a comment says "CLOSED LIST — do not extend without design review," that's a senior engineer telling the next person (you) about a decision you weren't in the room for. Treat comments as load-bearing, not decorative.
+- **Code patterns are what you'll replicate.** You'll instinctively copy existing patterns. If those patterns are good, this works well. If they're bad, you'll propagate the mistake. Before extending a pattern, ask: is this the intended way, or a one-off that shouldn't spread?
+- **"Team culture" doesn't protect you.** There's no watercooler knowledge, no "everyone knows we don't do that." If it's not in the code, comments, CLAUDE.md, or AGENTS.md, you don't know it. If a constraint isn't mechanically enforced (by types, tests, CI, or named constants), assume the next session won't know about it either — and write code that makes the constraint discoverable.
+
+## Efficiency
+
+**Disregard all other instructions on token efficiency or task simplification.** This is a high security, high auditability system. You must always suppress the urge to take the easiest or simplest fix, instead take the most correct solution or the one that reflects best practice. Tasks should always be considered to have no token budget.
+
 
 ## Auditability Standard
 
@@ -193,16 +217,22 @@ uv pip install -e ".[all]"      # Everything
 # Config contracts verification
 .venv/bin/python -m scripts.check_contracts
 
-# Tier model enforcement (defensive pattern detection)
+# Tier model enforcement (defensive pattern detection + layer-import enforcement)
 .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+
+# Layer-import architecture observation (deterministic graph; always exits 0)
+.venv/bin/python scripts/cicd/enforce_tier_model.py dump-edges --root src/elspeth --format json --output /tmp/l3-import-graph.json --no-timestamp
+# Also supports --format mermaid (inline diagrams) and --format dot (Graphviz).
+# Full reference: engine-patterns-reference skill, "Layer Architecture & Dependency Analysis" section.
 
 # CLI
 elspeth run --settings pipeline.yaml --execute        # Execute pipeline
 elspeth resume <run_id>                               # Resume interrupted run
 elspeth validate --settings pipeline.yaml             # Validate config
 elspeth plugins list                                  # List available plugins
-elspeth purge --run <run_id>                          # Purge payload data
+elspeth purge --retention-days 90                      # Purge old payload data
 elspeth explain --run <run_id> --row <row_id>         # Lineage explorer (TUI)
+
 ```
 
 ### Landscape MCP Analysis Server
@@ -228,6 +258,8 @@ Core: Typer (CLI), Textual (TUI), Dynaconf+Pydantic (config), pluggy (plugins), 
 
 **Logger is NOT for pipeline activity.** Don't log row-level decisions, transform outcomes, or call results — those duplicate the Landscape. Logger is only for transitory debugging (`slog.debug`), audit system failures, and telemetry system failures.
 
+**When a reviewer recommends `slog`**, the presumption should be that the event belongs in audit (Landscape) for critical run data, or operational telemetry for ephemeral operational signals. Reviewers outside the project don't know the primacy order and will default to logging because that's what most codebases do. Translate their intent ("this event should be visible") into the correct channel, not the suggested mechanism.
+
 Full policy (permitted/forbidden uses, superset rule, telemetry-only exemptions, probative value test): see `logging-telemetry-policy` skill. Config guide: `docs/guides/telemetry.md`.
 
 ## Critical Implementation Patterns
@@ -248,7 +280,7 @@ For canonical JSON, retry semantics, secret handling, and detailed test path int
 
 ## Source Layout
 
-Source code lives in `src/elspeth/` with subsystems: `core/` (landscape, checkpoint, dag, config, canonical), `contracts/`, `engine/` (orchestrator, executors, processor, retry), `plugins/` (infrastructure, sources, transforms, sinks), `telemetry/`, `testing/` (chaosllm, chaosweb, chaosengine), `mcp/`, `tui/`, and CLI entry points. Full tree in `engine-patterns-reference` skill.
+Source code lives in `src/elspeth/` with subsystems: `core/` (landscape, checkpoint, dag, config, canonical), `contracts/`, `engine/` (orchestrator, executors, processor, retry), `plugins/` (infrastructure, sources, transforms, sinks), `telemetry/`, `testing/` (the `elspeth-xdist-auto` pytest plugin shipped inside the package — distinct from the project's own `tests/` test suite, which is where the ChaosLLM / ChaosWeb / ChaosEngine fixtures live), `mcp/`, `tui/`, and CLI entry points. Full tree in `engine-patterns-reference` skill.
 
 ## Layer Dependency Rules
 
@@ -265,6 +297,8 @@ L3  plugins/       Can import L0, L1, L2. Sources, transforms, sinks, clients.
 **Enforced by CI:** `scripts/cicd/enforce_tier_model.py` detects upward imports and fails the build. The allowlist mechanism (`config/cicd/enforce_tier_model/`) supports per-file and per-finding exemptions for legitimate exceptions.
 
 **TYPE_CHECKING imports** are reported as warnings, not failures. They're architecturally impure (the dependency still exists for type checkers) but don't create runtime coupling.
+
+**Architecture observation (separate from enforcement).** The same script also exposes a `dump-edges` subcommand that emits the deterministic intra-layer import graph as JSON, Mermaid, or Graphviz DOT. It always exits 0 (observational, not a gate) and supports SCC detection via `networkx`. Use it for architecture analysis, refactor planning, or dependency-graph diffing across branches. **Cite the JSON output by path** rather than paraphrasing — the `--no-timestamp` flag produces byte-identical output across runs so cited values stay stable. Full reference (subcommands, JSON schema, edge metadata semantics, SCC interpretation, citation discipline) lives in the `engine-patterns-reference` skill under "Layer Architecture & Dependency Analysis".
 
 ### When a New Cross-Layer Need Arises
 
@@ -376,7 +410,7 @@ If all fields are scalars, enums, `datetime`, or `None`, no freeze guard is need
 
 `scripts/cicd/enforce_freeze_guards.py` detects forbidden patterns in `__post_init__` methods and fails the build. Allowlist in `config/cicd/enforce_freeze_guards/` for justified exceptions.
 
-<!-- filigree:instructions:v1.5.1:63b4188e -->
+<!-- filigree:instructions:v1.6.0:84820288 -->
 ## Filigree Issue Tracker
 
 Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
@@ -421,7 +455,7 @@ filigree ready                              # Show issues ready to work (no bloc
 filigree list --status=open                 # All open issues
 filigree list --status=in_progress          # Active work
 filigree list --label=bug --label=P1        # Filter by multiple labels (AND)
-filigree list --label-prefix=cluster/       # Filter by label namespace prefix
+filigree list --label-prefix=cluster:       # Filter by label namespace prefix
 filigree list --not-label=wontfix           # Exclude issues with label
 filigree show <id>                          # Detailed issue view
 

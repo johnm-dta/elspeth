@@ -13,9 +13,10 @@ from unittest.mock import Mock
 import pytest
 
 from elspeth.contracts import FrameworkBugError
+from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.factories import make_token_info
 
 
@@ -26,8 +27,8 @@ class TestRecordCallNoLandscapeGuard:
         ctx = PluginContext(run_id="run-1", config={}, landscape=None, state_id="state-1")
         with pytest.raises(FrameworkBugError, match=r"record_call.*without landscape"):
             ctx.record_call(
-                call_type="LLM",
-                status="SUCCESS",
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
                 request_data={"prompt": "test"},
                 latency_ms=100.0,
             )
@@ -39,18 +40,18 @@ class TestRecordCallXOREnforcement:
     def test_raises_when_both_state_id_and_operation_id_set(self) -> None:
         """Both set = ambiguous parent for the call = framework bug."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),
             state_id="state-1",
             operation_id="op-1",
         )
         with pytest.raises(FrameworkBugError, match="BOTH state_id and operation_id"):
             ctx.record_call(
-                call_type="LLM",
-                status="SUCCESS",
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
                 request_data={"prompt": "test"},
                 latency_ms=100.0,
             )
@@ -58,18 +59,18 @@ class TestRecordCallXOREnforcement:
     def test_raises_when_neither_state_id_nor_operation_id_set(self) -> None:
         """Neither set = no parent for the call = framework bug."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
         ctx = PluginContext(
             run_id="run-1",
             config={},
-            landscape=recorder,
+            landscape=factory.plugin_audit_writer(),
             state_id=None,
             operation_id=None,
         )
         with pytest.raises(FrameworkBugError, match="without state_id or operation_id"):
             ctx.record_call(
-                call_type="LLM",
-                status="SUCCESS",
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
                 request_data={"prompt": "test"},
                 latency_ms=100.0,
             )
@@ -94,8 +95,8 @@ class TestRecordCallNodeStateLookupGuard:
         )
         with pytest.raises(FrameworkBugError, match=r"get_node_state.*returned None"):
             ctx.record_call(
-                call_type="LLM",
-                status="SUCCESS",
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
                 request_data={"prompt": "test"},
                 latency_ms=100.0,
             )
@@ -125,8 +126,8 @@ class TestRecordCallTokenMismatchGuard:
         )
         with pytest.raises(FrameworkBugError, match="token mismatch"):
             ctx.record_call(
-                call_type="LLM",
-                status="SUCCESS",
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
                 request_data={"prompt": "test"},
                 latency_ms=100.0,
             )
@@ -150,8 +151,8 @@ class TestRecordCallTokenMismatchGuard:
         )
         # Should not raise — tokens are consistent
         ctx.record_call(
-            call_type="LLM",
-            status="SUCCESS",
+            call_type=CallType.LLM,
+            status=CallStatus.SUCCESS,
             request_data={"prompt": "test"},
             latency_ms=100.0,
         )
@@ -175,8 +176,8 @@ class TestRecordCallTokenMismatchGuard:
         )
         # Should not raise — no token to compare
         ctx.record_call(
-            call_type="LLM",
-            status="SUCCESS",
+            call_type=CallType.LLM,
+            status=CallStatus.SUCCESS,
             request_data={"prompt": "test"},
             latency_ms=100.0,
         )

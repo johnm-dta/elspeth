@@ -7,14 +7,30 @@ recording.
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required, TypedDict
 
-from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.audit_evidence import AuditEvidenceBase
+from elspeth.contracts.declaration_contracts import DeclarationContractViolation
+from elspeth.contracts.freeze import deep_freeze, freeze_fields
+
+# Re-export FrameworkBugError which lives in tier_registry to break the import
+# cycle between the registry primitive and the public exception module. Apply
+# @tier_1_error here so the decoration happens in errors.py (the canonical
+# Tier-1 declaration site). The re-exported name is identical to the class
+# object in tier_registry — isinstance/except identity is preserved.
+from elspeth.contracts.tier_registry import FrameworkBugError as _FrameworkBugError
+from elspeth.contracts.tier_registry import tier_1_error
+
+FrameworkBugError = tier_1_error(
+    reason="ADR-008: framework internal inconsistency — engine bug",
+    caller_module=__name__,
+)(_FrameworkBugError)
 
 if TYPE_CHECKING:
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
+    from elspeth.contracts.coalesce_metadata import CoalesceMetadata
 
 
+# TIER-2: Frozen audit DTO (not a raiseable exception) — records structured error payloads to the Landscape audit trail.
 @dataclass(frozen=True, slots=True)
 class ExecutionError:
     """Frozen dataclass for execution error payloads.
@@ -26,12 +42,20 @@ class ExecutionError:
     The ``exception_type`` field is renamed from ``type`` to avoid
     shadowing the Python builtin.  ``to_dict()`` serializes it back
     as ``"type"`` for hash stability with existing audit records.
+
+    The optional ``context`` field carries structured per-exception payload
+    (e.g., ``PassThroughContractViolation.to_audit_dict()``). It is populated
+    by ``NodeStateGuard.__exit__`` when the wrapped exception exposes
+    ``to_audit_dict()`` — see ``engine/executors/state_guard.py``.
+    Serialized as the top-level ``context`` key by ``to_dict()`` so triage
+    queries can filter on ``json_extract(error_data, '$.context.<field>')``.
     """
 
     exception: str  # String representation of the exception
     exception_type: str  # Exception class name (e.g., "ValueError")
     traceback: str | None = None  # Optional full traceback
     phase: str | None = None  # Optional phase indicator (e.g., "flush" for sink flush errors)
+    context: Mapping[str, Any] | None = None  # Structured per-exception audit payload (ADR-008)
 
     def __post_init__(self) -> None:
         """Validate that required error fields are non-empty.
@@ -43,6 +67,16 @@ class ExecutionError:
             raise ValueError("ExecutionError.exception must not be empty")
         if not self.exception_type:
             raise ValueError("ExecutionError.exception_type must not be empty")
+        # Deep-freeze the structured context payload (ADR-008) so the Tier-1
+        # audit-recording path cannot be mutated after construction.
+        if self.context is not None:
+            try:
+                context_keys = self.context.keys()
+            except AttributeError as exc:
+                raise TypeError(f"ExecutionError.context must be a mapping, got {type(self.context).__name__}") from exc
+            if any(type(key) is not str for key in context_keys):
+                raise TypeError("ExecutionError.context keys must be strings")
+            freeze_fields(self, "context")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.
@@ -59,6 +93,8 @@ class ExecutionError:
             d["traceback"] = self.traceback
         if self.phase is not None:
             d["phase"] = self.phase
+        if self.context is not None:
+            d["context"] = self.context
         return d
 
 
@@ -87,6 +123,7 @@ class CoalesceFailureReason:
             raise ValueError("CoalesceFailureReason.expected_branches must not be empty")
         if self.timeout_ms is not None and self.timeout_ms < 0:
             raise ValueError(f"CoalesceFailureReason.timeout_ms must be non-negative, got {self.timeout_ms}")
+        freeze_fields(self, "expected_branches", "branches_arrived")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.
@@ -220,8 +257,8 @@ class RowErrorEntry(TypedDict):
     """Entry in row_errors list for batch processing failures.
 
     The ``error`` field accepts both simple strings and structured dicts.
-    Batch plugins (e.g., azure_batch) may store structured error bodies
-    from external APIs, which are persisted as-is in the audit trail.
+    Plugins handling external-API responses may store structured error
+    bodies, which are persisted as-is in the audit trail.
     """
 
     row_index: int
@@ -277,6 +314,7 @@ TransformErrorCategory = Literal[
     "transient_error_no_retry",  # Transient error (connection/timeout) but retry disabled
     # Field/validation errors
     "missing_field",
+    "missing_scan_field",
     "type_mismatch",
     "validation_failed",
     "invalid_input",
@@ -406,6 +444,8 @@ class TransformErrorReason(TypedDict):
         provider: Retrieval provider name (e.g., "azure_search", "chroma")
         cause: Sub-cause within an error category (e.g., "null_value", "empty_query")
         pattern: Regex pattern string (for no_regex_match errors)
+        skipped_count: Number of candidate hits rejected before final output
+        skipped_reasons: Structured reasons for candidate hits rejected before final output
 
     Rate limiting/timeout context:
         elapsed_seconds: Time elapsed before timeout
@@ -419,6 +459,7 @@ class TransformErrorReason(TypedDict):
 
     Batch processing context:
         batch_id: Azure/OpenRouter batch job ID
+        operation: Computation step that failed within a batch transform
         queries_completed: Number of queries completed before failure
         row_errors: List of per-row error entries
 
@@ -512,6 +553,8 @@ class TransformErrorReason(TypedDict):
     provider: NotRequired[str]  # Retrieval provider name (e.g., "azure_search", "chroma")
     cause: NotRequired[str]  # Sub-cause within error category (e.g., "null_value", "empty_query")
     pattern: NotRequired[str]  # Regex pattern string (for no_regex_match errors)
+    skipped_count: NotRequired[int]  # Candidate hits rejected before final output
+    skipped_reasons: NotRequired[list[dict[str, Any]]]  # Structured reasons for rejected candidate hits
 
     # Content filtering context
     matched_pattern: NotRequired[str]
@@ -524,7 +567,10 @@ class TransformErrorReason(TypedDict):
 
     # Batch processing context
     batch_id: NotRequired[str]
+    operation: NotRequired[str]
     batch_size: NotRequired[int]  # Total rows in batch
+    group_by: NotRequired[str]  # Grouping field for grouped batch errors
+    group_value: NotRequired[Any]  # Group value for grouped batch errors
     valid_count: NotRequired[int]  # Rows that passed validation within batch
     queries_completed: NotRequired[int]
     row_errors: NotRequired[list[RowErrorEntry]]
@@ -594,77 +640,11 @@ class MaxRetriesExceeded(Exception):
         super().__init__(f"Max retries ({attempts}) exceeded: {last_error}")
 
 
-class BatchPendingError(Exception):
-    """Raised when batch is submitted but not yet complete.
-
-    This is NOT an error condition - it's a control flow signal
-    telling the engine to schedule a retry check later.
-
-    The exception carries the checkpoint state so the caller can persist
-    it and restore it when scheduling a retry. This enables crash recovery
-    and correct resume behavior.
-
-    Attributes:
-        batch_id: Azure batch job ID
-        status: Current batch status (e.g., "submitted", "in_progress")
-        check_after_seconds: When to check again (default 300s = 5 min)
-        checkpoint: Typed checkpoint state for retry (BatchCheckpointState)
-        node_id: Transform node ID that raised this (for checkpoint keying)
-
-    Example:
-        # Phase 1: Submit batch
-        batch_id = client.batches.create(...)
-        state = BatchCheckpointState(batch_id=batch_id, ...)
-        ctx.set_checkpoint(state)
-        raise BatchPendingError(
-            batch_id, "submitted",
-            check_after_seconds=300,
-            checkpoint=state,
-            node_id=self.node_id,
-        )
-
-        # Caller catches, persists checkpoint.to_dict(), schedules retry
-
-        # Phase 2: Resume and check (caller passes checkpoint back via orchestrator)
-        checkpoint = ctx.get_checkpoint()
-        if checkpoint is not None:
-            status = client.batches.retrieve(checkpoint.batch_id).status
-            if status == "in_progress":
-                raise BatchPendingError(checkpoint.batch_id, "in_progress", checkpoint=checkpoint)
-            elif status == "completed":
-                # Download results and return
-    """
-
-    def __init__(
-        self,
-        batch_id: str,
-        status: str,
-        *,
-        check_after_seconds: int = 300,
-        checkpoint: "BatchCheckpointState | None" = None,
-        node_id: str | None = None,
-    ) -> None:
-        """Initialize BatchPendingError.
-
-        Args:
-            batch_id: Azure batch job ID
-            status: Current batch status
-            check_after_seconds: Seconds until next check (default 300)
-            checkpoint: Typed checkpoint state for retry (BatchCheckpointState)
-            node_id: Transform node ID (for checkpoint keying)
-        """
-        self.batch_id = batch_id
-        self.status = status
-        self.check_after_seconds = check_after_seconds
-        self.checkpoint = checkpoint
-        self.node_id = node_id
-        super().__init__(f"Batch {batch_id} is {status}, check after {check_after_seconds}s")
-
-
+# TIER-2: Control-flow signal for interrupted runs (SIGINT/SIGTERM) — run is resumable; not a system corruption or framework bug.
 class GracefulShutdownError(Exception):
     """Raised when a pipeline run is interrupted by a shutdown signal.
 
-    This is a CONTROL-FLOW SIGNAL, like BatchPendingError. It indicates the
+    This is a CONTROL-FLOW SIGNAL. It indicates the
     orchestrator stopped processing new rows due to SIGINT/SIGTERM but
     completed all in-flight work (aggregation flush, sink writes, checkpoints).
 
@@ -679,7 +659,8 @@ class GracefulShutdownError(Exception):
         rows_succeeded: int = 0,
         rows_failed: int = 0,
         rows_quarantined: int = 0,
-        rows_routed: int = 0,
+        rows_routed_success: int = 0,
+        rows_routed_failure: int = 0,
         routed_destinations: dict[str, int] | None = None,
     ) -> None:
         self.rows_processed = rows_processed
@@ -687,13 +668,18 @@ class GracefulShutdownError(Exception):
         self.rows_succeeded = rows_succeeded
         self.rows_failed = rows_failed
         self.rows_quarantined = rows_quarantined
-        self.rows_routed = rows_routed
+        self.rows_routed_success = rows_routed_success
+        self.rows_routed_failure = rows_routed_failure
         self.routed_destinations: Mapping[str, int] = deep_freeze(dict(routed_destinations) if routed_destinations is not None else {})
         super().__init__(
             f"Pipeline interrupted after {rows_processed} rows (run_id={run_id}). Resume with: elspeth resume {run_id} --execute"
         )
 
 
+@tier_1_error(
+    reason="ADR-008: audit trail corruption — permanent OPEN state",
+    caller_module=__name__,
+)
 class AuditIntegrityError(Exception):
     """Raised when audit database operations fail unexpectedly.
 
@@ -714,6 +700,31 @@ class AuditIntegrityError(Exception):
     pass
 
 
+# TIER-2: Config-elected enforcement failure (union collision policy = fail). Not a system corruption; pipeline author chose fail-fast on merge conflicts.
+class CoalesceCollisionError(Exception):
+    """Raised when union_collision_policy=fail and a field collision occurs.
+
+    This is NOT an engine bug or audit-integrity failure — it's a config-elected
+    enforcement. The pipeline author chose to fail-fast on union merge collisions
+    rather than allow last_wins/first_wins resolution. The full CoalesceMetadata
+    is captured BEFORE raising so the orchestrator's failure path can persist
+    the complete collision record (field_origins + collision_values) to the
+    audit trail.
+
+    Attributes:
+        metadata: CoalesceMetadata with union_field_origins and
+                  union_field_collision_values populated.
+    """
+
+    def __init__(self, message: str, *, metadata: "CoalesceMetadata") -> None:
+        super().__init__(message)
+        self.metadata = metadata
+
+
+@tier_1_error(
+    reason="ADR-008: orchestration invariant broken — executor bug",
+    caller_module=__name__,
+)
 class OrchestrationInvariantError(Exception):
     """Raised when orchestration invariants are violated.
 
@@ -733,6 +744,172 @@ class OrchestrationInvariantError(Exception):
     pass
 
 
+class DeclaredRequiredInputFieldsPayload(TypedDict):
+    """Audit payload for ADR-013 declared-input-field mismatches."""
+
+    declared: Required[list[str]]
+    effective_input_fields: Required[list[str]]
+    missing: Required[list[str]]
+
+
+@tier_1_error(
+    reason="ADR-013: undeclared transform input dependency corrupts attribution",
+    caller_module=__name__,
+)
+class DeclaredRequiredInputFieldsViolation(DeclarationContractViolation):
+    """Raised when a transform runs on input missing its declared fields.
+
+    ``declared_input_fields`` is trusted as the transform's precondition
+    surface. If runtime input does not satisfy that declaration, any later
+    plugin crash or emitted output would be attributed on false premises.
+    """
+
+    payload_schema: ClassVar[type] = DeclaredRequiredInputFieldsPayload
+
+
+class DeclaredOutputFieldRowViolationPayload(TypedDict):
+    """Per-emitted-row evidence for ADR-011 declared-output-fields mismatches."""
+
+    emitted_index: Required[int]
+    runtime_observed: Required[list[str]]
+    missing: Required[list[str]]
+
+
+class DeclaredOutputFieldsPayload(TypedDict):
+    """Audit payload for ADR-011 declared-output-fields mismatches."""
+
+    declared: Required[list[str]]
+    violations: Required[list[DeclaredOutputFieldRowViolationPayload]]
+
+
+@tier_1_error(
+    reason="ADR-011: declared output-field lie corrupts downstream lineage",
+    caller_module=__name__,
+)
+class DeclaredOutputFieldsViolation(DeclarationContractViolation):
+    """Raised when a transform emits rows missing declared output fields.
+
+    ``declared_output_fields`` is trusted by DAG/schema propagation. If a
+    transform advertises output fields the emitted rows do not actually carry,
+    downstream lineage and required-field reasoning become silently wrong.
+    This is audit-integrity corruption, not a row-level data error, so the
+    violation is Tier 1 and must never be absorbed by ``on_error`` routing.
+    """
+
+    payload_schema: ClassVar[type] = DeclaredOutputFieldsPayload
+
+
+class SourceGuaranteedFieldsPayload(TypedDict):
+    """Audit payload for ADR-016 source guaranteed-field mismatches."""
+
+    declared: Required[list[str]]
+    runtime_observed: Required[list[str]]
+    missing: Required[list[str]]
+
+
+@tier_1_error(
+    reason="ADR-016: source guaranteed-field lie corrupts downstream propagation and audit lineage",
+    caller_module=__name__,
+)
+class SourceGuaranteedFieldsViolation(DeclarationContractViolation):
+    """Raised when a source emits a row missing a guaranteed field.
+
+    Source guaranteed fields feed the framework's producer-side propagation
+    logic. If a source advertises a stable field that the emitted row does not
+    actually carry at runtime, downstream reasoning is built on fabricated
+    provenance.
+    """
+
+    payload_schema: ClassVar[type] = SourceGuaranteedFieldsPayload
+
+
+class SinkRequiredFieldsPayload(TypedDict):
+    """Audit payload for ADR-017 sink required-field mismatches."""
+
+    declared: Required[list[str]]
+    runtime_observed: Required[list[str]]
+    missing: Required[list[str]]
+
+
+@tier_1_error(
+    reason="ADR-017: sink required-field contract failure corrupts sink-intent attribution",
+    caller_module=__name__,
+)
+class SinkRequiredFieldsViolation(DeclarationContractViolation):
+    """Raised when a row reaches a sink missing declared required fields.
+
+    This is the framework-owned Layer 1 sink boundary contract. It fires
+    before schema validation and before sink I/O so attribution stays on the
+    sink's declared intent surface rather than collapsing into a generic
+    validation or transactional failure.
+    """
+
+    payload_schema: ClassVar[type] = SinkRequiredFieldsPayload
+
+
+class SchemaConfigFieldMetadataMismatch(TypedDict):
+    """Per-field metadata drift evidence for ADR-014 schema-mode mismatches."""
+
+    field: Required[str]
+    expected_type: Required[str]
+    observed_type: Required[str]
+    expected_required: Required[bool]
+    observed_required: Required[bool]
+    expected_nullable: Required[bool]
+    observed_nullable: Required[bool]
+    observed_present: Required[bool]
+
+
+class SchemaConfigModePayload(TypedDict):
+    """Audit payload for ADR-014 schema-mode/runtime-semantic mismatches."""
+
+    declared_mode: Required[str]
+    observed_mode: Required[str]
+    declared_locked: Required[bool]
+    observed_locked: Required[bool]
+    runtime_observed_fields: NotRequired[list[str]]
+    missing_required_fields: NotRequired[list[str]]
+    undeclared_extra_fields: NotRequired[list[str]]
+    field_metadata_mismatches: NotRequired[list[SchemaConfigFieldMetadataMismatch]]
+
+
+@tier_1_error(
+    reason="ADR-014: emitted runtime schema semantics diverge from declared config mode",
+    caller_module=__name__,
+)
+class SchemaConfigModeViolation(DeclarationContractViolation):
+    """Raised when emitted row contracts disagree with declared schema mode.
+
+    ``_output_schema_config`` is the transform's runtime declaration surface for
+    schema semantics. If emitted contracts advertise a different mode/lock
+    posture, or a FIXED schema leaks undeclared output fields, auditors query a
+    fabricated contract view rather than the transform's declared one.
+    """
+
+    payload_schema: ClassVar[type] = SchemaConfigModePayload
+
+
+class UnexpectedEmptyEmissionPayload(TypedDict):
+    """Audit payload for ADR-012 unexpected empty-emission mismatches."""
+
+    passes_through_input: Required[bool]
+    can_drop_rows: Required[bool]
+    emitted_count: Required[int]
+
+
+# TIER-2: Plugin declaration mismatch — row-level failure is fully auditable and does not imply framework or audit-record corruption.
+class UnexpectedEmptyEmissionViolation(DeclarationContractViolation):
+    """Raised when a pass-through transform emits zero rows without opting in.
+
+    Tier 2 by design. The row-level terminal state remains auditable and the
+    failure reflects a plugin declaration bug, not a corruption of Tier-1
+    framework state.
+    """
+
+    payload_schema: ClassVar[type] = UnexpectedEmptyEmissionPayload
+
+
+# TIER-2: Plugin retry signal — transient operational failure eligible for RetryManager retry, not a system corruption or framework bug.
 class PluginRetryableError(Exception):
     """Base for plugin exceptions eligible for engine retry.
 
@@ -751,26 +928,8 @@ class PluginRetryableError(Exception):
         self.status_code = status_code
 
 
-class FrameworkBugError(Exception):
-    """Raised when the framework encounters an internal inconsistency.
-
-    This indicates a bug in ELSPETH itself, not user error or external failure.
-    Unlike OrchestrationInvariantError (specific to orchestration flow), this
-    is a general-purpose exception for any framework-level bug.
-
-    Examples of conditions that trigger this:
-    - Double-completing an operation (already completed, trying to complete again)
-    - Missing required context (record_call with neither state_id nor operation_id)
-    - Completing a non-existent operation
-
-    Recovery: These errors indicate bugs in framework code that must be fixed.
-    They should never occur in correct operation.
-    """
-
-    pass
-
-
-class PluginContractViolation(RuntimeError):
+# TIER-2: Plugin contract violation — plugin bug (row-level failure). Recording FAILED state is accurate; not system corruption. Base class excluded from TIER_1_ERRORS (ADR-008).
+class PluginContractViolation(AuditEvidenceBase, RuntimeError):
     """Raised when a plugin violates its contract with the framework.
 
     This indicates a bug in a plugin (Source, Transform, Gate, Sink) that must
@@ -783,9 +942,230 @@ class PluginContractViolation(RuntimeError):
     - Plugin violates interface contract
 
     Recovery: Fix the plugin. These errors indicate bugs in plugin code.
+
+    Base class accepts a positional message, matching RuntimeError. Subclasses
+    (e.g., PassThroughContractViolation) add structured fields and override
+    to_audit_dict() to contribute them to the audit trail via
+    ExecutionError.context.
     """
 
-    pass
+    def to_audit_dict(self) -> dict[str, Any]:
+        """Canonical audit-recording payload for ExecutionError.context.
+
+        Base implementation is message-only. Subclasses should override to
+        surface structured fields. Return value must be JSON-serializable —
+        the Landscape records it through canonical JSON serialization.
+        """
+        return {"exception_type": type(self).__name__, "message": str(self)}
+
+
+# TIER-2: Plugin success-empty misuse — row-level contract bug remains fully auditable and does not imply Tier-1 framework or audit-record corruption.
+class ZeroEmissionSuccessContractViolation(PluginContractViolation, AuditEvidenceBase):
+    """Raised when ``success_empty()`` is used outside the filter declaration path.
+
+    Tier 2 by design. The engine can still record a row-level FAILED outcome,
+    so this is a plugin contract bug rather than Tier-1 audit corruption.
+    """
+
+    def __init__(
+        self,
+        *,
+        transform: str,
+        transform_node_id: str,
+        run_id: str,
+        row_id: str,
+        token_id: str,
+        passes_through_input: bool,
+        can_drop_rows: bool,
+        emitted_count: int,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.transform = transform
+        self.transform_node_id = transform_node_id
+        self.run_id = run_id
+        self.row_id = row_id
+        self.token_id = token_id
+        self.passes_through_input = passes_through_input
+        self.can_drop_rows = can_drop_rows
+        self.emitted_count = emitted_count
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        return {
+            "exception_type": "ZeroEmissionSuccessContractViolation",
+            "message": str(self),
+            "transform": self.transform,
+            "transform_node_id": self.transform_node_id,
+            "run_id": self.run_id,
+            "row_id": self.row_id,
+            "token_id": self.token_id,
+            "passes_through_input": self.passes_through_input,
+            "can_drop_rows": self.can_drop_rows,
+            "emitted_count": self.emitted_count,
+        }
+
+
+@tier_1_error(
+    reason=(
+        "ADR-010 §H2 landing scope F3: sink transactional-boundary invariant "
+        "distinct from pre-write VAL contract — must crash, never absorbed by on_error."
+    ),
+    caller_module=__name__,
+)
+class SinkTransactionalInvariantError(PluginContractViolation):
+    """Raised by a sink's inline commit-boundary check when state diverges
+    between contract evaluation and the transactional write.
+
+    **Two-layer sink invariant architecture** (ADR-010 §H2 landing scope F3):
+
+    - **Layer 1 — pre-write declaration contract** (currently
+      ``SinkRequiredFieldsContract``): dispatcher-owned, fires BEFORE
+      ``sink.write()``, raises a ``DeclarationContractViolation`` subclass
+      with a ``payload_schema``. Triage SQL:
+      ``WHERE exception_type = '<SubclassName>Violation'``.
+
+    - **Layer 2 — transactional backstop, THIS class**: catches the rare
+      case where row state diverges between contract evaluation and commit
+      (e.g. cross-token mutation during batch assembly, or a required field
+      deleted by a transformation layered between contract and commit that
+      the contract could not see). Raises ``SinkTransactionalInvariantError``
+      from the inline sink check. Triage SQL:
+      ``WHERE exception_type = 'SinkTransactionalInvariantError'``.
+
+    Before the F3 split (pre-ADR-010 §Semantics amendment, 2026-04-20) both layers
+    raised ``PluginContractViolation`` and the audit table conflated pre-
+    write contract failures with commit-boundary failures — the auditor
+    could not distinguish "intent validation failed" from "state diverged
+    mid-transaction" without reading the message text. The F3 amendment
+    separates the triage surfaces by exception class.
+
+    Inherits ``PluginContractViolation`` (not ``DeclarationContractViolation``)
+    because the backstop is NOT dispatcher-owned. It is an inline offensive
+    assertion at the sink's own commit boundary — plugin-level guarding,
+    not framework-level contract dispatch.
+
+    Registered in TIER_1_ERRORS via ``@tier_1_error`` so ``on_error``
+    routing cannot absorb it; the orchestrator must propagate.
+    """
+
+
+@tier_1_error(
+    reason="ADR-008: pass-through annotation lie corrupts batch audit fields",
+    caller_module=__name__,
+)
+class PassThroughContractViolation(PluginContractViolation):
+    """Raised by TransformExecutor when a passes_through_input=True transform
+    drops input fields from its emitted row(s).
+
+    This is a framework contract violation, not a row-level data error — hence
+    registration in ``TIER_1_ERRORS``. It cannot be silenced by on_error
+    routing or generic ``except Exception`` handlers. A mis-annotation is
+    evidence tampering: the static validator was told the transform emits a
+    superset of input, and runtime observed otherwise; routing past that
+    divergence would corrupt the audit trail.
+
+    Attributes:
+        transform: Name of the offending transform class.
+        transform_node_id: DAG node identifier.
+        run_id: Pipeline run identifier for audit correlation.
+        row_id: Source row identifier.
+        token_id: DAG token identifier (post-fork/join lineage).
+        static_contract: Fields the static validator computed for output.
+        runtime_observed: Fields the emitted row actually exposes at runtime —
+            the intersection of ``emitted_row.contract.fields`` and
+            ``emitted_row.keys()``. ``PipelineRow`` treats contract and
+            payload as independent references, so a field is only "kept"
+            if it appears in both.
+        divergence_set: ``input_fields - runtime_observed`` (the dropped fields).
+    """
+
+    def __init__(
+        self,
+        *,
+        transform: str,
+        transform_node_id: str,
+        run_id: str,
+        row_id: str,
+        token_id: str,
+        static_contract: frozenset[str],
+        runtime_observed: frozenset[str],
+        divergence_set: frozenset[str],
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.transform = transform
+        self.transform_node_id = transform_node_id
+        self.run_id = run_id
+        self.row_id = row_id
+        self.token_id = token_id
+        self.static_contract = static_contract
+        self.runtime_observed = runtime_observed
+        self.divergence_set = divergence_set
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        """Return 9-key structured payload for ExecutionError.context.
+
+        frozenset fields are sorted into lists for canonical JSON
+        determinism — the Landscape serializer requires stable ordering.
+        """
+        return {
+            "exception_type": "PassThroughContractViolation",
+            "message": str(self),
+            "transform": self.transform,
+            "transform_node_id": self.transform_node_id,
+            "run_id": self.run_id,
+            "row_id": self.row_id,
+            "token_id": self.token_id,
+            "static_contract": sorted(self.static_contract),
+            "runtime_observed": sorted(self.runtime_observed),
+            "divergence_set": sorted(self.divergence_set),
+        }
+
+
+# =============================================================================
+# Tier 1 Guard Tuple — Live View (ADR-010 §Decision 2)
+# =============================================================================
+# TIER_1_ERRORS is materialized from the tier_registry on each attribute
+# access. This is a MODULE __getattr__ (PEP 562) — NOT a from-import
+# re-export. The v0 plan used `from tier_registry import TIER_1_ERRORS` which
+# captured a snapshot at errors.py import time; late registrations never
+# reached callers doing `from elspeth.contracts.errors import TIER_1_ERRORS`.
+# The live view closes reviewer finding B8.
+#
+# Usage: `except TIER_1_ERRORS: raise` before any `except Exception:` block.
+#
+# PluginContractViolation (the base class) is intentionally excluded: it
+# represents a plugin bug (row-level failure), not system corruption.
+# Recording FAILED state for a PluginContractViolation is accurate;
+# recording it for the base members is misleading.
+#
+# PassThroughContractViolation IS included (ADR-008) because a pass-through-
+# annotation lie is a framework contract violation (the static validator was
+# told the transform emits a superset of input; runtime observed otherwise),
+# not a row-level data error. Audit integrity demands it crash, not be
+# absorbed by on_error routing.
+# =============================================================================
+
+
+if TYPE_CHECKING:
+    # Declare the type of TIER_1_ERRORS for mypy / static tools.
+    # At runtime the name is resolved via __getattr__ (PEP 562) below;
+    # at type-check time this declaration wins, giving callers the right type.
+    TIER_1_ERRORS: tuple[type[Exception], ...]
+
+
+def __getattr__(name: str) -> tuple[type[Exception], ...]:
+    if name == "TIER_1_ERRORS":
+        from elspeth.contracts.tier_registry import _TIER_1_ERRORS_VIEW
+
+        # Materialise a fresh tuple on every access so callers can use it in
+        # ``except`` clauses (which require a tuple, not a custom view) while
+        # still seeing any registrations that occurred after import time.
+        # This is distinct from the _Tier1ErrorsView live-view object in
+        # tier_registry (which supports membership tests and iteration but is
+        # NOT a tuple).
+        return tuple(_TIER_1_ERRORS_VIEW)  # type: ignore[arg-type]  # _Tier1ErrorsView yields BaseException subclasses; Exception is a subtype
+    raise AttributeError(name)
 
 
 # =============================================================================
@@ -801,6 +1181,7 @@ class PluginContractViolation(RuntimeError):
 # =============================================================================
 
 
+# TIER-2: Tier-3 data validation base — external data error resulting in row quarantine, not system corruption.
 class ContractViolation(Exception):
     """Base exception for schema contract violations.
 
@@ -843,6 +1224,7 @@ class ContractViolation(Exception):
         }
 
 
+# TIER-2: Tier-3 data validation — required field absent in external data; results in row quarantine.
 class MissingFieldViolation(ContractViolation):
     """Raised when a required field is missing from the data.
 
@@ -859,6 +1241,7 @@ class MissingFieldViolation(ContractViolation):
         return f"Required field '{self.original_name}' ({self.normalized_name}) is missing"
 
 
+# TIER-2: Tier-3 data validation — external data type mismatch; results in row quarantine.
 class TypeMismatchViolation(ContractViolation):
     """Raised when a field value has the wrong type.
 
@@ -934,6 +1317,7 @@ class TypeMismatchViolation(ContractViolation):
         return base
 
 
+# TIER-2: Tier-3 data validation — unexpected field in FIXED schema mode; results in row quarantine.
 class ExtraFieldViolation(ContractViolation):
     """Raised when an unexpected field is present in FIXED schema mode.
 
@@ -951,6 +1335,7 @@ class ExtraFieldViolation(ContractViolation):
         return f"Extra field '{self.original_name}' ({self.normalized_name}) not allowed in FIXED mode"
 
 
+# TIER-2: Configuration error — fork/join schema type conflict (pipeline design issue), not an external data or system error.
 class ContractMergeError(ValueError):
     """Raised when schema contracts cannot be merged due to type conflicts.
 
@@ -1041,6 +1426,7 @@ def violations_to_error_reason(violations: list[ContractViolation]) -> dict[str,
 # =============================================================================
 
 
+# TIER-2: Pipeline dependency failure signal — upstream dependency did not complete; pipeline cannot proceed, but this is not a framework/audit corruption.
 class DependencyFailedError(Exception):
     """A pipeline dependency failed to complete successfully."""
 
@@ -1057,6 +1443,7 @@ class DependencyFailedError(Exception):
         super().__init__(f"Dependency '{dependency_name}' failed (run_id={run_id}): {reason}")
 
 
+# TIER-2: Commencement gate failure signal — config-driven pre-flight check rejected the run; not a framework bug or audit corruption.
 class CommencementGateFailedError(Exception):
     """A commencement gate evaluated to falsy or raised an error."""
 
@@ -1081,6 +1468,7 @@ class CommencementGateFailedError(Exception):
         super().__init__(f"Commencement gate '{gate_name}' failed: {reason} (condition: {condition})")
 
 
+# TIER-2: Retrieval readiness signal — collection unavailable at run time; operational failure, not audit corruption or framework bug.
 class RetrievalNotReadyError(Exception):
     """A retrieval provider's collection is empty or unreachable."""
 
@@ -1094,6 +1482,7 @@ class RetrievalNotReadyError(Exception):
         super().__init__(f"Collection {collection!r} not ready: {reason}")
 
 
+# TIER-2: Sink duplicate-write rejection — on_duplicate='error' policy enforcement; not a framework bug or audit corruption.
 class DuplicateDocumentError(Exception):
     """Sink rejected a write because document IDs already exist in the collection.
 
@@ -1108,3 +1497,72 @@ class DuplicateDocumentError(Exception):
         self.collection = collection
         self.duplicate_ids = tuple(duplicate_ids)
         super().__init__(f"Duplicate document IDs in collection {collection!r}: {list(self.duplicate_ids)}")
+
+
+# Capacity error classification for pooled API transforms.
+#
+# Capacity errors are transient overload conditions that should be retried
+# with AIMD throttling. They are distinct from "normal" errors (auth failures,
+# malformed requests) which use standard retry limits.
+#
+# HTTP Status Codes:
+# - 429: Too Many Requests (universal)
+# - 503: Service Unavailable (universal)
+# - 529: Overloaded (Azure, some other providers)
+#
+# Lives in contracts/ (L0) so engine retry classification can import it without
+# crossing the L2→L3 layer boundary; pooled transforms in plugins/ raise it.
+
+CAPACITY_ERROR_CODES: frozenset[int] = frozenset({429, 503, 529})
+
+
+def is_capacity_error(status_code: int) -> bool:
+    """Check if HTTP status code indicates a capacity error.
+
+    Capacity errors are transient overload conditions that should trigger
+    AIMD throttle backoff and be retried with increasing delays.
+    """
+    return status_code in CAPACITY_ERROR_CODES
+
+
+# TIER-2: pooled-API capacity/rate-limit signal — transient overload, retried until budget exhausted.
+class CapacityError(Exception):
+    """Exception for capacity/rate limit errors.
+
+    Raised when an API call fails due to capacity limits.
+    These errors trigger AIMD throttle and are retried until
+    max_capacity_retry_seconds is exceeded.
+
+    Attributes:
+        status_code: HTTP status code that triggered this error
+        retryable: Always True for capacity errors
+    """
+
+    def __init__(self, status_code: int, message: str) -> None:
+        if not (100 <= status_code <= 599):
+            raise ValueError(f"CapacityError.status_code must be a valid HTTP status (100-599), got {status_code}")
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = True
+
+
+# TIER-2: telemetry-subsystem configuration/initialization failure.
+# Lives in contracts/ so the engine can reference it without crossing the
+# L2→L3 layer boundary; the telemetry package re-exports it for its
+# internal subsystem consumers.
+# TIER-2: telemetry exporter configuration/initialization failure, not audit-integrity corruption.
+class TelemetryExporterError(Exception):
+    """Raised when an exporter encounters a configuration or initialization error.
+
+    This is raised during exporter setup (configure/initialization), NOT during
+    export operations. Export operations must not raise — they log errors instead.
+
+    Attributes:
+        exporter_name: Name of the exporter that failed
+        message: Human-readable error description
+    """
+
+    def __init__(self, exporter_name: str, message: str) -> None:
+        self.exporter_name = exporter_name
+        self.message = message
+        super().__init__(f"Exporter '{exporter_name}' failed: {message}")

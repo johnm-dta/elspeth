@@ -10,28 +10,40 @@ These tests verify:
 from __future__ import annotations
 
 import threading
-from collections.abc import Generator
+import time
+from collections.abc import Callable, Generator
 from typing import Any
 
 import pytest
 
 from elspeth.contracts import TransformResult
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.engine.batch_adapter import SharedBatchAdapter
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import BatchTransformMixin
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort, OutputPort
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
-def _make_recorder() -> LandscapeRecorder:
-    """Create an in-memory LandscapeRecorder for testing."""
-    return make_recorder()
+def _wait_for(condition: Callable[[], bool], *, timeout: float = 3.0, poll: float = 0.05, desc: str = "condition") -> None:
+    """Poll until condition is true or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Timed out after {timeout}s waiting for {desc}")
+        time.sleep(poll)
+
+
+def _make_factory() -> RecorderFactory:
+    """Create an in-memory RecorderFactory for testing."""
+    return make_factory()
 
 
 def make_token(row_id: str, token_id: str | None = None, row_data: dict[str, Any] | None = None) -> TokenInfo:
@@ -82,6 +94,15 @@ class SimpleBatchTransform(BaseTransform, BatchTransformMixin):
             self.shutdown_batch_processing()
 
 
+class Tier1FailingBatchTransform(SimpleBatchTransform):
+    """Batch transform whose worker raises a Tier 1 audit exception."""
+
+    name = "tier1_failing_batch_transform"
+
+    def _process_row(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
+        raise AuditIntegrityError("simulated audit integrity failure")
+
+
 class TestBatchTransformMixinTokenValidation:
     """Tests for token validation in BatchTransformMixin."""
 
@@ -106,7 +127,7 @@ class TestBatchTransformMixinTokenValidation:
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=_make_recorder(),
+            landscape=None,
             token=None,  # Explicitly None - contract violation
         )
 
@@ -117,7 +138,7 @@ class TestBatchTransformMixinTokenValidation:
         """accept() succeeds when ctx.token is properly set."""
         token = make_token("row-1", row_data={"data": "test"})
         ctx = make_context(
-            landscape=_make_recorder(),
+            landscape=_make_factory(),
             token=token,
             state_id="test-state-1",  # Required for batch processing
         )
@@ -153,7 +174,7 @@ class TestBatchTransformMixinTokenIdentity:
         2. Audit attribution - the token tracks row lineage through the DAG
         """
         input_token = make_token("row-42", row_data={"value": 100})
-        ctx = make_context(landscape=_make_recorder(), token=input_token, state_id="test-state-1")
+        ctx = make_context(landscape=_make_factory(), token=input_token, state_id="test-state-1")
 
         transform.accept({"value": 100}, ctx)
         transform.flush_batch_processing(timeout=10.0)
@@ -171,7 +192,7 @@ class TestBatchTransformMixinTokenIdentity:
         tokens = [make_token(f"row-{i}") for i in range(3)]
 
         for i, token in enumerate(tokens):
-            ctx = make_context(landscape=_make_recorder(), token=token, state_id=f"state-{i}")
+            ctx = make_context(landscape=_make_factory(), token=token, state_id=f"state-{i}")
             transform.accept({"index": i}, ctx)
 
         transform.flush_batch_processing(timeout=10.0)
@@ -216,7 +237,7 @@ class TestStaleTokenDetection:
         reused across multiple rows, with ctx.token updated per-row.
         """
         # Create a single context (engine pattern)
-        ctx = make_context(landscape=_make_recorder())
+        ctx = make_context(landscape=_make_factory())
 
         # Process row 1 with token 1
         token1 = make_token("row-1")
@@ -248,7 +269,7 @@ class TestStaleTokenDetection:
         update ctx.token, they would see the SAME token for multiple rows,
         which is detectable in tests.
         """
-        ctx = make_context(landscape=_make_recorder())
+        ctx = make_context(landscape=_make_factory())
 
         # Process 3 rows, each with a unique token
         tokens = []
@@ -280,7 +301,7 @@ class TestStaleTokenDetection:
         This verifies the synchronization contract: the executor sets
         ctx.token, then calls accept(), and accept() sees the updated value.
         """
-        ctx = make_context(landscape=_make_recorder())
+        ctx = make_context(landscape=_make_factory())
 
         # Initial token
         initial_token = make_token("initial")
@@ -398,7 +419,7 @@ class TestBatchTransformMixinEviction:
         4. Retry can proceed without FIFO blocking
         """
         token = make_token("row-1")
-        ctx = make_context(landscape=_make_recorder(), token=token, state_id="state-attempt-1")
+        ctx = make_context(landscape=_make_factory(), token=token, state_id="state-attempt-1")
 
         # Submit the row (will block in worker)
         blocking_transform.accept({"value": 1}, ctx)
@@ -438,7 +459,7 @@ class TestBatchTransformMixinEviction:
         token = make_token("row-1")
 
         # Original attempt
-        ctx1 = make_context(landscape=_make_recorder(), token=token, state_id="state-attempt-1")
+        ctx1 = make_context(landscape=_make_factory(), token=token, state_id="state-attempt-1")
         transform.accept({"attempt": 1}, ctx1)
 
         # Evict original (simulating timeout)
@@ -446,7 +467,7 @@ class TestBatchTransformMixinEviction:
         transform.evict_submission(token.token_id, ctx1.state_id)
 
         # Retry attempt with new state_id
-        ctx2 = make_context(landscape=_make_recorder(), token=token, state_id="state-attempt-2")
+        ctx2 = make_context(landscape=_make_factory(), token=token, state_id="state-attempt-2")
         transform.accept({"attempt": 2}, ctx2)
 
         # Flush and verify retry result is released
@@ -536,7 +557,7 @@ class TestShutdownDrainsInFlightRows:
         num_rows = 3
         for i in range(num_rows):
             token = make_token(f"row-{i}")
-            ctx = make_context(landscape=_make_recorder(), token=token, state_id=f"state-{i}")
+            ctx = make_context(landscape=_make_factory(), token=token, state_id=f"state-{i}")
             transform.accept({"idx": i}, ctx)
 
         # Shutdown while workers are still processing
@@ -572,7 +593,7 @@ class TestShutdownDrainsInFlightRows:
         num_rows = 4
         for i in range(num_rows):
             token = make_token(f"row-{i}")
-            ctx = make_context(landscape=_make_recorder(), token=token, state_id=f"state-{i}")
+            ctx = make_context(landscape=_make_factory(), token=token, state_id=f"state-{i}")
             transform.accept({"idx": i}, ctx)
 
         transform.flush_batch_processing(timeout=10.0)
@@ -633,13 +654,11 @@ class TestReleaseLoopStaleTokenDetection:
 
         try:
             token = make_token("row-0")
-            ctx = make_context(landscape=_make_recorder(), token=token, state_id="state-0")
+            ctx = make_context(landscape=_make_factory(), token=token, state_id="state-0")
             transform.accept({"data": "test"}, ctx)
 
-            # Wait for processing to complete and release loop to handle the failure
-            import time
-
-            time.sleep(1.0)
+            # Wait for release loop to process the failure and emit ExceptionResult
+            _wait_for(lambda: len(port.results) >= 1, timeout=3.0, desc="ExceptionResult emit")
 
             # The second emit (ExceptionResult fallback) should have succeeded.
             # The port's results list should have the ExceptionResult with the
@@ -677,12 +696,11 @@ class TestReleaseLoopStaleTokenDetection:
             for i in range(3):
                 token = make_token(f"row-{i}")
                 tokens.append(token)
-                ctx = make_context(landscape=_make_recorder(), token=token, state_id=f"state-{i}")
+                ctx = make_context(landscape=_make_factory(), token=token, state_id=f"state-{i}")
                 transform.accept({"idx": i}, ctx)
 
-            import time
-
-            time.sleep(2.0)
+            # Wait for all 3 rows to be processed and emitted
+            _wait_for(lambda: len(port.results) >= 3, timeout=5.0, desc="all 3 row results")
 
             # Row 0 should have emitted successfully
             # Row 1 should have failed then emitted ExceptionResult
@@ -714,6 +732,7 @@ class AlwaysFailingOutputPort:
         raise RuntimeError("Port is completely broken")
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 class TestReleaseLoopCrashesOnBrokenPort:
     """Regression tests for elspeth-dc2fff46fe: release loop must not silently
     continue when the output port is completely broken.
@@ -740,13 +759,11 @@ class TestReleaseLoopCrashesOnBrokenPort:
         transform._batch_initialized = True
 
         token = make_token("row-0")
-        ctx = make_context(landscape=_make_recorder(), token=token, state_id="state-0")
+        ctx = make_context(landscape=_make_factory(), token=token, state_id="state-0")
         transform.accept({"data": "test"}, ctx)
 
-        # Give the release thread time to process the result and crash
-        import time
-
-        time.sleep(2.0)
+        # Wait for release thread to crash from FrameworkBugError
+        transform._batch_release_thread.join(timeout=3.0)
 
         # Release thread should have died (FrameworkBugError), not silently continued
         assert not transform._batch_release_thread.is_alive(), (
@@ -759,6 +776,7 @@ class TestReleaseLoopCrashesOnBrokenPort:
         transform._batch_buffer.shutdown()
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 class TestShutdownRaisesOnThreadTimeout:
     """Regression test for elspeth-da9918e43a: shutdown_batch_processing must
     raise when the release thread fails to stop, not just warn.
@@ -787,14 +805,171 @@ class TestShutdownRaisesOnThreadTimeout:
         transform._batch_initialized = True
 
         token = make_token("row-0")
-        ctx = make_context(landscape=_make_recorder(), token=token, state_id="state-0")
+        ctx = make_context(landscape=_make_factory(), token=token, state_id="state-0")
         transform.accept({"data": "test"}, ctx)
 
         # Wait for release thread to crash from broken port
-        import time
-
-        time.sleep(2.0)
+        transform._batch_release_thread.join(timeout=3.0)
         assert not transform._batch_release_thread.is_alive()
 
         # Shutdown should complete without raising — thread is already dead
         transform.shutdown_batch_processing(timeout=5.0)
+
+
+class TestBatchTransformMixinShutdownGuard:
+    """Tests for accept_row() rejecting rows after shutdown."""
+
+    def test_accept_row_raises_after_shutdown_signal(self) -> None:
+        """accept_row() checks _batch_shutdown before touching the buffer.
+
+        The mixin must guard at accept_row() level, not rely on the buffer's
+        own shutdown check. This matters because _batch_shutdown is set before
+        the buffer is shut down (step 1 vs step 3 of shutdown_batch_processing).
+        The guard prevents new rows entering during drain.
+        """
+        from elspeth.plugins.infrastructure.batching.row_reorder_buffer import ShutdownError
+
+        collector = CollectorOutputPort()
+        transform = SimpleBatchTransform()
+        transform.connect_output(collector, max_pending=5)
+
+        # Set the shutdown signal directly (without full shutdown_batch_processing)
+        # to isolate the mixin's own guard from the buffer's shutdown
+        transform._batch_shutdown.set()
+
+        token = make_token("row-post-shutdown")
+        ctx = make_context(
+            landscape=_make_factory(),
+            token=token,
+            state_id="state-post-shutdown",
+        )
+
+        with pytest.raises(ShutdownError, match="shut down"):
+            transform.accept({"data": "should-fail"}, ctx)
+
+        # Clean up: do full shutdown so threads stop
+        transform.shutdown_batch_processing()
+
+
+class TestFlushTimeoutRaisesTimeoutError:
+    """Tests for flush_batch_processing() timeout path.
+
+    When workers are stalled and the flush deadline expires,
+    flush_batch_processing must raise TimeoutError rather than
+    hanging indefinitely.
+    """
+
+    @pytest.fixture
+    def collector(self) -> CollectorOutputPort:
+        return CollectorOutputPort()
+
+    @pytest.fixture
+    def blocking_transform(self, collector: CollectorOutputPort) -> Generator[BlockingBatchTransform, None, None]:
+        transform = BlockingBatchTransform()
+        transform.connect_output(collector, max_pending=5)
+        yield transform
+        transform.close()
+
+    def test_flush_raises_timeout_when_workers_stalled(
+        self, blocking_transform: BlockingBatchTransform, collector: CollectorOutputPort
+    ) -> None:
+        """flush_batch_processing raises TimeoutError when rows remain pending past deadline."""
+        token = make_token("row-stalled")
+        ctx = make_context(landscape=_make_factory(), token=token, state_id="state-stalled")
+
+        blocking_transform.accept({"data": "stuck"}, ctx)
+        blocking_transform.wait_for_processing_started()
+
+        assert blocking_transform.batch_pending_count > 0
+
+        with pytest.raises(TimeoutError, match="rows still pending"):
+            blocking_transform.flush_batch_processing(timeout=0.2)
+
+    def test_flush_timeout_reports_pending_count(self, blocking_transform: BlockingBatchTransform, collector: CollectorOutputPort) -> None:
+        """TimeoutError message includes the number of rows still pending."""
+        tokens = [make_token(f"row-{i}") for i in range(3)]
+        for i, token in enumerate(tokens):
+            ctx = make_context(landscape=_make_factory(), token=token, state_id=f"state-{i}")
+            blocking_transform.accept({"idx": i}, ctx)
+
+        _wait_for(
+            lambda: blocking_transform.batch_pending_count >= 1,
+            timeout=3.0,
+            desc="at least one row pending",
+        )
+
+        with pytest.raises(TimeoutError, match=r"\d+ rows still pending"):
+            blocking_transform.flush_batch_processing(timeout=0.2)
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+class TestBatchTransformMixinWorkerFailurePropagation:
+    """Tests for worker-thread failure delivery to the orchestrator."""
+
+    def test_tier1_worker_exception_reaches_waiter_immediately(self) -> None:
+        """Tier 1 worker exceptions must travel through the waiter path.
+
+        If the worker thread re-raises directly, the waiter never receives a
+        result and times out instead of surfacing the original audit failure.
+        """
+        adapter = SharedBatchAdapter()
+        transform = Tier1FailingBatchTransform()
+        transform.connect_output(adapter, max_pending=5)
+
+        token = make_token("row-tier1")
+        ctx = make_context(
+            landscape=_make_factory(),
+            token=token,
+            state_id="state-tier1",
+        )
+        waiter = adapter.register(token.token_id, "state-tier1")
+
+        try:
+            transform.accept({"data": "test"}, ctx)
+
+            with pytest.raises(AuditIntegrityError, match="simulated audit integrity failure"):
+                waiter.wait(timeout=0.2)
+        finally:
+            if ctx.state_id is not None:
+                transform.evict_submission(token.token_id, ctx.state_id)
+            transform.close()
+
+
+class TestBatchTransformMixinSubmitRollback:
+    """Tests for submit-time rollback when the worker pool rejects a row."""
+
+    def test_submit_failure_returns_shutdown_error_without_stranding_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A submit-time shutdown race must not leave a pending ticket behind."""
+        adapter = SharedBatchAdapter()
+        transform = SimpleBatchTransform()
+        transform.connect_output(adapter, max_pending=5)
+
+        token = make_token("row-submit-race")
+        state_id = "state-submit-race"
+        ctx = make_context(
+            landscape=_make_factory(),
+            token=token,
+            state_id=state_id,
+        )
+        waiter = adapter.register(token.token_id, state_id)
+
+        def fail_submit(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+        monkeypatch.setattr(transform._batch_executor, "submit", fail_submit)
+
+        try:
+            transform.accept({"data": "test"}, ctx)
+
+            result = waiter.wait(timeout=1.0)
+
+            assert result.status == "error"
+            assert result.reason == {
+                "reason": "shutdown_requested",
+                "error": "thread pool shut down during submission",
+            }
+            assert transform.batch_pending_count == 0
+            assert (token.token_id, state_id) not in transform._batch_submissions
+            assert (token.token_id, state_id) not in adapter._entries
+        finally:
+            transform.close()

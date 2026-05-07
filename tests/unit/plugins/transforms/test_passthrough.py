@@ -93,62 +93,21 @@ class TestPassThrough:
         with pytest.raises(PluginConfigError, match="schema"):
             PassThrough({})
 
-    def test_validate_input_attribute_set_from_config(self) -> None:
-        """validate_input=True is stored as attribute for executor enforcement.
+    def test_no_validate_input_attribute(self) -> None:
+        """PassThrough does not carry a validate_input attribute.
 
-        Input validation is centralized in TransformExecutor. This test verifies
-        the plugin correctly sets the attribute from config so the executor can
-        check it before calling process().
+        Input validation is unconditional in the executor — plugins
+        no longer control this via a flag.
         """
         from elspeth.plugins.transforms.passthrough import PassThrough
 
         transform = PassThrough(
             {
                 "schema": {"mode": "fixed", "fields": ["count: int"]},
-                "validate_input": True,
             }
         )
 
-        assert transform.validate_input is True
-
-    def test_validate_input_disabled_passes_wrong_type(self, ctx: PluginContext) -> None:
-        """validate_input=False (default) passes wrong types through.
-
-        When validation is disabled, the transform doesn't check types.
-        This is the default to avoid breaking existing pipelines.
-        """
-        from elspeth.plugins.transforms.passthrough import PassThrough
-
-        transform = PassThrough(
-            {
-                "schema": {"mode": "fixed", "fields": ["count: int"]},
-                "validate_input": False,  # Explicit default
-            }
-        )
-
-        # String passes through without validation
-        result = transform.process(make_pipeline_row({"count": "not_an_int"}), ctx)
-        assert result.status == "success"
-        assert result.row is not None
-        assert result.row["count"] == "not_an_int"
-
-    def test_validate_input_skipped_for_dynamic_schema(self, ctx: PluginContext) -> None:
-        """validate_input=True with dynamic schema skips validation.
-
-        Dynamic schemas accept anything, so validation is a no-op.
-        """
-        from elspeth.plugins.transforms.passthrough import PassThrough
-
-        transform = PassThrough(
-            {
-                "schema": {"mode": "observed"},
-                "validate_input": True,  # Would validate, but schema is dynamic
-            }
-        )
-
-        # Any data passes with dynamic schema
-        result = transform.process(make_pipeline_row({"anything": "goes", "count": "string"}), ctx)
-        assert result.status == "success"
+        assert not hasattr(transform, "validate_input")
 
     def test_passthrough_validates_schema_compatibility(self) -> None:
         """PassThrough should validate schema is self-compatible."""
@@ -164,3 +123,25 @@ class TestPassThrough:
 
         # Note: PassThrough has same input/output schema, so always compatible
         # More complex transforms tested separately
+
+    def test_fixed_schema_initializes_output_schema_config_and_aligns_output_contract(self, ctx: PluginContext) -> None:
+        """Declared fixed schemas must drive runtime output contracts."""
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        transform = PassThrough(
+            {
+                "schema": {
+                    "mode": "fixed",
+                    "fields": ["id: int", "name: str"],
+                },
+            }
+        )
+        row = make_pipeline_row({"id": 1, "name": "alice"})
+
+        result = transform.process(row, ctx)
+
+        assert transform._output_schema_config is not None
+        assert transform._output_schema_config.mode == "fixed"
+        assert result.row is not None
+        assert result.row.contract.mode == "FIXED"
+        assert result.row.contract.locked is True

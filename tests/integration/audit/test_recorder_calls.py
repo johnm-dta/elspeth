@@ -1,7 +1,7 @@
 # tests/core/landscape/test_recorder_calls.py
 """Tests for external call recording API.
 
-Tests LandscapeRecorder.record_call() and get_calls() methods.
+Tests ExecutionRepository.record_call() and QueryRepository.get_calls() methods.
 """
 
 from pathlib import Path
@@ -14,26 +14,26 @@ from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.row_data import CallDataState
 from elspeth.core.payload_store import FilesystemPayloadStore
 
 
 class TestRecordCall:
-    """Tests for LandscapeRecorder.record_call()."""
+    """Tests for ExecutionRepository.record_call()."""
 
     @pytest.fixture
-    def recorder(self) -> LandscapeRecorder:
-        """Create recorder with in-memory DB."""
+    def landscape_factory(self) -> RecorderFactory:
+        """Create factory with in-memory DB."""
         db = LandscapeDB.in_memory()
-        return LandscapeRecorder(db)
+        return RecorderFactory(db)
 
     @pytest.fixture
-    def state_id(self, recorder: LandscapeRecorder) -> str:
+    def state_id(self, landscape_factory: RecorderFactory) -> str:
         """Create a node state to attach calls to."""
         schema = SchemaConfig.from_dict({"mode": "observed"})
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        run = landscape_factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = landscape_factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -41,14 +41,14 @@ class TestRecordCall:
             config={},
             schema_config=schema,
         )
-        row = recorder.create_row(
+        row = landscape_factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"input": "test"},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = landscape_factory.data_flow.create_token(row_id=row.row_id)
+        state = landscape_factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -57,9 +57,9 @@ class TestRecordCall:
         )
         return state.state_id
 
-    def test_record_successful_llm_call(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_record_successful_llm_call(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording a successful LLM call."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -79,9 +79,9 @@ class TestRecordCall:
         assert call.latency_ms == 150.5
         assert call.error_json is None
 
-    def test_record_failed_call_with_error(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_record_failed_call_with_error(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording a failed call with error details."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.HTTP,
@@ -96,9 +96,9 @@ class TestRecordCall:
         assert call.error_json is not None
         assert "500" in call.error_json
 
-    def test_multiple_calls_same_state(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_multiple_calls_same_state(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording multiple calls for the same state."""
-        call1 = recorder.record_call(
+        call1 = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -106,7 +106,7 @@ class TestRecordCall:
             request_data=RawCallPayload({"prompt": "First"}),
             response_data=RawCallPayload({"response": "First response"}),
         )
-        call2 = recorder.record_call(
+        call2 = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=1,
             call_type=CallType.LLM,
@@ -119,12 +119,12 @@ class TestRecordCall:
         assert call2.call_index == 1
 
         # Verify via get_calls
-        calls = recorder.get_calls(state_id)
+        calls = landscape_factory.query.get_calls(state_id)
         assert len(calls) == 2
         assert calls[0].call_index == 0
         assert calls[1].call_index == 1
 
-    def test_persisted_call_fields_match_expected_values(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_persisted_call_fields_match_expected_values(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Verify all persisted call fields match expected values.
 
         P1 audit trail verification: Tests must not just check non-null,
@@ -135,7 +135,7 @@ class TestRecordCall:
         request_data = {"model": "gpt-4", "prompt": "Hello"}
         response_data = {"completion": "Hi there!"}
 
-        recorder.record_call(
+        landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -146,7 +146,7 @@ class TestRecordCall:
         )
 
         # Retrieve persisted call via get_calls
-        calls = recorder.get_calls(state_id)
+        calls = landscape_factory.query.get_calls(state_id)
         persisted = calls[0]
 
         # Verify enums are actual enum types (not strings)
@@ -170,14 +170,14 @@ class TestRecordCall:
         assert persisted.latency_ms == 150.5
         assert persisted.error_json is None
 
-    def test_persisted_error_call_fields(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_persisted_error_call_fields(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Verify error call fields are correctly persisted."""
         from elspeth.core.canonical import canonical_json, stable_hash
 
         request_data = {"url": "https://api.example.com"}
         error_data = {"code": 500, "message": "Internal Server Error"}
 
-        recorder.record_call(
+        landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.HTTP,
@@ -188,7 +188,7 @@ class TestRecordCall:
         )
 
         # Retrieve persisted call
-        calls = recorder.get_calls(state_id)
+        calls = landscape_factory.query.get_calls(state_id)
         persisted = calls[0]
 
         # Verify enum types and values
@@ -208,9 +208,9 @@ class TestRecordCall:
         # Verify no response hash for error calls
         assert persisted.response_hash is None
 
-    def test_call_with_payload_refs(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_call_with_payload_refs(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording calls with payload store references."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -224,7 +224,7 @@ class TestRecordCall:
         assert call.request_ref == "sha256:abc123..."
         assert call.response_ref == "sha256:def456..."
 
-    def test_duplicate_call_index_rejected_at_db_level(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_duplicate_call_index_rejected_at_db_level(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test that duplicate (state_id, call_index) is rejected at DB level.
 
         The schema has a partial unique index: UNIQUE(state_id, call_index) WHERE state_id IS NOT NULL.
@@ -234,8 +234,10 @@ class TestRecordCall:
         Callers should use allocate_call_index() to get unique indices, but the DB
         constraint serves as defense-in-depth against bugs that might bypass the allocator.
         """
+        from elspeth.core.landscape.errors import LandscapeRecordError
+
         # First call succeeds
-        recorder.record_call(
+        landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -245,8 +247,8 @@ class TestRecordCall:
         )
 
         # Duplicate call_index is rejected by DB constraint
-        with pytest.raises(IntegrityError):
-            recorder.record_call(
+        with pytest.raises(LandscapeRecordError) as exc_info:
+            landscape_factory.execution.record_call(
                 state_id=state_id,
                 call_index=0,  # Same index - rejected at DB level
                 call_type=CallType.LLM,
@@ -254,11 +256,14 @@ class TestRecordCall:
                 request_data=RawCallPayload({"prompt": "Second"}),
                 response_data=RawCallPayload({"response": "Second"}),
             )
+        assert isinstance(exc_info.value.__cause__, IntegrityError)
 
-    def test_invalid_state_id_raises_integrity_error(self, recorder: LandscapeRecorder) -> None:
-        """Test that invalid state_id raises IntegrityError (FK constraint)."""
-        with pytest.raises(IntegrityError):
-            recorder.record_call(
+    def test_invalid_state_id_raises_integrity_error(self, landscape_factory: RecorderFactory) -> None:
+        """Test that invalid state_id raises LandscapeRecordError with FK cause."""
+        from elspeth.core.landscape.errors import LandscapeRecordError
+
+        with pytest.raises(LandscapeRecordError) as exc_info:
+            landscape_factory.execution.record_call(
                 state_id="nonexistent_state_id",
                 call_index=0,
                 call_type=CallType.LLM,
@@ -266,10 +271,11 @@ class TestRecordCall:
                 request_data=RawCallPayload({"prompt": "Test"}),
                 response_data=RawCallPayload({"response": "Test"}),
             )
+        assert isinstance(exc_info.value.__cause__, IntegrityError)
 
-    def test_record_http_call(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_record_http_call(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording an HTTP call type."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.HTTP,
@@ -282,9 +288,9 @@ class TestRecordCall:
         assert call.call_type == CallType.HTTP
         assert call.latency_ms == 250.0
 
-    def test_record_sql_call(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_record_sql_call(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording a SQL call type."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.SQL,
@@ -296,9 +302,9 @@ class TestRecordCall:
 
         assert call.call_type == CallType.SQL
 
-    def test_record_filesystem_call(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_record_filesystem_call(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording a filesystem call type."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.FILESYSTEM,
@@ -310,9 +316,9 @@ class TestRecordCall:
 
         assert call.call_type == CallType.FILESYSTEM
 
-    def test_call_without_latency(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_call_without_latency(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording a call without latency information."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -324,9 +330,9 @@ class TestRecordCall:
 
         assert call.latency_ms is None
 
-    def test_error_call_without_response(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_error_call_without_response(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test recording an error call with no response data."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.HTTP,
@@ -342,9 +348,9 @@ class TestRecordCall:
         assert call.error_json is not None
         assert "timeout" in call.error_json
 
-    def test_created_at_is_set(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_created_at_is_set(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test that created_at timestamp is automatically set."""
-        call = recorder.record_call(
+        call = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -355,11 +361,11 @@ class TestRecordCall:
 
         assert call.created_at is not None
 
-    def test_request_hash_is_deterministic(self, recorder: LandscapeRecorder, state_id: str) -> None:
+    def test_request_hash_is_deterministic(self, landscape_factory: RecorderFactory, state_id: str) -> None:
         """Test that the same request data produces the same hash."""
         request_data = {"model": "gpt-4", "prompt": "Hello, world!"}
 
-        call1 = recorder.record_call(
+        call1 = landscape_factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -370,8 +376,8 @@ class TestRecordCall:
 
         # Create another state for second call
         schema = SchemaConfig.from_dict({"mode": "observed"})
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        run = landscape_factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = landscape_factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -379,14 +385,14 @@ class TestRecordCall:
             config={},
             schema_config=schema,
         )
-        row = recorder.create_row(
+        row = landscape_factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"input": "test"},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state2 = recorder.begin_node_state(
+        token = landscape_factory.data_flow.create_token(row_id=row.row_id)
+        state2 = landscape_factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -394,7 +400,7 @@ class TestRecordCall:
             input_data={"input": "test"},
         )
 
-        call2 = recorder.record_call(
+        call2 = landscape_factory.execution.record_call(
             state_id=state2.state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -417,11 +423,11 @@ class TestCallPayloadPersistence:
     replay/verify modes to retrieve the original payloads.
     """
 
-    def _create_state(self, recorder: LandscapeRecorder) -> str:
+    def _create_state(self, factory: RecorderFactory) -> str:
         """Helper to create a node state for attaching calls."""
         schema = SchemaConfig.from_dict({"mode": "observed"})
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        node = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -429,14 +435,14 @@ class TestCallPayloadPersistence:
             config={},
             schema_config=schema,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"input": "test"},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -450,11 +456,11 @@ class TestCallPayloadPersistence:
         with TemporaryDirectory() as tmpdir:
             payload_store = FilesystemPayloadStore(Path(tmpdir) / "payloads")
             db = LandscapeDB.in_memory()
-            recorder = LandscapeRecorder(db, payload_store=payload_store)
-            state_id = self._create_state(recorder)
+            factory = RecorderFactory(db, payload_store=payload_store)
+            state_id = self._create_state(factory)
 
             response_data = {"content": "Hello!", "model": "gpt-4"}
-            call = recorder.record_call(
+            call = factory.execution.record_call(
                 state_id=state_id,
                 call_index=0,
                 call_type=CallType.LLM,
@@ -467,8 +473,9 @@ class TestCallPayloadPersistence:
             assert call.response_ref is not None
 
             # The response should be retrievable
-            result = recorder.get_call_response_data(call.call_id)
+            result = factory.execution.get_call_response_data(call.call_id)
             assert result.state == CallDataState.AVAILABLE
+            assert result.data is not None
             assert dict(result.data) == response_data
 
     def test_auto_persist_request_when_payload_store_configured(self, payload_store) -> None:
@@ -476,11 +483,11 @@ class TestCallPayloadPersistence:
         with TemporaryDirectory() as tmpdir:
             payload_store = FilesystemPayloadStore(Path(tmpdir) / "payloads")
             db = LandscapeDB.in_memory()
-            recorder = LandscapeRecorder(db, payload_store=payload_store)
-            state_id = self._create_state(recorder)
+            factory = RecorderFactory(db, payload_store=payload_store)
+            state_id = self._create_state(factory)
 
             request_data = {"model": "gpt-4", "prompt": "Hello, world!"}
-            call = recorder.record_call(
+            call = factory.execution.record_call(
                 state_id=state_id,
                 call_index=0,
                 call_type=CallType.LLM,
@@ -495,10 +502,10 @@ class TestCallPayloadPersistence:
     def test_no_auto_persist_without_payload_store(self) -> None:
         """Without payload store, refs remain None."""
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)  # No payload store
-        state_id = self._create_state(recorder)
+        factory = RecorderFactory(db)  # No payload store
+        state_id = self._create_state(factory)
 
-        call = recorder.record_call(
+        call = factory.execution.record_call(
             state_id=state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -512,7 +519,7 @@ class TestCallPayloadPersistence:
         assert call.response_ref is None
 
         # get_call_response_data should indicate hash-only (no payload store)
-        result = recorder.get_call_response_data(call.call_id)
+        result = factory.execution.get_call_response_data(call.call_id)
         assert result.state == CallDataState.HASH_ONLY
         assert result.data is None
 
@@ -521,11 +528,11 @@ class TestCallPayloadPersistence:
         with TemporaryDirectory() as tmpdir:
             payload_store = FilesystemPayloadStore(Path(tmpdir) / "payloads")
             db = LandscapeDB.in_memory()
-            recorder = LandscapeRecorder(db, payload_store=payload_store)
-            state_id = self._create_state(recorder)
+            factory = RecorderFactory(db, payload_store=payload_store)
+            state_id = self._create_state(factory)
 
             explicit_ref = "explicit-reference-123"
-            call = recorder.record_call(
+            call = factory.execution.record_call(
                 state_id=state_id,
                 call_index=0,
                 call_type=CallType.LLM,
@@ -543,10 +550,10 @@ class TestCallPayloadPersistence:
         with TemporaryDirectory() as tmpdir:
             payload_store = FilesystemPayloadStore(Path(tmpdir) / "payloads")
             db = LandscapeDB.in_memory()
-            recorder = LandscapeRecorder(db, payload_store=payload_store)
-            state_id = self._create_state(recorder)
+            factory = RecorderFactory(db, payload_store=payload_store)
+            state_id = self._create_state(factory)
 
-            call = recorder.record_call(
+            call = factory.execution.record_call(
                 state_id=state_id,
                 call_index=0,
                 call_type=CallType.HTTP,
@@ -576,7 +583,7 @@ class TestFindCallByRequestHashRunIsolation:
 
     def _create_run_with_call(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         node_id: str,
         request_data: RawCallPayload,
         response_data: RawCallPayload,
@@ -584,7 +591,7 @@ class TestFindCallByRequestHashRunIsolation:
         """Create a run with a transform node and an LLM call.
 
         Args:
-            recorder: LandscapeRecorder instance
+            factory: RecorderFactory instance
             node_id: Node ID to use (for testing reuse across runs)
             request_data: Request data for the call
             response_data: Response data for the call
@@ -593,10 +600,10 @@ class TestFindCallByRequestHashRunIsolation:
             Tuple of (run_id, call_id)
         """
         schema = SchemaConfig.from_dict({"mode": "observed"})
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         # Register node with specified node_id
-        node = recorder.register_node(
+        node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -607,14 +614,14 @@ class TestFindCallByRequestHashRunIsolation:
         )
 
         # Create row, token, and state
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
             data={"input": "test"},
         )
-        token = recorder.create_token(row_id=row.row_id)
-        state = recorder.begin_node_state(
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
             token_id=token.token_id,
             node_id=node.node_id,
             run_id=run.run_id,
@@ -623,7 +630,7 @@ class TestFindCallByRequestHashRunIsolation:
         )
 
         # Record the call
-        call = recorder.record_call(
+        call = factory.execution.record_call(
             state_id=state.state_id,
             call_index=0,
             call_type=CallType.LLM,
@@ -645,7 +652,7 @@ class TestFindCallByRequestHashRunIsolation:
         This tests the critical cross-run isolation requirement.
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         # Identical request data = same request_hash
         request_data = {"model": "gpt-4", "prompt": "Hello"}
@@ -653,7 +660,7 @@ class TestFindCallByRequestHashRunIsolation:
 
         # Create Run A with call
         _run_a_id, call_a_id = self._create_run_with_call(
-            recorder,
+            factory,
             node_id=node_id,
             request_data=RawCallPayload(request_data),
             response_data=RawCallPayload({"content": "Response from Run A"}),
@@ -661,7 +668,7 @@ class TestFindCallByRequestHashRunIsolation:
 
         # Create Run B with call (same node_id, same request_hash)
         run_b_id, call_b_id = self._create_run_with_call(
-            recorder,
+            factory,
             node_id=node_id,
             request_data=RawCallPayload(request_data),
             response_data=RawCallPayload({"content": "Response from Run B"}),
@@ -673,7 +680,7 @@ class TestFindCallByRequestHashRunIsolation:
         request_hash = stable_hash(request_data)
 
         # Query for Run B's call
-        result = recorder.find_call_by_request_hash(
+        result = factory.execution.find_call_by_request_hash(
             run_id=run_b_id,
             call_type=CallType.LLM,
             request_hash=request_hash,
@@ -696,14 +703,14 @@ class TestFindCallByRequestHashRunIsolation:
         This ensures run isolation is complete (not just filtering).
         """
         db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
+        factory = RecorderFactory(db)
 
         request_data = {"model": "gpt-4", "prompt": "Hello"}
         node_id = "shared_llm_transform_1"
 
         # Create Run A with call
         _run_a_id, _ = self._create_run_with_call(
-            recorder,
+            factory,
             node_id=node_id,
             request_data=RawCallPayload(request_data),
             response_data=RawCallPayload({"content": "Response from Run A"}),
@@ -711,8 +718,8 @@ class TestFindCallByRequestHashRunIsolation:
 
         # Create Run B WITHOUT any calls (just the node)
         schema = SchemaConfig.from_dict({"mode": "observed"})
-        run_b = recorder.begin_run(config={}, canonical_version="v1")
-        recorder.register_node(
+        run_b = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        factory.data_flow.register_node(
             run_id=run_b.run_id,
             plugin_name="llm_transform",
             node_type=NodeType.TRANSFORM,
@@ -728,7 +735,7 @@ class TestFindCallByRequestHashRunIsolation:
         request_hash = stable_hash(request_data)
 
         # Query for Run B's call (should not find Run A's)
-        result = recorder.find_call_by_request_hash(
+        result = factory.execution.find_call_by_request_hash(
             run_id=run_b.run_id,
             call_type=CallType.LLM,
             request_hash=request_hash,

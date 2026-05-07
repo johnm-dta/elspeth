@@ -5,12 +5,6 @@ from elspeth.plugins.infrastructure.clients.llm import LLMClientError
 from elspeth.plugins.transforms.web_scrape_errors import WebScrapeError
 
 
-def test_plugin_retryable_error_has_retryable_attribute():
-    err = PluginRetryableError("test", retryable=True)
-    assert err.retryable is True
-    assert str(err) == "test"
-
-
 def test_plugin_retryable_error_has_status_code():
     err = PluginRetryableError("test", retryable=False, status_code=404)
     assert err.retryable is False
@@ -79,18 +73,6 @@ def test_web_scrape_subclasses_still_work():
     assert not_found.retryable is False
 
 
-def test_is_retryable_catches_plugin_retryable_error():
-    """PluginRetryableError with retryable=True is retryable."""
-    err = PluginRetryableError("transient", retryable=True)
-    assert err.retryable is True
-
-
-def test_is_retryable_rejects_non_retryable_plugin_error():
-    """PluginRetryableError with retryable=False is not retryable."""
-    err = PluginRetryableError("permanent", retryable=False)
-    assert err.retryable is False
-
-
 def test_all_plugin_errors_share_retryable_interface():
     """All plugin error types have a consistent retryable interface."""
     errors = [
@@ -101,3 +83,11 @@ def test_all_plugin_errors_share_retryable_interface():
     for err in errors:
         assert isinstance(err, PluginRetryableError)
         assert err.retryable is True
+
+
+def test_web_scrape_error_requires_retryable_keyword():
+    """WebScrapeError must not have a default for retryable — matches PluginRetryableError contract."""
+    import pytest
+
+    with pytest.raises(TypeError):
+        WebScrapeError("missing retryable keyword")

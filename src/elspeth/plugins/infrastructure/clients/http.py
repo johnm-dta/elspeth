@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from ipaddress import IPv4Network, IPv6Network
 from typing import TYPE_CHECKING, Any
@@ -16,9 +16,9 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
+import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.call_data import CallPayload, HTTPCallError, HTTPCallRequest, HTTPCallResponse
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.core.canonical import stable_hash
 from elspeth.core.security.web import (
@@ -41,7 +41,7 @@ logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from elspeth.contracts import Call
-    from elspeth.core.landscape.recorder import LandscapeRecorder
+    from elspeth.contracts.audit_protocols import CallRecorder
     from elspeth.core.rate_limit import NoOpLimiter
     from elspeth.core.rate_limit.limiter import RateLimiter
 
@@ -60,7 +60,7 @@ class AuditedHTTPClient(AuditedClientBase):
 
     Example:
         client = AuditedHTTPClient(
-            recorder=recorder,
+            execution=execution,
             state_id=state_id,
             run_id=run_id,
             telemetry_emit=telemetry_emit,
@@ -75,7 +75,7 @@ class AuditedHTTPClient(AuditedClientBase):
 
     def __init__(
         self,
-        recorder: LandscapeRecorder,
+        execution: CallRecorder,
         state_id: str,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
@@ -89,7 +89,7 @@ class AuditedHTTPClient(AuditedClientBase):
         """Initialize audited HTTP client.
 
         Args:
-            recorder: LandscapeRecorder for audit trail storage
+            execution: CallRecorder for audit trail storage
             state_id: Node state ID to associate calls with
             run_id: Pipeline run ID for telemetry correlation
             telemetry_emit: Callback to emit telemetry events
@@ -99,7 +99,7 @@ class AuditedHTTPClient(AuditedClientBase):
             limiter: Optional rate limiter for throttling requests
             token_id: Optional token identity for telemetry correlation
         """
-        super().__init__(recorder, state_id, run_id, telemetry_emit, limiter=limiter, token_id=token_id)
+        super().__init__(execution, state_id, run_id, telemetry_emit, limiter=limiter, token_id=token_id)
         self._timeout = timeout
         self._base_url = base_url
         self._default_headers = headers or {}
@@ -165,15 +165,8 @@ class AuditedHTTPClient(AuditedClientBase):
         if "application/json" in content_type:
             parsed, error = _parse_json_strict(response.text)
             if error is not None:
-                logger.warning(
-                    "JSON parse failed despite Content-Type: application/json",
-                    extra={
-                        "url": full_url,
-                        "status_code": response.status_code,
-                        "body_preview": response.text[:200],
-                        "error": error,
-                    },
-                )
+                # JSON parse failure is captured in the audit trail via the
+                # _json_parse_failed sentinel dict recorded by record_call().
                 return {
                     "_json_parse_failed": True,
                     "_error": error,
@@ -194,9 +187,9 @@ class AuditedHTTPClient(AuditedClientBase):
         *,
         call_index: int,
         full_url: str,
-        request_data: dict[str, Any],
+        request_data: Mapping[str, Any],
         response: httpx.Response | None,
-        response_data: dict[str, Any] | None,
+        response_data: Mapping[str, Any] | None,
         error_data: CallPayload | None,
         latency_ms: float,
         call_status: CallStatus,
@@ -216,7 +209,7 @@ class AuditedHTTPClient(AuditedClientBase):
         Returns:
             Call object from Landscape recording (contains request_ref and response_ref blob hashes).
         """
-        call = self._recorder.record_call(
+        call = self._execution.record_call(
             state_id=self._state_id,
             call_index=call_index,
             call_type=CallType.HTTP,
@@ -228,7 +221,35 @@ class AuditedHTTPClient(AuditedClientBase):
         )
 
         # Telemetry emitted AFTER successful Landscape recording
-        # Wrapped in try/except to prevent telemetry failures from corrupting audit trail
+        self._emit_telemetry_after_audit(
+            provider=self._extract_provider(full_url),
+            call_status=call_status,
+            latency_ms=latency_ms,
+            request_data=request_data,
+            response_data=response_data,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            token_id_override=token_id_override,
+            call_type_label="http",
+        )
+
+        return call
+
+    def _emit_telemetry_after_audit(
+        self,
+        *,
+        provider: str,
+        call_status: CallStatus,
+        latency_ms: float,
+        request_data: Mapping[str, Any],
+        response_data: Mapping[str, Any] | None,
+        request_payload: CallPayload,
+        response_payload: CallPayload | None = None,
+        token_id_override: str | None = None,
+        call_type_label: str,
+    ) -> None:
+        """Emit HTTP telemetry after audit recording, crashing on programmer bugs."""
+
         effective_token_id = token_id_override if token_id_override is not None else self._telemetry_token_id()
         try:
             self._telemetry_emit(
@@ -236,7 +257,7 @@ class AuditedHTTPClient(AuditedClientBase):
                     timestamp=datetime.now(UTC),
                     run_id=self._run_id,
                     call_type=CallType.HTTP,
-                    provider=self._extract_provider(full_url),
+                    provider=provider,
                     status=call_status,
                     latency_ms=latency_ms,
                     state_id=self._state_id,
@@ -249,8 +270,10 @@ class AuditedHTTPClient(AuditedClientBase):
                     token_usage=None,
                 )
             )
-        except (FrameworkBugError, AuditIntegrityError):
+        except contract_errors.TIER_1_ERRORS:
             raise  # System bugs and audit integrity violations must crash
+        except (TypeError, AttributeError, KeyError, NameError):
+            raise  # Programming errors must crash
         except Exception as tel_err:
             logger.warning(
                 "telemetry_emit_failed",
@@ -258,11 +281,23 @@ class AuditedHTTPClient(AuditedClientBase):
                 error_type=type(tel_err).__name__,
                 run_id=self._run_id,
                 state_id=self._state_id,
-                call_type="http",
+                call_type=call_type_label,
                 exc_info=True,
             )
 
-        return call
+    def _build_response_payload(
+        self, response: httpx.Response, full_url: str, *, redirect_count: int = 0
+    ) -> tuple[HTTPCallResponse, dict[str, Any]]:
+        """Build typed and dict response payloads from an HTTP response."""
+        response_body = self._parse_response_body(response, full_url)
+        response_dto = HTTPCallResponse(
+            status_code=response.status_code,
+            headers=self._filter_response_headers(dict(response.headers)),
+            body_size=len(response.content),
+            body=response_body,
+            redirect_count=redirect_count,
+        )
+        return response_dto, response_dto.to_dict()
 
     def _execute_request(
         self,
@@ -273,6 +308,7 @@ class AuditedHTTPClient(AuditedClientBase):
         timeout: float | None,
         json: dict[str, Any] | None = None,
         params: dict[str, str | int | float] | None = None,
+        audit_request_metadata: Mapping[str, Any] | None = None,
         token_id: str | None = None,
     ) -> httpx.Response:
         """Execute an HTTP request with audit recording and telemetry.
@@ -287,6 +323,9 @@ class AuditedHTTPClient(AuditedClientBase):
             timeout: Request timeout override (uses client default if None)
             json: JSON body (POST only)
             params: Query parameters (GET only)
+            audit_request_metadata: Audit-only metadata to include in the
+                recorded request payload without sending it to the remote
+                service.
             token_id: Per-call token_id for telemetry (overrides client default).
                 Used by batch transforms where one client serves multiple tokens.
 
@@ -312,10 +351,12 @@ class AuditedHTTPClient(AuditedClientBase):
             headers=self._filter_request_headers(merged_headers),
             json=json,
             params=params,
+            audit_metadata=audit_request_metadata,
         )
         request_data = request_dto.to_dict()
 
         start = time.perf_counter()
+        response: httpx.Response | None = None
 
         try:
             # Dispatch to the correct httpx method
@@ -333,52 +374,6 @@ class AuditedHTTPClient(AuditedClientBase):
                     headers=merged_headers,
                     timeout=effective_timeout,
                 )
-
-            latency_ms = (time.perf_counter() - start) * 1000
-
-            response_body = self._parse_response_body(response, full_url)
-
-            # 2xx = SUCCESS, 4xx/5xx = ERROR
-            is_success = 200 <= response.status_code < 300
-            call_status = CallStatus.SUCCESS if is_success else CallStatus.ERROR
-
-            response_dto = HTTPCallResponse(
-                status_code=response.status_code,
-                headers=self._filter_response_headers(dict(response.headers)),
-                body_size=len(response.content),
-                body=response_body,
-            )
-            response_data = response_dto.to_dict()
-
-            error_data: CallPayload | None = None
-            if not is_success:
-                error_data = HTTPCallError(
-                    type="HTTPError",
-                    message=f"HTTP {response.status_code}",
-                    status_code=response.status_code,
-                )
-
-            self._record_and_emit(
-                call_index=call_index,
-                full_url=full_url,
-                request_data=request_data,
-                response=response,
-                response_data=response_data,
-                error_data=error_data,
-                latency_ms=latency_ms,
-                call_status=call_status,
-                request_payload=request_dto,
-                response_payload=response_dto,
-                token_id_override=token_id,
-            )
-
-            return response
-
-        except (FrameworkBugError, AuditIntegrityError):
-            # Telemetry re-raise after successful Landscape record_call.
-            # The SUCCESS record already exists — do NOT record a second
-            # ERROR call with the same call_index (unique constraint).
-            raise
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
 
@@ -401,6 +396,37 @@ class AuditedHTTPClient(AuditedClientBase):
 
             raise
 
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        # 2xx = SUCCESS, 4xx/5xx = ERROR
+        is_success = 200 <= response.status_code < 300
+        call_status = CallStatus.SUCCESS if is_success else CallStatus.ERROR
+        response_dto, response_data = self._build_response_payload(response, full_url)
+
+        error_data: CallPayload | None = None
+        if not is_success:
+            error_data = HTTPCallError(
+                type="HTTPError",
+                message=f"HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+
+        self._record_and_emit(
+            call_index=call_index,
+            full_url=full_url,
+            request_data=request_data,
+            response=response,
+            response_data=response_data,
+            error_data=error_data,
+            latency_ms=latency_ms,
+            call_status=call_status,
+            request_payload=request_dto,
+            response_payload=response_dto,
+            token_id_override=token_id,
+        )
+
+        return response
+
     def post(
         self,
         url: str,
@@ -408,6 +434,7 @@ class AuditedHTTPClient(AuditedClientBase):
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        audit_request_metadata: Mapping[str, Any] | None = None,
         token_id: str | None = None,
     ) -> httpx.Response:
         """Make POST request with automatic audit recording.
@@ -417,6 +444,9 @@ class AuditedHTTPClient(AuditedClientBase):
             json: JSON body to send (optional)
             headers: Additional headers for this request
             timeout: Request timeout in seconds (uses client default if None)
+            audit_request_metadata: Audit-only metadata to include in the
+                recorded request payload without sending it to the remote
+                service.
             token_id: Per-call token_id for telemetry (overrides client default).
                 Used by batch transforms where one client serves multiple tokens.
 
@@ -432,6 +462,7 @@ class AuditedHTTPClient(AuditedClientBase):
             headers=headers,
             timeout=timeout,
             json=json,
+            audit_request_metadata=audit_request_metadata,
             token_id=token_id,
         )
 
@@ -532,6 +563,7 @@ class AuditedHTTPClient(AuditedClientBase):
         request_data = request_dto.to_dict()
 
         start = time.perf_counter()
+        response: httpx.Response | None = None
 
         try:
             # Ephemeral client for SSRF-safe requests: connection_url uses the
@@ -564,46 +596,10 @@ class AuditedHTTPClient(AuditedClientBase):
 
             latency_ms = (time.perf_counter() - start) * 1000
 
-            response_body: Any = None
-            content_type = response.headers.get("content-type", "")
-
-            if "application/json" in content_type:
-                parsed, error = _parse_json_strict(response.text)
-                if error is not None:
-                    logger.warning(
-                        "JSON parse failed despite Content-Type: application/json",
-                        extra={
-                            "url": request.original_url,
-                            "status_code": response.status_code,
-                            "body_preview": response.text[:200],
-                            "error": error,
-                        },
-                    )
-                    response_body = {
-                        "_json_parse_failed": True,
-                        "_error": error,
-                        "_raw_text": response.text[:10_000],
-                    }
-                else:
-                    response_body = parsed
-            else:
-                is_text_content = content_type.startswith("text/") or "xml" in content_type or "form-urlencoded" in content_type
-                if is_text_content:
-                    response_body = response.text
-                else:
-                    response_body = {"_binary": base64.b64encode(response.content).decode("ascii")}
-
             is_success = 200 <= response.status_code < 300
             call_status = CallStatus.SUCCESS if is_success else CallStatus.ERROR
 
-            response_dto = HTTPCallResponse(
-                status_code=response.status_code,
-                headers=self._filter_response_headers(dict(response.headers)),
-                body_size=len(response.content),
-                body=response_body,
-                redirect_count=redirect_count,
-            )
-            response_data = response_dto.to_dict()
+            response_dto, response_data = self._build_response_payload(response, final_hostname_url, redirect_count=redirect_count)
 
             error_data: CallPayload | None = None
             if not is_success:
@@ -613,7 +609,7 @@ class AuditedHTTPClient(AuditedClientBase):
                     status_code=response.status_code,
                 )
 
-            call = self._recorder.record_call(
+            call = self._execution.record_call(
                 state_id=self._state_id,
                 call_index=call_index,
                 call_type=CallType.HTTP,
@@ -624,41 +620,20 @@ class AuditedHTTPClient(AuditedClientBase):
                 latency_ms=latency_ms,
             )
 
-            try:
-                self._telemetry_emit(
-                    ExternalCallCompleted(
-                        timestamp=datetime.now(UTC),
-                        run_id=self._run_id,
-                        call_type=CallType.HTTP,
-                        provider=request.host_header,
-                        status=call_status,
-                        latency_ms=latency_ms,
-                        state_id=self._state_id,
-                        operation_id=None,
-                        token_id=self._telemetry_token_id(),
-                        request_hash=stable_hash(request_data),
-                        response_hash=stable_hash(response_data),
-                        request_payload=request_dto,
-                        response_payload=response_dto,
-                        token_usage=None,
-                    )
-                )
-            except (FrameworkBugError, AuditIntegrityError):
-                raise  # System bugs and audit integrity violations must crash
-            except Exception as tel_err:
-                logger.warning(
-                    "telemetry_emit_failed",
-                    error=str(tel_err),
-                    error_type=type(tel_err).__name__,
-                    run_id=self._run_id,
-                    state_id=self._state_id,
-                    call_type="http_ssrf_safe",
-                    exc_info=True,
-                )
+            self._emit_telemetry_after_audit(
+                provider=request.host_header,
+                call_status=call_status,
+                latency_ms=latency_ms,
+                request_data=request_data,
+                response_data=response_data,
+                request_payload=request_dto,
+                response_payload=response_dto,
+                call_type_label="http_ssrf_safe",
+            )
 
             return response, final_hostname_url, call
 
-        except (FrameworkBugError, AuditIntegrityError):
+        except contract_errors.TIER_1_ERRORS:
             # Telemetry re-raise after successful Landscape record_call.
             # The SUCCESS record already exists — do NOT record a second
             # ERROR call with the same call_index (unique constraint).
@@ -666,12 +641,18 @@ class AuditedHTTPClient(AuditedClientBase):
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
 
-            _ = self._recorder.record_call(
+            response_payload: HTTPCallResponse | None = None
+            error_response_data: Mapping[str, Any] | None = None
+            if response is not None:
+                response_payload, error_response_data = self._build_response_payload(response, request.original_url)
+
+            _ = self._execution.record_call(
                 state_id=self._state_id,
                 call_index=call_index,
                 call_type=CallType.HTTP,
                 status=CallStatus.ERROR,
                 request_data=request_dto,
+                response_data=response_payload,
                 error=HTTPCallError(
                     type=type(e).__name__,
                     message=str(e),
@@ -679,37 +660,16 @@ class AuditedHTTPClient(AuditedClientBase):
                 latency_ms=latency_ms,
             )
 
-            try:
-                self._telemetry_emit(
-                    ExternalCallCompleted(
-                        timestamp=datetime.now(UTC),
-                        run_id=self._run_id,
-                        call_type=CallType.HTTP,
-                        provider=request.host_header,
-                        status=CallStatus.ERROR,
-                        latency_ms=latency_ms,
-                        state_id=self._state_id,
-                        operation_id=None,
-                        token_id=self._telemetry_token_id(),
-                        request_hash=stable_hash(request_data),
-                        response_hash=None,
-                        request_payload=request_dto,
-                        response_payload=None,
-                        token_usage=None,
-                    )
-                )
-            except (FrameworkBugError, AuditIntegrityError):
-                raise  # System bugs and audit integrity violations must crash
-            except Exception as tel_err:
-                logger.warning(
-                    "telemetry_emit_failed",
-                    error=str(tel_err),
-                    error_type=type(tel_err).__name__,
-                    run_id=self._run_id,
-                    state_id=self._state_id,
-                    call_type="http_ssrf_safe",
-                    exc_info=True,
-                )
+            self._emit_telemetry_after_audit(
+                provider=request.host_header,
+                call_status=CallStatus.ERROR,
+                latency_ms=latency_ms,
+                request_data=request_data,
+                response_data=error_response_data,
+                request_payload=request_dto,
+                response_payload=response_payload,
+                call_type_label="http_ssrf_safe",
+            )
 
             raise
 
@@ -766,8 +726,45 @@ class AuditedHTTPClient(AuditedClientBase):
             # Resolve relative URLs against the hostname URL, NOT response.url
             redirect_url = str(hostname_url.join(location))
 
+            hop_call_index = self._next_call_index()
+            hop_number = redirects_followed + 1
+            hop_start = time.perf_counter()
+
+            hop_headers = {k: v for k, v in original_headers.items() if k.lower() != "host"}
+            redirect_url_obj = httpx.URL(redirect_url)
+            redirect_host = redirect_url_obj.host or "unknown"
+            default_port = 443 if redirect_url_obj.scheme == "https" else 80
+            redirect_port = redirect_url_obj.port or default_port
+            hop_headers["Host"] = f"{redirect_host}:{redirect_port}" if redirect_port != default_port else redirect_host
+
+            blocked_hop_request_dto = HTTPCallRequest(
+                method="GET",
+                url=redirect_url,
+                headers=self._filter_request_headers(hop_headers),
+                hop_number=hop_number,
+                redirect_from=redirect_from,
+            )
+
             # CRITICAL: Validate the redirect target for SSRF
-            redirect_request = validate_url_for_ssrf(redirect_url, allowed_ranges=allowed_ranges)
+            try:
+                redirect_request = validate_url_for_ssrf(redirect_url, allowed_ranges=allowed_ranges)
+            except contract_errors.TIER_1_ERRORS:
+                raise
+            except Exception as redirect_err:
+                hop_latency_ms = (time.perf_counter() - hop_start) * 1000
+                self._execution.record_call(
+                    state_id=self._state_id,
+                    call_index=hop_call_index,
+                    call_type=CallType.HTTP_REDIRECT,
+                    status=CallStatus.ERROR,
+                    request_data=blocked_hop_request_dto,
+                    error=HTTPCallError(
+                        type=type(redirect_err).__name__,
+                        message=str(redirect_err),
+                    ),
+                    latency_ms=hop_latency_ms,
+                )
+                raise
 
             # Update hostname_url to the redirect target for the next iteration.
             # If this was an absolute redirect to a different host, hostname_url
@@ -775,7 +772,6 @@ class AuditedHTTPClient(AuditedClientBase):
             hostname_url = httpx.URL(redirect_url)
 
             # Build headers for this hop (Host header for virtual hosting)
-            hop_headers = {k: v for k, v in original_headers.items() if k.lower() != "host"}
             hop_headers["Host"] = redirect_request.host_header
 
             # TLS SNI for this hop
@@ -788,20 +784,17 @@ class AuditedHTTPClient(AuditedClientBase):
             # Bug fix: redirect hops were bypassing the rate limiter.
             self._acquire_rate_limit()
 
-            hop_start = time.perf_counter()
-
             # Pre-allocate call index and request data BEFORE the hop so that
             # both success and failure paths can record the hop in the audit trail.
-            hop_call_index = self._next_call_index()
-            redirects_followed += 1
             hop_request_dto = HTTPCallRequest(
                 method="GET",
                 url=redirect_url,
                 headers=self._filter_request_headers(hop_headers),
                 resolved_ip=redirect_request.resolved_ip,
-                hop_number=redirects_followed,
+                hop_number=hop_number,
                 redirect_from=redirect_from,
             )
+            redirects_followed += 1
 
             # Ephemeral client per redirect hop: same TLS/SNI isolation rationale
             # as the initial SSRF-safe request — IP-based connection_url would
@@ -819,7 +812,7 @@ class AuditedHTTPClient(AuditedClientBase):
             except Exception as hop_err:
                 hop_latency_ms = (time.perf_counter() - hop_start) * 1000
                 # Record the failed hop in the audit trail so lineage is complete
-                self._recorder.record_call(
+                self._execution.record_call(
                     state_id=self._state_id,
                     call_index=hop_call_index,
                     call_type=CallType.HTTP_REDIRECT,
@@ -842,7 +835,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 headers=self._filter_response_headers(dict(response.headers)),
             )
 
-            self._recorder.record_call(
+            self._execution.record_call(
                 state_id=self._state_id,
                 call_index=hop_call_index,
                 call_type=CallType.HTTP_REDIRECT,

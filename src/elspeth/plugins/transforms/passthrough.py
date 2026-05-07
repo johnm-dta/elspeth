@@ -9,8 +9,6 @@ If the source outputs wrong types, the transform crashes immediately.
 import copy
 from typing import Any
 
-from pydantic import Field
-
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -25,11 +23,6 @@ class PassThroughConfig(TransformDataConfig):
     Use 'schema: {mode: observed}' for dynamic field handling.
     """
 
-    validate_input: bool = Field(
-        default=False,
-        description="If True, validate input against schema (default: False)",
-    )
-
 
 class PassThrough(BaseTransform):
     """Pass rows through unchanged.
@@ -41,19 +34,30 @@ class PassThrough(BaseTransform):
 
     Config options:
         schema: Required. Schema for input/output (use {mode: observed} for any fields)
-        validate_input: If True, validate input against schema (default: False)
     """
 
     name = "passthrough"
     plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:2163447d28c7063d"
+    config_model = PassThroughConfig
+
+    # ADR-007: PassThrough emits a deep copy of the input row unchanged, so every
+    # input field is present on every emitted row. Canonical pass-through exemplar.
+    passes_through_input = True
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        cfg = PassThroughConfig.from_dict(config)
-        self.validate_input = cfg.validate_input
+        cfg = PassThroughConfig.from_dict(config, plugin_name=self.name)
+        self._initialize_declared_input_fields(cfg)
 
         self._schema_config = cfg.schema_config
+        self._output_schema_config = self._build_output_schema_config(cfg.schema_config)
         self.input_schema, self.output_schema = self._create_schemas(cfg.schema_config, "PassThrough")
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Minimal config for the ADR-009 §Clause 4 invariant harness."""
+        return {"schema": {"mode": "observed"}}
 
     def process(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
         """Return row unchanged (deep copy to prevent mutation).
@@ -66,11 +70,12 @@ class PassThrough(BaseTransform):
             TransformResult with unchanged row data
 
         Raises:
-            ValidationError: If validate_input=True and row fails schema validation.
-                This indicates a bug in the upstream source/transform.
+            PluginContractViolation: Raised by executor if row fails input schema
+                validation. This indicates a bug in the upstream source/transform.
         """
+        output_contract = self._align_output_contract(row.contract)
         return TransformResult.success(
-            PipelineRow(copy.deepcopy(row.to_dict()), row.contract),
+            PipelineRow(copy.deepcopy(row.to_dict()), output_contract),
             success_reason={"action": "passthrough"},
         )
 

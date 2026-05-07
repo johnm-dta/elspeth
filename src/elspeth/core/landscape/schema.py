@@ -27,7 +27,27 @@ metadata = MetaData()
 # Explicit SQLite schema epoch for pre-1.0 compatibility policy.
 # Stored in PRAGMA user_version so future releases can distinguish
 # "intentionally old schema, needs migration" from "runtime-required field".
-SQLITE_SCHEMA_EPOCH = 2
+#
+# Epoch history (pre-1.0 policy — bumps require DB recreation):
+#   1 → initial
+#   2 → Phase 5 schema contracts + operation I/O hashes (pre-ADR-010)
+#   3 → ADR-010 §Decision 3 M3: runtime_val_manifest_json
+#        column on runs_table records the declaration + Tier-1 registries
+#        in effect at run start, enabling auditor queries like "which VAL
+#        contracts were in force during run X?"
+#   4 → validation_errors.row_id links quarantine errors to persisted rows,
+#        allowing explain() to resolve the exact validation failures for
+#        quarantined tokens even when the stored row payload is normalized
+#        before persistence.
+#   5 → batch/artifact audit links are mechanically run-scoped: batch_members
+#        carries run_id, token_outcomes.batch_id is scoped by run_id,
+#        batches.aggregation_state_id is scoped by run_id, and
+#        artifacts.produced_by_state_id is scoped by run_id.
+#   6 → batches.retry_of_batch_id records retry lineage so retry_batch()
+#        can deduplicate per failed batch rather than per aggregation node.
+#   7 → ADR-019 Stage 2/3: token_outcomes stores the two-axis terminal model
+#        (`outcome`, `path`, `completed`) instead of the old single-axis outcome + is_terminal.
+SQLITE_SCHEMA_EPOCH = 7
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -64,6 +84,14 @@ runs_table = Table(
     # Stores the run-level schema contract with field resolution and types
     Column("schema_contract_json", Text),  # Full contract with field resolution and types
     Column("schema_contract_hash", String(16)),  # version_hash for integrity verification
+    # Runtime-VAL manifest for audit trail (ADR-010 §Decision 3 M3).
+    # Captures the set of DeclarationContract and Tier-1 error classes
+    # registered at bootstrap, serialized as canonical JSON. Enables auditor
+    # queries like "which VAL contracts were in force during run X?" and
+    # regression detection across runs ("are TIER_1_ERRORS the same between
+    # runs X and Y?"). The column is nullable for resume paths and for
+    # tests that skip the full bootstrap path.
+    Column("runtime_val_manifest_json", Text),
 )
 
 # === Nodes (Plugin Instances) ===
@@ -76,6 +104,7 @@ nodes_table = Table(
     Column("plugin_name", String(128), nullable=False),
     Column("node_type", String(32), nullable=False),
     Column("plugin_version", String(32), nullable=False),
+    Column("source_file_hash", String(32), nullable=True),
     Column("determinism", String(32), nullable=False),  # deterministic, seeded, nondeterministic (from Determinism enum)
     Column("config_hash", String(64), nullable=False),
     Column("config_json", Text, nullable=False),
@@ -159,13 +188,20 @@ token_outcomes_table = Table(
     Column("token_id", String(64), nullable=False, index=True),
     # Composite FK: enforces token_id and run_id belong together (prevents cross-run contamination)
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
-    # Core outcome
-    Column("outcome", String(32), nullable=False),
-    Column("is_terminal", Integer, nullable=False),  # SQLite doesn't have Boolean, use Integer
+    # ADR-019 two-axis terminal model. ``completed`` mirrors the prior
+    # ``is_terminal`` column (sub-decision 3). ``outcome`` value space changed
+    # from the old single-axis outcome (12 values, non-NULL) to TerminalOutcome (3 values:
+    # success / failure / transient) with NULL when completed=False
+    # (only ``BUFFERED`` today). ``path`` is producer-declared per ADR-019
+    # § "Classification is producer-declared, not topology-derivable" and
+    # always populated, including ``path="buffered"`` for non-terminal rows.
+    Column("outcome", String(32), nullable=True),
+    Column("path", String(64), nullable=False),
+    Column("completed", Integer, nullable=False),
     Column("recorded_at", DateTime(timezone=True), nullable=False),
-    # Outcome-specific fields (nullable based on outcome type)
+    # Outcome-specific fields (nullable based on (outcome, path) pair)
     Column("sink_name", String(128)),
-    Column("batch_id", String(64), ForeignKey("batches.batch_id")),
+    Column("batch_id", String(64)),
     Column("fork_group_id", String(64)),
     Column("join_group_id", String(64)),
     Column("expand_group_id", String(64)),
@@ -174,6 +210,8 @@ token_outcomes_table = Table(
     Column("context_json", Text),
     # Branch contract for FORKED/EXPANDED outcomes (enables recovery validation)
     Column("expected_branches_json", Text),
+    # Composite FK: batch outcomes must point at a batch from the same run.
+    ForeignKeyConstraint(["batch_id", "run_id"], ["batches.batch_id", "batches.run_id"]),
 )
 
 # Partial unique index: exactly one terminal outcome per token
@@ -182,8 +220,8 @@ Index(
     "ix_token_outcomes_terminal_unique",
     token_outcomes_table.c.token_id,
     unique=True,
-    sqlite_where=(token_outcomes_table.c.is_terminal == 1),
-    postgresql_where=(token_outcomes_table.c.is_terminal == 1),
+    sqlite_where=(token_outcomes_table.c.completed == 1),
+    postgresql_where=(token_outcomes_table.c.completed == 1),
 )
 
 # === Token Parents (for multi-parent joins) ===
@@ -208,8 +246,8 @@ node_states_table = Table(
     "node_states",
     metadata,
     Column("state_id", String(64), primary_key=True),
-    Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False),
-    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),  # Added for composite FK
+    Column("token_id", String(64), nullable=False),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("node_id", String(64), nullable=False),
     Column("step_index", Integer, nullable=False),
     Column("attempt", Integer, nullable=False, default=0),
@@ -223,8 +261,12 @@ node_states_table = Table(
     Column("success_reason_json", Text),  # TransformSuccessReason for successful transforms
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
+    # Composite unique target for run-scoped FKs to node_states.
+    UniqueConstraint("state_id", "run_id"),
     UniqueConstraint("token_id", "node_id", "attempt"),
     UniqueConstraint("token_id", "step_index", "attempt"),
+    # Composite FK: enforces token_id and run_id belong together (prevents cross-run contamination)
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
@@ -315,7 +357,6 @@ artifacts_table = Table(
     Column(
         "produced_by_state_id",
         String(64),
-        ForeignKey("node_states.state_id"),
         nullable=False,
     ),
     Column("sink_node_id", String(64), nullable=False),
@@ -325,6 +366,8 @@ artifacts_table = Table(
     Column("size_bytes", Integer, nullable=False),
     Column("idempotency_key", String(256)),  # For retry deduplication
     Column("created_at", DateTime(timezone=True), nullable=False),
+    # Composite FK: producer node state must belong to the artifact run.
+    ForeignKeyConstraint(["produced_by_state_id", "run_id"], ["node_states.state_id", "node_states.run_id"]),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["sink_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
@@ -354,25 +397,37 @@ batches_table = Table(
     Column("batch_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("aggregation_node_id", String(64), nullable=False),
-    Column("aggregation_state_id", String(64), ForeignKey("node_states.state_id")),
+    Column("aggregation_state_id", String(64)),
+    Column("retry_of_batch_id", String(64)),
     Column("trigger_reason", String(128)),
     Column("trigger_type", String(32)),  # TriggerType enum value
     Column("attempt", Integer, nullable=False, default=0),
     Column("status", String(32), nullable=False),  # draft, executing, completed, failed
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
+    # Composite unique target for run-scoped batch FKs.
+    UniqueConstraint("batch_id", "run_id"),
+    UniqueConstraint("retry_of_batch_id"),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["aggregation_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+    # Composite FK: aggregation state must belong to the batch run.
+    ForeignKeyConstraint(["aggregation_state_id", "run_id"], ["node_states.state_id", "node_states.run_id"]),
+    # Retry lineage is same-run and one-to-one at the direct-retry level.
+    ForeignKeyConstraint(["retry_of_batch_id", "run_id"], ["batches.batch_id", "batches.run_id"]),
 )
 
 batch_members_table = Table(
     "batch_members",
     metadata,
-    Column("batch_id", String(64), ForeignKey("batches.batch_id"), nullable=False),
-    Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False),
+    Column("batch_id", String(64), nullable=False),
+    Column("run_id", String(64), nullable=False),
+    Column("token_id", String(64), nullable=False),
     Column("ordinal", Integer, nullable=False),
     PrimaryKeyConstraint("batch_id", "token_id"),  # Natural key: token belongs to batch once
     UniqueConstraint("batch_id", "ordinal"),  # Ordering uniqueness within a batch
+    # Composite FKs: member token and batch must belong to the same run.
+    ForeignKeyConstraint(["batch_id", "run_id"], ["batches.batch_id", "batches.run_id"]),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
 )
 
 batch_outputs_table = Table(
@@ -398,6 +453,10 @@ Index("ix_nodes_run_id", nodes_table.c.run_id)
 Index("ix_edges_run_id", edges_table.c.run_id)
 Index("ix_rows_run_id", rows_table.c.run_id)
 Index("ix_tokens_row_id", tokens_table.c.row_id)
+# Performance index for run-accounting API projections and session-list batch
+# reads. This is additive and intentionally does not advance the SQLite schema
+# epoch or participate in the required-schema compatibility gate.
+Index("ix_tokens_run_id", tokens_table.c.run_id)
 Index("ix_token_parents_parent", token_parents_table.c.parent_token_id)
 Index("ix_node_states_token", node_states_table.c.token_id)
 Index("ix_node_states_node", node_states_table.c.node_id)
@@ -414,6 +473,7 @@ validation_errors_table = Table(
     Column("error_id", String(32), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("node_id", String(64)),  # Source node where validation failed (nullable)
+    Column("row_id", String(64), ForeignKey("rows.row_id")),  # Persisted quarantine row when one exists
     Column("row_hash", String(64), nullable=False),
     Column("row_data_json", Text),  # Store the row for debugging
     Column("error", Text, nullable=False),
@@ -437,6 +497,7 @@ validation_errors_table = Table(
 
 Index("ix_validation_errors_run", validation_errors_table.c.run_id)
 Index("ix_validation_errors_node", validation_errors_table.c.node_id)
+Index("ix_validation_errors_run_row", validation_errors_table.c.run_id, validation_errors_table.c.row_id)
 
 # === Transform Errors (WP-11.99b: Transform Error Routing) ===
 
@@ -477,7 +538,7 @@ checkpoints_table = Table(
     metadata,
     Column("checkpoint_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False),
+    Column("token_id", String(64), nullable=False),
     Column("node_id", String(64), nullable=False),  # Part of composite FK to nodes
     Column("sequence_number", Integer, nullable=False),  # Monotonic progress marker
     Column("aggregation_state_json", Text),  # Serialized aggregation buffers (if any)
@@ -492,6 +553,8 @@ checkpoints_table = Table(
     # Version 3: Phase 2 traversal refactor checkpoint break
     # Version 4: Pending coalesce state persisted in checkpoints
     Column("format_version", Integer, nullable=True),  # Nullable — populated on new runs, NULL for checkpoints created before this column
+    # Composite FK: enforces token_id and run_id belong together (prevents cross-run contamination)
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(
         ["node_id", "run_id"],

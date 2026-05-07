@@ -1,5 +1,5 @@
 # tests/core/landscape/test_recorder_row_data.py
-"""Tests for LandscapeRecorder.get_row_data() with explicit states."""
+"""Tests for RecorderFactory query.get_row_data() with explicit states."""
 
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.payload_store import FilesystemPayloadStore
 
@@ -23,9 +23,9 @@ class TestGetRowDataExplicitStates:
         """Returns ROW_NOT_FOUND when row doesn't exist."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
-        result = recorder.get_row_data("nonexistent-row")
+        result = factory.query.get_row_data("nonexistent-row")
 
         assert isinstance(result, RowDataResult)
         assert result.state == RowDataState.ROW_NOT_FOUND
@@ -34,16 +34,16 @@ class TestGetRowDataExplicitStates:
     def test_never_stored(self, tmp_path: Path) -> None:
         """Returns NEVER_STORED when payload_store is not configured.
 
-        When LandscapeRecorder is created without a payload_store, rows are
+        When RecorderFactory is created without a payload_store, rows are
         created without payload storage (source_data_ref is None).
         """
         db = LandscapeDB.in_memory()
         # No payload_store configured - payloads won't be stored
-        recorder = LandscapeRecorder(db, payload_store=None)
+        factory = RecorderFactory(db, payload_store=None)
 
         # Create run and row - payload will not be stored
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -51,7 +51,7 @@ class TestGetRowDataExplicitStates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -59,7 +59,7 @@ class TestGetRowDataExplicitStates:
             # No payload_store configured - source_data_ref will be None
         )
 
-        result = recorder.get_row_data(row.row_id)
+        result = factory.query.get_row_data(row.row_id)
 
         assert result.state == RowDataState.NEVER_STORED
         assert result.data is None
@@ -69,10 +69,10 @@ class TestGetRowDataExplicitStates:
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
 
-        # Create recorder WITH payload store to store the row
-        recorder_with_store = LandscapeRecorder(db, payload_store=payload_store)
-        run = recorder_with_store.begin_run(config={}, canonical_version="v1")
-        source = recorder_with_store.register_node(
+        # Create factory WITH payload store to store the row
+        factory_with_store = RecorderFactory(db, payload_store=payload_store)
+        run = factory_with_store.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory_with_store.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -83,17 +83,17 @@ class TestGetRowDataExplicitStates:
 
         # create_row auto-stores payload via configured payload_store
         test_data = {"field": "value"}
-        row = recorder_with_store.create_row(
+        row = factory_with_store.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
         )
 
-        # Create new recorder WITHOUT payload store, using same db
-        recorder_no_store = LandscapeRecorder(db, payload_store=None)
+        # Create new factory WITHOUT payload store, using same db
+        factory_no_store = RecorderFactory(db, payload_store=None)
 
-        result = recorder_no_store.get_row_data(row.row_id)
+        result = factory_no_store.query.get_row_data(row.row_id)
 
         assert result.state == RowDataState.STORE_NOT_CONFIGURED
         assert result.data is None
@@ -102,10 +102,10 @@ class TestGetRowDataExplicitStates:
         """Returns PURGED when payload has been deleted (PayloadNotFoundError)."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -116,7 +116,7 @@ class TestGetRowDataExplicitStates:
 
         # create_row auto-stores payload via configured payload_store
         test_data = {"field": "value"}
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -126,7 +126,7 @@ class TestGetRowDataExplicitStates:
         # Delete the payload (simulating retention policy purge)
         payload_store.delete(row.source_data_ref)
 
-        result = recorder.get_row_data(row.row_id)
+        result = factory.query.get_row_data(row.row_id)
 
         assert result.state == RowDataState.PURGED
         assert result.data is None
@@ -135,10 +135,10 @@ class TestGetRowDataExplicitStates:
         """Returns AVAILABLE with data when payload exists."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -149,14 +149,14 @@ class TestGetRowDataExplicitStates:
 
         # create_row auto-stores payload via configured payload_store
         test_data = {"field": "value", "number": 42}
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
         )
 
-        result = recorder.get_row_data(row.row_id)
+        result = factory.query.get_row_data(row.row_id)
 
         assert result.state == RowDataState.AVAILABLE
         assert result.data == test_data
@@ -181,10 +181,10 @@ class TestGetRowDataTier1Corruption:
 
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -195,7 +195,7 @@ class TestGetRowDataTier1Corruption:
 
         # create_row auto-stores payload via configured payload_store
         test_data = {"field": "value"}
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -213,7 +213,7 @@ class TestGetRowDataTier1Corruption:
         import pytest
 
         with pytest.raises(AuditIntegrityError, match="Payload integrity check failed"):
-            recorder.get_row_data(row.row_id)
+            factory.query.get_row_data(row.row_id)
 
     def test_invalid_json_propagates(self, tmp_path: Path, payload_store) -> None:
         """Invalid JSON in payload must propagate as AuditIntegrityError.
@@ -228,10 +228,10 @@ class TestGetRowDataTier1Corruption:
 
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -241,7 +241,7 @@ class TestGetRowDataTier1Corruption:
         )
 
         # create_row auto-stores valid canonical JSON via payload_store
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -260,7 +260,7 @@ class TestGetRowDataTier1Corruption:
 
         # get_row_data must raise AuditIntegrityError with row context
         with pytest.raises(AuditIntegrityError, match="Corrupt payload"):
-            recorder.get_row_data(row.row_id)
+            factory.query.get_row_data(row.row_id)
 
     def test_non_object_json_raises_audit_integrity_error(self, tmp_path: Path, payload_store) -> None:
         """JSON payloads must decode to objects for AVAILABLE row data."""
@@ -268,10 +268,10 @@ class TestGetRowDataTier1Corruption:
 
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-        recorder = LandscapeRecorder(db, payload_store=payload_store)
+        factory = RecorderFactory(db, payload_store=payload_store)
 
-        run = recorder.begin_run(config={}, canonical_version="v1")
-        source = recorder.register_node(
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="csv_source",
             node_type=NodeType.SOURCE,
@@ -281,7 +281,7 @@ class TestGetRowDataTier1Corruption:
         )
 
         # create_row auto-stores valid canonical JSON via payload_store
-        row = recorder.create_row(
+        row = factory.data_flow.create_row(
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
@@ -299,4 +299,4 @@ class TestGetRowDataTier1Corruption:
             conn.commit()
 
         with pytest.raises(AuditIntegrityError, match="expected JSON object"):
-            recorder.get_row_data(row.row_id)
+            factory.query.get_row_data(row.row_id)

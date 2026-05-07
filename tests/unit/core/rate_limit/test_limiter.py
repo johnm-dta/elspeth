@@ -679,3 +679,70 @@ class TestAcquireTimeoutValidation:
 
         with RateLimiter(name="pos_test", requests_per_minute=60) as limiter:
             limiter.acquire(timeout=1.0)
+
+
+class TestRateLimiterWeightValidation:
+    """Weight parameter must be validated before reaching pyrate-limiter."""
+
+    @pytest.mark.parametrize("bad_weight", [0, -1, -100], ids=["zero", "neg1", "neg100"])
+    def test_acquire_rejects_non_positive_weight(self, bad_weight: int) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        with (
+            RateLimiter(name="wv_test", requests_per_minute=60) as limiter,
+            pytest.raises(ValueError, match="weight must be positive"),
+        ):
+            limiter.acquire(weight=bad_weight)
+
+    @pytest.mark.parametrize("bad_weight", [0, -1], ids=["zero", "neg1"])
+    def test_try_acquire_rejects_non_positive_weight(self, bad_weight: int) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        with (
+            RateLimiter(name="wv_try_test", requests_per_minute=60) as limiter,
+            pytest.raises(ValueError, match="weight must be positive"),
+        ):
+            limiter.try_acquire(weight=bad_weight)
+
+    def test_acquire_rejects_bool_weight(self) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        with (
+            RateLimiter(name="wv_bool_test", requests_per_minute=60) as limiter,
+            pytest.raises(TypeError, match="weight must be int"),
+        ):
+            limiter.acquire(weight=True)
+
+    def test_valid_weight_accepted(self) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        with RateLimiter(name="wv_ok_test", requests_per_minute=60) as limiter:
+            limiter.acquire(weight=1)
+            limiter.acquire(weight=5)
+
+
+class TestRateLimiterLifecycleGuard:
+    """RateLimiter must reject calls after close()."""
+
+    def test_acquire_after_close_raises(self) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        limiter = RateLimiter(name="lc_acq_test", requests_per_minute=60)
+        limiter.close()
+        with pytest.raises(RuntimeError, match="has been closed"):
+            limiter.acquire()
+
+    def test_try_acquire_after_close_raises(self) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        limiter = RateLimiter(name="lc_try_test", requests_per_minute=60)
+        limiter.close()
+        with pytest.raises(RuntimeError, match="has been closed"):
+            limiter.try_acquire()
+
+    def test_double_close_is_harmless(self) -> None:
+        from elspeth.core.rate_limit import RateLimiter
+
+        limiter = RateLimiter(name="lc_dbl_test", requests_per_minute=60)
+        limiter.close()
+        limiter.close()  # Should not raise

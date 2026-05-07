@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.plugins.sinks.database_sink import DatabaseSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_operation_context
 from tests.strategies.settings import SLOW_SETTINGS
 
@@ -49,12 +50,14 @@ class TestDatabaseSinkProperties:
             db_path = Path(tmp_dir) / f"{db_id}.db"
             url = f"sqlite:///{db_path}"
 
-            sink = DatabaseSink(
-                {
-                    "url": url,
-                    "table": table_name,
-                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str", "score: float?"]},
-                }
+            sink = inject_write_failure(
+                DatabaseSink(
+                    {
+                        "url": url,
+                        "table": table_name,
+                        "schema": {"mode": "fixed", "fields": ["id: int", "name: str", "score: float?"]},
+                    }
+                )
             )
             ctx = make_operation_context(
                 node_id="sink",
@@ -76,8 +79,8 @@ class TestDatabaseSinkProperties:
 
             engine = create_engine(url)
             with engine.connect() as conn:
-                result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
-                count = result.scalar_one()
+                db_result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
+                count = db_result.scalar_one()
             engine.dispose()
 
             assert count == len(rows)

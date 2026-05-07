@@ -1,0 +1,1773 @@
+{
+  "edges": [
+    {
+      "conditional": false,
+      "from": ".",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "cli.py",
+          "line": 499
+        },
+        {
+          "file": "cli.py",
+          "line": 1256
+        },
+        {
+          "file": "cli.py",
+          "line": 1257
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 7
+    },
+    {
+      "conditional": false,
+      "from": ".",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "cli.py",
+          "line": 1568
+        },
+        {
+          "file": "cli.py",
+          "line": 1851
+        }
+      ],
+      "to": "plugins/sources",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": ".",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "cli.py",
+          "line": 876
+        }
+      ],
+      "to": "telemetry",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": true,
+      "from": ".",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "cli.py",
+          "line": 806
+        }
+      ],
+      "to": "tui",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "composer_mcp",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "composer_mcp/server.py",
+          "line": 524
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "composer_mcp",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "composer_mcp/server.py",
+          "line": 27
+        }
+      ],
+      "to": "web/catalog",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "composer_mcp",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "composer_mcp/server.py",
+          "line": 28
+        },
+        {
+          "file": "composer_mcp/server.py",
+          "line": 29
+        },
+        {
+          "file": "composer_mcp/server.py",
+          "line": 29
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 12
+    },
+    {
+      "conditional": false,
+      "from": "mcp",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "mcp/analyzer.py",
+          "line": 14
+        },
+        {
+          "file": "mcp/analyzer.py",
+          "line": 14
+        },
+        {
+          "file": "mcp/analyzer.py",
+          "line": 14
+        }
+      ],
+      "to": "mcp/analyzers",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "mcp/analyzers",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "mcp/analyzers/contracts.py",
+          "line": 12
+        },
+        {
+          "file": "mcp/analyzers/contracts.py",
+          "line": 12
+        },
+        {
+          "file": "mcp/analyzers/contracts.py",
+          "line": 12
+        }
+      ],
+      "to": "mcp",
+      "type_checking_only": false,
+      "weight": 29
+    },
+    {
+      "conditional": false,
+      "from": "plugins/infrastructure",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/infrastructure/probe_factory.py",
+          "line": 12
+        }
+      ],
+      "to": "plugins/infrastructure/clients/retrieval",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "plugins/infrastructure/clients/retrieval",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/infrastructure/clients/retrieval/azure_search.py",
+          "line": 21
+        },
+        {
+          "file": "plugins/infrastructure/clients/retrieval/azure_search.py",
+          "line": 120
+        },
+        {
+          "file": "plugins/infrastructure/clients/retrieval/azure_search.py",
+          "line": 205
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "plugins/sinks",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/sinks/azure_blob_sink.py",
+          "line": 33
+        },
+        {
+          "file": "plugins/sinks/azure_blob_sink.py",
+          "line": 34
+        },
+        {
+          "file": "plugins/sinks/azure_blob_sink.py",
+          "line": 35
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 45
+    },
+    {
+      "conditional": false,
+      "from": "plugins/sinks",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/sinks/dataverse.py",
+          "line": 30
+        },
+        {
+          "file": "plugins/sinks/dataverse.py",
+          "line": 30
+        },
+        {
+          "file": "plugins/sinks/dataverse.py",
+          "line": 30
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "plugins/sinks",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/sinks/chroma_sink.py",
+          "line": 32
+        }
+      ],
+      "to": "plugins/infrastructure/clients/retrieval",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "plugins/sources",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/sources/azure_blob_source.py",
+          "line": 28
+        },
+        {
+          "file": "plugins/sources/azure_blob_source.py",
+          "line": 29
+        },
+        {
+          "file": "plugins/sources/azure_blob_source.py",
+          "line": 30
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 17
+    },
+    {
+      "conditional": false,
+      "from": "plugins/sources",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/sources/dataverse.py",
+          "line": 27
+        },
+        {
+          "file": "plugins/sources/dataverse.py",
+          "line": 27
+        },
+        {
+          "file": "plugins/sources/dataverse.py",
+          "line": 27
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/batch_replicate.py",
+          "line": 22
+        },
+        {
+          "file": "plugins/transforms/batch_replicate.py",
+          "line": 23
+        },
+        {
+          "file": "plugins/transforms/batch_replicate.py",
+          "line": 23
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 40
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/web_scrape.py",
+          "line": 41
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/azure",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 30
+        },
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 32
+        },
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 34
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/azure",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 31
+        },
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 31
+        }
+      ],
+      "to": "plugins/infrastructure/batching",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/azure",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 458
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/azure",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 33
+        },
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 33
+        }
+      ],
+      "to": "plugins/infrastructure/pooling",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/azure",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 37
+        },
+        {
+          "file": "plugins/transforms/azure/base.py",
+          "line": 38
+        }
+      ],
+      "to": "plugins/transforms",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/__init__.py",
+          "line": 229
+        },
+        {
+          "file": "plugins/transforms/llm/__init__.py",
+          "line": 294
+        },
+        {
+          "file": "plugins/transforms/llm/azure_batch.py",
+          "line": 46
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 17
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 40
+        },
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 40
+        }
+      ],
+      "to": "plugins/infrastructure/batching",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/openrouter_batch.py",
+          "line": 38
+        },
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 41
+        },
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 41
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/base.py",
+          "line": 15
+        },
+        {
+          "file": "plugins/transforms/llm/openrouter_batch.py",
+          "line": 39
+        },
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 42
+        }
+      ],
+      "to": "plugins/infrastructure/pooling",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 64
+        },
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 64
+        },
+        {
+          "file": "plugins/transforms/llm/transform.py",
+          "line": 64
+        }
+      ],
+      "to": "plugins/transforms/llm/providers",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm/providers",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/providers/azure.py",
+          "line": 22
+        },
+        {
+          "file": "plugins/transforms/llm/providers/azure.py",
+          "line": 22
+        },
+        {
+          "file": "plugins/transforms/llm/providers/azure.py",
+          "line": 22
+        }
+      ],
+      "to": "plugins/infrastructure/clients",
+      "type_checking_only": false,
+      "weight": 12
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/llm/providers",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/llm/providers/azure.py",
+          "line": 23
+        },
+        {
+          "file": "plugins/transforms/llm/providers/azure.py",
+          "line": 24
+        },
+        {
+          "file": "plugins/transforms/llm/providers/azure.py",
+          "line": 24
+        }
+      ],
+      "to": "plugins/transforms/llm",
+      "type_checking_only": false,
+      "weight": 10
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/rag",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/rag/config.py",
+          "line": 13
+        },
+        {
+          "file": "plugins/transforms/rag/query.py",
+          "line": 25
+        },
+        {
+          "file": "plugins/transforms/rag/query.py",
+          "line": 25
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "plugins/transforms/rag",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "plugins/transforms/rag/config.py",
+          "line": 16
+        },
+        {
+          "file": "plugins/transforms/rag/config.py",
+          "line": 29
+        },
+        {
+          "file": "plugins/transforms/rag/config.py",
+          "line": 29
+        }
+      ],
+      "to": "plugins/infrastructure/clients/retrieval",
+      "type_checking_only": false,
+      "weight": 9
+    },
+    {
+      "conditional": false,
+      "from": "telemetry",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "telemetry/__init__.py",
+          "line": 54
+        },
+        {
+          "file": "telemetry/factory.py",
+          "line": 28
+        }
+      ],
+      "to": "telemetry/exporters",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "telemetry/exporters",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "telemetry/exporters/__init__.py",
+          "line": 20
+        },
+        {
+          "file": "telemetry/exporters/__init__.py",
+          "line": 25
+        },
+        {
+          "file": "telemetry/exporters/azure_monitor.py",
+          "line": 18
+        }
+      ],
+      "to": "telemetry",
+      "type_checking_only": false,
+      "weight": 18
+    },
+    {
+      "conditional": false,
+      "from": "testing",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "testing/__init__.py",
+          "line": 67
+        },
+        {
+          "file": "testing/__init__.py",
+          "line": 235
+        },
+        {
+          "file": "testing/__init__.py",
+          "line": 267
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "tui",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "tui/explain_app.py",
+          "line": 14
+        },
+        {
+          "file": "tui/explain_app.py",
+          "line": 14
+        },
+        {
+          "file": "tui/explain_app.py",
+          "line": 14
+        }
+      ],
+      "to": "tui/screens",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "tui/screens",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "tui/screens/explain_screen.py",
+          "line": 15
+        },
+        {
+          "file": "tui/screens/explain_screen.py",
+          "line": 15
+        }
+      ],
+      "to": "tui",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "tui/screens",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "tui/screens/explain_screen.py",
+          "line": 16
+        },
+        {
+          "file": "tui/screens/explain_screen.py",
+          "line": 17
+        }
+      ],
+      "to": "tui/widgets",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "tui/widgets",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "tui/widgets/lineage_tree.py",
+          "line": 6
+        },
+        {
+          "file": "tui/widgets/lineage_tree.py",
+          "line": 6
+        },
+        {
+          "file": "tui/widgets/node_detail.py",
+          "line": 8
+        }
+      ],
+      "to": "tui",
+      "type_checking_only": false,
+      "weight": 7
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/dependencies.py",
+          "line": 48
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 27
+        },
+        {
+          "file": "web/app.py",
+          "line": 28
+        },
+        {
+          "file": "web/app.py",
+          "line": 29
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 31
+        },
+        {
+          "file": "web/app.py",
+          "line": 32
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 33
+        },
+        {
+          "file": "web/dependencies.py",
+          "line": 19
+        },
+        {
+          "file": "web/dependencies.py",
+          "line": 49
+        }
+      ],
+      "to": "web/catalog",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 34
+        },
+        {
+          "file": "web/app.py",
+          "line": 35
+        },
+        {
+          "file": "web/app.py",
+          "line": 36
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 39
+        },
+        {
+          "file": "web/app.py",
+          "line": 40
+        },
+        {
+          "file": "web/app.py",
+          "line": 41
+        }
+      ],
+      "to": "web/execution",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 42
+        },
+        {
+          "file": "web/app.py",
+          "line": 43
+        }
+      ],
+      "to": "web/middleware",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 44
+        },
+        {
+          "file": "web/app.py",
+          "line": 45
+        },
+        {
+          "file": "web/app.py",
+          "line": 46
+        }
+      ],
+      "to": "web/secrets",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/app.py",
+          "line": 48
+        },
+        {
+          "file": "web/app.py",
+          "line": 49
+        },
+        {
+          "file": "web/app.py",
+          "line": 50
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/auth",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/auth/local.py",
+          "line": 17
+        },
+        {
+          "file": "web/auth/models.py",
+          "line": 14
+        },
+        {
+          "file": "web/auth/oidc.py",
+          "line": 20
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web/auth",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/auth/routes.py",
+          "line": 21
+        }
+      ],
+      "to": "web/middleware",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/blobs",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/blobs/service.py",
+          "line": 19
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/blobs",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/blobs/routes.py",
+          "line": 17
+        },
+        {
+          "file": "web/blobs/routes.py",
+          "line": 18
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/blobs",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/blobs/service.py",
+          "line": 41
+        },
+        {
+          "file": "web/blobs/service.py",
+          "line": 41
+        },
+        {
+          "file": "web/blobs/service.py",
+          "line": 41
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "web/catalog",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/catalog/service.py",
+          "line": 8
+        },
+        {
+          "file": "web/catalog/service.py",
+          "line": 9
+        },
+        {
+          "file": "web/catalog/service.py",
+          "line": 9
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/_semantic_validator.py",
+          "line": 47
+        },
+        {
+          "file": "web/composer/_semantic_validator.py",
+          "line": 52
+        },
+        {
+          "file": "web/composer/_semantic_validator.py",
+          "line": 53
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 22
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/service.py",
+          "line": 29
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 47
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 47
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/tools.py",
+          "line": 30
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 31
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 31
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/prompts.py",
+          "line": 17
+        },
+        {
+          "file": "web/composer/service.py",
+          "line": 30
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 32
+        }
+      ],
+      "to": "web/catalog",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/prompts.py",
+          "line": 19
+        },
+        {
+          "file": "web/composer/prompts.py",
+          "line": 19
+        }
+      ],
+      "to": "web/composer/skills",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/composer",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/composer/service.py",
+          "line": 49
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 48
+        },
+        {
+          "file": "web/composer/tools.py",
+          "line": 48
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/service.py",
+          "line": 30
+        },
+        {
+          "file": "web/execution/service.py",
+          "line": 805
+        },
+        {
+          "file": "web/execution/validation.py",
+          "line": 24
+        }
+      ],
+      "to": ".",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/_semantic_helpers.py",
+          "line": 66
+        },
+        {
+          "file": "web/execution/_semantic_helpers.py",
+          "line": 67
+        },
+        {
+          "file": "web/execution/validation.py",
+          "line": 30
+        }
+      ],
+      "to": "plugins/infrastructure",
+      "type_checking_only": false,
+      "weight": 4
+    },
+    {
+      "conditional": true,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/service.py",
+          "line": 781
+        }
+      ],
+      "to": "telemetry",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/diagnostics.py",
+          "line": 25
+        },
+        {
+          "file": "web/execution/discard_summary.py",
+          "line": 17
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 26
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 15
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/protocol.py",
+          "line": 8
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 27
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 28
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/routes.py",
+          "line": 30
+        },
+        {
+          "file": "web/execution/service.py",
+          "line": 45
+        },
+        {
+          "file": "web/execution/service.py",
+          "line": 45
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 5
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/_semantic_helpers.py",
+          "line": 25
+        },
+        {
+          "file": "web/execution/errors.py",
+          "line": 16
+        },
+        {
+          "file": "web/execution/protocol.py",
+          "line": 9
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 9
+    },
+    {
+      "conditional": false,
+      "from": "web/execution",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/execution/diagnostics.py",
+          "line": 35
+        },
+        {
+          "file": "web/execution/routes.py",
+          "line": 51
+        },
+        {
+          "file": "web/execution/schemas.py",
+          "line": 16
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 7
+    },
+    {
+      "conditional": false,
+      "from": "web/secrets",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/secrets/routes.py",
+          "line": 18
+        },
+        {
+          "file": "web/secrets/routes.py",
+          "line": 21
+        },
+        {
+          "file": "web/secrets/schemas.py",
+          "line": 22
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 6
+    },
+    {
+      "conditional": false,
+      "from": "web/secrets",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/secrets/routes.py",
+          "line": 19
+        },
+        {
+          "file": "web/secrets/routes.py",
+          "line": 20
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/secrets",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/secrets/user_store.py",
+          "line": 32
+        }
+      ],
+      "to": "web/sessions",
+      "type_checking_only": false,
+      "weight": 1
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 20
+        },
+        {
+          "file": "web/sessions/schemas.py",
+          "line": 25
+        },
+        {
+          "file": "web/sessions/service.py",
+          "line": 23
+        }
+      ],
+      "to": "web",
+      "type_checking_only": false,
+      "weight": 3
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 21
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 22
+        }
+      ],
+      "to": "web/auth",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 23
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 23
+        }
+      ],
+      "to": "web/blobs",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/converters.py",
+          "line": 15
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 24
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 24
+        }
+      ],
+      "to": "web/composer",
+      "type_checking_only": false,
+      "weight": 15
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 1224
+        },
+        {
+          "file": "web/sessions/schemas.py",
+          "line": 23
+        }
+      ],
+      "to": "web/execution",
+      "type_checking_only": false,
+      "weight": 2
+    },
+    {
+      "conditional": false,
+      "from": "web/sessions",
+      "reexport": false,
+      "sample_sites": [
+        {
+          "file": "web/sessions/routes.py",
+          "line": 39
+        },
+        {
+          "file": "web/sessions/routes.py",
+          "line": 39
+        }
+      ],
+      "to": "web/middleware",
+      "type_checking_only": false,
+      "weight": 2
+    }
+  ],
+  "generated_at": "2026-04-28T16:32:38Z",
+  "nodes": [
+    {
+      "file_count": 4,
+      "id": ".",
+      "layer": "L3/application",
+      "loc": 2958
+    },
+    {
+      "file_count": 3,
+      "id": "composer_mcp",
+      "layer": "L3/application",
+      "loc": 824
+    },
+    {
+      "file_count": 4,
+      "id": "mcp",
+      "layer": "L3/application",
+      "loc": 1661
+    },
+    {
+      "file_count": 5,
+      "id": "mcp/analyzers",
+      "layer": "L3/application",
+      "loc": 2453
+    },
+    {
+      "file_count": 1,
+      "id": "plugins",
+      "layer": "L3/application",
+      "loc": 8
+    },
+    {
+      "file_count": 16,
+      "id": "plugins/infrastructure",
+      "layer": "L3/application",
+      "loc": 3804
+    },
+    {
+      "file_count": 4,
+      "id": "plugins/infrastructure/batching",
+      "layer": "L3/application",
+      "loc": 1024
+    },
+    {
+      "file_count": 9,
+      "id": "plugins/infrastructure/clients",
+      "layer": "L3/application",
+      "loc": 3790
+    },
+    {
+      "file_count": 6,
+      "id": "plugins/infrastructure/clients/retrieval",
+      "layer": "L3/application",
+      "loc": 1031
+    },
+    {
+      "file_count": 6,
+      "id": "plugins/infrastructure/pooling",
+      "layer": "L3/application",
+      "loc": 1133
+    },
+    {
+      "file_count": 7,
+      "id": "plugins/sinks",
+      "layer": "L3/application",
+      "loc": 3515
+    },
+    {
+      "file_count": 8,
+      "id": "plugins/sources",
+      "layer": "L3/application",
+      "loc": 3519
+    },
+    {
+      "file_count": 17,
+      "id": "plugins/transforms",
+      "layer": "L3/application",
+      "loc": 4125
+    },
+    {
+      "file_count": 5,
+      "id": "plugins/transforms/azure",
+      "layer": "L3/application",
+      "loc": 1125
+    },
+    {
+      "file_count": 11,
+      "id": "plugins/transforms/llm",
+      "layer": "L3/application",
+      "loc": 5740
+    },
+    {
+      "file_count": 3,
+      "id": "plugins/transforms/llm/providers",
+      "layer": "L3/application",
+      "loc": 663
+    },
+    {
+      "file_count": 5,
+      "id": "plugins/transforms/rag",
+      "layer": "L3/application",
+      "loc": 922
+    },
+    {
+      "file_count": 9,
+      "id": "telemetry",
+      "layer": "L3/application",
+      "loc": 1497
+    },
+    {
+      "file_count": 5,
+      "id": "telemetry/exporters",
+      "layer": "L3/application",
+      "loc": 1387
+    },
+    {
+      "file_count": 2,
+      "id": "testing",
+      "layer": "L3/application",
+      "loc": 877
+    },
+    {
+      "file_count": 4,
+      "id": "tui",
+      "layer": "L3/application",
+      "loc": 307
+    },
+    {
+      "file_count": 2,
+      "id": "tui/screens",
+      "layer": "L3/application",
+      "loc": 352
+    },
+    {
+      "file_count": 3,
+      "id": "tui/widgets",
+      "layer": "L3/application",
+      "loc": 516
+    },
+    {
+      "file_count": 7,
+      "id": "web",
+      "layer": "L3/application",
+      "loc": 1072
+    },
+    {
+      "file_count": 8,
+      "id": "web/auth",
+      "layer": "L3/application",
+      "loc": 1224
+    },
+    {
+      "file_count": 6,
+      "id": "web/blobs",
+      "layer": "L3/application",
+      "loc": 1952
+    },
+    {
+      "file_count": 5,
+      "id": "web/catalog",
+      "layer": "L3/application",
+      "loc": 407
+    },
+    {
+      "file_count": 11,
+      "id": "web/composer",
+      "layer": "L3/application",
+      "loc": 8189
+    },
+    {
+      "file_count": 1,
+      "id": "web/composer/skills",
+      "layer": "L3/application",
+      "loc": 85
+    },
+    {
+      "file_count": 11,
+      "id": "web/execution",
+      "layer": "L3/application",
+      "loc": 3748
+    },
+    {
+      "file_count": 3,
+      "id": "web/middleware",
+      "layer": "L3/application",
+      "loc": 257
+    },
+    {
+      "file_count": 6,
+      "id": "web/secrets",
+      "layer": "L3/application",
+      "loc": 1011
+    },
+    {
+      "file_count": 9,
+      "id": "web/sessions",
+      "layer": "L3/application",
+      "loc": 4080
+    }
+  ],
+  "schema_version": "1.0",
+  "scope": {
+    "collapsed_to_subsystem": true,
+    "layers_included": [
+      "L3/application"
+    ],
+    "root": "src/elspeth"
+  },
+  "stats": {
+    "conditional_edges": 2,
+    "largest_scc_size": 7,
+    "reexport_edges": 0,
+    "scc_count": 5,
+    "total_edges": 77,
+    "total_nodes": 33,
+    "type_checking_edges": 0
+  },
+  "strongly_connected_components": [
+    [
+      "mcp",
+      "mcp/analyzers"
+    ],
+    [
+      "plugins/transforms/llm",
+      "plugins/transforms/llm/providers"
+    ],
+    [
+      "telemetry",
+      "telemetry/exporters"
+    ],
+    [
+      "tui",
+      "tui/screens",
+      "tui/widgets"
+    ],
+    [
+      "web",
+      "web/auth",
+      "web/blobs",
+      "web/composer",
+      "web/execution",
+      "web/secrets",
+      "web/sessions"
+    ]
+  ],
+  "tool_version": "sha256:c9cef30d1f6a"
+}

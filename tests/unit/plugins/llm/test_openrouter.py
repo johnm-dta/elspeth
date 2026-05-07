@@ -17,11 +17,11 @@ from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.engine.batch_adapter import ExceptionResult
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
-from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig
+from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig, OpenRouterLLMProvider
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row, make_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 from .conftest import chaosllm_openrouter_http_responses, chaosllm_openrouter_httpx_response
 
@@ -268,8 +268,8 @@ class TestLLMTransformOpenRouterInit:
     def test_process_raises_not_implemented(self) -> None:
         """process() raises NotImplementedError directing to accept()."""
         transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
-        recorder = make_recorder()
-        ctx = make_context(run_id="test-run", landscape=recorder)
+        factory = make_factory()
+        ctx = make_context(run_id="test-run", landscape=factory.plugin_audit_writer())
 
         with pytest.raises(NotImplementedError, match="row-level pipelining"):
             transform.process(make_pipeline_row({"text": "hello"}), ctx)
@@ -288,6 +288,22 @@ class TestLLMTransformOpenRouterInit:
         assert "llm_response" in transform.declared_output_fields
         assert "llm_response_model" in transform.declared_output_fields
 
+    def test_output_semantics_declares_single_query_response_field_as_string(self) -> None:
+        """Single-query raw LLM output is a string semantic value."""
+        from elspeth.contracts.plugin_semantics import ContentKind, SemanticValueType, TextFraming
+
+        transform = LLMTransform(_openrouter_config(response_field="analysis", template="{{ row.text }}"))
+
+        declaration = transform.output_semantics()
+
+        assert len(declaration.fields) == 1
+        facts = declaration.fields[0]
+        assert facts.field_name == "analysis"
+        assert facts.value_type is SemanticValueType.STR
+        assert facts.content_kind is ContentKind.UNKNOWN
+        assert facts.text_framing is TextFraming.UNKNOWN
+        assert facts.configured_by == ("response_field", "queries")
+
 
 class TestLLMTransformOpenRouterPipelining:
     """Tests for LLMTransform (OpenRouter) with row-level pipelining.
@@ -297,11 +313,11 @@ class TestLLMTransformOpenRouterPipelining:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create a mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create a mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
@@ -309,21 +325,21 @@ class TestLLMTransformOpenRouterPipelining:
         return CollectorOutputPort()
 
     @pytest.fixture
-    def ctx(self, mock_recorder: Mock) -> PluginContext:
+    def ctx(self, mock_factory: Mock) -> PluginContext:
         """Create plugin context with landscape, state_id, and token."""
         token = make_token("row-1")
         return make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
     @pytest.fixture
-    def transform(self, collector: CollectorOutputPort, mock_recorder: Mock) -> Generator[LLMTransform, None, None]:
+    def transform(self, collector: CollectorOutputPort, mock_factory: Mock) -> Generator[LLMTransform, None, None]:
         """Create and initialize LLMTransform (OpenRouter) with pipelining."""
         t = LLMTransform(_openrouter_config())
-        # Initialize with recorder reference
-        init_ctx = make_context(landscape=mock_recorder)
+        # Initialize with factory reference
+        init_ctx = make_context(landscape=mock_factory)
         t.on_start(init_ctx)
         # Connect output port
         t.connect_output(collector, max_pending=10)
@@ -559,7 +575,7 @@ class TestLLMTransformOpenRouterPipelining:
         assert result.exception.retryable is True
 
     def test_missing_state_id_propagates_exception(
-        self, mock_recorder: Mock, transform: LLMTransform, collector: CollectorOutputPort
+        self, mock_factory: Mock, transform: LLMTransform, collector: CollectorOutputPort
     ) -> None:
         """Missing state_id causes exception propagation, not error result.
 
@@ -576,7 +592,7 @@ class TestLLMTransformOpenRouterPipelining:
         ctx = PluginContext(
             run_id="test-run",
             config={},
-            landscape=mock_recorder,
+            landscape=mock_factory,
             state_id=None,  # Missing state_id - calling code bug
             token=token,
         )
@@ -592,7 +608,7 @@ class TestLLMTransformOpenRouterPipelining:
         assert isinstance(result.exception, RuntimeError)
         assert "state_id" in str(result.exception)
 
-    def test_system_prompt_included_in_request(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_system_prompt_included_in_request(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """System prompt is included when configured."""
         transform = LLMTransform(
             _openrouter_config(
@@ -600,7 +616,7 @@ class TestLLMTransformOpenRouterPipelining:
                 system_prompt="You are a helpful assistant.",
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -608,7 +624,7 @@ class TestLLMTransformOpenRouterPipelining:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -650,7 +666,7 @@ class TestLLMTransformOpenRouterPipelining:
             assert len(messages) == 1
             assert messages[0]["role"] == "user"
 
-    def test_custom_response_field(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_custom_response_field(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Custom response_field name is used."""
         transform = LLMTransform(
             _openrouter_config(
@@ -659,7 +675,7 @@ class TestLLMTransformOpenRouterPipelining:
                 response_field="analysis",
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -667,7 +683,7 @@ class TestLLMTransformOpenRouterPipelining:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -748,10 +764,10 @@ class TestLLMTransformOpenRouterPipelining:
         with pytest.raises(RuntimeError, match="connect_output"):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
 
-    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_recorder: Mock) -> None:
+    def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_factory: Mock) -> None:
         """connect_output() raises if called more than once."""
         transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -771,18 +787,18 @@ class TestLLMTransformOpenRouterIntegration:
     """Integration-style tests for edge cases with OpenRouter provider."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create a mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create a mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_complex_template_with_multiple_variables(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_complex_template_with_multiple_variables(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Complex template with multiple variables works correctly."""
         transform = LLMTransform(
             _openrouter_config(
@@ -797,7 +813,7 @@ class TestLLMTransformOpenRouterIntegration:
                 """,
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -805,7 +821,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -831,10 +847,10 @@ class TestLLMTransformOpenRouterIntegration:
         finally:
             transform.close()
 
-    def test_empty_usage_handled_gracefully(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_empty_usage_handled_gracefully(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Empty usage dict from API is handled."""
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -842,7 +858,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         response = _create_mock_response(
@@ -870,7 +886,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.row is not None
         assert result.row["llm_response_usage"] == {}
 
-    def test_connection_error_raises_network_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_connection_error_raises_network_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Network connection error raises NetworkError for engine RetryManager.
 
         Regression test for P2-2026-01-31-openrouter-retry-semantics.
@@ -878,7 +894,7 @@ class TestLLMTransformOpenRouterIntegration:
         from elspeth.plugins.infrastructure.clients.llm import NetworkError
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -886,7 +902,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -902,7 +918,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert isinstance(result.exception, NetworkError)
         assert result.exception.retryable is True
 
-    def test_timeout_stored_in_config(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_timeout_stored_in_config(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Custom timeout_seconds is stored in _config for provider creation."""
         transform = LLMTransform(
             _openrouter_config(
@@ -916,7 +932,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert isinstance(transform._config, OpenRouterConfig)
         assert transform._config.timeout_seconds == 120.0
 
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -924,7 +940,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -940,14 +956,14 @@ class TestLLMTransformOpenRouterIntegration:
         assert isinstance(result, TransformResult)
         assert result.status == "success"
 
-    def test_empty_choices_emits_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_empty_choices_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Empty choices array emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         empty choices, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -955,7 +971,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         response = _create_mock_response(
@@ -985,7 +1001,7 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason["reason"] == "llm_call_failed"
 
     def test_null_content_from_content_filtering_emits_error(
-        self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server
+        self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server
     ) -> None:
         """Null content (content filtering) returns error.
 
@@ -994,7 +1010,7 @@ class TestLLMTransformOpenRouterIntegration:
         as a non-retryable 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1002,7 +1018,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         response = _create_mock_response(
@@ -1031,14 +1047,14 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
 
-    def test_missing_choices_key_emits_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_missing_choices_key_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Missing 'choices' key in response emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         missing choices, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1046,7 +1062,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         response = _create_mock_response(
@@ -1074,14 +1090,14 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
 
-    def test_malformed_choice_structure_emits_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_malformed_choice_structure_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Malformed choice structure emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         malformed response structure, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1089,7 +1105,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         response = _create_mock_response(
@@ -1118,14 +1134,14 @@ class TestLLMTransformOpenRouterIntegration:
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
 
-    def test_invalid_json_response_emits_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_invalid_json_response_emits_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Non-JSON response body emits error via provider exception.
 
         In the unified LLMTransform, the provider raises LLMClientError for
         invalid JSON, which the strategy catches as 'llm_call_failed'.
         """
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1133,7 +1149,7 @@ class TestLLMTransformOpenRouterIntegration:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         response = _create_mock_response(
@@ -1161,18 +1177,18 @@ class TestOpenRouterTemplateFeatures:
     """Tests for template files and lookup features via LLMTransform (OpenRouter)."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create a mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create a mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_lookup_data_accessible_in_template(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_lookup_data_accessible_in_template(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Lookup data is accessible via lookup.* namespace in templates."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1181,7 +1197,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup={"categories": ["positive", "negative"]},
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1189,7 +1205,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1211,7 +1227,7 @@ class TestOpenRouterTemplateFeatures:
         finally:
             transform.close()
 
-    def test_two_dimensional_lookup_row_plus_lookup(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_two_dimensional_lookup_row_plus_lookup(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Two-dimensional lookup: lookup.X[row.Y] works correctly."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1220,7 +1236,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup={"tones": {"formal": "professional", "casual": "friendly"}},
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1228,7 +1244,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1248,7 +1264,7 @@ class TestOpenRouterTemplateFeatures:
         finally:
             transform.close()
 
-    def test_lookup_hash_included_in_output(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_lookup_hash_included_in_output(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Output includes lookup_hash when lookup data is configured."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1257,7 +1273,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup={"cats": ["A", "B", "C"]},
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1265,7 +1281,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1289,7 +1305,7 @@ class TestOpenRouterTemplateFeatures:
         # lookup_source is None when lookup is inline (not from file)
         assert "llm_response_lookup_source" in metadata
 
-    def test_template_source_included_in_output(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_template_source_included_in_output(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Output includes template_source when provided."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1298,7 +1314,7 @@ class TestOpenRouterTemplateFeatures:
                 template_source="prompts/analysis.j2",
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1306,7 +1322,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1325,7 +1341,7 @@ class TestOpenRouterTemplateFeatures:
         assert result.success_reason is not None
         assert result.success_reason["metadata"]["llm_response_template_source"] == "prompts/analysis.j2"
 
-    def test_all_audit_fields_present_with_lookup(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_all_audit_fields_present_with_lookup(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """All audit metadata fields are present when using template with lookup."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1336,7 +1352,7 @@ class TestOpenRouterTemplateFeatures:
                 lookup_source="prompts/lookups.yaml",
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1344,7 +1360,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1376,7 +1392,7 @@ class TestOpenRouterTemplateFeatures:
         assert metadata["llm_response_lookup_source"] == "prompts/lookups.yaml"
         assert metadata["llm_response_lookup_hash"] is not None
 
-    def test_no_lookup_has_none_hash_in_output(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_no_lookup_has_none_hash_in_output(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Output has None for lookup fields when no lookup configured."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1385,7 +1401,7 @@ class TestOpenRouterTemplateFeatures:
                 # No lookup configured
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1393,7 +1409,7 @@ class TestOpenRouterTemplateFeatures:
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1417,7 +1433,7 @@ class TestOpenRouterTemplateFeatures:
         assert "llm_response_lookup_source" in metadata
         assert metadata["llm_response_lookup_source"] is None
 
-    def test_lookup_iteration_in_template(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_lookup_iteration_in_template(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Lookup data can be iterated in templates."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1435,7 +1451,7 @@ Text: {{ row.text }}""",
                 },
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1443,7 +1459,7 @@ Text: {{ row.text }}""",
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1464,7 +1480,7 @@ Text: {{ row.text }}""",
         finally:
             transform.close()
 
-    def test_template_error_includes_source_in_error_details(self, mock_recorder: Mock, collector: CollectorOutputPort) -> None:
+    def test_template_error_includes_source_in_error_details(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
         """Template rendering error includes template_source for debugging."""
         transform = LLMTransform(
             _openrouter_config(
@@ -1473,7 +1489,7 @@ Text: {{ row.text }}""",
                 template_source="prompts/requires_field.j2",
             )
         )
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1481,7 +1497,7 @@ Text: {{ row.text }}""",
         ctx = make_context(
             state_id="test-state-id",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1504,21 +1520,21 @@ class TestOpenRouterConcurrency:
     """Tests for concurrent row processing via BatchTransformMixin (OpenRouter)."""
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        """Create a mock LandscapeRecorder."""
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        """Create a mock RecorderFactory."""
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         """Create output collector for capturing results."""
         return CollectorOutputPort()
 
-    def test_multiple_rows_processed_in_fifo_order(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_multiple_rows_processed_in_fifo_order(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Multiple rows are emitted in submission order (FIFO)."""
         transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1536,7 +1552,7 @@ class TestOpenRouterConcurrency:
                     ctx = make_context(
                         state_id=f"state-{i}",
                         token=token,
-                        landscape=mock_recorder,
+                        landscape=mock_factory,
                     )
                     transform.accept(make_pipeline_row(row), ctx)
 
@@ -1552,8 +1568,8 @@ class TestOpenRouterConcurrency:
             assert result.row is not None
             assert result.row["text"] == rows[i]["text"]
 
-    def test_on_start_captures_recorder(self, mock_recorder: Mock) -> None:
-        """on_start() captures recorder reference for provider creation."""
+    def test_on_start_captures_recorder(self, mock_factory: Mock) -> None:
+        """on_start() captures factory reference for provider creation."""
         transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
 
         # Verify _recorder starts as None
@@ -1561,17 +1577,17 @@ class TestOpenRouterConcurrency:
 
         ctx = make_context(
             state_id="test-state-id",
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
         transform.on_start(ctx)
 
-        # Verify recorder was captured
-        assert transform._recorder is mock_recorder
+        # Verify factory was captured
+        assert transform._recorder is mock_factory
 
-    def test_close_clears_recorder(self, mock_recorder: Mock, collector: CollectorOutputPort) -> None:
-        """close() clears recorder reference."""
+    def test_close_clears_recorder(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
+        """close() clears factory reference."""
         transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1595,22 +1611,22 @@ class TestOpenRouterNanRejection:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         return CollectorOutputPort()
 
-    def test_nan_in_response_body_returns_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_nan_in_response_body_returns_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """NaN token in API response body is rejected at parse boundary."""
         nan_body = '{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": NaN}, "model": "test"}'
         response = _create_mock_response(chaosllm_server, raw_body=nan_body, status_code=200, headers={"content-type": "application/json"})
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1619,7 +1635,7 @@ class TestOpenRouterNanRejection:
             run_id="test",
             state_id="test-state",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1636,13 +1652,13 @@ class TestOpenRouterNanRejection:
         finally:
             transform.close()
 
-    def test_non_finite_usage_value_returns_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_non_finite_usage_value_returns_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Usage field with overflow float (inf from 1e309) is rejected."""
         inf_body = '{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1e309}, "model": "test"}'
         response = _create_mock_response(chaosllm_server, raw_body=inf_body, status_code=200, headers={"content-type": "application/json"})
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1651,7 +1667,7 @@ class TestOpenRouterNanRejection:
             run_id="test",
             state_id="test-state",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1682,16 +1698,16 @@ class TestOpenRouterMalformedUtf8:
     """
 
     @pytest.fixture
-    def mock_recorder(self) -> Mock:
-        recorder = Mock()
-        recorder.record_call = Mock()
-        return recorder
+    def mock_factory(self) -> Mock:
+        factory = Mock()
+        factory.record_call = Mock()
+        return factory
 
     @pytest.fixture
     def collector(self) -> CollectorOutputPort:
         return CollectorOutputPort()
 
-    def test_invalid_utf8_response_returns_error(self, mock_recorder: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
+    def test_invalid_utf8_response_returns_error(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Response with invalid UTF-8 bytes must be rejected, not silently decoded."""
         # Valid JSON prefix with invalid UTF-8 continuation byte embedded
         invalid_utf8 = b'{"choices": [{"message": {"content": "hello \x80\x81 world"}}]}'
@@ -1703,7 +1719,7 @@ class TestOpenRouterMalformedUtf8:
         )
 
         transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
-        init_ctx = make_context(landscape=mock_recorder)
+        init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
 
@@ -1712,7 +1728,7 @@ class TestOpenRouterMalformedUtf8:
             run_id="test",
             state_id="test-state",
             token=token,
-            landscape=mock_recorder,
+            landscape=mock_factory,
         )
 
         try:
@@ -1728,3 +1744,23 @@ class TestOpenRouterMalformedUtf8:
             assert result.reason["reason"] == "llm_call_failed"
         finally:
             transform.close()
+
+
+class TestOpenRouterRefcount:
+    """Tests for HTTP client reference counting correctness."""
+
+    def _make_provider(self) -> OpenRouterLLMProvider:
+        """Create provider with mock dependencies for refcount testing."""
+        return OpenRouterLLMProvider(
+            api_key="sk-test",
+            recorder=Mock(),
+            run_id="test-run",
+            telemetry_emit=Mock(),
+        )
+
+    def test_release_unknown_state_id_raises(self) -> None:
+        """Releasing an unacquired state_id is a refcount underflow — must crash."""
+        provider = self._make_provider()
+
+        with pytest.raises(RuntimeError, match="unknown state_id"):
+            provider._release_http_client("never-acquired")

@@ -77,12 +77,43 @@ def discover_plugins_in_directory(
             continue
 
         # Plugin code is SYSTEM-OWNED, not user-provided.
-        # Import/Syntax errors indicate bugs in our code - crash immediately.
-        # DO NOT catch exceptions here - let them propagate to surface the real bug.
-        plugins = _discover_in_file(py_file, base_class)
+        # Most import errors indicate bugs in our code — crash immediately.
+        # ImportError from a missing optional extra (e.g., chromadb for [rag])
+        # is expected when not all extras are installed — skip with a warning.
+        try:
+            plugins = _discover_in_file(py_file, base_class)
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.warning(
+                "Skipping plugin file %s: optional dependency not installed (%s)",
+                py_file.name,
+                exc,
+            )
+            continue
         discovered.extend(plugins)
 
     return discovered
+
+
+def _canonical_module_name(py_file: Path) -> str | None:
+    """Derive the canonical dotted module name for a plugin file.
+
+    Walks up from *py_file* to find the ``elspeth`` package root (the
+    directory whose ``__init__.py`` defines the ``elspeth`` package).
+    Returns the dotted path (e.g. ``elspeth.plugins.transforms.llm.azure_batch``)
+    or ``None`` if the file is not under the ``elspeth`` package tree.
+    """
+    parts: list[str] = [py_file.stem]
+    current = py_file.parent
+    while True:
+        init = current / "__init__.py"
+        if not init.exists():
+            break
+        parts.append(current.name)
+        if current.name == "elspeth":
+            parts.reverse()
+            return ".".join(parts)
+        current = current.parent
+    return None
 
 
 def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
@@ -95,30 +126,43 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
     Returns:
         List of plugin classes found in the file
     """
-    # Load module from file path
-    # Include parent directory in module name to avoid collisions
-    # (e.g., transforms/base.py vs llm/base.py would both be "base" otherwise)
-    parent_name = py_file.parent.name
-    module_name = f"elspeth.plugins._discovered.{parent_name}.{py_file.stem}"
-    spec = importlib.util.spec_from_file_location(module_name, py_file)
-    if spec is None:
-        raise RuntimeError(
-            f"Failed to create module spec for {py_file} (module_name={module_name!r}): spec_from_file_location() returned None"
-        )
-    if spec.loader is None:
-        raise RuntimeError(f"Module spec for {py_file} (module_name={module_name!r}) has no loader")
+    # Compute the canonical module name (e.g. elspeth.plugins.transforms.llm.azure_batch).
+    # If the module was already imported canonically (e.g. by another plugin's
+    # module-level imports), reuse it to avoid dual class objects.
+    canonical_name = _canonical_module_name(py_file)
+    if canonical_name is not None and canonical_name in sys.modules:
+        module = sys.modules[canonical_name]
+    else:
+        # Load module from file path
+        # Include parent directory in module name to avoid collisions
+        # (e.g., transforms/base.py vs llm/base.py would both be "base" otherwise)
+        parent_name = py_file.parent.name
+        module_name = f"elspeth.plugins._discovered.{parent_name}.{py_file.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, py_file)
+        if spec is None:
+            raise RuntimeError(
+                f"Failed to create module spec for {py_file} (module_name={module_name!r}): spec_from_file_location() returned None"
+            )
+        if spec.loader is None:
+            raise RuntimeError(f"Module spec for {py_file} (module_name={module_name!r}) has no loader")
 
-    module = importlib.util.module_from_spec(spec)
-    # Register module in sys.modules BEFORE exec_module
-    # Required for Python 3.13+ where dataclass decorator looks up
-    # cls.__module__ in sys.modules during field resolution
-    sys.modules[module.__name__] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        # Clean up on failure
-        sys.modules.pop(module.__name__, None)
-        raise
+        module = importlib.util.module_from_spec(spec)
+        # Register module in sys.modules BEFORE exec_module
+        # Required for Python 3.13+ where dataclass decorator looks up
+        # cls.__module__ in sys.modules during field resolution
+        sys.modules[module.__name__] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            # Clean up on failure
+            sys.modules.pop(module.__name__, None)
+            raise
+
+        # Also register under the canonical name so that future standard
+        # imports (e.g. `from elspeth.plugins.transforms.llm.transform import X`)
+        # find the same module object rather than loading a duplicate.
+        if canonical_name is not None and canonical_name not in sys.modules:
+            sys.modules[canonical_name] = module
 
     # Find classes that inherit from base_class
     discovered: list[type] = []

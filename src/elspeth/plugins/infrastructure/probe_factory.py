@@ -24,13 +24,12 @@ class ChromaCollectionProbe:
 
     def __init__(self, collection: str, config: Mapping[str, Any]) -> None:
         self.collection_name = collection
-        self._config = config
 
-        # Validate connection config at construction time. Construct-and-discard
-        # pattern: ChromaConnectionConfig's model_validator checks cross-field
-        # constraints (persistent requires persist_directory, client requires host).
+        # Validate AND retain the model — probe() reads from the validated
+        # instance so that Pydantic defaults (port=8000, ssl=True) are available
+        # even when the operator's config omits them.
         try:
-            ChromaConnectionConfig(collection=collection, **config)
+            self._conn = ChromaConnectionConfig(collection=collection, **config)
         except ValidationError as exc:
             # Re-raise as ValueError so callers see a clean config error, not a
             # Pydantic internal. First error message is the most specific.
@@ -41,24 +40,20 @@ class ChromaCollectionProbe:
         """Check collection existence and document count."""
         import chromadb  # ImportError crashes — missing package is a config bug, not "unreachable"
 
-        # Tier 3 boundary — operator-provided config values.
-        # All fields use direct access: mode determines deployment topology,
-        # port/ssl are infrastructure addressing. KeyError crashes through
-        # on missing keys — the operator must be explicit.
-        mode = self._config["mode"]
-
         try:
             # Client construction CAN fail for infrastructure reasons (server down,
             # TLS errors, path permissions) — caught below as "unreachable".
-            # Config KeyError from missing required keys crashes through —
-            # KeyError is not in the catch list.
-            if mode == "persistent":
-                client = chromadb.PersistentClient(path=self._config["persist_directory"])
+            if self._conn.mode == "persistent":
+                # persist_directory guaranteed non-None by validate_mode_fields
+                assert self._conn.persist_directory is not None
+                client = chromadb.PersistentClient(path=self._conn.persist_directory)
             else:
+                # host guaranteed non-None by validate_mode_fields
+                assert self._conn.host is not None
                 client = chromadb.HttpClient(
-                    host=self._config["host"],
-                    port=self._config["port"],
-                    ssl=self._config["ssl"],
+                    host=self._conn.host,
+                    port=self._conn.port,
+                    ssl=self._conn.ssl,
                 )
 
             collection = client.get_collection(self.collection_name)
@@ -74,11 +69,13 @@ class ChromaCollectionProbe:
                 ),
             )
         except chromadb.errors.NotFoundError:
-            # Collection doesn't exist — server reachable, collection absent
+            # Collection doesn't exist — server reachable, collection absent.
+            # count=None: we reached the server but the collection is absent,
+            # so the count is unknown (not zero — zero means "empty").
             return CollectionReadinessResult(
                 collection=self.collection_name,
                 reachable=True,
-                count=0,
+                count=None,
                 message=f"Collection '{self.collection_name}' not found",
             )
         except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
@@ -87,7 +84,7 @@ class ChromaCollectionProbe:
             return CollectionReadinessResult(
                 collection=self.collection_name,
                 reachable=False,
-                count=0,
+                count=None,
                 message=f"Collection '{self.collection_name}' unreachable: {type(exc).__name__}: {exc}",
             )
 

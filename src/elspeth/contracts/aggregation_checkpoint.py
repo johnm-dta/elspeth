@@ -20,7 +20,6 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any
 
 from elspeth.contracts.errors import AuditIntegrityError
@@ -40,6 +39,7 @@ class AggregationTokenCheckpoint:
         expand_group_id: Deaggregation expansion group, or ``None``.
         row_data: Row payload as plain dict (opaque — PipelineRow owns format).
         contract_version: Version hash of the SchemaContract at checkpoint time.
+        contract: SchemaContract checkpoint dict (opaque — SchemaContract owns format).
     """
 
     token_id: str
@@ -50,6 +50,7 @@ class AggregationTokenCheckpoint:
     expand_group_id: str | None
     row_data: Mapping[str, Any]
     contract_version: str
+    contract: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         if not self.token_id:
@@ -58,9 +59,11 @@ class AggregationTokenCheckpoint:
             raise ValueError("AggregationTokenCheckpoint.row_id must not be empty")
         if not self.contract_version:
             raise ValueError("AggregationTokenCheckpoint.contract_version must not be empty")
-        if not isinstance(self.row_data, (dict, MappingProxyType)):
-            raise TypeError(f"AggregationTokenCheckpoint.row_data must be dict or MappingProxyType, got {type(self.row_data).__name__}")
-        freeze_fields(self, "row_data")
+        if not isinstance(self.row_data, Mapping):
+            raise TypeError(f"AggregationTokenCheckpoint.row_data must be a Mapping, got {type(self.row_data).__name__}")
+        if not isinstance(self.contract, Mapping):
+            raise TypeError(f"AggregationTokenCheckpoint.contract must be a Mapping, got {type(self.contract).__name__}")
+        freeze_fields(self, "row_data", "contract")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to checkpoint dict format."""
@@ -73,6 +76,7 @@ class AggregationTokenCheckpoint:
             "expand_group_id": self.expand_group_id,
             "row_data": deep_thaw(self.row_data),
             "contract_version": self.contract_version,
+            "contract": deep_thaw(self.contract),
         }
 
     @classmethod
@@ -94,12 +98,37 @@ class AggregationTokenCheckpoint:
             "join_group_id",
             "expand_group_id",
             "contract_version",
+            "contract",
         }
         missing = required_fields - set(data.keys())
         if missing:
             raise AuditIntegrityError(
                 f"Corrupted aggregation token checkpoint: missing required fields {missing}. Found: {set(data.keys())}"
             )
+
+        # Tier 1 type guards — crash on type corruption, not on downstream access.
+        # Scalars must be str (not int, bool, etc. from malformed JSON).
+        for field_name in ("token_id", "row_id", "contract_version"):
+            value = data[field_name]
+            if not isinstance(value, str):
+                raise AuditIntegrityError(
+                    f"Corrupted aggregation token checkpoint: '{field_name}' must be str, got {type(value).__name__}: {value!r}"
+                )
+        # Optional str fields — must be str or None
+        for field_name in ("branch_name", "fork_group_id", "join_group_id", "expand_group_id"):
+            value = data[field_name]
+            if value is not None and not isinstance(value, str):
+                raise AuditIntegrityError(
+                    f"Corrupted aggregation token checkpoint: '{field_name}' must be str or None, got {type(value).__name__}: {value!r}"
+                )
+        # Container fields — must be dict (JSON object)
+        for field_name in ("row_data", "contract"):
+            value = data[field_name]
+            if not isinstance(value, dict):
+                raise AuditIntegrityError(
+                    f"Corrupted aggregation token checkpoint: '{field_name}' must be a dict, got {type(value).__name__}"
+                )
+
         return cls(
             token_id=data["token_id"],
             row_id=data["row_id"],
@@ -109,6 +138,7 @@ class AggregationTokenCheckpoint:
             expand_group_id=data["expand_group_id"],
             row_data=data["row_data"],
             contract_version=data["contract_version"],
+            contract=data["contract"],
         )
 
 
@@ -122,7 +152,6 @@ class AggregationNodeCheckpoint:
         elapsed_age_seconds: Seconds since first accept for timeout preservation.
         count_fire_offset: Trigger fire-time offset for count trigger, or ``None``.
         condition_fire_offset: Trigger fire-time offset for condition trigger, or ``None``.
-        contract: SchemaContract checkpoint dict (opaque — SchemaContract owns format).
     """
 
     tokens: tuple[AggregationTokenCheckpoint, ...]
@@ -130,7 +159,6 @@ class AggregationNodeCheckpoint:
     elapsed_age_seconds: float
     count_fire_offset: float | None
     condition_fire_offset: float | None
-    contract: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         if not self.batch_id:
@@ -145,9 +173,7 @@ class AggregationNodeCheckpoint:
             raise ValueError(
                 f"AggregationNodeCheckpoint.condition_fire_offset must be non-negative and finite, got {self.condition_fire_offset}"
             )
-        if not isinstance(self.contract, (dict, MappingProxyType)):
-            raise TypeError(f"AggregationNodeCheckpoint.contract must be dict or MappingProxyType, got {type(self.contract).__name__}")
-        freeze_fields(self, "contract")
+        freeze_fields(self, "tokens")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to checkpoint dict format."""
@@ -157,7 +183,6 @@ class AggregationNodeCheckpoint:
             "elapsed_age_seconds": self.elapsed_age_seconds,
             "count_fire_offset": self.count_fire_offset,
             "condition_fire_offset": self.condition_fire_offset,
-            "contract": deep_thaw(self.contract),
         }
 
     @classmethod
@@ -177,7 +202,6 @@ class AggregationNodeCheckpoint:
             "elapsed_age_seconds",
             "count_fire_offset",
             "condition_fire_offset",
-            "contract",
         }
         missing = required_fields - set(data.keys())
         if missing:
@@ -205,7 +229,6 @@ class AggregationNodeCheckpoint:
             elapsed_age_seconds=data["elapsed_age_seconds"],
             count_fire_offset=data["count_fire_offset"],
             condition_fire_offset=data["condition_fire_offset"],
-            contract=data["contract"],
         )
 
 
@@ -216,7 +239,7 @@ class AggregationCheckpointState:
     Wire format (preserved for ``checkpoint_dumps`` compatibility)::
 
         {
-            "_version": "3.0",
+            "_version": "4.0",
             "node_id_1": { ... node checkpoint ... },
             "node_id_2": { ... node checkpoint ... },
         }
@@ -232,8 +255,8 @@ class AggregationCheckpointState:
     def __post_init__(self) -> None:
         if not self.version:
             raise ValueError("AggregationCheckpointState.version must not be empty")
-        if not isinstance(self.nodes, (dict, MappingProxyType)):
-            raise TypeError(f"AggregationCheckpointState.nodes must be dict or MappingProxyType, got {type(self.nodes).__name__}")
+        if not isinstance(self.nodes, Mapping):
+            raise TypeError(f"AggregationCheckpointState.nodes must be a Mapping, got {type(self.nodes).__name__}")
         freeze_fields(self, "nodes")
 
     def to_dict(self) -> dict[str, Any]:
@@ -262,8 +285,12 @@ class AggregationCheckpointState:
 
         nodes: dict[str, AggregationNodeCheckpoint] = {}
         for key, value in data.items():
-            if key.startswith("_"):
+            if key == "_version":
                 continue
+            if key.startswith("_"):
+                raise AuditIntegrityError(
+                    f"Corrupted aggregation checkpoint: unexpected reserved key {key!r}. Only '_version' is a valid metadata key."
+                )
             nodes[key] = AggregationNodeCheckpoint.from_dict(key, value)
 
         return cls(version=version, nodes=nodes)

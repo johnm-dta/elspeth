@@ -317,6 +317,18 @@ class TestSchemaContractEdgeCases:
         assert "simple_field" in contract._by_normalized
         assert "simple_field" in contract._by_original
 
+    def test_duplicate_original_name_raises_valueerror(self) -> None:
+        """Duplicate original_name in fields raises ValueError.
+
+        Two fields with different normalized_names but the same original_name
+        would cause _by_original dict to silently overwrite, breaking reverse lookups.
+        """
+        fc1 = make_field("amount_usd", int, original_name="Amount", required=True, source="declared")
+        fc2 = make_field("amount_eur", float, original_name="Amount", required=False, source="declared")
+
+        with pytest.raises(ValueError, match=r"Duplicate original_name.*Amount"):
+            SchemaContract(mode="FIXED", fields=(fc1, fc2), locked=True)
+
     def test_indices_are_read_only(self, sample_fields: tuple[FieldContract, ...]) -> None:
         """Internal indices are immutable after construction."""
         contract = SchemaContract(
@@ -912,6 +924,44 @@ class TestSchemaContractMerge:
         y_field = next(f for f in merged.fields if f.normalized_name == "y")
         assert y_field.required is False
 
+    def test_merge_branch_exclusive_field_forced_nullable(self) -> None:
+        """Branch-exclusive fields must be forced nullable (D3 fix).
+
+        When a field exists only in one branch, the source branch may not arrive
+        (e.g., timeout under best_effort policy). The merged row would then have
+        None for that field. The contract must reflect this by setting nullable=True,
+        regardless of the source field's nullable status.
+        """
+        # Branch A has y (non-nullable), Branch B doesn't
+        c1 = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("x", int, original_name="X", required=False, source="inferred"),
+                make_field("y", str, original_name="Y", required=False, source="inferred", nullable=False),
+            ),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("x", int, original_name="X", required=False, source="inferred"),
+                make_field("z", str, original_name="Z", required=False, source="inferred", nullable=False),
+            ),
+            locked=True,
+        )
+        merged = c1.merge(c2)
+
+        # y is only in c1, z is only in c2 — both become nullable
+        y_field = next(f for f in merged.fields if f.normalized_name == "y")
+        z_field = next(f for f in merged.fields if f.normalized_name == "z")
+
+        assert y_field.nullable is True, "Branch-exclusive field must be forced nullable"
+        assert z_field.nullable is True, "Branch-exclusive field must be forced nullable"
+
+        # x is in both branches — preserves original nullable
+        x_field = next(f for f in merged.fields if f.normalized_name == "x")
+        assert x_field.nullable is False, "Shared field preserves original nullable"
+
     def test_merge_mode_precedence(self) -> None:
         """Most restrictive mode wins: FIXED > FLEXIBLE > OBSERVED."""
         fixed = SchemaContract(mode="FIXED", fields=(), locked=True)
@@ -930,8 +980,13 @@ class TestSchemaContractMerge:
         assert locked.merge(unlocked).locked is True
         assert unlocked.merge(locked).locked is True
 
-    def test_merge_required_if_either_required(self) -> None:
-        """Field is required if required in either path."""
+    def test_merge_required_only_if_both_required(self) -> None:
+        """Field is required only if required in BOTH paths (AND semantics).
+
+        Why AND: For best_effort/quorum coalesces, a branch that guarantees
+        field X might be lost. The merged output can only guarantee X if ALL
+        branches that produce X guarantee it.
+        """
         c1 = SchemaContract(
             mode="FLEXIBLE",
             fields=(make_field("x", int, original_name="X", required=True, source="declared"),),
@@ -940,6 +995,22 @@ class TestSchemaContractMerge:
         c2 = SchemaContract(
             mode="FLEXIBLE",
             fields=(make_field("x", int, original_name="X", required=False, source="inferred"),),
+            locked=True,
+        )
+        merged = c1.merge(c2)
+
+        assert merged.fields[0].required is False
+
+    def test_merge_required_when_both_branches_require(self) -> None:
+        """Field is required when required in BOTH paths."""
+        c1 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared"),),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared"),),
             locked=True,
         )
         merged = c1.merge(c2)
@@ -997,6 +1068,164 @@ class TestSchemaContractMerge:
             "yankee",
             "zeta",
         ]
+        # All four fields are branch-exclusive (none appears in both contracts).
+        # Under AND semantics, branch-exclusive fields must be marked optional
+        # in the merged output. Asserting this here catches any regression to
+        # OR semantics that the ordering check alone would miss.
+        assert all(not field.required for field in merged.fields), (
+            "Branch-exclusive fields must be marked required=False after AND-semantics merge"
+        )
+
+    def test_merge_shared_field_nullable_or_propagation(self) -> None:
+        """Shared field nullable uses OR semantics: True if EITHER is nullable.
+
+        When branch A has x:int (non-nullable) and branch B has x:int? (nullable),
+        the merged x must be nullable because branch B can produce None via
+        last_wins collision resolution. This is the D7 fix.
+
+        The merge() rule (line 502): nullable=self_fc.nullable or other_fc.nullable
+        """
+        c1 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=False),),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=True),),
+            locked=True,
+        )
+        merged = c1.merge(c2)
+
+        x_field = merged.fields[0]
+        assert x_field.nullable is True, "Shared field nullable via OR: True if EITHER nullable"
+
+    def test_merge_shared_field_nullable_or_commutative(self) -> None:
+        """Nullable OR is commutative: A.merge(B).nullable == B.merge(A).nullable.
+
+        Order of merge must not affect nullable outcome for shared fields.
+        """
+        c1 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=False),),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=True),),
+            locked=True,
+        )
+
+        ab = c1.merge(c2)
+        ba = c2.merge(c1)
+
+        assert ab.fields[0].nullable == ba.fields[0].nullable, "Nullable OR must be commutative"
+        assert ab.fields[0].nullable is True
+
+    def test_merge_shared_field_both_non_nullable_stays_non_nullable(self) -> None:
+        """When both branches have non-nullable field, merged stays non-nullable.
+
+        OR semantics: False OR False = False.
+        """
+        c1 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=False),),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=False),),
+            locked=True,
+        )
+        merged = c1.merge(c2)
+
+        assert merged.fields[0].nullable is False, "Both non-nullable: merged stays non-nullable"
+
+    def test_merge_shared_field_both_nullable_stays_nullable(self) -> None:
+        """When both branches have nullable field, merged is nullable.
+
+        OR semantics: True OR True = True.
+        """
+        c1 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=True),),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=True),),
+            locked=True,
+        )
+        merged = c1.merge(c2)
+
+        assert merged.fields[0].nullable is True, "Both nullable: merged is nullable"
+
+    def test_merge_multiple_fields_mixed_nullable(self) -> None:
+        """Multiple fields with mixed nullable values merge correctly.
+
+        Each field's nullable is determined independently via OR semantics.
+        """
+        c1 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field("a", int, original_name="A", required=True, source="declared", nullable=False),
+                make_field("b", str, original_name="B", required=True, source="declared", nullable=True),
+                make_field("c", float, original_name="C", required=True, source="declared", nullable=False),
+            ),
+            locked=True,
+        )
+        c2 = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field("a", int, original_name="A", required=True, source="declared", nullable=True),
+                make_field("b", str, original_name="B", required=True, source="declared", nullable=False),
+                make_field("c", float, original_name="C", required=True, source="declared", nullable=False),
+            ),
+            locked=True,
+        )
+        merged = c1.merge(c2)
+
+        a_field = next(f for f in merged.fields if f.normalized_name == "a")
+        b_field = next(f for f in merged.fields if f.normalized_name == "b")
+        c_field = next(f for f in merged.fields if f.normalized_name == "c")
+
+        assert a_field.nullable is True, "a: False OR True = True"
+        assert b_field.nullable is True, "b: True OR False = True"
+        assert c_field.nullable is False, "c: False OR False = False"
+
+
+# --- Required Field Names Tests ---
+
+
+class TestRequiredFieldNames:
+    """Tests for SchemaContract.required_field_names property."""
+
+    def test_returns_required_fields_only(self) -> None:
+        """Property returns frozenset of names where required=True."""
+        contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field("a", int, original_name="A", required=True, source="declared"),
+                make_field("b", str, original_name="B", required=False, source="declared"),
+                make_field("c", float, original_name="C", required=True, source="declared"),
+            ),
+            locked=True,
+        )
+        assert contract.required_field_names == frozenset({"a", "c"})
+
+    def test_empty_when_no_required_fields(self) -> None:
+        """Property returns empty frozenset when no fields are required."""
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(make_field("x", int, original_name="X", required=False, source="inferred"),),
+            locked=True,
+        )
+        assert contract.required_field_names == frozenset()
+
+    def test_empty_contract(self) -> None:
+        """Property returns empty frozenset for empty contract."""
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+        assert contract.required_field_names == frozenset()
 
 
 # --- Any Type Tests ---

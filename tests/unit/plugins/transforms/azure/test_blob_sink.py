@@ -12,6 +12,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_operation_context
 
 # Dynamic schema config for tests - DataPluginConfig requires schema
@@ -104,13 +105,18 @@ def make_config(
     return config
 
 
+def _make_sink(**kwargs: Any) -> AzureBlobSink:
+    """Create an AzureBlobSink with _on_write_failure injected."""
+    return inject_write_failure(AzureBlobSink(make_config(**kwargs)))
+
+
 class TestAzureBlobSinkProtocol:
     """Tests for AzureBlobSink protocol compliance."""
 
     def test_has_required_attributes(self, mock_container_client: MagicMock) -> None:
         """AzureBlobSink has name and input_schema."""
         assert AzureBlobSink.name == "azure_blob"
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         assert hasattr(sink, "input_schema")
 
 
@@ -166,17 +172,19 @@ class TestAzureBlobSinkConfigValidation:
             AzureBlobSink(make_config(blob_path=""))
 
     def test_invalid_blob_path_template_raises_error(self) -> None:
-        """Invalid Jinja2 template in blob_path raises ValueError at init time.
+        """Invalid Jinja2 template in blob_path raises PluginConfigError at config time.
 
         Structural template errors must stop the run at setup, not be deferred
         to the first write() call (Pipeline Templates as Tier 2 Data pattern).
+        Validation is now in the Pydantic model_validator (from_dict catches it).
         """
-        with pytest.raises(ValueError, match="Invalid blob_path template"):
+        with pytest.raises(PluginConfigError, match="Invalid blob_path template"):
             AzureBlobSink(make_config(blob_path="results/{% if unclosed %}/output.csv"))
 
     def test_missing_schema_raises_error(self) -> None:
         """Missing schema raises PluginConfigError."""
-        with pytest.raises(PluginConfigError, match=r"schema_config[\s\S]*Field required"):
+        # Error message uses alias "schema" not field name "schema_config"
+        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
             AzureBlobSink(
                 {
                     "connection_string": TEST_CONNECTION_STRING,
@@ -218,7 +226,7 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         rows = [
             {"id": 1, "name": "alice", "value": 100},
             {"id": 2, "name": "bob", "value": 200},
@@ -248,7 +256,7 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(csv_options={"delimiter": ";"}))
+        sink = _make_sink(csv_options={"delimiter": ";"})
         rows = [{"id": 1, "name": "alice"}]
 
         sink.write(rows, ctx)
@@ -264,7 +272,7 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(csv_options={"include_header": False}))
+        sink = _make_sink(csv_options={"include_header": False})
         rows = [{"id": 1, "name": "alice"}]
 
         sink.write(rows, ctx)
@@ -282,7 +290,7 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(headers={"id": "ID", "name": "Full Name"}))
+        sink = _make_sink(headers={"id": "ID", "name": "Full Name"})
         rows = [{"id": 1, "name": "alice"}]
 
         sink.write(rows, ctx)
@@ -299,7 +307,7 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(headers="original"))
+        sink = _make_sink(headers="original")
         sink.set_resume_field_resolution({"User ID": "user_id", "Amount $": "amount"})
         rows = [{"user_id": "1", "amount": "100"}]
 
@@ -316,7 +324,7 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="csv"))
+        sink = _make_sink(format="csv")
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
 
@@ -338,11 +346,9 @@ class TestAzureBlobSinkWriteCSV:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(
-            make_config(
-                format="csv",
-                schema={"mode": "flexible", "fields": ["id: int", "name: str"]},
-            )
+        sink = _make_sink(
+            format="csv",
+            schema={"mode": "flexible", "fields": ["id: int", "name: str"]},
         )
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
@@ -364,7 +370,7 @@ class TestAzureBlobSinkWriteJSON:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="json"))
+        sink = _make_sink(format="json")
         rows = [
             {"id": 1, "name": "alice"},
             {"id": 2, "name": "bob"},
@@ -391,7 +397,7 @@ class TestAzureBlobSinkWriteJSON:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="json", headers={"id": "ID", "name": "Full Name"}))
+        sink = _make_sink(format="json", headers={"id": "ID", "name": "Full Name"})
         rows = [
             {"id": 1, "name": "alice"},
         ]
@@ -411,7 +417,7 @@ class TestAzureBlobSinkWriteJSON:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="json"))
+        sink = _make_sink(format="json")
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
 
@@ -433,7 +439,7 @@ class TestAzureBlobSinkWriteJSONL:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="jsonl"))
+        sink = _make_sink(format="jsonl")
         rows = [
             {"id": 1, "name": "alice"},
             {"id": 2, "name": "bob"},
@@ -462,7 +468,7 @@ class TestAzureBlobSinkWriteJSONL:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="jsonl", headers={"id": "ID"}))
+        sink = _make_sink(format="jsonl", headers={"id": "ID", "name": "Name"})
         rows = [
             {"id": 1, "name": "alice"},
         ]
@@ -473,7 +479,7 @@ class TestAzureBlobSinkWriteJSONL:
         lines = uploaded_content.decode().strip().split("\n")
         import json
 
-        assert json.loads(lines[0]) == {"ID": 1, "name": "alice"}
+        assert json.loads(lines[0]) == {"ID": 1, "Name": "alice"}
 
     def test_jsonl_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """JSONL format should rewrite blob with cumulative line-delimited content."""
@@ -482,7 +488,7 @@ class TestAzureBlobSinkWriteJSONL:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="jsonl"))
+        sink = _make_sink(format="jsonl")
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
 
@@ -506,7 +512,7 @@ class TestAzureBlobSinkPathTemplating:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(blob_path="results/{{ run_id }}/output.csv"))
+        sink = _make_sink(blob_path="results/{{ run_id }}/output.csv")
         rows = [{"id": 1, "name": "alice"}]
 
         result = sink.write(rows, ctx)
@@ -526,7 +532,7 @@ class TestAzureBlobSinkPathTemplating:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(blob_path="results/{{ timestamp }}/output.csv"))
+        sink = _make_sink(blob_path="results/{{ timestamp }}/output.csv")
         rows = [{"id": 1, "name": "alice"}]
 
         sink.write(rows, ctx)
@@ -544,7 +550,7 @@ class TestAzureBlobSinkPathTemplating:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(blob_path="results/{{ timestamp }}/output.csv"))
+        sink = _make_sink(blob_path="results/{{ timestamp }}/output.csv")
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
 
@@ -565,7 +571,7 @@ class TestAzureBlobSinkOverwriteBehavior:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(overwrite=True))
+        sink = _make_sink(overwrite=True)
         rows = [{"id": 1, "name": "alice"}]
 
         # Should not raise
@@ -594,7 +600,7 @@ class TestAzureBlobSinkOverwriteBehavior:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(overwrite=False))
+        sink = _make_sink(overwrite=False)
         rows = [{"id": 1, "name": "alice"}]
 
         with pytest.raises(ValueError, match="already exists"):
@@ -613,7 +619,7 @@ class TestAzureBlobSinkOverwriteBehavior:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(overwrite=False))
+        sink = _make_sink(overwrite=False)
         rows = [{"id": 1, "name": "alice"}]
 
         result = sink.write(rows, ctx)
@@ -629,7 +635,7 @@ class TestAzureBlobSinkOverwriteBehavior:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(overwrite=False))
+        sink = _make_sink(overwrite=False)
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
 
@@ -648,7 +654,7 @@ class TestAzureBlobSinkArtifactDescriptor:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         rows = [{"id": 1, "name": "alice"}]
 
         result = sink.write(rows, ctx)
@@ -670,7 +676,7 @@ class TestAzureBlobSinkArtifactDescriptor:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(blob_path="data/{{ run_id }}/file.csv"))
+        sink = _make_sink(blob_path="data/{{ run_id }}/file.csv")
         rows = [{"id": 1}]
 
         result = sink.write(rows, ctx)
@@ -685,7 +691,7 @@ class TestAzureBlobSinkEmptyRows:
 
     def test_empty_rows_returns_empty_descriptor(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Empty rows list returns descriptor with empty content hash."""
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         rows: list[dict[str, Any]] = []
 
         result = sink.write(rows, ctx)
@@ -709,7 +715,7 @@ class TestAzureBlobSinkErrors:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         rows = [{"id": 1}]
 
         with pytest.raises(RuntimeError, match="Failed to upload blob") as exc_info:
@@ -727,7 +733,7 @@ class TestAzureBlobSinkErrors:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="csv"))
+        sink = _make_sink(format="csv")
         rows = [{"id": 1, "name": "alice"}]
 
         with pytest.raises(RuntimeError, match="Failed to upload blob"):
@@ -762,7 +768,7 @@ class TestAzureBlobSinkErrors:
             side_effect=[Exception("Audit DB unavailable"), None, None]
         )
 
-        sink = AzureBlobSink(make_config(format="csv", overwrite=False))
+        sink = _make_sink(format="csv", overwrite=False)
         rows = [{"id": 1, "name": "alice"}]
 
         with pytest.raises(AuditIntegrityError, match="Failed to record successful blob upload"):
@@ -788,7 +794,7 @@ class TestAzureBlobSinkErrors:
         """Connection errors propagate to caller."""
         mock_container_client.side_effect = Exception("Connection refused")
 
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         rows = [{"id": 1}]
 
         with pytest.raises(Exception, match="Connection refused"):
@@ -800,7 +806,7 @@ class TestAzureBlobSinkLifecycle:
 
     def test_close_is_idempotent(self, mock_container_client: MagicMock) -> None:
         """close() can be called multiple times."""
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         sink.close()
         sink.close()  # Should not raise
 
@@ -811,14 +817,14 @@ class TestAzureBlobSinkLifecycle:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         sink.write([{"id": 1}], ctx)  # Populate client
         sink.close()
         assert sink._container_client is None
 
     def test_flush_is_noop(self, mock_container_client: MagicMock) -> None:
         """flush() is a no-op (uploads are synchronous)."""
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
         sink.flush()  # Should not raise
 
 
@@ -827,7 +833,7 @@ class TestAzureBlobSinkImportError:
 
     def test_import_error_gives_helpful_message(self, ctx: PluginContext) -> None:
         """Missing azure-storage-blob gives helpful install message."""
-        sink = AzureBlobSink(make_config())
+        sink = _make_sink()
 
         # Mock the import to fail
         with patch.object(sink, "_get_container_client") as mock_get:
@@ -844,18 +850,16 @@ class TestAzureBlobSinkAuthMethods:
 
     def test_auth_connection_string(self, mock_container_client: MagicMock) -> None:
         """Connection string auth creates sink successfully."""
-        sink = AzureBlobSink(make_config(connection_string=TEST_CONNECTION_STRING))
+        sink = _make_sink(connection_string=TEST_CONNECTION_STRING)
         assert sink._auth_config.auth_method == "connection_string"
         assert sink._auth_config.connection_string == TEST_CONNECTION_STRING
 
     def test_auth_managed_identity(self, mock_container_client: MagicMock) -> None:
         """Managed identity auth creates sink successfully."""
-        sink = AzureBlobSink(
-            make_config(
-                connection_string=None,
-                use_managed_identity=True,
-                account_url=TEST_ACCOUNT_URL,
-            )
+        sink = _make_sink(
+            connection_string=None,
+            use_managed_identity=True,
+            account_url=TEST_ACCOUNT_URL,
         )
         assert sink._auth_config.auth_method == "managed_identity"
         assert sink._auth_config.use_managed_identity is True
@@ -863,14 +867,12 @@ class TestAzureBlobSinkAuthMethods:
 
     def test_auth_service_principal(self, mock_container_client: MagicMock) -> None:
         """Service principal auth creates sink successfully."""
-        sink = AzureBlobSink(
-            make_config(
-                connection_string=None,
-                tenant_id=TEST_TENANT_ID,
-                client_id=TEST_CLIENT_ID,
-                client_secret=TEST_CLIENT_SECRET,
-                account_url=TEST_ACCOUNT_URL,
-            )
+        sink = _make_sink(
+            connection_string=None,
+            tenant_id=TEST_TENANT_ID,
+            client_id=TEST_CLIENT_ID,
+            client_secret=TEST_CLIENT_SECRET,
+            account_url=TEST_ACCOUNT_URL,
         )
         assert sink._auth_config.auth_method == "service_principal"
         assert sink._auth_config.tenant_id == TEST_TENANT_ID
@@ -998,12 +1000,10 @@ class TestAzureBlobSinkAuthClientCreation:
 
     def test_managed_identity_uses_default_credential(self, ctx: PluginContext) -> None:
         """Managed identity auth uses DefaultAzureCredential."""
-        sink = AzureBlobSink(
-            make_config(
-                connection_string=None,
-                use_managed_identity=True,
-                account_url=TEST_ACCOUNT_URL,
-            )
+        sink = _make_sink(
+            connection_string=None,
+            use_managed_identity=True,
+            account_url=TEST_ACCOUNT_URL,
         )
 
         # Mock the azure.identity and azure.storage.blob imports
@@ -1026,14 +1026,12 @@ class TestAzureBlobSinkAuthClientCreation:
 
     def test_service_principal_uses_client_secret_credential(self, ctx: PluginContext) -> None:
         """Service principal auth uses ClientSecretCredential."""
-        sink = AzureBlobSink(
-            make_config(
-                connection_string=None,
-                tenant_id=TEST_TENANT_ID,
-                client_id=TEST_CLIENT_ID,
-                client_secret=TEST_CLIENT_SECRET,
-                account_url=TEST_ACCOUNT_URL,
-            )
+        sink = _make_sink(
+            connection_string=None,
+            tenant_id=TEST_TENANT_ID,
+            client_id=TEST_CLIENT_ID,
+            client_secret=TEST_CLIENT_SECRET,
+            account_url=TEST_ACCOUNT_URL,
         )
 
         # Mock the azure.identity and azure.storage.blob imports
@@ -1060,7 +1058,7 @@ class TestAzureBlobSinkAuthClientCreation:
 
     def test_connection_string_uses_from_connection_string(self, ctx: PluginContext) -> None:
         """Connection string auth uses from_connection_string factory."""
-        sink = AzureBlobSink(make_config(connection_string=TEST_CONNECTION_STRING))
+        sink = _make_sink(connection_string=TEST_CONNECTION_STRING)
 
         # Mock the azure.storage.blob import
         with patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls:
@@ -1089,14 +1087,16 @@ class TestAzureBlobSinkSchemaValidation:
         """
         # Schema declares only 'id', but row has 'id', 'name', 'llm_response'
         flexible_schema = {"mode": "flexible", "fields": ["id: int"]}
-        sink = AzureBlobSink(
-            {
-                "connection_string": TEST_CONNECTION_STRING,
-                "container": TEST_CONTAINER,
-                "blob_path": TEST_BLOB_PATH,
-                "format": "csv",
-                "schema": flexible_schema,
-            }
+        sink = inject_write_failure(
+            AzureBlobSink(
+                {
+                    "connection_string": TEST_CONNECTION_STRING,
+                    "container": TEST_CONTAINER,
+                    "blob_path": TEST_BLOB_PATH,
+                    "format": "csv",
+                    "schema": flexible_schema,
+                }
+            )
         )
 
         # Mock the Azure client
@@ -1129,14 +1129,16 @@ class TestAzureBlobSinkSchemaValidation:
         """Flexible mode should place declared fields before extras for predictability."""
         # Schema declares 'id' and 'name'
         flexible_schema = {"mode": "flexible", "fields": ["id: int", "name: str"]}
-        sink = AzureBlobSink(
-            {
-                "connection_string": TEST_CONNECTION_STRING,
-                "container": TEST_CONTAINER,
-                "blob_path": TEST_BLOB_PATH,
-                "format": "csv",
-                "schema": flexible_schema,
-            }
+        sink = inject_write_failure(
+            AzureBlobSink(
+                {
+                    "connection_string": TEST_CONNECTION_STRING,
+                    "container": TEST_CONTAINER,
+                    "blob_path": TEST_BLOB_PATH,
+                    "format": "csv",
+                    "schema": flexible_schema,
+                }
+            )
         )
 
         # Mock the Azure client
@@ -1174,14 +1176,16 @@ class TestAzureBlobSinkSchemaValidation:
         """
         # Schema declares only 'id' and 'name' in fixed mode
         fixed_schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
-        sink = AzureBlobSink(
-            {
-                "connection_string": TEST_CONNECTION_STRING,
-                "container": TEST_CONTAINER,
-                "blob_path": TEST_BLOB_PATH,
-                "format": "csv",
-                "schema": fixed_schema,
-            }
+        sink = inject_write_failure(
+            AzureBlobSink(
+                {
+                    "connection_string": TEST_CONNECTION_STRING,
+                    "container": TEST_CONTAINER,
+                    "blob_path": TEST_BLOB_PATH,
+                    "format": "csv",
+                    "schema": fixed_schema,
+                }
+            )
         )
 
         # Mock the Azure client
@@ -1224,12 +1228,12 @@ class TestAzureBlobSinkDisplayHeaders:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="jsonl", headers="original"))
+        sink = _make_sink(format="jsonl", headers="original")
 
         # Set up a contract with original names
         contract = SchemaContract(
-            mode="observed",
-            fields=[
+            mode="OBSERVED",
+            fields=(
                 FieldContract(
                     normalized_name="user_id",
                     original_name="User ID",
@@ -1244,7 +1248,7 @@ class TestAzureBlobSinkDisplayHeaders:
                     required=True,
                     source="declared",
                 ),
-            ],
+            ),
         )
         # Inject contract via context (simulates orchestrator setting it)
         ctx.contract = contract
@@ -1270,7 +1274,7 @@ class TestAzureBlobSinkDisplayHeaders:
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(make_config(format="csv", headers="original"))
+        sink = _make_sink(format="csv", headers="original")
         # CLI resume injects field resolution mapping (original → normalized)
         sink.set_resume_field_resolution({"User ID": "user_id", "Total $": "total"})
 

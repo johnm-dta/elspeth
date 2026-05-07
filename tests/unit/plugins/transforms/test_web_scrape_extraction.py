@@ -24,9 +24,19 @@ def test_extract_content_text():
 
     result = extract_content(html, format="text")
 
+    assert result == "Title Content"
     assert "Title" in result
     assert "Content" in result
     assert "<h1>" not in result  # No HTML tags
+
+
+def test_extract_content_text_uses_configured_separator():
+    """Text extraction can preserve DOM text boundaries for line-oriented flows."""
+    html = "<html><body><h1>Title</h1><p>Content</p><ul><li>One</li><li>Two</li></ul></body></html>"
+
+    result = extract_content(html, format="text", text_separator="\n")
+
+    assert result == "Title\nContent\nOne\nTwo"
 
 
 def test_extract_content_raw():
@@ -79,7 +89,7 @@ def test_extract_content_none_input_raises_valueerror():
     import pytest
 
     with pytest.raises(ValueError, match="malformed content"):
-        extract_content(None, format="markdown")  # type: ignore[arg-type]
+        extract_content(None, format="markdown")
 
 
 def test_html2text_deterministic_simple():

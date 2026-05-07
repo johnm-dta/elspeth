@@ -4,53 +4,169 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-4.1](https://img.shields.io/badge/status-RC--4.1-yellow.svg)
+![Status: RC-5](https://img.shields.io/badge/status-RC--5-yellow.svg)
 
-Auditable Sense/Decide/Act pipelines for high-stakes data processing. Every decision traceable to its source.
+Elspeth is a high-assurance pipeline substrate for consequential workflows:
+systems where the wrong output can cause operational, legal, safety, financial,
+or security harm. It supports two authoring surfaces over one runtime assurance
+model: operators can hand-edit reviewable, version-controlled YAML, while
+knowledge workers can use authenticated Web Composer authoring driven by an LLM
+tool loop. Both surfaces target the same primitives, plugin contracts, runtime
+assembly, graph-validation contracts, executor, Landscape audit trail, and
+run-accounting model. Validation and audit are core product properties, not
+after-the-fact diagnostics. In RC-5, composer-authored pipelines converge through
+runtime-shaped validation and production execution setup; the longer-term
+compiler direction is to seal YAML and composer input into one compiled
+artifact that the executor runs directly.
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [The Sense/Decide/Act Model](#the-sensedecideact-model)
-- [Data Trust Model](#data-trust-model)
-- [Example Use Cases](#example-use-cases)
+- [Why Elspeth Exists](#why-elspeth-exists)
+- [Architecture At A Glance](#architecture-at-a-glance)
+- [What Changed In RC-5](#what-changed-in-rc-5)
+- [Getting Started](#getting-started)
+  - [YAML Operator Path](#yaml-operator-path)
+  - [Web Composer Path](#web-composer-path)
+  - [Frontend Development](#frontend-development)
+- [Capabilities](#capabilities)
+  - [Authoring And Validation](#authoring-and-validation)
+  - [Execution And Run Evidence](#execution-and-run-evidence)
+  - [Plugin Surface](#plugin-surface)
+  - [MCP Surfaces](#mcp-surfaces)
+- [Audit And Assurance](#audit-and-assurance)
+  - [Data Trust Model](#data-trust-model)
+  - [Audit Trail Export](#audit-trail-export)
+  - [JSONL Change Journal](#jsonl-change-journal-optional)
+- [Status And Direction](#status-and-direction)
+- [Sense/Decide/Act Model](#sensedecideact-model)
 - [Usage](#usage)
   - [Running Pipelines](#running-pipelines)
   - [Explaining Decisions](#explaining-decisions)
-  - [Audit Trail Export](#audit-trail-export)
 - [Landscape MCP Server](#landscape-mcp-server)
 - [Configuration](#configuration)
 - [Docker](#docker)
-- [Architecture](#architecture)
+- [Repository Architecture](#repository-architecture)
 - [Documentation](#documentation)
-- [When to Use ELSPETH](#when-to-use-elspeth)
+- [When to Use Elspeth](#when-to-use-elspeth)
 - [Contributing](#contributing)
 - [License](#license)
 
 ---
 
-## Features
+## Why Elspeth Exists
 
-- **Complete Audit Trail** - Every transform, every routing decision, every external call recorded with payload storage
-- **Explain Any Decision** - `elspeth explain --run latest --row 42 --database <path/to/audit.db>` launches TUI to explore why any row reached its destination
-- **Declarative DAG Wiring** - Every edge is explicitly named and validated at construction time — no implicit routing
-- **Conditional Routing** - Gates route rows to different sinks based on config-driven expressions (AST-parsed, no eval)
-- **Pipeline Sequencing** - `depends_on` for multi-pipeline workflows with cycle detection, commencement gates for pre-flight go/no-go checks
-- **RAG Retrieval** - ChromaDB and Azure AI Search providers with readiness contracts, score normalization, and audited external calls
-- **Dataverse Integration** - Microsoft Dataverse source and sink via OData v4 with pagination, SSRF validation, and rate limiting
-- **Plugin Architecture** - Extensible sources, transforms, and sinks via pluggy with dynamic discovery
-- **Encryption at Rest** - SQLCipher encryption for the Landscape audit database via passphrase or environment variable
-- **Resilient Execution** - Checkpointing for crash recovery, retry logic with backoff, rate limiting, payload retention policies
-- **Signed Exports** - HMAC-signed audit exports for legal-grade integrity verification with manifest hash chains
-- **LLM Integration** - Azure OpenAI and OpenRouter support with pooled execution, batch processing, and multi-query
-- **Landscape MCP Server** - Read-only MCP analysis server for debugging pipeline failures against the audit database
+High-assurance pipeline tools usually assume the author is already a pipeline
+operator: someone comfortable reading YAML, tracing graph edges, and inspecting
+runtime evidence. That model fits sensitive, regulated, transactional,
+operational, medical, security, or defence-adjacent workflows where every step
+must be reviewable and auditable.
+
+LLM workflow builders usually solve a different problem: they make authoring
+easier, but often weaken validation, provenance, auditability, and operational
+evidence. Elspeth aims to serve both audiences without weakening the assurance
+side. The operator path stays hand-edited and version-controlled. The composer
+path lets a knowledge worker build document QA, classification, routing,
+extraction, reporting, and similar workflows through tools, contracts,
+validation, preflight checks, and execution evidence.
+
+The substrate is therefore the product. A pipeline is made from declared
+primitives: sources, transforms, pure-config gates, aggregations, coalesce
+points, and sinks. Those primitives carry schema and semantic contracts.
+Runtime assembly turns them into an execution graph; validation checks wiring,
+route targets, schema compatibility, and contracts before the executor runs the
+graph and writes the Landscape audit record.
+
+That gives Elspeth two first-class paths:
+
+| Audience | Authoring surface | Why it matters |
+| -------- | ----------------- | -------------- |
+| Operators in sensitive, regulated, transactional, operational, medical, security, or defence-adjacent workflows | Hand-edited YAML | The pipeline can be read, reviewed, versioned, and explained before it runs |
+| Knowledge workers building document QA, classification, routing, extraction, reporting, or review workflows | Authenticated Web Composer | The LLM builds through tools, contracts, validation, preflight checks, and execution evidence rather than emitting unchecked config text |
+
+The Web Composer is therefore not an alternative engine. It is an authoring
+surface over the same substrate.
 
 ---
 
-## Quick Start
+## Architecture At A Glance
+
+```text
+YAML authoring                         Web Composer authoring
+operator-reviewed settings             LLM tool loop + session state
+        │                                      │
+        └──────────────┬───────────────────────┘
+                       ▼
+       source/transform/sink plugins + pure-config gates
+                       │
+                       ▼
+       plugin schema contracts + route/semantic contracts
+                       │
+                       ▼
+   runtime assembly + graph validation + preflight
+                       │
+                       ▼
+        executor + orchestrator + payload store
+                       │
+                       ▼
+  Landscape audit trail + run accounting + artifacts
+```
+
+In RC-5, the important current-state claim is precise:
+
+- Web validation, web execution, and CLI execution all instantiate runtime
+  plugins through the production plugin-instantiation helper and build an
+  `ExecutionGraph` through the production graph factory.
+- Web validation is not a standalone UI checker. It generates YAML from
+  composer state, resolves runtime paths, loads settings, instantiates plugins
+  in preflight mode, builds the runtime graph, validates graph structure,
+  validates route targets, and validates edge/schema compatibility.
+- Composer previews run authoring validation first; when runtime preflight is
+  enabled, `preview_pipeline` also calls the same `validate_pipeline()` runtime
+  preflight boundary used by the web validation route.
+- Web execution reloads persisted composer state, verifies blob ownership and
+  runtime-only claims, resolves user secrets in the execution thread, loads
+  settings from the generated YAML, builds and validates a runtime graph in
+  normal runtime mode, assembles `PipelineConfig`, and runs the orchestrator.
+- The CLI path and the web path converge on production plugin instantiation,
+  graph construction, graph validation, executor/orchestrator behaviour, and
+  Landscape audit evidence. They are not yet one sealed compiler/executor
+  artifact boundary.
+- The project direction is stronger than the current shape: converge YAML and
+  composer input onto a sealed, secret-safe compiled artifact, then have the
+  executor run that artifact directly. That compiler boundary is designed, but
+  not yet the default execution path.
+
+The assurance machinery is load-bearing in this architecture. Declaration-trust
+contracts, runtime VAL manifests, strict response schemas, terminal outcome
+modelling, run-accounting invariants, and CI policy gates are what make it
+reasonable to let both authoring surfaces feed the same executor.
+
+---
+
+## What Changed In RC-5
+
+RC-5 moves Elspeth from a CLI-first auditable pipeline engine to a dual-surface
+authoring and execution platform. The YAML operator path remains first-class,
+while the authenticated Web Composer adds LLM-assisted authoring through audited
+tools, session state, blobs, secret references, runtime-shaped preview and
+preflight validation, background execution, cancellation, diagnostics, WebSocket
+progress, and artifact retrieval.
+
+The assurance work also moved forward: runtime-shaped validation, declaration
+trust, VAL manifests, terminal outcome modelling, run-accounting invariants,
+strict response schemas, and CI policy gates are now part of the product
+surface.
+
+---
+
+## Getting Started
+
+Choose the authoring path that matches how you want to work. Both paths end in
+an Elspeth pipeline that can be validated, executed, audited, and explained.
+
+### YAML Operator Path
 
 ```bash
 # Install
@@ -74,23 +190,308 @@ elspeth resume <run_id>
 
 See [Your First Pipeline](docs/guides/your-first-pipeline.md) for a complete walkthrough.
 
+### Web Composer Path
+
+The Web Composer is available through `elspeth web`. It runs a FastAPI backend
+and serves the built React frontend from `src/elspeth/web/frontend/dist/`.
+
+Use it when you want to build, inspect, validate, and execute a pipeline
+interactively:
+
+- create authenticated user sessions and keep versioned conversation/state
+  history
+- upload or create blobs, inspect schema hints, and wire blob-backed sources
+- store user secrets and wire `$secret{name}` references without exposing raw
+  values to the composer
+- ask the LLM composer to build or modify a pipeline through audited tools
+- preview validation, graph, spec, YAML, semantic contracts, and repair hints
+- start a background run, watch progress over WebSocket, cancel safely, and read
+  terminal diagnostics and output artifacts
+
+```bash
+# 1) Install backend web dependencies
+uv pip install -e ".[webui,dev]"
+
+# 2) Build the frontend bundle once
+cd src/elspeth/web/frontend
+npm install
+npm run build
+cd ../../../../
+
+# 3) Set a non-default JWT signing key
+export ELSPETH_WEB__SECRET_KEY="local-dev-secret-key"
+
+# 4) Create a local demo login user (development only)
+python - <<'PY'
+import os
+from pathlib import Path
+from elspeth.web.auth.local import LocalAuthProvider
+
+provider = LocalAuthProvider(
+    db_path=Path("data/auth.db"),
+    secret_key=os.environ["ELSPETH_WEB__SECRET_KEY"],
+)
+try:
+    provider.create_user(
+        user_id="demo",
+        password="demo12345",
+        display_name="Demo User",
+        email="demo@example.com",
+    )
+    print("Created demo user: demo / demo12345")
+except ValueError:
+    print("Demo user already exists: demo / demo12345")
+PY
+
+# 5) Start the web app
+elspeth web --host 127.0.0.1 --port 8451
+```
+
+Open `http://127.0.0.1:8451` and sign in with the local demo credentials
+`demo` / `demo12345`. Do not reuse these credentials outside local development.
+
+### Frontend Development
+
+For frontend iteration, run the API server and the Vite dev server separately.
+Vite proxies `/api` and `/ws` to the backend on port 8451.
+
+```bash
+# Terminal 1
+export ELSPETH_WEB__SECRET_KEY="local-dev-secret-key"
+elspeth web --host 127.0.0.1 --port 8451
+
+# Terminal 2
+cd src/elspeth/web/frontend
+npm install
+npm run dev
+```
+
+Then open `http://localhost:5173`.
+
+### Notes
+
+- `elspeth web` requires the `.[webui]` extra. Without it, the CLI exits with
+  an install hint.
+- The app refuses to start with the default
+  `ELSPETH_WEB__SECRET_KEY=change-me-in-production` outside test mode.
+- The default auth provider is local auth. Use `--auth oidc` or `--auth entra`
+  with the matching `ELSPETH_WEB__*` settings for external identity providers.
+- Local auth exposes `/api/auth/register` when
+  `ELSPETH_WEB__REGISTRATION_MODE=open`. For controlled local setups or closed
+  registration, create users directly in `data/auth.db` through
+  `LocalAuthProvider.create_user(...)` as shown above.
+- Session state is stored in `data/sessions.db`; local auth users are stored in
+  `data/auth.db`.
+- Run audit data defaults to `data/runs/audit.db`; payloads default to
+  `data/payloads/`. Override these with `ELSPETH_WEB__LANDSCAPE_URL` and
+  `ELSPETH_WEB__PAYLOAD_STORE_PATH` when you need explicit deployment paths.
+
 ---
 
-## The Sense/Decide/Act Model
+## Capabilities
+
+### Authoring And Validation
+
+- **Two authoring surfaces:** hand-edited YAML and the Web Composer both target
+  the same runtime substrate.
+- **Composer tool loop:** the LLM can discover plugins, mutate pipeline state,
+  manage blobs, reference secrets, preview validation, and request advisor
+  hints under explicit trigger categories. YAML export is a service-side
+  operation over validated composer state, not a free-form LLM emission.
+- **Declarative DAG wiring:** every edge is explicitly named and validated. No
+  implicit routing conventions are required for graph interpretation.
+- **Contract-aware validation:** schema contracts, semantic contracts, route
+  targets, source/sink path policy, secret-reference resolution, plugin
+  value-source rules, and runtime preflight failures surface before execution
+  where they can be checked.
+- **Configuration contract discipline:** user settings flow through validated
+  settings models into runtime dataclasses so accepted config fields are not
+  silently ignored by the engine.
+
+### Execution And Run Evidence
+
+- **Background web execution:** web runs start asynchronously, stream progress
+  over WebSocket, and can be cancelled through a bounded run-state transition.
+- **Landscape-derived accounting:** run responses split source rows, emitted
+  tokens, terminal tokens, routing/disposition counts, and ledger closure
+  integrity instead of collapsing everything into one row count.
+- **Terminal statuses:** runs distinguish `completed`,
+  `completed_with_failures`, `failed`, `empty`, and `cancelled`.
+- **Diagnostics and artifacts:** run endpoints expose diagnostics snapshots,
+  discard summaries, output artifact manifests, content hashes, and artifact
+  content retrieval.
+- **Resilient execution:** checkpointing, retry logic with backoff, plugin-level
+  concurrency, rate limiting, payload storage, and retention policies are part
+  of the runtime model.
+
+### Plugin Surface
+
+Elspeth discovers source, transform, and sink plugins through pluggy.
+Aggregations use batch-aware transform plugins. Gates are pure config: named
+expressions and route mappings interpreted by the engine, not plugin classes,
+pluggy entries, or dynamically registered components.
+Plugin authors can declare schema guarantees, required fields, semantic
+requirements, and composer assistance metadata so both humans and the composer
+can understand how a component may be wired.
+
+Current plugin families include:
+
+| Family | Examples |
+| ------ | -------- |
+| Sources and sinks | CSV, JSON, text, null, Azure Blob, Dataverse, database, Chroma, local file outputs |
+| Row transforms | Field mapping, type coercion, keyword filtering, truncation, line/json expansion |
+| LLM and safety | Regular `llm` transform with Azure OpenAI/OpenRouter support, multi-query and provider pooling, RAG retrieval, Azure Content Safety, Prompt Shield |
+| Batch analytics | `batch_distribution_profile`, `batch_experiment_compare`, `batch_classifier_metrics`, `batch_paired_preference`, `batch_drift_compare`, `batch_outlier_annotator`, `batch_data_quality_report`, `batch_top_k`, `batch_threshold_summary`, `batch_effect_size` |
+
+The old batch-specific LLM transforms, `azure_batch_llm` and
+`openrouter_batch_llm`, were retired. Use the regular `llm` transform with
+provider pooling or multi-query for LLM throughput, and use the statistical
+batch transforms for local, audit-attributable aggregation and evaluation.
+
+### MCP Surfaces
+
+- **Landscape MCP Server:** `elspeth-mcp` gives read-only tools for diagnosing
+  failures, explaining tokens, and inspecting performance from the audit
+  database.
+- **Composer MCP Server:** `elspeth-composer` exposes the composer tool surface
+  outside the web UI for agent-driven pipeline authoring.
+
+---
+
+## Audit And Assurance
+
+Elspeth treats the audit trail as the canonical evidentiary record, not as an
+optional log. The Landscape database records source rows, node states, external
+calls, payload hashes, route decisions, terminal outcomes, and artifact
+provenance. Telemetry and logs are secondary: useful for operations, but not the
+source of truth.
+
+RC-5 makes several assurance mechanisms product-visible:
+
+- **Declaration-trust:** plugin declarations that the graph builder trusts are
+  also backed by runtime VAL checks, invariant tests, and CI scanners.
+- **Runtime VAL manifests:** runtime validation commitments are recorded so a
+  later reader can see which declarations and implementation checks were active
+  for a run.
+- **Two-axis terminal model:** lifecycle outcome and path/provenance are
+  separated so "did this row succeed?" and "how did it get there?" are both
+  explicit.
+- **Strict response schemas:** web execution responses use strict validation and
+  forbid unknown fields so internal drift fails loudly instead of being silently
+  coerced.
+- **Mechanical policy gates:** CI and pre-commit include checks for tier-model
+  boundaries, component types, guard symmetry, contract manifests, composer
+  exception channels, catch ordering, and audit-evidence typing.
+- **Secret discipline:** runtime secrets are resolved at execution boundaries,
+  fingerprinted for audit, and not persisted as raw values in pipeline state.
+
+### Data Trust Model
+
+Elspeth enforces a three-tier trust model that governs how data is handled at
+every stage of the pipeline:
+
+| Tier | Data Source | Trust Level | Error Strategy |
+| ---- | ----------- | ----------- | -------------- |
+| **Tier 1** | Audit database, checkpoints, engine-owned runtime records | Full trust | Crash on any anomaly. Bad audit data means corruption or tampering |
+| **Tier 2** | Pipeline data after source validation | Elevated trust | Types are valid; wrap operations on row values where content can still fail |
+| **Tier 3** | External input, files, API/LLM responses, source data | Zero trust | Validate at the boundary, coerce where allowed, quarantine malformed rows |
+
+Coercion is only allowed at trust boundaries: sources ingesting external data,
+and transforms receiving LLM/API responses. Once data enters the pipeline with
+valid types, downstream transforms trust those types. Wrong types downstream are
+upstream bugs to fix, not data quality issues to handle gracefully.
+
+This means a CSV with garbage in row 500 should not crash a 10,000-row pipeline
+(Tier 3: quarantine the row, keep processing). A corrupted audit record should
+crash immediately (Tier 1: silently coercing bad audit data would be evidence
+tampering).
+
+See [Data Trust and Error Handling](docs/guides/data-trust-and-error-handling.md)
+for the complete model with code examples.
+
+### Audit Trail Export
+
+Export the complete audit trail for compliance and legal inquiry:
+
+```yaml
+landscape:
+  export:
+    enabled: true
+    sink: audit_archive
+    format: json
+    sign: true  # HMAC signature per record
+```
+
+```bash
+export ELSPETH_SIGNING_KEY="your-secret-key"
+elspeth run --settings pipeline.yaml --execute
+```
+
+Signed exports include every record with an HMAC-SHA256 signature, a manifest
+with total count and running hash, and timestamps for chain-of-custody review.
+
+### JSONL Change Journal (Optional)
+
+Enable a redundant JSONL change journal to record committed database writes as
+an emergency backup. **Disabled by default.** This is not the canonical audit
+record; use it only when you need a text-based, append-only backup stream.
+
+```yaml
+landscape:
+  dump_to_jsonl: true
+  dump_to_jsonl_path: ./runs/audit.journal.jsonl
+  # Include request/response payloads for LLM/HTTP calls
+  dump_to_jsonl_include_payloads: true
+```
+
+---
+
+## Status And Direction
+
+RC-5 is the release where the Web Composer becomes a real product surface, but
+the structural change is broader than the web UI. The project now has two
+authoring paths over a single high-assurance substrate, richer run evidence,
+declared plugin contracts, a stronger terminal outcome model, and more
+mechanical CI policy around audit integrity.
+
+Current RC-5 behaviour:
+
+- YAML remains a first-class operator path.
+- The Web Composer builds through discovery, mutation, blob, secret-reference,
+  validation, service-side YAML export, and optional advisor tools.
+- Composer validation and web execution use runtime-shaped engine setup rather
+  than a standalone UI validator.
+- The executor still runs from runtime-assembled settings and graph objects, not
+  from a persisted compiled artifact.
+
+Direction after RC-5:
+
+- introduce a first-class compiler facade over the existing graph builder
+- preview and seal a secret-safe compiled pipeline artifact
+- bind compiled artifacts to Landscape provenance
+- run web and CLI execution from the verified artifact instead of reparsing YAML
+  as the primary runtime input
+
+See [CHANGELOG.md](CHANGELOG.md) for the release-by-release detail.
+
+---
+
+## Sense/Decide/Act Model
 
 ```text
-SENSE (Sources)  →  DECIDE (Transforms/Gates)  →  ACT (Sinks)
+SENSE (Sources)  →  DECIDE (Transforms + Pure-Config Gates)  →  ACT (Sinks)
      │                       │                        │
   Load data            Process & classify       Route to outputs
 ```
 
 | Stage | What It Does | Examples |
 | ----- | ------------ | -------- |
-| **Sense** | Load data from any source | CSV, JSON, APIs, databases, message queues |
-| **Decide** | Transform and classify rows | LLM query, ML inference, rules engine, threshold gate |
-| **Act** | Route to appropriate outputs | File output, database insert, alert webhook, review queue |
+| **Sense** | Load data from built-in or custom sources | CSV, JSON, text/blob files, Azure Blob, Dataverse; custom source plugins for APIs or queues |
+| **Decide** | Transform and classify rows | LLM query, ML inference, rules engine, pure-config threshold gate |
+| **Act** | Route to appropriate outputs | CSV/JSON files, database rows, Azure Blob, Dataverse, Chroma; custom sinks for alerts or review queues |
 
-**Gates** route rows to different sinks based on config-driven expressions:
+**Gates are pure config.** They route rows to different sinks based on named
+expressions and route mappings that the engine interprets:
 
 ```yaml
 gates:
@@ -106,43 +507,12 @@ Every edge in the DAG is explicitly declared — no implicit routing conventions
 
 ---
 
-## Data Trust Model
-
-ELSPETH enforces a **three-tier trust model** that governs how data is handled at every stage of the pipeline:
-
-| Tier | Data Source | Trust Level | Error Strategy |
-| ---- | ----------- | ----------- | -------------- |
-| **Tier 1** | Audit database (Landscape) | Full trust | Crash on any anomaly — bad audit data means corruption or tampering |
-| **Tier 2** | Pipeline data (post-source) | Elevated trust | Types are valid (source validated them); wrap operations on row values |
-| **Tier 3** | External input (sources, API responses) | Zero trust | Validate at boundary, coerce where possible, quarantine failures |
-
-**Coercion is only allowed at trust boundaries:** sources ingesting external data, and transforms receiving LLM/API responses. Once data enters the pipeline with valid types, downstream transforms trust those types. Wrong types downstream are upstream bugs to fix, not data quality issues to handle gracefully.
-
-This means a CSV with garbage in row 500 won't crash your 10,000-row pipeline (Tier 3: quarantine the row, keep processing). But a corrupted audit record will crash immediately (Tier 1: the audit trail is the legal record, and silently coercing bad data would be evidence tampering).
-
-```text
-EXTERNAL DATA              PIPELINE DATA              AUDIT TRAIL
-(zero trust)               (elevated trust)           (full trust)
-
-┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
-│ External Source │        │ Transform/Sink  │        │ Landscape DB    │
-│                 │        │                 │        │                 │
-│ • Coerce OK     │───────►│ • No coercion   │───────►│ • Crash on      │
-│ • Validate      │ types  │ • Expect types  │ record │   any anomaly   │
-│ • Quarantine    │ valid  │ • Wrap ops on   │ what   │ • No coercion   │
-│   failures      │        │   row values    │ we saw │   ever          │
-└─────────────────┘        └─────────────────┘        └─────────────────┘
-```
-
-See [Data Trust and Error Handling](docs/guides/data-trust-and-error-handling.md) for the complete model with code examples.
-
----
-
 ## Example Use Cases
 
 | Domain | Sense | Decide | Act |
 | ------ | ----- | ------ | --- |
 | **Tender Evaluation** | CSV of submissions | LLM classification + safety gates | Results CSV, abuse review queue |
+| **Document QA** | PDF/text blobs | LLM extraction, rubric checks, statistical summaries | Annotated outputs, exception queue |
 | **Weather Monitoring** | Sensor API feed | Threshold + ML anomaly detection | Routine log, warning, emergency alert |
 | **Satellite Operations** | Telemetry stream | Anomaly classifier | Routine log, investigation ticket |
 | **Financial Compliance** | Transaction feed | Rules engine + ML fraud detection | Approved, flagged, blocked |
@@ -172,7 +542,7 @@ elspeth plugins list
 
 ### Explaining Decisions
 
-ELSPETH records complete lineage for every row. The audit database captures:
+Elspeth records complete lineage for every row. The audit database captures:
 
 - Source row with content hash
 - Every transform applied (input/output hashes)
@@ -185,46 +555,6 @@ elspeth explain --run <run_id> --row <row_id> --database <path/to/audit.db>
 ```
 
 For programmatic access, query the Landscape database directly using the `LandscapeRecorder` API.
-
-### Audit Trail Export
-
-Export the complete audit trail for compliance and legal inquiry:
-
-```yaml
-landscape:
-  export:
-    enabled: true
-    sink: audit_archive
-    format: json
-    sign: true  # HMAC signature per record
-```
-
-```bash
-export ELSPETH_SIGNING_KEY="your-secret-key"
-elspeth run --settings pipeline.yaml --execute
-```
-
-Signed exports include:
-
-- Every record with HMAC-SHA256 signature
-- Manifest with total count and running hash
-- Timestamp for chain-of-custody verification
-
-### JSONL Change Journal (Optional)
-
-Enable a redundant JSONL change journal to record committed database writes as
-an emergency backup. **Disabled by default.** This is not the canonical audit
-record—use only when you need a text-based, append-only backup stream.
-
-```yaml
-landscape:
-  dump_to_jsonl: true
-  dump_to_jsonl_path: ./runs/audit.journal.jsonl
-  # Include request/response payloads for LLM/HTTP calls
-  dump_to_jsonl_include_payloads: true
-```
-
----
 
 ## Landscape MCP Server
 
@@ -259,7 +589,7 @@ source:
   options:
     path: data/input.csv
     schema:
-      fields: dynamic
+      mode: observed
 
 transforms:
 - name: enrich
@@ -268,7 +598,7 @@ transforms:
   on_success: enriched        # Named output connection
   options:
     schema:
-      fields: dynamic
+      mode: observed
     mapping:
       old_name: new_name
 
@@ -296,7 +626,7 @@ landscape:
 
 ### Field Normalization
 
-ELSPETH handles messy external headers through source-side normalization and sink-side display restoration.
+Elspeth handles messy external headers through source-side normalization and sink-side display restoration.
 
 #### Source Normalization
 
@@ -365,7 +695,7 @@ export ELSPETH_SIGNING_KEY="your-signing-key"
 export ELSPETH_AUDIT_PASSPHRASE="your-audit-passphrase"
 ```
 
-ELSPETH automatically loads `.env` files. Use `--no-dotenv` to skip in CI/CD.
+Elspeth automatically loads `.env` files. Use `--no-dotenv` to skip in CI/CD.
 
 <details>
 <summary><strong>Advanced Configuration</strong></summary>
@@ -393,7 +723,7 @@ elspeth run --settings config.yaml --profile production
 
 ### Secret Fingerprinting
 
-ELSPETH fingerprints secrets before storing in the audit trail:
+Elspeth fingerprints secrets before storing in the audit trail:
 
 - **Production**: Set `ELSPETH_FINGERPRINT_KEY` (stable key for fingerprint consistency)
 - **Development**: Set `ELSPETH_ALLOW_RAW_SECRETS=true` (redacts instead of fingerprints)
@@ -412,7 +742,7 @@ payload_store:
 
 ### Concurrency Model
 
-ELSPETH uses **plugin-level concurrency** rather than orchestrator-level parallelism:
+Elspeth uses **plugin-level concurrency** rather than orchestrator-level parallelism:
 
 - **Orchestrator**: Single-threaded, sequential token processing (deterministic audit trail)
 - **Plugins**: Internally parallelize I/O-bound operations (LLM batching, DB bulk writes)
@@ -448,20 +778,23 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-ELSPETH is available as a Docker container:
+Elspeth can run from a published Docker image. Replace `v0.5.0` with the tag
+published for the release you are evaluating.
 
 ```bash
+IMAGE_TAG=v0.5.0
+
 # Run a pipeline
 docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.4.1 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 
 # Health check
-docker run --rm ghcr.io/johnm-dta/elspeth health --json
+docker run --rm ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} health --json
 ```
 
 | Mount | Purpose |
@@ -475,7 +808,7 @@ See [Docker Guide](docs/guides/docker.md) for complete deployment documentation.
 
 ---
 
-## Architecture
+## Repository Architecture
 
 ```text
 elspeth/
@@ -522,8 +855,8 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | -------- | -------- | ------- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Developers | C4 diagrams, data flows, component details |
 | [PLUGIN.md](PLUGIN.md) | Plugin Authors | How to create sources, transforms, sinks |
-| [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | 323 verified requirements with implementation status |
-| [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records (6 ADRs including sink routing, DAG wiring, layer remediation) |
+| [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | Verified requirements with implementation status |
+| [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
 | [CLAUDE.md](CLAUDE.md) | AI Assistants | Project context, trust model, patterns |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |
@@ -531,7 +864,7 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 
 ---
 
-## When to Use ELSPETH
+## When to Use Elspeth
 
 ### Good Fit
 

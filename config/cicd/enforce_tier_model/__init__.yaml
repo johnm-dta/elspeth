@@ -1,0 +1,6 @@
+allow_hits:
+- key: __init__.py:R6:_module_:fp=1669d46742317730
+  owner: core
+  reason: Standard importlib.metadata version fallback — PackageNotFoundError means package not installed in editable mode
+  safety: Sets version to "unknown"; no silent data loss
+  expires: null

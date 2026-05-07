@@ -12,7 +12,7 @@ Uses BaseAzureSafetyTransform for shared batch infrastructure.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import Field
 
@@ -39,6 +39,7 @@ class AzurePromptShieldConfig(BaseAzureSafetyConfig):
             - "user_prompt": Only check for user prompt attacks (jailbreak)
             - "document": Only check for document attacks (prompt injection)
         max_capacity_retry_seconds: Timeout for capacity error retries (default 3600)
+        batch_wait_timeout_seconds: Timeout for receiving a completed row result (default 3600)
 
     Example YAML:
         transforms:
@@ -61,6 +62,24 @@ class AzurePromptShieldConfig(BaseAzureSafetyConfig):
     )
 
 
+class _PromptShieldProbeRequestBody(TypedDict):
+    userPrompt: str
+    documents: list[str]
+
+
+class _PromptShieldProbeUserAnalysis(TypedDict):
+    attackDetected: bool
+
+
+class _PromptShieldProbeDocumentAnalysis(TypedDict):
+    attackDetected: bool
+
+
+class _PromptShieldProbeResponseBody(TypedDict):
+    userPromptAnalysis: _PromptShieldProbeUserAnalysis
+    documentsAnalysis: list[_PromptShieldProbeDocumentAnalysis]
+
+
 class AzurePromptShield(BaseAzureSafetyTransform):
     """Detect jailbreak attempts and prompt injection using Azure Prompt Shield.
 
@@ -75,11 +94,70 @@ class AzurePromptShield(BaseAzureSafetyTransform):
     """
 
     name = "azure_prompt_shield"
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = "sha256:19f08887d6f0065d"
+    config_model = AzurePromptShieldConfig
+    passes_through_input = True
+
+    @classmethod
+    def probe_config(cls) -> dict[str, Any]:
+        """Minimal config for the ADR-009 forward invariant."""
+        return {
+            "endpoint": "https://test.cognitiveservices.azure.com",
+            "api_key": "test-key",
+            "fields": ["prompt_shield_probe_text"],
+            "schema": {"mode": "observed"},
+        }
 
     def __init__(self, config: dict[str, Any]) -> None:
-        cfg = AzurePromptShieldConfig.from_dict(config)
+        cfg = AzurePromptShieldConfig.from_dict(config, plugin_name=self.name)
         super().__init__(config, cfg, "AzurePromptShieldSchema")
         self._analysis_type = cfg.analysis_type
+
+    def forward_invariant_probe_rows(self, probe: Any) -> list[Any]:
+        """Inject a deterministic safe prompt field for invariant probing."""
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name="prompt_shield_probe_text",
+                value="safe prompt",
+            )
+        ]
+
+    def execute_forward_invariant_probe(
+        self,
+        probe_rows: list[Any],
+        ctx: Any,
+    ) -> TransformResult:
+        """Exercise the real single-row validation path with a local fake client."""
+
+        class _ProbeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> _PromptShieldProbeResponseBody:
+                return {
+                    "userPromptAnalysis": {"attackDetected": False},
+                    "documentsAnalysis": [{"attackDetected": False}],
+                }
+
+        class _ProbeClient:
+            def post(
+                self,
+                url: str,
+                json: _PromptShieldProbeRequestBody,
+            ) -> _ProbeResponse:
+                del url, json
+                return _ProbeResponse()
+
+            def close(self) -> None:
+                return None
+
+        return self._execute_forward_invariant_probe_with_client(
+            probe_rows,
+            ctx,
+            client=_ProbeClient(),
+        )
 
     def _analyze_field(
         self,

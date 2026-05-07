@@ -21,7 +21,7 @@ ddtrace = pytest.importorskip(
 )
 
 from elspeth.contracts import TokenCompleted, TokenUsage  # noqa: E402
-from elspeth.contracts.enums import RowOutcome, RunStatus  # noqa: E402
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath  # noqa: E402
 from elspeth.contracts.events import RunFinished, RunStarted  # noqa: E402
 from elspeth.telemetry.exporters.datadog import DatadogExporter  # noqa: E402
 
@@ -158,7 +158,8 @@ class TestDatadogIntegration:
             run_id="run-789",
             token_id="token-abc",
             row_id="row-def",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output_sink",
         )
 
@@ -170,7 +171,8 @@ class TestDatadogIntegration:
         assert span.name == "TokenCompleted"
         assert tags.get("elspeth.token_id") == "token-abc"
         assert tags.get("elspeth.row_id") == "row-def"
-        assert tags.get("elspeth.outcome") == "completed"
+        assert tags.get("elspeth.outcome") == "success"
+        assert tags.get("elspeth.path") == "default_flow"
         assert tags.get("elspeth.sink_name") == "output_sink"
 
     def test_datetime_serialized_as_iso8601(self, configured_exporter) -> None:
@@ -280,7 +282,8 @@ class TestDatadogSpanFormat:
             run_id="none-test",
             token_id="token-1",
             row_id="row-1",
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             sink_name=None,  # Explicitly None
         )
         exporter.export(event)
@@ -413,7 +416,8 @@ class TestDatadogMultipleEvents:
                 run_id=run_id,
                 token_id="token-1",
                 row_id="row-1",
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="output",
             )
         )

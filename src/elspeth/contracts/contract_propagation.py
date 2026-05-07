@@ -10,12 +10,40 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
-import structlog
-
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.type_normalization import normalize_type_for_contract
 
-log = structlog.get_logger()
+
+def _infer_new_field_contract(name: str, value: Any) -> FieldContract:
+    """Build an inferred contract field for transform-created output data.
+
+    Unsupported checkpoint-incompatible types are retained as object so the
+    row data and contract cannot diverge. Non-finite floats intentionally
+    propagate ValueError from normalize_type_for_contract(); they are invalid
+    audit material and must fail consistently across propagation paths.
+    """
+    try:
+        python_type = normalize_type_for_contract(value)
+    except TypeError:
+        python_type = object
+
+    # Null-like values normalize to type(None), but for inference that means
+    # "type unknown, field is nullable" — not "field is always NoneType".
+    # Use object+nullable to avoid order-dependent contracts that break on
+    # subsequent rows with real values.
+    nullable = False
+    if python_type is type(None):
+        python_type = object
+        nullable = True
+
+    return FieldContract(
+        normalized_name=name,
+        original_name=name,
+        python_type=python_type,
+        required=False,
+        source="inferred",
+        nullable=nullable,
+    )
 
 
 def propagate_contract(
@@ -47,25 +75,7 @@ def propagate_contract(
 
     for name, value in output_row.items():
         if name not in existing_names:
-            # New field - try to infer type
-            try:
-                python_type = normalize_type_for_contract(value)
-            except TypeError:
-                # Unsupported type: map to object ("any") to preserve field in contract.
-                # Silently skipping would cause contract/data divergence — the row
-                # contains the field but the contract wouldn't, breaking FIXED mode
-                # access and losing field lineage in sinks.
-                python_type = object
-
-            new_fields.append(
-                FieldContract(
-                    normalized_name=name,
-                    original_name=name,  # No original for transform-created fields
-                    python_type=python_type,
-                    required=False,  # Inferred fields are never required
-                    source="inferred",
-                )
-            )
+            new_fields.append(_infer_new_field_contract(name, value))
 
     if not new_fields:
         return input_contract
@@ -100,8 +110,6 @@ def narrow_contract_to_output(
     Returns:
         Contract containing fields from input that still exist + new fields
 
-    Note:
-        TODO: Extract shared field inference logic with propagate_contract() - 90% overlap
     """
     output_field_names = set(output_row.keys())
 
@@ -111,8 +119,6 @@ def narrow_contract_to_output(
     # Find NEW fields in output (not in input contract)
     existing_names = {f.normalized_name for f in input_contract.fields}
     new_fields: list[FieldContract] = []
-    renamed_targets: list[str] = []
-    skipped_fields: list[str] = []
 
     # Build target->source lookup for metadata preservation.
     # If multiple sources map to the same target, last mapping wins.
@@ -132,7 +138,6 @@ def narrow_contract_to_output(
                     normalized_source_name = original_to_normalized[source_name]
                 source_contract = input_contract.find_field(normalized_source_name)
             if source_contract is not None:
-                renamed_targets.append(name)
                 new_fields.append(
                     FieldContract(
                         normalized_name=name,
@@ -145,45 +150,7 @@ def narrow_contract_to_output(
                 )
                 continue
 
-            try:
-                python_type = normalize_type_for_contract(value)
-            except TypeError:
-                # Unsupported type: map to object ("any") to preserve field in contract.
-                # Silently skipping would cause contract/data divergence — the row
-                # contains the field but the contract wouldn't, breaking FIXED mode
-                # access and losing field lineage in sinks.
-                python_type = object
-            except ValueError as e:
-                # Skip invalid values (NaN, Infinity)
-                skipped_fields.append(name)
-                log.debug(
-                    "contract_field_skipped",
-                    field_name=name,
-                    reason=type(e).__name__,
-                    value_type=type(value).__name__,
-                )
-                continue
-
-            new_fields.append(
-                FieldContract(
-                    normalized_name=name,
-                    original_name=name,  # New fields have no original name
-                    python_type=python_type,
-                    required=False,  # Inferred fields are never required
-                    source="inferred",
-                )
-            )
-
-    # B4: Observability for contract modifications
-    log.debug(
-        "contract_narrowed",
-        input_field_count=len(input_contract.fields),
-        output_field_count=len(kept_fields) + len(new_fields),
-        fields_kept=[f.normalized_name for f in kept_fields],
-        fields_renamed=renamed_targets,
-        fields_inferred=[f.normalized_name for f in new_fields if f.normalized_name not in renamed_targets],
-        fields_skipped=skipped_fields,
-    )
+            new_fields.append(_infer_new_field_contract(name, value))
 
     return SchemaContract(
         mode=input_contract.mode,

@@ -6,8 +6,9 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.sinks.csv_sink import CSVSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory
 
 # Strict schema config for tests - CSVSink requires fixed columns
 STRICT_SCHEMA = {"mode": "fixed", "fields": ["id: int", "value: str"]}
@@ -16,9 +17,8 @@ STRICT_SCHEMA = {"mode": "fixed", "fields": ["id: int", "value: str"]}
 @pytest.fixture
 def ctx() -> PluginContext:
     """Create test context."""
-    db = make_landscape_db()
-    recorder = make_recorder(db)
-    return make_context(landscape=recorder)
+    factory = make_factory()
+    return make_context(landscape=factory.plugin_audit_writer())
 
 
 class TestCSVSinkAppendMode:
@@ -29,11 +29,13 @@ class TestCSVSinkAppendMode:
         output_path = tmp_path / "output.csv"
 
         # First write in normal mode
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink1.write([{"id": 1, "value": "a"}], ctx)
         sink1.flush()
@@ -46,12 +48,14 @@ class TestCSVSinkAppendMode:
         assert "id" in lines1[0] and "value" in lines1[0]
 
         # Second write in append mode
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "mode": "append",
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "mode": "append",
+                }
+            )
         )
         sink2.write([{"id": 2, "value": "b"}], ctx)
         sink2.flush()
@@ -70,11 +74,13 @@ class TestCSVSinkAppendMode:
         name_age_schema = {"mode": "fixed", "fields": ["name: str", "age: int"]}
 
         # First write with specific column order
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": name_age_schema,
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": name_age_schema,
+                }
+            )
         )
         sink1.write([{"name": "Alice", "age": 30}], ctx)
         sink1.flush()
@@ -85,12 +91,14 @@ class TestCSVSinkAppendMode:
         original_header = content1.strip().split("\n")[0]
 
         # Append with same fields (order might differ in dict)
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": name_age_schema,
-                "mode": "append",
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": name_age_schema,
+                    "mode": "append",
+                }
+            )
         )
         sink2.write([{"age": 25, "name": "Bob"}], ctx)  # Different order
         sink2.flush()
@@ -109,12 +117,14 @@ class TestCSVSinkAppendMode:
         output_path = tmp_path / "new_file.csv"
         assert not output_path.exists()
 
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "mode": "append",
+                }
+            )
         )
         sink.write([{"id": 1, "value": "created"}], ctx)
         sink.flush()
@@ -131,22 +141,26 @@ class TestCSVSinkAppendMode:
         output_path = tmp_path / "output.csv"
 
         # First write
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink1.write([{"id": 1, "value": "first"}], ctx)
         sink1.flush()
         sink1.close()
 
         # Second write without mode (should truncate)
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink2.write([{"id": 2, "value": "second"}], ctx)
         sink2.flush()
@@ -164,12 +178,14 @@ class TestCSVSinkAppendMode:
         output_path = tmp_path / "empty.csv"
         output_path.touch()  # Create empty file
 
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "mode": "append",
+                }
+            )
         )
         sink.write([{"id": 1, "value": "test"}], ctx)
         sink.flush()
@@ -186,35 +202,41 @@ class TestCSVSinkAppendMode:
         output_path = tmp_path / "output.csv"
 
         # Initial write
-        sink1 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         sink1.write([{"id": 1, "value": "first"}], ctx)
         sink1.flush()
         sink1.close()
 
         # First append
-        sink2 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "mode": "append",
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "mode": "append",
+                }
+            )
         )
         sink2.write([{"id": 2, "value": "second"}], ctx)
         sink2.flush()
         sink2.close()
 
         # Second append
-        sink3 = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "mode": "append",
-            }
+        sink3 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "mode": "append",
+                }
+            )
         )
         sink3.write([{"id": 3, "value": "third"}], ctx)
         sink3.flush()
@@ -234,12 +256,14 @@ class TestCSVSinkAppendMode:
         """
         output_path = tmp_path / "output.csv"
 
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "mode": "append",
+                }
+            )
         )
 
         assert sink.declared_required_fields == frozenset({"id", "value"})
@@ -276,12 +300,14 @@ class TestCSVSinkAppendExplicitSchema:
             "fields": ["id: int", "score: float?"],
         }
 
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": strict_schema,
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": strict_schema,
+                    "mode": "append",
+                }
+            )
         )
 
         # Should fail fast at write time (when _open_file is called)
@@ -310,12 +336,14 @@ class TestCSVSinkAppendExplicitSchema:
             "fields": ["id: int", "score: float"],
         }
 
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": strict_schema,
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": strict_schema,
+                    "mode": "append",
+                }
+            )
         )
 
         # Should fail because order doesn't match
@@ -340,12 +368,14 @@ class TestCSVSinkAppendExplicitSchema:
             "fields": ["id: int", "score: float"],
         }
 
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": strict_schema,
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": strict_schema,
+                    "mode": "append",
+                }
+            )
         )
 
         # Should succeed - headers match schema

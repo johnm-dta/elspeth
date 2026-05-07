@@ -20,13 +20,13 @@ from elspeth.contracts import NodeType, TransformResult
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.executors import TransformExecutor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 DYNAMIC_SCHEMA = {"mode": "observed"}
 
@@ -243,8 +243,8 @@ def mock_azure_openai_multi_query(
 
 
 @pytest.fixture
-def recorder(tmp_path) -> LandscapeRecorder:
-    """Create recorder with file-based DB for cross-thread access.
+def factory(tmp_path) -> RecorderFactory:
+    """Create factory with file-based DB for cross-thread access.
 
     LLMTransform uses BatchTransformMixin which processes
     rows in a background thread. SQLite in-memory databases are
@@ -252,29 +252,29 @@ def recorder(tmp_path) -> LandscapeRecorder:
     A file-based temp DB is shared across threads correctly.
     """
     db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
-    return make_recorder(db)
+    return make_factory(db)
 
 
 @pytest.fixture
-def executor(recorder: LandscapeRecorder) -> TransformExecutor:
+def executor(factory: RecorderFactory) -> TransformExecutor:
     """Create TransformExecutor for testing."""
     spans = SpanFactory()
     step_resolver = lambda node_id: 0  # noqa: E731
-    return TransformExecutor(recorder, spans, step_resolver)
+    return TransformExecutor(factory.execution, spans, step_resolver, data_flow=factory.data_flow)
 
 
 @pytest.fixture
-def run_id(recorder: LandscapeRecorder) -> str:
+def run_id(factory: RecorderFactory) -> str:
     """Create a run for testing."""
-    run = recorder.begin_run(config={}, canonical_version="v1")
+    run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
     return run.run_id
 
 
 @pytest.fixture
-def node_id(recorder: LandscapeRecorder, run_id: str) -> str:
+def node_id(factory: RecorderFactory, run_id: str) -> str:
     """Create a node for testing."""
     schema = SchemaConfig.from_dict(DYNAMIC_SCHEMA)
-    node = recorder.register_node(
+    node = factory.data_flow.register_node(
         run_id=run_id,
         plugin_name="llm",
         node_type=NodeType.TRANSFORM,
@@ -285,8 +285,8 @@ def node_id(recorder: LandscapeRecorder, run_id: str) -> str:
     return node.node_id
 
 
-def create_token_in_recorder(
-    recorder: LandscapeRecorder,
+def create_token_in_factory(
+    factory: RecorderFactory,
     run_id: str,
     node_id: str,
     row_id: str,
@@ -294,15 +294,15 @@ def create_token_in_recorder(
     row_data: dict[str, Any],
     row_index: int = 0,
 ) -> TokenInfo:
-    """Create row and token in recorder, return TokenInfo."""
-    row = recorder.create_row(
+    """Create row and token in factory, return TokenInfo."""
+    row = factory.data_flow.create_row(
         run_id=run_id,
         source_node_id=node_id,
         row_index=row_index,
         data=row_data,
         row_id=row_id,
     )
-    recorder.create_token(row_id=row.row_id, token_id=token_id)
+    factory.data_flow.create_token(row_id=row.row_id, token_id=token_id)
     # Wrap row_data in PipelineRow with contract
     pipeline_row = make_pipeline_row(row_data)
     return TokenInfo(row_id=row_id, token_id=token_id, row_data=pipeline_row)
@@ -313,7 +313,7 @@ class TestMultiQueryIntegration:
 
     def test_full_assessment_matrix(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         executor: TransformExecutor,
         run_id: str,
         node_id: str,
@@ -337,7 +337,7 @@ class TestMultiQueryIntegration:
 
             ctx = make_context(
                 run_id=run_id,
-                landscape=recorder,
+                landscape=factory.plugin_audit_writer(),
             )
             transform.on_start(ctx)
 
@@ -364,8 +364,8 @@ class TestMultiQueryIntegration:
                     row_data[f"{cs}_{crit}_criterion_name"] = name
                     row_data[f"{cs}_{crit}_criterion_desc"] = desc
 
-            token = create_token_in_recorder(
-                recorder,
+            token = create_token_in_factory(
+                factory,
                 run_id,
                 node_id,
                 row_id="row-1",
@@ -402,7 +402,7 @@ class TestMultiQueryIntegration:
             from elspeth.contracts import CallStatus, CallType
 
             assert ctx.state_id is not None
-            calls = recorder.get_calls(ctx.state_id)
+            calls = factory.query.get_calls(ctx.state_id)
             llm_calls = [c for c in calls if c.call_type == CallType.LLM]
             assert len(llm_calls) == 10, f"Expected 10 LLM calls recorded, got {len(llm_calls)}"
             assert all(c.status == CallStatus.SUCCESS for c in llm_calls)
@@ -411,7 +411,7 @@ class TestMultiQueryIntegration:
 
     def test_multiple_rows_through_multi_query(
         self,
-        recorder: LandscapeRecorder,
+        factory: RecorderFactory,
         executor: TransformExecutor,
         run_id: str,
         node_id: str,
@@ -459,7 +459,7 @@ class TestMultiQueryIntegration:
 
             ctx = make_context(
                 run_id=run_id,
-                landscape=recorder,
+                landscape=factory.plugin_audit_writer(),
             )
             transform.on_start(ctx)
 
@@ -472,8 +472,8 @@ class TestMultiQueryIntegration:
             results: list[TransformResult] = []
 
             for i, row_data in enumerate(rows):
-                token = create_token_in_recorder(
-                    recorder,
+                token = create_token_in_factory(
+                    factory,
                     run_id,
                     node_id,
                     row_id=f"row-{i}",
@@ -505,7 +505,7 @@ class TestMultiQueryIntegration:
             from elspeth.contracts import CallStatus, CallType
 
             assert ctx.state_id is not None
-            calls = recorder.get_calls(ctx.state_id)
+            calls = factory.query.get_calls(ctx.state_id)
             llm_calls = [c for c in calls if c.call_type == CallType.LLM]
             assert len(llm_calls) == 2, f"Expected 2 LLM calls for last row, got {len(llm_calls)}"
             assert all(c.status == CallStatus.SUCCESS for c in llm_calls)

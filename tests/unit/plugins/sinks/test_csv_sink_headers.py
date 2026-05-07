@@ -14,8 +14,9 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.testing import make_field
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory
 
 # CSVSink requires fixed-column structure (strict mode)
 STRICT_SCHEMA = {"mode": "fixed", "fields": ["amount_usd: int", "customer_id: str"]}
@@ -44,17 +45,18 @@ class TestCSVSinkContractSupport:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        db = make_landscape_db()
-        recorder = make_recorder(db)
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_set_output_contract(self, output_path: Path, sample_contract: SchemaContract) -> None:
         """set_output_contract stores contract for header resolution."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
 
         sink.set_output_contract(sample_contract)
@@ -64,22 +66,26 @@ class TestCSVSinkContractSupport:
 
     def test_get_output_contract_returns_none_initially(self, output_path: Path) -> None:
         """get_output_contract returns None when no contract set."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
 
         assert sink.get_output_contract() is None
 
     def test_get_output_contract_returns_stored_contract(self, output_path: Path, sample_contract: SchemaContract) -> None:
         """get_output_contract returns stored contract."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
 
         sink.set_output_contract(sample_contract)
@@ -110,17 +116,18 @@ class TestCSVSinkHeaderModes:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        db = make_landscape_db()
-        recorder = make_recorder(db)
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_normalized_headers_default(self, output_path: Path, ctx: PluginContext) -> None:
         """Default mode uses normalized (Python identifier) headers."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
 
         sink.write([{"amount_usd": 100, "customer_id": "C001"}], ctx)
@@ -135,12 +142,14 @@ class TestCSVSinkHeaderModes:
 
     def test_original_headers_from_contract(self, output_path: Path, sample_contract: SchemaContract, ctx: PluginContext) -> None:
         """headers: original restores source headers from contract."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": "original",
+                }
+            )
         )
 
         # Provide contract to sink via explicit set_output_contract
@@ -167,12 +176,14 @@ class TestCSVSinkHeaderModes:
         but doesn't explicitly call sink.set_output_contract(). The sink
         should lazily capture the contract on first write().
         """
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": "original",
+                }
+            )
         )
 
         # Simulate orchestrator behavior: set contract on context, not sink
@@ -195,15 +206,17 @@ class TestCSVSinkHeaderModes:
 
     def test_custom_headers_mapping(self, output_path: Path, ctx: PluginContext) -> None:
         """headers: {mapping} uses custom header names."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": {
-                    "amount_usd": "AMOUNT",
-                    "customer_id": "CUST_ID",
-                },
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": {
+                        "amount_usd": "AMOUNT",
+                        "customer_id": "CUST_ID",
+                    },
+                }
+            )
         )
 
         sink.write([{"amount_usd": 100, "customer_id": "C001"}], ctx)
@@ -222,12 +235,14 @@ class TestCSVSinkHeaderModes:
         original names is available (no contract, no Landscape), write()
         raises an error rather than silently degrading to normalized names.
         """
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": "original",
+                }
+            )
         )
         # Deliberately NOT setting a contract or landscape
         ctx_no_landscape = PluginContext(run_id="test-run", config={}, landscape=None)
@@ -259,51 +274,58 @@ class TestCSVSinkHeaderModeInteraction:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        db = make_landscape_db()
-        recorder = make_recorder(db)
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_headers_mode_attribute_stored(self, output_path: Path) -> None:
         """CSVSink stores headers_mode from config."""
         from elspeth.contracts.header_modes import HeaderMode
 
         # Test NORMALIZED (default)
-        sink_default = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-            }
+        sink_default = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                }
+            )
         )
         assert sink_default._headers_mode == HeaderMode.NORMALIZED
 
         # Test ORIGINAL
-        sink_original = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": "original",
-            }
+        sink_original = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": "original",
+                }
+            )
         )
         assert sink_original._headers_mode == HeaderMode.ORIGINAL
 
         # Test CUSTOM
-        sink_custom = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": {"amount_usd": "AMOUNT"},
-            }
+        sink_custom = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": {"amount_usd": "AMOUNT"},
+                }
+            )
         )
         assert sink_custom._headers_mode == HeaderMode.CUSTOM
 
     def test_contract_used_with_original_mode(self, output_path: Path, sample_contract: SchemaContract, ctx: PluginContext) -> None:
         """Contract is used for header resolution when mode is ORIGINAL."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": "original",
+                }
+            )
         )
         sink.set_output_contract(sample_contract)
 
@@ -318,12 +340,14 @@ class TestCSVSinkHeaderModeInteraction:
 
     def test_contract_ignored_with_normalized_mode(self, output_path: Path, sample_contract: SchemaContract, ctx: PluginContext) -> None:
         """Contract is ignored when mode is NORMALIZED (explicit or default)."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": "normalized",  # Explicit normalized
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": "normalized",  # Explicit normalized
+                }
+            )
         )
         sink.set_output_contract(sample_contract)
 
@@ -341,15 +365,17 @@ class TestCSVSinkHeaderModeInteraction:
         self, output_path: Path, sample_contract: SchemaContract, ctx: PluginContext
     ) -> None:
         """Custom mapping takes precedence over contract original names."""
-        sink = CSVSink(
-            {
-                "path": str(output_path),
-                "schema": STRICT_SCHEMA,
-                "headers": {
-                    "amount_usd": "MY_AMOUNT",
-                    "customer_id": "MY_CUSTOMER",
-                },
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_path),
+                    "schema": STRICT_SCHEMA,
+                    "headers": {
+                        "amount_usd": "MY_AMOUNT",
+                        "customer_id": "MY_CUSTOMER",
+                    },
+                }
+            )
         )
         sink.set_output_contract(sample_contract)  # Set contract but should be ignored
 

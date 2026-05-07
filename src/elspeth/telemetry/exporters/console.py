@@ -16,8 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, TextIO, TypeGuard
 
 import structlog
 
-from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
-from elspeth.telemetry.errors import TelemetryExporterError
+from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
 
 if TYPE_CHECKING:
     from elspeth.contracts.events import TelemetryEvent
@@ -134,10 +133,8 @@ class ConsoleExporter:
 
             print(line, file=self._stream)
         except Exception as e:
-            if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                raise
-            if isinstance(e, (TypeError, AttributeError, KeyError, NameError)):
-                raise  # Programming errors must crash
+            if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                raise  # Programming error — must crash
             # Export MUST NOT raise - log and continue
             logger.warning(
                 "Failed to export telemetry event",
@@ -163,7 +160,7 @@ class ConsoleExporter:
         data = event.to_dict()
         data["event_type"] = type(event).__name__
 
-        for key, value in data.items():
+        for key, value in list(data.items()):
             if isinstance(value, datetime):
                 data[key] = value.isoformat()
             elif isinstance(value, Enum):
@@ -231,10 +228,8 @@ class ConsoleExporter:
         try:
             self._stream.flush()
         except Exception as e:
-            if isinstance(e, (FrameworkBugError, AuditIntegrityError)):
-                raise
-            if isinstance(e, (TypeError, AttributeError, KeyError, NameError)):
-                raise  # Programming errors must crash
+            if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
+                raise  # Programming error — must crash
             logger.warning(
                 "Failed to flush console stream",
                 exporter=self._name,

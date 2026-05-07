@@ -269,6 +269,31 @@ class TestExecuteQuery:
         assert result.finish_reason is None
         assert result.content == "hi"
 
+    def test_empty_choices_returns_none_finish_reason(self, provider: AzureLLMProvider) -> None:
+        """Empty choices list yields finish_reason=None without crashing."""
+        with patch.object(provider, "_get_llm_client") as mock_get:
+            mock_client = MagicMock()
+            resp = LLMResponse(
+                content="hi",
+                model="gpt-4o",
+                usage=TokenUsage.unknown(),
+                raw_response={"choices": []},
+            )
+            mock_client.chat_completion.return_value = resp
+            mock_get.return_value = mock_client
+
+            result = provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=None,
+                state_id="state-1",
+                token_id="tok-1",
+            )
+
+        assert result.finish_reason is None
+        assert result.content == "hi"
+
     def test_empty_content_raises_content_policy_error(self, provider: AzureLLMProvider) -> None:
         """Empty string content (from AuditedLLMClient's None→'' conversion)
         must raise ContentPolicyError, not ValueError from LLMQueryResult invariant."""

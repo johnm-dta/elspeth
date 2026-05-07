@@ -1,8 +1,0 @@
-src/elspeth/plugins/transforms/passthrough.py
-src/elspeth/plugins/transforms/truncate.py
-src/elspeth/plugins/transforms/web_scrape.py
-src/elspeth/plugins/transforms/web_scrape_errors.py
-src/elspeth/plugins/transforms/web_scrape_extraction.py
-src/elspeth/plugins/transforms/web_scrape_fingerprint.py
-src/elspeth/plugins/utils.py
-src/elspeth/plugins/validation.py

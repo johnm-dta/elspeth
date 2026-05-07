@@ -55,15 +55,11 @@ class ExplainApp(App[None]):
         self,
         db: LandscapeDB | None = None,
         run_id: str | None = None,
-        token_id: str | None = None,
-        row_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._db = db
         self._run_id = run_id
-        self._token_id = token_id
-        self._row_id = row_id
         self._screen: ExplainScreen | None = None
 
     def compose(self) -> ComposeResult:

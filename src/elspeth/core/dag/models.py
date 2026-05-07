@@ -6,25 +6,101 @@ Matches the orchestrator/types.py pattern.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.enums import NodeType
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.landscape.schema import NODE_ID_COLUMN_LENGTH
 
 if TYPE_CHECKING:
-    from types import MappingProxyType
-
     from elspeth.contracts import PluginSchema, TransformProtocol
     from elspeth.core.config import TransformSettings
 
 
 class GraphValidationError(ValueError):
-    """Raised when graph validation fails."""
+    """Raised when graph validation fails.
 
-    pass
+    Attributes:
+        component_id: The node ID responsible for the error (e.g. ``'gate_1'``,
+                      ``'transform_check'``), or None for structural errors
+                      (cycles, wrong source count, etc.) where no single node
+                      is at fault. Callers should read this instead of
+                      regex-parsing str(exc).
+        component_type: The node type (e.g. ``'gate'``, ``'transform'``,
+                        ``'coalesce'``), or None for structural errors.
+                        Set at the raise site where the type is known,
+                        avoiding fragile string-splitting of component_id.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        component_id: str | None = None,
+        component_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.component_id: str | None = component_id
+        self.component_type: str | None = component_type
+
+
+class EdgeContractError(GraphValidationError):
+    """Raised when graph edge schema compatibility fails.
+
+    Subclass of ``GraphValidationError`` carrying the structured
+    ``CompatibilityResult`` plus producer/consumer identity, so downstream
+    layers (composer runtime preflight error formatting) can build LLM-
+    actionable suggestions without re-parsing the prose form.
+
+    Why a subclass and not a separate exception:
+      - All existing callers that catch ``GraphValidationError`` keep working
+        without change (subclass IS-A parent).
+      - The downstream catch site can opportunistically narrow with
+        ``isinstance(exc, EdgeContractError)`` to access structured fields,
+        falling back to the prose ``str(exc)`` when other graph validation
+        paths raise the parent class.
+
+    Attributes:
+        from_node_id: Producer node ID (e.g. ``'web_scrape_a1b2c3'``).
+        to_node_id: Consumer node ID (e.g. ``'line_explode_d4e5f6'``).
+        producer_schema_name: Pydantic schema class name (e.g.
+            ``'WebScrapeOutput'``) — useful for naming the contract surface
+            to the LLM, but the per-field detail lives in
+            ``compatibility_result``.
+        consumer_schema_name: Pydantic schema class name (e.g.
+            ``'LineExplodeInput'``).
+        compatibility_result: The full structured incompatibility detail —
+            ``missing_fields``, ``type_mismatches[(field, expected, actual)]``,
+            ``extra_fields``, and ``constraint_mismatches``. The error-message
+            formatter walks this to produce actionable per-field guidance.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        from_node_id: str,
+        to_node_id: str,
+        producer_schema_name: str,
+        consumer_schema_name: str,
+        compatibility_result: CompatibilityResult,
+        component_type: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            component_id=to_node_id,
+            component_type=component_type,
+        )
+        self.from_node_id: str = from_node_id
+        self.to_node_id: str = to_node_id
+        self.producer_schema_name: str = producer_schema_name
+        self.consumer_schema_name: str = consumer_schema_name
+        self.compatibility_result: CompatibilityResult = compatibility_result
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,10 +130,16 @@ class BranchInfo:
     Consolidates two parallel dicts that were both keyed by BranchName:
     - branch_to_coalesce (BranchName -> CoalesceName)
     - branch_gate_map (BranchName -> NodeID)
+
+    The optional ``schema`` field stores the branch's producer schema,
+    enabling runtime tracking of which fields would have been contributed
+    by a branch that was lost (diverted to error sink). This supports
+    audit trail queries like "what fields were expected from lost branch X?"
     """
 
     coalesce_name: CoalesceName
     gate_node_id: NodeID
+    schema: SchemaConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.coalesce_name:
@@ -71,10 +153,15 @@ _NODE_ID_MAX_LENGTH = NODE_ID_COLUMN_LENGTH
 
 # Config stored on graph nodes varies by node type:
 # - Source/Transform/Sink: raw plugin config dict (arbitrary keys per plugin)
-# - Gate: {schema, routes, condition, fork_to?}
-# - Aggregation: {schema, trigger, output_mode, options}
+# - Gate: {routes, condition, fork_to?}
+# - Aggregation: {input_schema, trigger, output_mode, options}
 # - Coalesce: {branches, policy, merge, timeout_seconds?, quorum_count?, select_branch?}
-# Only "schema" is accessed cross-type. Other keys are opaque to the graph layer.
+# Schema data is accessed via output_schema_config on NodeInfo, not the raw config
+# keys. Source/transform/sink nodes may retain either "schema" or "schema_config"
+# in config for hashing/audit fidelity; runtime semantics read the parsed
+# output_schema_config instead. Aggregations use "input_schema" on the wrapper
+# config to prevent add_node() from auto-populating output_schema_config (see
+# elspeth-c3a98c358c).
 # dict[str, Any] is intentional: plugin configs are validated by each plugin's
 # Pydantic model, not by the graph. The graph only hashes them for node IDs.
 type NodeConfig = dict[str, Any]
@@ -100,18 +187,69 @@ class NodeInfo:
     node_type: NodeType
     plugin_name: str
     config: NodeConfig = field(default_factory=dict)
-    # NOTE: config is typed as dict for construction compatibility, but is
-    # frozen to MappingProxyType by build_execution_graph() in builder.py
-    # after graph build.
     input_schema: type[PluginSchema] | None = None
     output_schema: type[PluginSchema] | None = None
     input_schema_config: SchemaConfig | None = None
     output_schema_config: SchemaConfig | None = None
+    # Populated only for SINK nodes by the builder from SinkProtocol.declared_required_fields.
+    # Used for build-time validation that upstream coalesce output guarantees the
+    # fields a sink requires. Empty frozenset for all non-sink nodes.
+    declared_required_fields: frozenset[str] = field(default_factory=frozenset)
+
+    # Pass-through contract flag (ADR-007). Populated only for TRANSFORM nodes
+    # by the builder from TransformProtocol.passes_through_input. When True,
+    # the validator walk propagates predecessor guarantees through this node
+    # when computing effective guaranteed fields. Always False for non-TRANSFORM
+    # nodes; non-False value on any non-TRANSFORM node raises GraphValidationError.
+    passes_through_input: bool = False
 
     def __post_init__(self) -> None:
+        component_type = self.node_type.name.lower()
+        component_id = self.node_id or None
+        if not self.node_id:
+            raise GraphValidationError(
+                "NodeInfo.node_id must not be empty",
+                component_id=component_id,
+                component_type=component_type,
+            )
+        if not self.plugin_name or not self.plugin_name.strip():
+            raise GraphValidationError(
+                f"NodeInfo.plugin_name must not be empty for node {self.node_id!r}",
+                component_id=component_id,
+                component_type=component_type,
+            )
         if len(self.node_id) > _NODE_ID_MAX_LENGTH:
             msg = f"node_id exceeds {_NODE_ID_MAX_LENGTH} characters: '{self.node_id}' (length={len(self.node_id)})"
-            raise GraphValidationError(msg)
+            raise GraphValidationError(msg, component_id=self.node_id, component_type=component_type)
+        # Offensive programming: declared_required_fields is sink-specific.
+        # Catch the misuse at construction time rather than letting stray
+        # data sit on a non-sink node until a future validator widens its
+        # scope and produces mysterious errors.
+        if self.declared_required_fields and self.node_type != NodeType.SINK:
+            raise GraphValidationError(
+                f"NodeInfo.declared_required_fields is only meaningful for SINK nodes; "
+                f"node {self.node_id!r} has type {self.node_type.name} "
+                f"with declared_required_fields={sorted(self.declared_required_fields)!r}.",
+                component_id=self.node_id,
+                component_type=component_type,
+            )
+        # Offensive programming: passes_through_input is for nodes that execute
+        # a TransformProtocol plugin — TRANSFORM and AGGREGATION. Aggregations
+        # (including BatchReplicate wired under `aggregations:` in YAML) execute
+        # transform-class plugins and share the propagation semantics per
+        # ADR-007. Setting it on source/coalesce/sink/gate indicates a builder
+        # bug or misrouted attribute assignment; surface at construction.
+        if self.passes_through_input and self.node_type not in (NodeType.TRANSFORM, NodeType.AGGREGATION):
+            raise GraphValidationError(
+                f"NodeInfo.passes_through_input is only meaningful for TRANSFORM or "
+                f"AGGREGATION nodes; node {self.node_id!r} has type {self.node_type.name}.",
+                component_id=self.node_id,
+                component_type=component_type,
+            )
+        # NOTE: config is NOT frozen here because the builder mutates
+        # output_schema_config on pass-through nodes (gates, coalesce) via
+        # object.__setattr__ during schema propagation. Deep freeze is
+        # applied by build_execution_graph() after all mutations are complete.
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +259,7 @@ class _GateEntry:
     node_id: NodeID
     name: str
     fork_to: tuple[str, ...] | None
-    routes: MappingProxyType[str, str]
+    routes: Mapping[str, str]
 
     def __post_init__(self) -> None:
         if not self.node_id:
@@ -132,6 +270,7 @@ class _GateEntry:
             raise ValueError("_GateEntry.fork_to must not be empty tuple (use None for no fork)")
         if len(self.routes) == 0:
             raise ValueError("_GateEntry.routes must have at least one entry")
+        freeze_fields(self, "routes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +284,9 @@ class WiredTransform:
         """Ensure wiring metadata matches the instantiated plugin."""
         if self.plugin.name != self.settings.plugin:
             raise GraphValidationError(
-                f"WiredTransform mismatch: settings.plugin='{self.settings.plugin}' but plugin instance name='{self.plugin.name}'."
+                f"WiredTransform mismatch: settings.plugin='{self.settings.plugin}' but plugin instance name='{self.plugin.name}'.",
+                component_id=self.settings.name,
+                component_type="transform",
             )
 
 

@@ -12,8 +12,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder
+from tests.fixtures.landscape import make_factory
 
 
 class TestCSVSinkHeaders:
@@ -22,20 +23,22 @@ class TestCSVSinkHeaders:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        recorder = make_recorder()
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_explicit_custom_headers(self, tmp_path: Path, ctx: PluginContext) -> None:
         """headers dict maps normalized names to display names in CSV header."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-                "headers": {"user_id": "User ID", "amount": "Transaction Amount"},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    "headers": {"user_id": "User ID", "amount": "Transaction Amount"},
+                }
+            )
         )
 
         # Write with normalized field names
@@ -66,12 +69,14 @@ class TestCSVSinkHeaders:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float", "status: str"]},
-                "headers": {"user_id": "User ID"},  # Only user_id is mapped
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float", "status: str"]},
+                    "headers": {"user_id": "User ID"},  # Only user_id is mapped
+                }
+            )
         )
 
         sink.write([{"user_id": "u1", "amount": 100.0, "status": "active"}], ctx)
@@ -89,12 +94,14 @@ class TestCSVSinkHeaders:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "case_study_1: str"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "case_study_1: str"]},
+                    "headers": "original",
+                }
+            )
         )
 
         # Mock Landscape with field resolution
@@ -129,12 +136,14 @@ class TestCSVSinkHeaders:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["id: str"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["id: str"]},
+                    "headers": "original",
+                }
+            )
         )
 
         ctx = PluginContext(run_id="test-run", config={}, landscape=None)
@@ -155,12 +164,14 @@ class TestCSVSinkHeaders:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["id: str"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["id: str"]},
+                    "headers": "original",
+                }
+            )
         )
 
         mock_landscape = MagicMock()
@@ -180,12 +191,14 @@ class TestCSVSinkHeaders:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "computed_score: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "computed_score: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         mock_landscape = MagicMock()
@@ -212,11 +225,13 @@ class TestCSVSinkHeaders:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                }
+            )
         )
 
         sink.write([{"user_id": "u1", "amount": 100.0}], ctx)
@@ -235,20 +250,22 @@ class TestJSONSinkHeaders:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        recorder = make_recorder()
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_explicit_custom_headers_jsonl(self, tmp_path: Path, ctx: PluginContext) -> None:
         """headers dict maps normalized names to display names in JSONL keys."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "observed"},
-                "headers": {"user_id": "User ID", "amount": "Transaction Amount"},
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "observed"},
+                    "headers": {"user_id": "User ID", "amount": "Transaction Amount"},
+                }
+            )
         )
 
         sink.write(
@@ -277,13 +294,15 @@ class TestJSONSinkHeaders:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "format": "json",
-                "schema": {"mode": "observed"},
-                "headers": {"user_id": "User ID"},
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "schema": {"mode": "observed"},
+                    "headers": {"user_id": "User ID", "status": "Status"},
+                }
+            )
         )
 
         sink.write([{"user_id": "u1", "status": "active"}], ctx)
@@ -293,19 +312,21 @@ class TestJSONSinkHeaders:
         with open(output_file) as f:
             data = json.load(f)
             assert len(data) == 1
-            assert data[0] == {"User ID": "u1", "status": "active"}
+            assert data[0] == {"User ID": "u1", "Status": "active"}
 
     def test_original_headers_jsonl(self, tmp_path: Path) -> None:
         """headers: original fetches mapping from Landscape for JSONL."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "observed"},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "observed"},
+                    "headers": "original",
+                }
+            )
         )
 
         mock_landscape = MagicMock()
@@ -330,11 +351,13 @@ class TestJSONSinkHeaders:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "observed"},
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "observed"},
+                }
+            )
         )
 
         sink.write([{"user_id": "u1", "amount": 100.0}], ctx)
@@ -352,8 +375,8 @@ class TestCSVCustomHeadersAppendMode:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        recorder = make_recorder()
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_append_with_custom_headers(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Append mode correctly validates and appends when custom headers match."""
@@ -362,25 +385,29 @@ class TestCSVCustomHeadersAppendMode:
         output_file = tmp_path / "output.csv"
 
         # First write with custom headers
-        sink1 = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-                "headers": {"user_id": "User ID", "amount": "Amount"},
-            }
+        sink1 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    "headers": {"user_id": "User ID", "amount": "Amount"},
+                }
+            )
         )
         sink1.write([{"user_id": "u1", "amount": 100.0}], ctx)
         sink1.flush()
         sink1.close()
 
         # Append with same custom headers
-        sink2 = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-                "headers": {"user_id": "User ID", "amount": "Amount"},
-                "mode": "append",
-            }
+        sink2 = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    "headers": {"user_id": "User ID", "amount": "Amount"},
+                    "mode": "append",
+                }
+            )
         )
         sink2.write([{"user_id": "u2", "amount": 200.0}], ctx)
         sink2.flush()
@@ -403,20 +430,22 @@ class TestCSVCustomHeadersSpecialCharacters:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        recorder = make_recorder()
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_header_with_comma(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Custom headers containing commas are properly quoted in CSV."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["amount: float", "currency: str"]},
-                "headers": {"amount": "Amount, USD", "currency": "Currency"},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["amount: float", "currency: str"]},
+                    "headers": {"amount": "Amount, USD", "currency": "Currency"},
+                }
+            )
         )
 
         sink.write([{"amount": 100.0, "currency": "USD"}], ctx)
@@ -443,12 +472,14 @@ class TestCSVCustomHeadersSpecialCharacters:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["value: str"]},
-                "headers": {"value": 'Value "quoted"'},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["value: str"]},
+                    "headers": {"value": 'Value "quoted"'},
+                }
+            )
         )
 
         sink.write([{"value": "test"}], ctx)
@@ -466,12 +497,14 @@ class TestCSVCustomHeadersSpecialCharacters:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["description: str"]},
-                "headers": {"description": "Description\n(multi-line)"},
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["description: str"]},
+                    "headers": {"description": "Description\n(multi-line)"},
+                }
+            )
         )
 
         sink.write([{"description": "test"}], ctx)
@@ -491,8 +524,8 @@ class TestJSONLCustomHeadersAppendMode:
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create a minimal plugin context."""
-        recorder = make_recorder()
-        return make_context(landscape=recorder)
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
 
     def test_append_with_custom_headers(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Append mode correctly validates and appends when custom headers match."""
@@ -501,25 +534,29 @@ class TestJSONLCustomHeadersAppendMode:
         output_file = tmp_path / "output.jsonl"
 
         # First write with custom headers
-        sink1 = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-                "headers": {"user_id": "User ID", "amount": "Amount"},
-            }
+        sink1 = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    "headers": {"user_id": "User ID", "amount": "Amount"},
+                }
+            )
         )
         sink1.write([{"user_id": "u1", "amount": 100.0}], ctx)
         sink1.flush()
         sink1.close()
 
         # Append with same custom headers
-        sink2 = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-                "headers": {"user_id": "User ID", "amount": "Amount"},
-                "mode": "append",
-            }
+        sink2 = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    "headers": {"user_id": "User ID", "amount": "Amount"},
+                    "mode": "append",
+                }
+            )
         )
         sink2.write([{"user_id": "u2", "amount": 200.0}], ctx)
         sink2.flush()
@@ -545,13 +582,15 @@ class TestJSONLCustomHeadersAppendMode:
             f.write(json.dumps({"User ID": "u1", "Amount": 100.0}) + "\n")
 
         # Open in append mode with matching custom headers - should validate successfully
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
-                "headers": {"user_id": "User ID", "amount": "Amount"},
-                "mode": "append",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount: float"]},
+                    "headers": {"user_id": "User ID", "amount": "Amount"},
+                    "mode": "append",
+                }
+            )
         )
 
         # Validation happens lazily, trigger it by calling validate_output_target
@@ -587,12 +626,14 @@ class TestResumeValidationWithOriginalHeaders:
             writer.writerow(["u1", "100.0"])
 
         # Create sink with headers: original (resume scenario)
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         # Simulate resume: provide the field resolution mapping BEFORE validation
@@ -629,12 +670,14 @@ class TestResumeValidationWithOriginalHeaders:
             writer.writerow(["u1", "100.0"])
 
         # Create sink with headers: original but don't provide resolution
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         # Without resolution, validation skips — can't compare normalized vs display names
@@ -652,12 +695,14 @@ class TestResumeValidationWithOriginalHeaders:
             f.write(json.dumps({"User ID": "u1", "Amount (USD)": 100.0}) + "\n")
 
         # Create sink with headers: original
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         # Provide field resolution for resume
@@ -682,12 +727,14 @@ class TestResumeValidationWithOriginalHeaders:
             f.write(json.dumps({"User ID": "u1", "Amount (USD)": 100.0}) + "\n")
 
         # Create sink with headers: original but no resolution
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "amount_usd: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         # Without resolution, validation should fail
@@ -707,12 +754,14 @@ class TestResumeValidationWithOriginalHeaders:
             writer.writerow(["User ID", "Status"])
             writer.writerow(["u1", "active"])
 
-        sink = CSVSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "fixed", "fields": ["user_id: str", "status: str"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "fixed", "fields": ["user_id: str", "status: str"]},
+                    "headers": "original",
+                }
+            )
         )
 
         field_resolution = {"User ID": "user_id", "Status": "status"}
@@ -731,12 +780,14 @@ class TestResumeValidationWithOriginalHeaders:
         with open(output_file, "w") as f:
             f.write(json.dumps({"User ID": "u1", "Amount": 100.0, "Extra Field": "extra"}) + "\n")
 
-        sink = JSONSink(
-            {
-                "path": str(output_file),
-                "schema": {"mode": "flexible", "fields": ["user_id: str", "amount: float"]},
-                "headers": "original",
-            }
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "flexible", "fields": ["user_id: str", "amount: float"]},
+                    "headers": "original",
+                }
+            )
         )
 
         field_resolution = {"User ID": "user_id", "Amount": "amount"}

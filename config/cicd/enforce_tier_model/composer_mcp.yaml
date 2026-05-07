@@ -1,0 +1,44 @@
+per_file_rules:
+- pattern: composer_mcp/server.py
+  rules:
+  - R1
+  reason: MCP tool arguments are external client data (Tier 3) - defensive access is correct
+  expires: null
+- pattern: composer_mcp/server.py
+  rules:
+  - R5
+  reason: Serialization boundary — isinstance checks convert Pydantic models and containers
+    to JSON-safe types; RuntimePreflightFailure union dispatch in _mcp_preview_runtime_preflight
+    also uses isinstance to narrow the result type
+  expires: null
+  max_hits: 4
+allow_hits:
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=78a0cc4b4f3ce402
+  owner: composer-audit
+  reason: Trust-boundary recovery — canonical_json/stable_hash on LLM-supplied arguments
+    can raise on Tier-3 input (non-finite floats, non-serializable types). The catch
+    builds a sentinel canonical and later synthesizes ARG_ERROR through the explicit
+    argument-error result path so the audit row still lands. Audit primacy demands a
+    row even on un-canonicalizable input. Updated 2026-05-06 (elspeth-281f259235) to
+    delegate sentinel construction to web.composer.audit.build_canonicalization_sentinel
+    so both audit surfaces share a single sentinel-shape policy.
+  safety: "Sentinel canonical _canonicalization_error key is written to the audit
+    row; the original exception class is preserved in the synthesized ValueError
+    message shape, returning a structured tool error to the LLM. Diagnostic upgrade
+    adds bounded, leak-safe metadata (top-level argument keys + rfc8785-allowlisted
+    detail) so auditors can fingerprint the failure shape from the sentinel alone."
+  expires: null
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=eb7d5c3932aeddac
+  owner: composer-audit
+  reason: Trust-boundary recovery — canonical_json/stable_hash on the success-path result_dict
+    runs in finally to compute the audit row. A non-finite float in our own dispatch output
+    would otherwise raise from finally and mask the success return entirely. Falling back
+    to a sentinel canonical preserves both the LLM's success response AND the audit row.
+    Updated 2026-05-06 (elspeth-281f259235) to delegate sentinel construction to
+    web.composer.audit.build_canonicalization_sentinel for diagnostic-shape symmetry.
+  safety: "Sentinel canonical _canonicalization_error key is written to the audit
+    row; the result_dict the LLM saw is unchanged. A future hardening would also flag
+    the underlying _dispatch_tool output as a Tier-1 invariant breach (it should not
+    have produced un-canonicalizable output), tracked separately. Diagnostic upgrade
+    captures top-level result_dict keys and rfc8785-allowlisted exception messages."
+  expires: null

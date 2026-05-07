@@ -12,11 +12,26 @@ class RunStatus(StrEnum):
     """Status of a pipeline run.
 
     Stored in the database (runs.status).
+
+    The four-value terminal taxonomy (COMPLETED / COMPLETED_WITH_FAILURES /
+    FAILED / EMPTY) was introduced in Phase 2.2 (elspeth-0de989c56d) so an
+    operator scanning ``/api/runs/{rid}`` can distinguish "ran cleanly" from
+    "ran but no row succeeded" without reading diagnostics.  RUNNING is
+    non-terminal; INTERRUPTED is signal-bounded (SIGINT/SIGTERM).
+
+    The presence-indicator predicate that maps row-count shapes to status
+    values is enforced in :class:`elspeth.contracts.run_result.RunResult`'s
+    ``__post_init__`` (the in-memory engine record carries the row counters).
+    The web sessions DB and the Pydantic API schemas mirror the same
+    invariant; the Landscape audit ``Run`` dataclass has no row-count
+    fields so the enum widening alone is sufficient at that layer.
     """
 
     RUNNING = "running"
     COMPLETED = "completed"
+    COMPLETED_WITH_FAILURES = "completed_with_failures"
     FAILED = "failed"
+    EMPTY = "empty"
     INTERRUPTED = "interrupted"
 
 
@@ -65,14 +80,12 @@ class TriggerType(StrEnum):
         TIMEOUT: Batch reached configured time limit
         CONDITION: Custom condition expression evaluated to true
         END_OF_SOURCE: Source exhausted, flush remaining rows
-        MANUAL: Explicitly triggered via API/CLI
     """
 
     COUNT = "count"
     TIMEOUT = "timeout"
     CONDITION = "condition"
     END_OF_SOURCE = "end_of_source"
-    MANUAL = "manual"
 
 
 class NodeType(StrEnum):
@@ -144,51 +157,137 @@ class RoutingMode(StrEnum):
     DIVERT = "divert"
 
 
-class RowOutcome(StrEnum):
-    """Outcome for a token in the pipeline.
+# ADR-019 (two-axis terminal model): TerminalOutcome and TerminalPath split the
+# terminal state into a lifecycle answer (outcome) and a provenance answer
+# (path).  See ``docs/architecture/adr/019-two-axis-terminal-model.md``
+# § "Counter derivation contract — public API field names preserved" (round-4
+# amendment, 2026-05-04) for the normative ``(outcome, path) → counter
+# increment`` mapping.
+class TerminalOutcome(StrEnum):
+    """Lifecycle answer for a row that has reached a terminal state.
 
-    These outcomes are explicitly recorded in the `token_outcomes` table
-    (AUD-001) at determination time. The (StrEnum) base allows direct
-    database storage via .value.
+    ADR-019 § Decision: when ``completed=True``, ``outcome`` is one of three
+    values; when ``completed=False`` (only ``BUFFERED`` today), ``outcome`` is
+    NULL.  ``SUCCESS`` and ``FAILURE`` are predicate inputs to
+    ``RunResult.__post_init__``'s ``RunStatus`` derivation; ``TRANSIENT`` is
+    explicitly NOT a predicate input — it marks parent-token bookkeeping
+    (``FORK_PARENT``, ``EXPAND_PARENT``), batch absorption (``BATCH_CONSUMED``),
+    and sink-fallback-to-failsink absorptions whose lifecycle answers live on
+    a paired ``token_outcomes`` row, ``node_state``, or ``artifacts`` row
+    elsewhere.
 
-    Most outcomes are TERMINAL - the token's journey is complete:
-    - COMPLETED: Reached output sink successfully
-    - ROUTED: Sent to named sink by gate
-    - FORKED: Split into multiple parallel paths (parent token)
-    - FAILED: Processing failed, not recoverable
-    - QUARANTINED: Failed validation, stored for investigation
-    - DIVERTED: Sink write failed for this row, diverted to failsink
-    - CONSUMED_IN_BATCH: Absorbed into aggregate (single/transform mode)
-    - COALESCED: Merged in join from parallel paths
-    - EXPANDED: Deaggregated into child tokens (parent token)
-
-    One outcome is NON-TERMINAL - the token will reappear:
-    - BUFFERED: Held for batch processing in passthrough mode
+    See ADR-019 § "Why TRANSIENT exists as a third outcome value" for the
+    rationale that admits this third value.
     """
 
-    # Terminal outcomes
-    COMPLETED = "completed"
-    ROUTED = "routed"
-    FORKED = "forked"
-    FAILED = "failed"
-    QUARANTINED = "quarantined"
-    DIVERTED = "diverted"
-    CONSUMED_IN_BATCH = "consumed_in_batch"
-    COALESCED = "coalesced"
-    EXPANDED = "expanded"
+    SUCCESS = "success"
+    FAILURE = "failure"
+    TRANSIENT = "transient"
 
-    # Non-terminal outcomes
+
+class TerminalPath(StrEnum):
+    """Provenance answer for a row's terminal — how did it get there?
+
+    Producer-declared, producer-emitted; never inferred from graph topology
+    or counter context.  See ADR-019 § "Classification is producer-declared,
+    not topology-derivable" — ``ON_ERROR_ROUTED`` and
+    ``SINK_FALLBACK_TO_FAILSINK`` are structurally identical at the audit
+    layer (both write a paired ``NodeStateStatus.COMPLETED`` ``node_state``
+    plus an ``artifacts`` row at a different node), so only the producer
+    knows whether the lifecycle answer is FAILURE (transform threw, on-error
+    sink received) or TRANSIENT (sink-write fallback for visibility).
+
+    Stored alongside ``TerminalOutcome`` in the post-Stage-2 ``token_outcomes``
+    schema.  ``BUFFERED`` is the only non-terminal path — it pairs with
+    ``outcome IS NULL`` to mark a row that hasn't decided yet.
+    """
+
+    DEFAULT_FLOW = "default_flow"
+    GATE_ROUTED = "gate_routed"
+    GATE_DISCARDED = "gate_discarded"
+    ON_ERROR_ROUTED = "on_error_routed"
+    FILTER_DROPPED = "filter_dropped"
+    COALESCED = "coalesced"
+    UNROUTED = "unrouted"
+    QUARANTINED_AT_SOURCE = "quarantined_at_source"
+    SINK_FALLBACK_TO_FAILSINK = "sink_fallback_to_failsink"
+    SINK_DISCARDED = "sink_discarded"
+    FORK_PARENT = "fork_parent"
+    EXPAND_PARENT = "expand_parent"
+    BATCH_CONSUMED = "batch_consumed"
     BUFFERED = "buffered"
 
-    @property
-    def is_terminal(self) -> bool:
-        """Check if this outcome represents a final state for the token.
 
-        Terminal outcomes mean the token's journey is complete - it won't
-        appear again in results. Non-terminal outcomes (BUFFERED) mean
-        the token is temporarily held and will reappear with a final outcome.
-        """
-        return self != RowOutcome.BUFFERED
+# Closed-set partition over the cross-product of TerminalOutcome and
+# TerminalPath per the ADR-019 mapping table at lines 99-115.  Every legal
+# terminal pair is enumerated below; the assertion that follows verifies every
+# ``TerminalPath`` is either covered by a legal terminal pair OR present in
+# ``_NON_TERMINAL_PATHS``.
+_LEGAL_TERMINAL_PAIRS: frozenset[tuple[TerminalOutcome, TerminalPath]] = frozenset(
+    {
+        (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
+        (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED),
+        (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED),
+        (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED),
+        (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
+        (TerminalOutcome.SUCCESS, TerminalPath.COALESCED),
+        (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
+        (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE),
+        (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK),
+        (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED),
+        (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT),
+        (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT),
+        (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
+    }
+)
+
+_NON_TERMINAL_PATHS: frozenset[TerminalPath] = frozenset(
+    {
+        TerminalPath.BUFFERED,
+    }
+)
+
+
+# Exhaustiveness: every TerminalPath value MUST be covered by either a legal
+# terminal pair (paired with some TerminalOutcome) or the non-terminal set.
+# An unclassified path would silently land in the ``case _:`` arm of any
+# future (outcome, path) match in the recorder/accumulator and corrupt the
+# audit-integrity invariant the way an unclassified terminal value would.
+_paths_in_terminal_pairs: frozenset[TerminalPath] = frozenset(path for _, path in _LEGAL_TERMINAL_PAIRS)
+_all_terminal_paths: frozenset[TerminalPath] = frozenset(TerminalPath)
+_classified_terminal_paths: frozenset[TerminalPath] = _paths_in_terminal_pairs | _NON_TERMINAL_PATHS
+if _classified_terminal_paths != _all_terminal_paths:
+    _unclassified_paths = _all_terminal_paths - _classified_terminal_paths
+    raise AssertionError(
+        f"TerminalPath members {sorted(p.name for p in _unclassified_paths)} are "
+        f"not classified into _LEGAL_TERMINAL_PAIRS or _NON_TERMINAL_PATHS in "
+        f"contracts/enums.py — every new TerminalPath value must be added to "
+        f"exactly one (paired with a TerminalOutcome in _LEGAL_TERMINAL_PAIRS, "
+        f"or listed alone in _NON_TERMINAL_PATHS)."
+    )
+
+# Mutual exclusion: a path cannot be both terminal-paired and non-terminal.
+_paths_overlap = _paths_in_terminal_pairs & _NON_TERMINAL_PATHS
+if _paths_overlap:
+    raise AssertionError(
+        f"TerminalPath members {sorted(p.name for p in _paths_overlap)} appear in "
+        f"BOTH _LEGAL_TERMINAL_PAIRS and _NON_TERMINAL_PATHS — these sets must be "
+        f"disjoint (a path is either terminal-paired or non-terminal, never both)."
+    )
+
+# Outcome exhaustiveness: every TerminalOutcome value MUST be the lifecycle
+# answer for at least one legal terminal pair.  An unused outcome would mean
+# the enum has dead values that no producer can emit — drift from the ADR.
+_outcomes_in_terminal_pairs: frozenset[TerminalOutcome] = frozenset(outcome for outcome, _ in _LEGAL_TERMINAL_PAIRS)
+_all_terminal_outcomes: frozenset[TerminalOutcome] = frozenset(TerminalOutcome)
+if _outcomes_in_terminal_pairs != _all_terminal_outcomes:
+    _orphaned_outcomes = _all_terminal_outcomes - _outcomes_in_terminal_pairs
+    raise AssertionError(
+        f"TerminalOutcome members {sorted(o.name for o in _orphaned_outcomes)} "
+        f"do not appear in any pair in _LEGAL_TERMINAL_PAIRS in contracts/enums.py "
+        f"— every TerminalOutcome value must be the lifecycle answer for at least "
+        f"one legal (outcome, path) pair per the ADR-019 mapping table."
+    )
 
 
 class CallType(StrEnum):

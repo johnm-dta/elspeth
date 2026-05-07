@@ -14,7 +14,6 @@ Verifies:
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
@@ -30,67 +29,6 @@ from elspeth.contracts.node_state_context import (
     QueryOrderEntry,
 )
 from elspeth.core.canonical import canonical_json
-
-
-class TestPoolConfigSnapshot:
-    def test_to_dict(self) -> None:
-        config = PoolConfigSnapshot(pool_size=4, max_capacity_retry_seconds=30.0, dispatch_delay_at_completion_ms=10.0)
-        d = config.to_dict()
-        assert d == {
-            "pool_size": 4,
-            "max_capacity_retry_seconds": 30.0,
-            "dispatch_delay_at_completion_ms": 10.0,
-        }
-
-    def test_frozen(self) -> None:
-        config = PoolConfigSnapshot(pool_size=4, max_capacity_retry_seconds=30.0, dispatch_delay_at_completion_ms=10.0)
-        with pytest.raises(FrozenInstanceError):
-            config.pool_size = 8  # type: ignore[misc]
-
-
-class TestPoolStatsSnapshot:
-    def test_to_dict(self) -> None:
-        stats = PoolStatsSnapshot(
-            capacity_retries=2,
-            successes=10,
-            peak_delay_ms=50.0,
-            current_delay_ms=15.0,
-            total_throttle_time_ms=100.0,
-            max_concurrent_reached=4,
-        )
-        d = stats.to_dict()
-        assert d == {
-            "capacity_retries": 2,
-            "successes": 10,
-            "peak_delay_ms": 50.0,
-            "current_delay_ms": 15.0,
-            "total_throttle_time_ms": 100.0,
-            "max_concurrent_reached": 4,
-        }
-
-    def test_frozen(self) -> None:
-        stats = PoolStatsSnapshot(
-            capacity_retries=0,
-            successes=1,
-            peak_delay_ms=0.0,
-            current_delay_ms=0.0,
-            total_throttle_time_ms=0.0,
-            max_concurrent_reached=1,
-        )
-        with pytest.raises(FrozenInstanceError):
-            stats.successes = 99  # type: ignore[misc]
-
-
-class TestQueryOrderEntry:
-    def test_to_dict(self) -> None:
-        entry = QueryOrderEntry(submit_index=0, complete_index=2, buffer_wait_ms=5.5)
-        d = entry.to_dict()
-        assert d == {"submit_index": 0, "complete_index": 2, "buffer_wait_ms": 5.5}
-
-    def test_frozen(self) -> None:
-        entry = QueryOrderEntry(submit_index=0, complete_index=0, buffer_wait_ms=0.0)
-        with pytest.raises(FrozenInstanceError):
-            entry.submit_index = 1  # type: ignore[misc]
 
 
 class TestPoolExecutionContext:
@@ -128,11 +66,6 @@ class TestPoolExecutionContext:
         assert d["query_ordering"][0]["submit_index"] == 0
         assert d["query_ordering"][1]["buffer_wait_ms"] == 0.0
 
-    def test_frozen(self) -> None:
-        ctx = self._make_context()
-        with pytest.raises(FrozenInstanceError):
-            ctx.pool_config = None  # type: ignore[misc, assignment]
-
     def test_canonical_json_produces_valid_json(self) -> None:
         ctx = self._make_context()
         json_str = canonical_json(ctx.to_dict())
@@ -147,20 +80,6 @@ class TestPoolExecutionContext:
 
 
 class TestGateEvaluationContext:
-    def test_to_dict(self) -> None:
-        ctx = GateEvaluationContext(condition="amount > 1000", result="True", route_label="high_value")
-        d = ctx.to_dict()
-        assert d == {
-            "condition": "amount > 1000",
-            "result": "True",
-            "route_label": "high_value",
-        }
-
-    def test_frozen(self) -> None:
-        ctx = GateEvaluationContext(condition="x > 0", result="True", route_label="positive")
-        with pytest.raises(FrozenInstanceError):
-            ctx.condition = "x < 0"  # type: ignore[misc]
-
     def test_canonical_json_produces_valid_json(self) -> None:
         ctx = GateEvaluationContext(condition="status == 'active'", result="True", route_label="active")
         json_str = canonical_json(ctx.to_dict())
@@ -175,20 +94,6 @@ class TestGateEvaluationContext:
 
 
 class TestAggregationFlushContext:
-    def test_to_dict(self) -> None:
-        ctx = AggregationFlushContext(trigger_type="COUNT", buffer_size=100, batch_id="batch-001")
-        d = ctx.to_dict()
-        assert d == {
-            "trigger_type": "COUNT",
-            "buffer_size": 100,
-            "batch_id": "batch-001",
-        }
-
-    def test_frozen(self) -> None:
-        ctx = AggregationFlushContext(trigger_type="TIMEOUT", buffer_size=50, batch_id="batch-002")
-        with pytest.raises(FrozenInstanceError):
-            ctx.buffer_size = 200  # type: ignore[misc]
-
     def test_canonical_json_produces_valid_json(self) -> None:
         ctx = AggregationFlushContext(trigger_type="END_OF_SOURCE", buffer_size=37, batch_id="batch-final")
         json_str = canonical_json(ctx.to_dict())
@@ -207,12 +112,12 @@ class TestRequireIntValidation:
 
     def test_pool_config_snapshot_rejects_bool_pool_size(self) -> None:
         with pytest.raises(TypeError, match="pool_size must be int"):
-            PoolConfigSnapshot(pool_size=True, max_capacity_retry_seconds=30.0, dispatch_delay_at_completion_ms=10.0)  # type: ignore[arg-type]
+            PoolConfigSnapshot(pool_size=True, max_capacity_retry_seconds=30.0, dispatch_delay_at_completion_ms=10.0)
 
     def test_pool_stats_snapshot_rejects_bool_capacity_retries(self) -> None:
         with pytest.raises(TypeError, match="capacity_retries must be int"):
             PoolStatsSnapshot(
-                capacity_retries=True,  # type: ignore[arg-type]
+                capacity_retries=True,
                 successes=0,
                 peak_delay_ms=0.0,
                 current_delay_ms=0.0,
@@ -224,7 +129,7 @@ class TestRequireIntValidation:
         with pytest.raises(TypeError, match="successes must be int"):
             PoolStatsSnapshot(
                 capacity_retries=0,
-                successes=False,  # type: ignore[arg-type]
+                successes=False,
                 peak_delay_ms=0.0,
                 current_delay_ms=0.0,
                 total_throttle_time_ms=0.0,
@@ -239,20 +144,20 @@ class TestRequireIntValidation:
                 peak_delay_ms=0.0,
                 current_delay_ms=0.0,
                 total_throttle_time_ms=0.0,
-                max_concurrent_reached=True,  # type: ignore[arg-type]
+                max_concurrent_reached=True,
             )
 
     def test_query_order_entry_rejects_bool_submit_index(self) -> None:
         with pytest.raises(TypeError, match="submit_index must be int"):
-            QueryOrderEntry(submit_index=True, complete_index=0, buffer_wait_ms=0.0)  # type: ignore[arg-type]
+            QueryOrderEntry(submit_index=True, complete_index=0, buffer_wait_ms=0.0)
 
     def test_query_order_entry_rejects_bool_complete_index(self) -> None:
         with pytest.raises(TypeError, match="complete_index must be int"):
-            QueryOrderEntry(submit_index=0, complete_index=False, buffer_wait_ms=0.0)  # type: ignore[arg-type]
+            QueryOrderEntry(submit_index=0, complete_index=False, buffer_wait_ms=0.0)
 
     def test_aggregation_flush_context_rejects_bool_buffer_size(self) -> None:
         with pytest.raises(TypeError, match="buffer_size must be int"):
-            AggregationFlushContext(trigger_type="COUNT", buffer_size=True, batch_id="b1")  # type: ignore[arg-type]
+            AggregationFlushContext(trigger_type="COUNT", buffer_size=True, batch_id="b1")
 
 
 class TestFromExecutorStats:

@@ -1,0 +1,103 @@
+{
+  "edges": [],
+  "generated_at": "<stable>",
+  "nodes": [
+    {
+      "file_count": 1,
+      "id": ".",
+      "layer": "L3/application",
+      "loc": 8
+    },
+    {
+      "file_count": 16,
+      "id": "infrastructure",
+      "layer": "L3/application",
+      "loc": 3804
+    },
+    {
+      "file_count": 4,
+      "id": "infrastructure/batching",
+      "layer": "L3/application",
+      "loc": 1024
+    },
+    {
+      "file_count": 9,
+      "id": "infrastructure/clients",
+      "layer": "L3/application",
+      "loc": 3790
+    },
+    {
+      "file_count": 6,
+      "id": "infrastructure/clients/retrieval",
+      "layer": "L3/application",
+      "loc": 1031
+    },
+    {
+      "file_count": 6,
+      "id": "infrastructure/pooling",
+      "layer": "L3/application",
+      "loc": 1133
+    },
+    {
+      "file_count": 7,
+      "id": "sinks",
+      "layer": "L3/application",
+      "loc": 3515
+    },
+    {
+      "file_count": 8,
+      "id": "sources",
+      "layer": "L3/application",
+      "loc": 3519
+    },
+    {
+      "file_count": 17,
+      "id": "transforms",
+      "layer": "L3/application",
+      "loc": 4125
+    },
+    {
+      "file_count": 5,
+      "id": "transforms/azure",
+      "layer": "L3/application",
+      "loc": 1125
+    },
+    {
+      "file_count": 11,
+      "id": "transforms/llm",
+      "layer": "L3/application",
+      "loc": 5740
+    },
+    {
+      "file_count": 3,
+      "id": "transforms/llm/providers",
+      "layer": "L3/application",
+      "loc": 663
+    },
+    {
+      "file_count": 5,
+      "id": "transforms/rag",
+      "layer": "L3/application",
+      "loc": 922
+    }
+  ],
+  "schema_version": "1.0",
+  "scope": {
+    "collapsed_to_subsystem": true,
+    "layers_included": [
+      "L3/application"
+    ],
+    "root": "src/elspeth/plugins"
+  },
+  "stats": {
+    "conditional_edges": 0,
+    "largest_scc_size": 0,
+    "reexport_edges": 0,
+    "scc_count": 0,
+    "total_edges": 0,
+    "total_nodes": 13,
+    "type_checking_edges": 0
+  },
+  "strongly_connected_components": [],
+  "tool_version": "<stable>"
+}

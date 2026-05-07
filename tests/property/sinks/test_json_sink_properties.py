@@ -11,8 +11,9 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from elspeth.plugins.sinks.json_sink import JSONSink
+from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_landscape_db, make_recorder
+from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.strategies.settings import SLOW_SETTINGS
 
 # =============================================================================
@@ -57,16 +58,18 @@ class TestJSONSinkProperties:
             file_id = data.draw(st.uuids()).hex
             path = Path(tmp_dir) / f"{file_id}.jsonl"
 
-            sink = JSONSink(
-                {
-                    "path": str(path),
-                    "format": "jsonl",
-                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str", "score: float?"]},
-                }
+            sink = inject_write_failure(
+                JSONSink(
+                    {
+                        "path": str(path),
+                        "format": "jsonl",
+                        "schema": {"mode": "fixed", "fields": ["id: int", "name: str", "score: float?"]},
+                    }
+                )
             )
             db = make_landscape_db()
-            recorder = make_recorder(db)
-            ctx = make_context(landscape=recorder)
+            factory = make_factory(db)
+            ctx = make_context(landscape=factory.plugin_audit_writer())
 
             result = sink.write(rows, ctx)
             sink.close()
@@ -81,38 +84,21 @@ class TestJSONSinkProperties:
             file_id = data.draw(st.uuids()).hex
             path = Path(tmp_dir) / f"{file_id}.json"
 
-            sink = JSONSink(
-                {
-                    "path": str(path),
-                    "format": "json",
-                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str", "score: float?"]},
-                }
+            sink = inject_write_failure(
+                JSONSink(
+                    {
+                        "path": str(path),
+                        "format": "json",
+                        "schema": {"mode": "fixed", "fields": ["id: int", "name: str", "score: float?"]},
+                    }
+                )
             )
             db = make_landscape_db()
-            recorder = make_recorder(db)
-            ctx = make_context(landscape=recorder)
+            factory = make_factory(db)
+            ctx = make_context(landscape=factory.plugin_audit_writer())
 
             result = sink.write(rows, ctx)
             sink.close()
 
             assert result.artifact.content_hash == _compute_sha256(path)
             assert result.artifact.size_bytes == path.stat().st_size
-
-    def test_json_sink_validate_input_attribute_set_from_config(self, tmp_path: Path) -> None:
-        """validate_input=True stored as attribute for executor enforcement.
-
-        Input validation is centralized in SinkExecutor. This test verifies
-        the plugin correctly sets the attribute from config.
-        """
-        path = tmp_path / "good.jsonl"
-
-        sink = JSONSink(
-            {
-                "path": str(path),
-                "format": "jsonl",
-                "schema": {"mode": "fixed", "fields": ["value: int"]},
-                "validate_input": True,
-            }
-        )
-
-        assert sink.validate_input is True

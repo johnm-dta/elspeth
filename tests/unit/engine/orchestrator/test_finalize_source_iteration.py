@@ -73,7 +73,7 @@ class TestFinalizeSourceIterationContext:
 
         orchestrator._finalize_source_iteration(
             loop_ctx,
-            recorder=MagicMock(),
+            factory=MagicMock(),
             run_id="test-run",
             source_id=source_id,
             source_operation_id=source_operation_id,
@@ -104,7 +104,7 @@ class TestFinalizeSourceIterationContext:
 
         orchestrator._finalize_source_iteration(
             loop_ctx,
-            recorder=MagicMock(),
+            factory=MagicMock(),
             run_id="test-run",
             source_id=source_id,
             source_operation_id=source_operation_id,

@@ -135,13 +135,12 @@ sinks:
 
 
 def test_aggregation_output_incompatibility_detected():
-    """Verify validation SKIPS dynamic aggregation output schema.
+    """Verify validation CATCHES sink required-field mismatch after aggregation.
 
-    BatchStats uses dynamic output schema (intentionally, because it transforms
-    data shape). Validation should be skipped for dynamic schemas.
-
-    This test was previously incorrect - it expected validation to fail, but
-    BatchStats intentionally uses dynamic output to avoid exactly this problem.
+    BatchStats uses dynamic output schema, so type validation (PHASE 2) is
+    skipped. However, the sink declares ``total_records`` as a required field
+    via its explicit schema. Contract validation (PHASE 1) detects that the
+    upstream aggregation does not guarantee this field and rejects the pipeline.
     """
     runner = CliRunner()
 
@@ -181,7 +180,7 @@ sinks:
       schema:
         mode: fixed
         fields:
-          - "total_records: int"  # Would be incompatible, but validation is skipped
+          - "total_records: int"  # Sink requires this but aggregation doesn't guarantee it
 """
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -190,9 +189,9 @@ sinks:
 
     try:
         result = runner.invoke(app, ["validate", "--settings", str(config_file)])
-        # Should PASS - BatchStats has dynamic output schema, validation is skipped
-        assert result.exit_code == 0
-        assert "valid" in result.output.lower()
+        # Contract validation catches the field mismatch
+        assert result.exit_code != 0
+        assert "total_records" in result.output.lower()
 
     finally:
         config_file.unlink()
@@ -299,13 +298,12 @@ sinks:
 
 
 def test_aggregation_outgoing_edge_uses_output_schema():
-    """Test that outgoing edge validation is SKIPPED for dynamic aggregation output schema.
+    """Test that contract validation CATCHES sink required-field mismatch after aggregation.
 
-    BatchStats uses dynamic output schema because it transforms data shape.
-    Validation should be skipped when either producer or consumer has dynamic schema.
-
-    This test was previously incorrect - it expected validation to fail, but
-    BatchStats intentionally uses dynamic output schema.
+    BatchStats uses dynamic output schema, so type validation (PHASE 2) is
+    skipped. However, the sink declares ``nonexistent_field`` as a required
+    field via its explicit schema. Contract validation (PHASE 1) detects that
+    the upstream aggregation does not guarantee this field.
     """
     runner = CliRunner()
 
@@ -346,7 +344,7 @@ sinks:
       schema:
         mode: fixed
         fields:
-          - "nonexistent_field: str"  # Would be incompatible, but validation is skipped
+          - "nonexistent_field: str"  # Sink requires this but aggregation doesn't guarantee it
 """
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -355,9 +353,9 @@ sinks:
 
     try:
         result = runner.invoke(app, ["validate", "--settings", str(config_file)])
-        # Should PASS - BatchStats has dynamic output schema, validation is skipped
-        assert result.exit_code == 0
-        assert "valid" in result.output.lower()
+        # Contract validation catches the field mismatch
+        assert result.exit_code != 0
+        assert "nonexistent_field" in result.output.lower()
 
     finally:
         config_file.unlink()

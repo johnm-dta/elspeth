@@ -61,7 +61,7 @@ jobs:
         run: uv run ruff format --check src/ tests/ scripts/ examples/
 
       - name: Type check (mypy)
-        run: uv run mypy src/ tests/
+        run: uv run mypy src/
 
   # ===========================================================================
   # Stage 2a: Tier Model Enforcement

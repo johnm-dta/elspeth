@@ -34,6 +34,7 @@ import json, math, pathlib, sys
 runs = pathlib.Path(sys.argv[1])
 ledgers = sorted(runs.glob("*/ledger.json"))
 agg = []
+aggregate_errors = []
 summary_usage = {
     "prompt_tokens": 0,
     "cached_prompt_tokens": 0,
@@ -61,7 +62,12 @@ def as_cost(value):
 for p in ledgers:
     try:
         L = json.loads(p.read_text())
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        aggregate_errors.append({
+            "kind": "malformed_ledger",
+            "path": str(p.relative_to(runs)),
+            "error": str(exc),
+        })
         continue
     raw_provider_usage = L.get("provider_usage")
     provider_usage = raw_provider_usage if isinstance(raw_provider_usage, dict) else {}
@@ -134,10 +140,12 @@ for p in ledgers:
 
 agg.sort(key=lambda r: (r.get("persona") or "", r.get("task_class") or "", r.get("scenario_id") or ""))
 (runs / "aggregate.json").write_text(json.dumps(agg, indent=2))
+(runs / "aggregate_errors.json").write_text(json.dumps(aggregate_errors, indent=2))
 (runs / "aggregate_summary.json").write_text(json.dumps({
     "scenario_count": len(agg),
     "total_wall_seconds": round(sum(r.get("total_wall_seconds") or 0 for r in agg), 1),
     "artifact_collection_error_count": total_artifact_errors,
+    "aggregate_error_count": len(aggregate_errors),
     "provider_usage": {
         "prompt_tokens": summary_usage["prompt_tokens"] if summary_usage["token_usage_available_scenarios"] else None,
         "cached_prompt_tokens": (
@@ -245,8 +253,16 @@ for p in personas:
             cells.append("<br>".join(outs))
     lines.append(f"| **{p}** | " + " | ".join(cells) + " |")
 
+if aggregate_errors:
+    lines += ["", "## Aggregate errors", ""]
+    lines.append("| Path | Kind | Error |")
+    lines.append("|---|---|---|")
+    for err in aggregate_errors:
+        lines.append(f"| {err['path']} | {err['kind']} | {str(err.get('error') or '')[:120]} |")
+
 (runs / "SCORECARD.md").write_text("\n".join(lines) + "\n")
 print(f"wrote {runs/'aggregate.json'}")
+print(f"wrote {runs/'aggregate_errors.json'}")
 print(f"wrote {runs/'aggregate_summary.json'}")
 print(f"wrote {runs/'SCORECARD.md'}")
 PY

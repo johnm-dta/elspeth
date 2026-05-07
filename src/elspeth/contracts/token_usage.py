@@ -47,6 +47,10 @@ class TokenUsage:
         cache_read_input_tokens: Anthropic read-side cache token count
             (number of input tokens served from the prompt cache on this
             call). ``None`` when unreported.
+        reasoning_tokens: Provider-reported output tokens used for internal
+            reasoning, or ``None`` when unreported. This is counted as output
+            usage by providers that expose it, but remains separate audit
+            metadata so callers do not infer it from completion totals.
 
     Note on provider differences: OpenAI/OpenRouter expose a single
     ``cached_tokens`` figure inside ``prompt_tokens_details``; Anthropic
@@ -61,6 +65,7 @@ class TokenUsage:
     cached_prompt_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
     def __post_init__(self) -> None:
         """Validate token counts are non-negative when known.
@@ -80,6 +85,7 @@ class TokenUsage:
             min_value=0,
         )
         require_int(self.cache_read_input_tokens, "cache_read_input_tokens", optional=True, min_value=0)
+        require_int(self.reasoning_tokens, "reasoning_tokens", optional=True, min_value=0)
 
     # ------------------------------------------------------------------
     # Derived properties
@@ -118,6 +124,7 @@ class TokenUsage:
             or self.cached_prompt_tokens is not None
             or self.cache_creation_input_tokens is not None
             or self.cache_read_input_tokens is not None
+            or self.reasoning_tokens is not None
         )
 
     # ------------------------------------------------------------------
@@ -146,6 +153,8 @@ class TokenUsage:
             result["cache_creation_input_tokens"] = self.cache_creation_input_tokens
         if self.cache_read_input_tokens is not None:
             result["cache_read_input_tokens"] = self.cache_read_input_tokens
+        if self.reasoning_tokens is not None:
+            result["reasoning_tokens"] = self.reasoning_tokens
         return result
 
     # ------------------------------------------------------------------
@@ -188,6 +197,10 @@ class TokenUsage:
         - When neither provider exposes the relevant field, it stays
           ``None`` — a missing cache statistic must NOT be coerced to zero
           (per CLAUDE.md fabrication policy: absence is evidence, not zero).
+        - Reasoning-capable providers may expose ``reasoning_tokens`` at top
+          level or nested under ``completion_tokens_details`` /
+          ``output_tokens_details``. The counter remains ``None`` when absent
+          or malformed; it is never derived from completion totals.
 
         Args:
             data: Raw dict from an LLM API response, or ``None``/non-dict.
@@ -223,6 +236,14 @@ class TokenUsage:
 
         cache_creation = _coerce_nonneg_int(data.get("cache_creation_input_tokens"))
         cache_read = _coerce_nonneg_int(data.get("cache_read_input_tokens"))
+        reasoning = _coerce_nonneg_int(data.get("reasoning_tokens"))
+        if reasoning is None:
+            for details_key in ("completion_tokens_details", "output_tokens_details"):
+                details = data.get(details_key)
+                if isinstance(details, Mapping):
+                    reasoning = _coerce_nonneg_int(details.get("reasoning_tokens"))
+                    if reasoning is not None:
+                        break
 
         return cls(
             prompt_tokens=prompt,
@@ -231,6 +252,7 @@ class TokenUsage:
             cached_prompt_tokens=cached_prompt,
             cache_creation_input_tokens=cache_creation,
             cache_read_input_tokens=cache_read,
+            reasoning_tokens=reasoning,
         )
 
 

@@ -70,6 +70,7 @@ def _empty_diagnostics(
     run_id: str,
     landscape_run_id: str,
     run_status: SessionRunStatus,
+    cancel_requested: bool = False,
     limit: int,
 ) -> RunDiagnosticsResponse:
     preview_limit = _bounded_limit(limit)
@@ -77,6 +78,7 @@ def _empty_diagnostics(
         run_id=run_id,
         landscape_run_id=landscape_run_id,
         run_status=run_status,
+        cancel_requested=cancel_requested,
         summary=RunDiagnosticSummary(
             token_count=0,
             preview_limit=preview_limit,
@@ -97,6 +99,7 @@ def load_run_diagnostics_for_settings(
     run_id: str,
     landscape_run_id: str,
     run_status: SessionRunStatus,
+    cancel_requested: bool = False,
     limit: int = _DEFAULT_DIAGNOSTIC_LIMIT,
 ) -> RunDiagnosticsResponse:
     """Open Landscape from web settings and return a bounded run snapshot."""
@@ -106,6 +109,7 @@ def load_run_diagnostics_for_settings(
             run_id=run_id,
             landscape_run_id=landscape_run_id,
             run_status=run_status,
+            cancel_requested=cancel_requested,
             limit=limit,
         )
 
@@ -120,6 +124,7 @@ def load_run_diagnostics_for_settings(
             run_id=run_id,
             landscape_run_id=landscape_run_id,
             run_status=run_status,
+            cancel_requested=cancel_requested,
             limit=limit,
         )
     finally:
@@ -132,6 +137,7 @@ def load_run_diagnostics_from_db(
     run_id: str,
     landscape_run_id: str,
     run_status: SessionRunStatus,
+    cancel_requested: bool = False,
     limit: int = _DEFAULT_DIAGNOSTIC_LIMIT,
 ) -> RunDiagnosticsResponse:
     """Return a bounded diagnostics snapshot for one Landscape run."""
@@ -304,6 +310,7 @@ def load_run_diagnostics_from_db(
         run_id=run_id,
         landscape_run_id=landscape_run_id,
         run_status=run_status,
+        cancel_requested=cancel_requested,
         summary=RunDiagnosticSummary(
             token_count=token_count,
             preview_limit=preview_limit,

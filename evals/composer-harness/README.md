@@ -69,33 +69,41 @@ cp .env.example .env && $EDITOR .env
 hardmode/harness.sh --doctor
 
 # Bootstrap one scenario:
-hardmode/harness.sh p1_t1_happy
+SCENARIO=p1_t1_happy
+export ELSPETH_EVAL_RUNS_DIR="${ELSPETH_EVAL_RUNS_DIR:-runs/$(date -u +%Y-%m-%d)-hardmode}"
+RUN_DIR="$ELSPETH_EVAL_RUNS_DIR/$SCENARIO"
+hardmode/harness.sh "$SCENARIO"
 
 # Drive the dialogue (turn 1 from the fixture; turn 2+ from a persona-subagent):
-jq -r '.opening_prompt' runs/$(date -u +%Y-%m-%d)-hardmode/p1_t1_happy/scenario.json \
-  > runs/$(date -u +%Y-%m-%d)-hardmode/p1_t1_happy/turn1.user.txt
-hardmode/post_message.sh p1_t1_happy 1 \
-  runs/$(date -u +%Y-%m-%d)-hardmode/p1_t1_happy/turn1.user.txt
+jq -r '.opening_prompt' "$RUN_DIR/scenario.json" > "$RUN_DIR/turn1.user.txt"
+hardmode/post_message.sh "$SCENARIO" 1 "$RUN_DIR/turn1.user.txt"
 # ... see lib/dispatch-protocol.md for the persona-subagent loop
 
 # Finalize:
-hardmode/finalize_scenario.sh p1_t1_happy
+hardmode/finalize_scenario.sh "$SCENARIO"
 
-# After all 9-15 scenarios done:
-hardmode/aggregate.sh
-cat runs/$(date -u +%Y-%m-%d)-hardmode/SCORECARD.md
+# After all scenarios are done:
+hardmode/aggregate.sh "$ELSPETH_EVAL_RUNS_DIR"
+cat "$ELSPETH_EVAL_RUNS_DIR/SCORECARD.md"
 # Also writes aggregate.json and aggregate_summary.json in that run root.
 ```
 
 Full step-by-step is in [`hardmode/RUNBOOK.md`](hardmode/RUNBOOK.md).
 
-## Model under test
+## Composer model and generated model fields
 
-The model exercised by the eval is **`openai/gpt-5-mini`** (via OpenRouter).
-This name appears in two places that the harness controls:
+The composer LLM under test is the running web service's
+`WebSettings.composer_model`, not a value controlled by this harness. In
+settings/env form that field is `ELSPETH_WEB__COMPOSER_MODEL`; the source
+default lives in `src/elspeth/web/config.py`. On staging, inspect only the
+targeted key in `deploy/elspeth-web.env` before running, and restart
+`elspeth-web.service` if you change it.
+
+`openai/gpt-5-mini` appears in the eval suite as a **generated pipeline model
+field**, not as the composer model:
 
 1. **`scenarios/hardmode/p4_t1_happy_csv_to_jsonl.json`** — Dev (P4) is the only
-   persona who *prescribes* a model. Her opening prompt names
+   persona who *prescribes* a transform model. Her opening prompt names
    `openai/gpt-5-mini` explicitly, so the composer's `final_yaml.json` for that
    scenario should pin the same id. If it doesn't, that's a probe failure
    (composer ignored a prescriptive ask).
@@ -105,27 +113,22 @@ This name appears in two places that the harness controls:
    resolve the shorthand or push back?).
 
 For the **P1/P2/P3 scenarios**, the persona deliberately does **not** name a
-model — the test is whether the composer auto-selects something that actually
-works on OpenRouter (this is the failure surface the historical
-`elspeth-obs-f3143acba2` flagged). The harness cannot force the composer's
-auto-pick from outside the running session.
+transform model — the test is whether the composer chooses a model identifier
+that actually validates and runs when it builds an LLM transform. The harness
+cannot force that generated YAML value from outside the running session.
 
-If you want every scenario in the matrix to land on `openai/gpt-5-mini`,
-you need to set the composer's server-side default model to that id before
-running. Two options on the staging deploy:
+Changing `ELSPETH_WEB__COMPOSER_MODEL` changes the agent that writes the YAML;
+it does **not** force every generated LLM transform to use the same `model:`.
+If you want every scenario in the matrix to emit `openai/gpt-5-mini`, make that
+an explicit eval contract or composer behavior, then verify it in
+`final_yaml.json`.
 
-- **Composer config**: whatever the deploy's composer-LLM-default config key
-  is — depends on the running build of `src/elspeth/web/composer/`.
-- **Environment override on the web service**: if the composer respects an
-  env var for its default model (check the running deploy's systemd unit),
-  set it and `systemctl restart elspeth-web.service` before bootstrapping
-  any scenarios.
-
-The harness will faithfully record whatever model lands in `final_yaml.json`
-per scenario — verify the expected id post-run with:
+The harness will faithfully record whatever transform model lands in
+`final_yaml.json` per scenario — verify the expected id post-run with:
 
 ```bash
-for d in runs/$(date -u +%Y-%m-%d)-hardmode/*/; do
+RUN_ROOT="${ELSPETH_EVAL_RUNS_DIR:-runs/$(date -u +%Y-%m-%d)-hardmode}"
+for d in "$RUN_ROOT"/*/; do
   echo "=== $(basename "$d") ==="
   jq -r '.yaml' "$d/final_yaml.json" 2>/dev/null | grep -E '^\s+model:' || echo "(no model in YAML)"
 done
@@ -141,6 +144,9 @@ done
 - Per-row engine errors (`diagnostics.json`)
 - Optional-artifact failures (`artifact_collection_errors.json` and
   `ledger.json` → `.artifact_collection_errors[]`)
+- Run/turn evidence manifests (`suite_manifest.json`, `run_manifest.json`,
+  `turn<N>.manifest.json`) with fixture/persona hashes, dispatch contract,
+  session id, posted artifact paths, and turn transport status.
 
 **Heuristic signals** (read with appropriate skepticism):
 - `metrics.t{N}.json`'s `*_keyword_match` fields are **noisy** — keyword-based
@@ -192,6 +198,12 @@ LLM credit.
   than overwriting. Use `--fresh` to reset a single scenario.
 - All script invocations append to `runs/.../<scenario_id>/harness.log`
   with timestamped events.
+- `harness.sh` writes `suite_manifest.json` at the run root and
+  `run_manifest.json` per scenario. These record the hardmode dispatch contract,
+  message budget, session id, and scenario/persona hashes.
+- `post_message.sh` writes `turn<N>.manifest.json` alongside
+  `metrics.t<N>.json`. Non-2xx `/messages` responses are typed as
+  `turn_status.status = "transport_error"` and the response body is preserved.
 - `finalize_scenario.sh` treats optional artifact collection failures
   (`diagnostics`, final YAML export, message export) as evidence metadata:
   fallback JSON is written, the HTTP code is preserved in `<artifact>.code`,
@@ -203,6 +215,8 @@ LLM credit.
 - Each finalize starts by resetting generated `run.json`, `diagnostics.json`,
   and `artifact_collection_errors.json` so a reused run directory cannot leak
   stale engine or usage data into the new ledger.
+- `aggregate.sh` writes `aggregate_errors.json`; malformed ledgers are counted
+  in `aggregate_summary.json` instead of disappearing from the suite silently.
 
 ## Adding a new scenario
 
@@ -213,8 +227,8 @@ LLM credit.
    `pass_criterion`. Optional: `csv_filename`, `csv_content`.
 3. Reference the persona by `persona_id` matching a `personas/<persona_id>.md`
    file.
-4. Run `hardmode/harness.sh <scenario_id> --doctor` (well, run `--doctor` first
-   without scenario, then `harness.sh <scenario_id>` without flag).
+4. Run `hardmode/harness.sh --doctor` first, then
+   `hardmode/harness.sh <scenario_id>` without `--doctor`.
 
 ## Adding a new persona
 

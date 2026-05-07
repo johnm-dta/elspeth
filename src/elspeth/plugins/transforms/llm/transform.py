@@ -117,6 +117,26 @@ def _serialize_finish_reason(finish_reason: ParsedFinishReason) -> str | None:
     return str(finish_reason)  # type: ignore[unreachable]  # pragma: no cover — exhaustive, but future-proof
 
 
+def _shutdown_event_is_set(shutdown_event: object | None) -> bool:
+    """Return True only for concrete cancellation signals, not arbitrary mocks."""
+    is_set = getattr(shutdown_event, "is_set", None)
+    return callable(is_set) and is_set() is True
+
+
+def _shutdown_requested_result(
+    *,
+    error: str = "Run cancellation requested before LLM provider call",
+    query_name: str | None = None,
+    query_index: int | None = None,
+) -> TransformResult:
+    reason: dict[str, Any] = {"reason": "shutdown_requested", "error": error}
+    if query_name is not None:
+        reason["query_name"] = query_name
+    if query_index is not None:
+        reason["query_index"] = query_index
+    return TransformResult.error(cast(TransformErrorReason, reason), retryable=False)
+
+
 def _finish_reason_error(
     finish_reason: ParsedFinishReason,
     *,
@@ -257,6 +277,7 @@ class SingleQueryStrategy:
         if ctx.token is None:
             raise RuntimeError("LLMTransform requires ctx.token")
         token_id = ctx.token.token_id
+        shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
         # 1. Render template (THEIR DATA — wrap)
         try:
@@ -276,6 +297,9 @@ class SingleQueryStrategy:
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": rendered.prompt})
+
+        if _shutdown_event_is_set(shutdown_event):
+            return _shutdown_requested_result()
 
         # 3. Call provider (EXTERNAL — errors classified by provider)
         start_time = time.monotonic()
@@ -452,10 +476,11 @@ class MultiQueryStrategy:
         if ctx.token is None:
             raise RuntimeError("LLMTransform requires ctx.token")
         token_id = ctx.token.token_id
+        shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
         if self.executor is not None:
-            return self._execute_parallel(row, state_id, token_id, provider, tracer)
-        return self._execute_sequential(row, state_id, token_id, provider, tracer)
+            return self._execute_parallel(row, state_id, token_id, provider, tracer, shutdown_event)
+        return self._execute_sequential(row, state_id, token_id, provider, tracer, shutdown_event)
 
     @dataclass(frozen=True, slots=True)
     class _QuerySuccess:
@@ -486,6 +511,7 @@ class MultiQueryStrategy:
         token_id: str,
         provider: LLMProvider,
         tracer: LangfuseTracer,
+        shutdown_event: threading.Event | None = None,
     ) -> _QuerySuccess | TransformResult:
         """Execute a single query within a multi-query row.
 
@@ -497,6 +523,9 @@ class MultiQueryStrategy:
             LLMClientError: Retryable errors propagate to caller for retry
                 handling (PooledExecutor AIMD or sequential error capture).
         """
+        if _shutdown_event_is_set(shutdown_event):
+            return _shutdown_requested_result(query_name=spec.name, query_index=query_idx)
+
         # Build template context from named input_fields
         try:
             template_ctx = spec.build_template_context(row)
@@ -545,6 +574,9 @@ class MultiQueryStrategy:
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": rendered.prompt})
+
+        if _shutdown_event_is_set(shutdown_event):
+            return _shutdown_requested_result(query_name=spec.name, query_index=query_idx)
 
         # Execute query
         query_max_tokens = spec.max_tokens or self.max_tokens
@@ -749,6 +781,7 @@ class MultiQueryStrategy:
         token_id: str,
         provider: LLMProvider,
         tracer: LangfuseTracer,
+        shutdown_event: threading.Event | None = None,
     ) -> TransformResult:
         """Execute queries sequentially (pool_size=1 fallback).
 
@@ -769,6 +802,7 @@ class MultiQueryStrategy:
                     token_id,
                     provider,
                     tracer,
+                    shutdown_event,
                 )
             except LLMClientError as e:
                 # Sequential mode: no AIMD retry — return retryable error result
@@ -832,6 +866,7 @@ class MultiQueryStrategy:
         token_id: str,
         provider: LLMProvider,
         tracer: LangfuseTracer,
+        shutdown_event: threading.Event | None = None,
     ) -> TransformResult:
         """Execute queries in parallel via PooledExecutor with AIMD retry.
 
@@ -880,6 +915,7 @@ class MultiQueryStrategy:
                 work["token_id"],
                 work["provider"],
                 work["tracer"],
+                shutdown_event,
             )
             if isinstance(result, TransformResult):
                 return result  # Error passthrough
@@ -912,7 +948,10 @@ class MultiQueryStrategy:
                 success_reason={"action": "query_completed", "metadata": {"query_name": work["spec"].name}},
             )
 
-        entries = self.executor.execute_batch(contexts=contexts, process_fn=_process_fn)
+        if shutdown_event is None:
+            entries = self.executor.execute_batch(contexts=contexts, process_fn=_process_fn)
+        else:
+            entries = self.executor.execute_batch(contexts=contexts, process_fn=_process_fn, shutdown_event=shutdown_event)
         query_results = [entry.result for entry in entries]
 
         # Check for failures — atomic: any failure fails the row
@@ -1003,7 +1042,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
     name = "llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8b50d4f0ab38bbea"
+    source_file_hash: str | None = "sha256:070f87f5e115a2b9"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1342,6 +1381,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._run_id: str = ""
         self._telemetry_emit: Callable[[Any], None] = _warn_telemetry_before_start
         self._limiter: Any = None
+        self._shutdown_event: threading.Event | None = None
 
         # Batch processing state
         self._batch_initialized = False
@@ -1426,6 +1466,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._recorder = ctx.landscape
         self._run_id = ctx.run_id
         self._telemetry_emit = ctx.telemetry_emit
+        self._shutdown_event = ctx.shutdown_event
         limiter_name = "azure_openai" if isinstance(self._config, AzureOpenAIConfig) else "openrouter"
         self._limiter = ctx.rate_limit_registry.get_limiter(limiter_name) if ctx.rate_limit_registry is not None else None
 
@@ -1495,6 +1536,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         """
         if self._provider is None:
             raise RuntimeError("Provider not initialized — _process_row called before on_start()")
+        self._shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
 
         return self._strategy.execute(
             row,
@@ -1506,18 +1548,24 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     def close(self) -> None:
         """Release resources."""
         self._tracer.flush()
+        shutdown_requested = _shutdown_event_is_set(self._shutdown_event)
 
-        if self._batch_initialized:
-            self.shutdown_batch_processing()
+        if shutdown_requested and self._provider is not None:
+            self._provider.close()
+            self._provider = None
 
         if self._query_executor is not None:
-            self._query_executor.shutdown(wait=True)
+            self._query_executor.shutdown(wait=not shutdown_requested)
+
+        if self._batch_initialized:
+            self.shutdown_batch_processing(wait_for_workers=not shutdown_requested)
 
         if self._provider is not None:
             self._provider.close()
             self._provider = None
 
         self._recorder = None
+        self._shutdown_event = None
 
 
 # Register opt-in for value-source compliance: the typed Pydantic config

@@ -275,80 +275,41 @@ class BatchTransformContractTestBase(ABC):
     # Protocol Attribute Contracts (from TransformProtocol)
     # =========================================================================
 
-    def test_transform_has_name(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'name' attribute."""
+    def test_batch_transform_satisfies_runtime_protocol(self, batch_transform: TransformProtocol) -> None:
+        """Contract: batch transform MUST satisfy the runtime engine protocol."""
+        assert isinstance(batch_transform, TransformProtocol)
+
+    def test_batch_transform_engine_identity_surface_is_coherent(self, batch_transform: TransformProtocol) -> None:
+        """Contract: engine-facing identity and routing metadata MUST be well formed."""
         assert isinstance(batch_transform.name, str)
         assert len(batch_transform.name) > 0
-
-    def test_transform_has_input_schema(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have an 'input_schema' attribute that is a PluginSchema subclass."""
         assert isinstance(batch_transform.input_schema, type)
         assert issubclass(batch_transform.input_schema, PluginSchema)
-
-    def test_transform_has_output_schema(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have an 'output_schema' attribute that is a PluginSchema subclass."""
         assert isinstance(batch_transform.output_schema, type)
         assert issubclass(batch_transform.output_schema, PluginSchema)
-
-    def test_transform_has_determinism(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'determinism' attribute."""
         assert isinstance(batch_transform.determinism, Determinism)
-
-    def test_transform_has_plugin_version(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'plugin_version' attribute."""
         assert isinstance(batch_transform.plugin_version, str)
-
-    def test_transform_has_batch_awareness_flag(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have 'is_batch_aware' attribute."""
-        assert isinstance(batch_transform.is_batch_aware, bool)
-
-    def test_transform_has_batch_row_mode_opt_in_flag(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST declare whether batch-aware row mode is supported."""
-        assert isinstance(batch_transform.supports_row_mode_when_batch_aware, bool)
-
-    def test_transform_has_creates_tokens_flag(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have 'creates_tokens' attribute."""
-        assert isinstance(batch_transform.creates_tokens, bool)
-
-    def test_transform_has_config_dict(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose its original config dict."""
         assert isinstance(batch_transform.config, dict)
-
-    def test_transform_has_optional_node_id(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform node_id is None before registration or a string after registration."""
         assert batch_transform.node_id is None or isinstance(batch_transform.node_id, str)
-
-    def test_transform_has_optional_source_file_hash(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform source_file_hash is None or a string fingerprint."""
         assert batch_transform.source_file_hash is None or isinstance(batch_transform.source_file_hash, str)
-
-    def test_transform_has_lifecycle_guard_flag(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose the on_start lifecycle guard flag."""
         assert isinstance(batch_transform._on_start_called, bool)
-
-    def test_transform_has_routing_configuration(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform routing configuration is unset or string-valued."""
         assert batch_transform.on_error is None or isinstance(batch_transform.on_error, str)
         assert batch_transform.on_success is None or isinstance(batch_transform.on_success, str)
 
-    def test_transform_has_passthrough_flag(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST declare whether it preserves all input fields."""
+    def test_batch_transform_behavior_flags_are_boolean(self, batch_transform: TransformProtocol) -> None:
+        """Contract: engine dispatch and governance flags MUST be explicit booleans."""
+        assert isinstance(batch_transform.is_batch_aware, bool)
+        assert isinstance(batch_transform.supports_row_mode_when_batch_aware, bool)
+        assert isinstance(batch_transform.creates_tokens, bool)
         assert isinstance(batch_transform.passes_through_input, bool)
-
-    def test_transform_has_can_drop_rows_flag(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST declare whether it may intentionally emit zero rows."""
         assert isinstance(batch_transform.can_drop_rows, bool)
 
-    def test_transform_has_declared_output_fields(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose centralized output-field declarations."""
-        _assert_frozenset_of_str(batch_transform.declared_output_fields, attr_name="declared_output_fields")
-
-    def test_transform_has_declared_input_fields(self, batch_transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose pre-emission required-input declarations."""
+    def test_batch_declaration_surfaces_are_normalized_and_effective(
+        self,
+        batch_transform: TransformProtocol,
+    ) -> None:
+        """Contract: declared fields are normalized and included in the static contract."""
         _assert_frozenset_of_str(batch_transform.declared_input_fields, attr_name="declared_input_fields")
-
-    def test_effective_static_contract_returns_declared_surface(self, batch_transform: TransformProtocol) -> None:
-        """Contract: effective_static_contract() MUST expose declared output guarantees."""
         static_contract = _assert_frozenset_of_str(
             batch_transform.effective_static_contract(),
             attr_name="effective_static_contract()",
@@ -598,50 +559,65 @@ class BatchTransformContractTestBase(ABC):
     def test_close_is_idempotent(
         self,
         batch_transform: TransformProtocol,
+        valid_input: dict[str, Any],
         output_port: CollectingOutputPort,
         mock_ctx_factory: Any,
     ) -> None:
-        """Contract: close() MUST be safe to call multiple times."""
+        """Contract: close() MUST drain accepted work and stay idempotent."""
         batch_transform.connect_output(output_port)  # type: ignore[attr-defined]
-        batch_transform.on_start(mock_ctx_factory())
+        ctx = mock_ctx_factory()
+        batch_transform.on_start(ctx)
+        submitted_token = ctx.token
+        submitted_state_id = ctx.state_id
+        pipeline_row = make_pipeline_row(valid_input)
+        batch_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
 
-        # close() should not raise on first call
         batch_transform.close()
 
-        # close() should not raise on subsequent calls (idempotent)
-        batch_transform.close()
-        batch_transform.close()
+        results = output_port.get_results()
+        assert len(results) == 1, "close() must drain accepted work before shutdown returns"
+        returned_token, result, returned_state_id = results[0]
+        assert returned_token.token_id == submitted_token.token_id
+        assert returned_state_id == submitted_state_id
+        assert isinstance(result, TransformResult)
+        assert result.status == "success"
 
-    def test_on_start_does_not_raise(
+        batch_transform.close()
+        batch_transform.close()
+        assert output_port.get_results() == results, "repeated close() calls must not emit duplicate results"
+
+    def test_on_start_records_lifecycle_state(
         self,
         batch_transform: TransformProtocol,
         output_port: CollectingOutputPort,
         mock_ctx_factory: Any,
     ) -> None:
-        """Contract: on_start() lifecycle hook MUST not raise."""
+        """Contract: on_start() MUST record lifecycle state before processing."""
         batch_transform.connect_output(output_port)  # type: ignore[attr-defined]
         ctx = mock_ctx_factory()
 
         try:
             batch_transform.on_start(ctx)
+            assert batch_transform._on_start_called is True
         finally:
             batch_transform.close()
 
-    def test_on_complete_does_not_raise(
+    def test_on_complete_runs_after_emitted_result(
         self,
         started_transform: TransformProtocol,
         valid_input: dict[str, Any],
         mock_ctx_factory: Any,
         output_port: CollectingOutputPort,
     ) -> None:
-        """Contract: on_complete() lifecycle hook MUST not raise."""
+        """Contract: on_complete() MUST run after accepted work has emitted."""
         # Process something first
         ctx = mock_ctx_factory()
         pipeline_row = make_pipeline_row(valid_input)
         started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
-        output_port.wait_for_results(1, timeout=10.0)
+        arrived = output_port.wait_for_results(1, timeout=10.0)
+        assert arrived, "accepted work must emit before on_complete() runs"
+        assert len(output_port.get_results()) == 1
 
-        # on_complete should not raise
         started_transform.on_complete(ctx)
 
 

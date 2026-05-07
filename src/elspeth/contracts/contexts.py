@@ -19,6 +19,7 @@ See: docs/plans/2026-02-26-t17-plugincontext-protocol-split-design.md
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -111,6 +112,9 @@ class TransformContext(Protocol):
     @property
     def contract(self) -> SchemaContract | None: ...
 
+    @property
+    def shutdown_event(self) -> threading.Event | None: ...
+
     def record_call(
         self,
         call_type: CallType,
@@ -193,3 +197,6 @@ class LifecycleContext(Protocol):
 
     @property
     def concurrency_config(self) -> RuntimeConcurrencyConfig | None: ...
+
+    @property
+    def shutdown_event(self) -> threading.Event | None: ...

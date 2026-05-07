@@ -809,6 +809,7 @@ async def _persist_llm_calls(
                 "model_requested": call.model_requested,
                 "model_returned": call.model_returned,
                 "total_tokens": call.total_tokens,
+                "reasoning_tokens": call.reasoning_tokens,
                 "provider_cost": call.provider_cost,
             }
         )

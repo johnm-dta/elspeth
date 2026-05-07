@@ -41,4 +41,28 @@ describe("ProgressView", () => {
     expect(screen.getByText("2 routed failure")).toBeInTheDocument();
     expect(screen.getByText("1 quarantined")).toBeInTheDocument();
   });
+
+  it("shows a cancelling state after cancel is requested", () => {
+    (useWebSocket as ReturnType<typeof vi.fn>).mockReturnValue({
+      activeRunId: "run-1",
+      wsDisconnected: false,
+      progress: {
+        source_rows_processed: 1,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        cancel_requested: true,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    render(<ProgressView />);
+
+    expect(screen.getByText("cancelling")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel pipeline execution" })).not.toBeInTheDocument();
+  });
 });

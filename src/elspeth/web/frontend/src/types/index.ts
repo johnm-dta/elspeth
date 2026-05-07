@@ -434,6 +434,7 @@ export interface Run {
   id: string;
   session_id: string;
   status: RunStatus;
+  cancel_requested?: boolean;
   accounting: RunAccounting | null;
   error: string | null;
   started_at: string;
@@ -522,6 +523,7 @@ export interface RunProgress {
   tokens_quarantined: number;
   tokens_routed_success: number;
   tokens_routed_failure: number;
+  cancel_requested?: boolean;
   accounting: RunAccounting | null;
   recent_errors: RunEventError[];
   status: RunStatus;
@@ -588,10 +590,16 @@ export interface RunDiagnostics {
   run_id: string;
   landscape_run_id: string;
   run_status: Run["status"];
+  cancel_requested: boolean;
   summary: RunDiagnosticSummary;
   tokens: RunDiagnosticToken[];
   operations: RunDiagnosticOperation[];
   artifacts: RunDiagnosticArtifact[];
+}
+
+export interface CancelRunResponse {
+  status: RunStatus;
+  cancel_requested: boolean;
 }
 
 export interface RunDiagnosticsWorkingView {

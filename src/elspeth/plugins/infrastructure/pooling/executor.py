@@ -222,6 +222,7 @@ class PooledExecutor:
         self,
         contexts: list[RowContext],
         process_fn: Callable[[Mapping[str, Any], str], TransformResult],
+        shutdown_event: Event | None = None,
     ) -> list[BufferEntry[TransformResult]]:
         """Execute batch of rows with parallel processing.
 
@@ -237,6 +238,9 @@ class PooledExecutor:
         Args:
             contexts: List of RowContext with row data and state_ids
             process_fn: Function that processes a single row with state_id
+            shutdown_event: Optional run-cancellation signal. When set, workers
+                stop before dispatch and during retry sleeps with
+                shutdown_requested results.
 
         Returns:
             List of BufferEntry in submission order, each containing:
@@ -256,7 +260,7 @@ class PooledExecutor:
         with self._batch_lock:
             self._buffer = ReorderBuffer()
             try:
-                return self._execute_batch_locked(contexts, process_fn)
+                return self._execute_batch_locked(contexts, process_fn, shutdown_event)
             except Exception:
                 self._buffer = ReorderBuffer()
                 raise
@@ -265,6 +269,7 @@ class PooledExecutor:
         self,
         contexts: list[RowContext],
         process_fn: Callable[[Mapping[str, Any], str], TransformResult],
+        shutdown_event: Event | None = None,
     ) -> list[BufferEntry[TransformResult]]:
         """Internal batch execution (must be called while holding _batch_lock).
 
@@ -304,6 +309,7 @@ class PooledExecutor:
                     ctx.state_id,
                     process_fn,
                     batch_cancel_event,
+                    shutdown_event,
                 )
             except RuntimeError:
                 # Thread pool is shut down (concurrent shutdown() call).
@@ -376,24 +382,29 @@ class PooledExecutor:
             future.cancel()
         wait(futures)
 
-    def _is_interrupted(self, batch_cancel_event: Event | None = None) -> bool:
+    def _is_interrupted(self, batch_cancel_event: Event | None = None, shutdown_event: Event | None = None) -> bool:
         """Return True when executor-wide or batch-local shutdown has been requested."""
-        return self._shutdown_event.is_set() or (batch_cancel_event is not None and batch_cancel_event.is_set())
+        return (
+            self._shutdown_event.is_set()
+            or (batch_cancel_event is not None and batch_cancel_event.is_set())
+            or (shutdown_event is not None and shutdown_event.is_set())
+        )
 
     def _wait_interruptibly(
         self,
         timeout_seconds: float,
         batch_cancel_event: Event | None = None,
+        shutdown_event: Event | None = None,
     ) -> tuple[bool, float]:
         """Wait up to timeout_seconds, returning (interrupted, actual_wait_ms)."""
         if timeout_seconds <= 0:
-            return (self._is_interrupted(batch_cancel_event), 0.0)
+            return (self._is_interrupted(batch_cancel_event, shutdown_event), 0.0)
 
         start = time.monotonic()
         deadline = start + timeout_seconds
 
         while True:
-            if self._is_interrupted(batch_cancel_event):
+            if self._is_interrupted(batch_cancel_event, shutdown_event):
                 return (True, (time.monotonic() - start) * 1000)
 
             remaining_s = deadline - time.monotonic()
@@ -401,18 +412,13 @@ class PooledExecutor:
                 return (False, (time.monotonic() - start) * 1000)
 
             wait_slice_s = min(remaining_s, 0.05)
-            if batch_cancel_event is None:
-                if self._shutdown_event.wait(timeout=wait_slice_s):
-                    return (True, (time.monotonic() - start) * 1000)
-                continue
-
-            if batch_cancel_event.wait(timeout=wait_slice_s):
+            if self._shutdown_event.wait(timeout=wait_slice_s):
                 return (True, (time.monotonic() - start) * 1000)
 
-    def _acquire_worker_slot(self, batch_cancel_event: Event | None = None) -> bool:
+    def _acquire_worker_slot(self, batch_cancel_event: Event | None = None, shutdown_event: Event | None = None) -> bool:
         """Acquire a worker permit while remaining responsive to cancellation."""
         while True:
-            if self._is_interrupted(batch_cancel_event):
+            if self._is_interrupted(batch_cancel_event, shutdown_event):
                 return False
             if self._semaphore.acquire(timeout=0.05):
                 self._increment_active_workers()
@@ -440,9 +446,10 @@ class PooledExecutor:
         self,
         retryable_error: PluginRetryableError | CapacityError | None,
         batch_cancel_event: Event | None = None,
+        shutdown_event: Event | None = None,
     ) -> TransformResult:
         """Build a deterministic result when work stops before redispatch."""
-        if self._shutdown_event.is_set():
+        if self._shutdown_event.is_set() or (shutdown_event is not None and shutdown_event.is_set()):
             return TransformResult.error(
                 {
                     "reason": "shutdown_requested",
@@ -462,7 +469,7 @@ class PooledExecutor:
 
         raise RuntimeError("Interrupted result requested without shutdown or batch cancellation")
 
-    def _wait_for_dispatch_gate(self, batch_cancel_event: Event | None = None) -> bool:
+    def _wait_for_dispatch_gate(self, batch_cancel_event: Event | None = None, shutdown_event: Event | None = None) -> bool:
         """Wait until we're allowed to dispatch, ensuring global pacing.
 
         Enforces min_dispatch_delay_ms between consecutive dispatches across
@@ -481,7 +488,7 @@ class PooledExecutor:
         """
         delay_ms = self._config.min_dispatch_delay_ms
         if delay_ms <= 0:
-            return not self._is_interrupted(batch_cancel_event)  # No pacing needed
+            return not self._is_interrupted(batch_cancel_event, shutdown_event)  # No pacing needed
 
         delay_s = delay_ms / 1000
         total_wait_ms = 0.0
@@ -507,11 +514,11 @@ class PooledExecutor:
                 remaining_s = delay_s - time_since_last
 
             # Bail out if shutdown or batch cancellation was requested.
-            if self._is_interrupted(batch_cancel_event):
+            if self._is_interrupted(batch_cancel_event, shutdown_event):
                 break
 
             # Sleep OUTSIDE the lock to allow other workers to check
-            interrupted, waited_ms = self._wait_interruptibly(remaining_s, batch_cancel_event)
+            interrupted, waited_ms = self._wait_interruptibly(remaining_s, batch_cancel_event, shutdown_event)
             total_wait_ms += waited_ms
             if interrupted:
                 break
@@ -520,7 +527,7 @@ class PooledExecutor:
         if total_wait_ms > 0:
             self._throttle.record_throttle_wait(total_wait_ms)
 
-        return not self._is_interrupted(batch_cancel_event)
+        return not self._is_interrupted(batch_cancel_event, shutdown_event)
 
     def _execute_single(
         self,
@@ -529,6 +536,7 @@ class PooledExecutor:
         state_id: str,
         process_fn: Callable[[Mapping[str, Any], str], TransformResult],
         batch_cancel_event: Event,
+        shutdown_event: Event | None = None,
     ) -> tuple[int, TransformResult]:
         """Execute single row with capacity error retry and timeout.
 
@@ -560,8 +568,8 @@ class PooledExecutor:
 
         # Acquire semaphore at start of worker (not in execute_batch)
         # This prevents deadlock when capacity errors cause release-then-reacquire
-        if not self._acquire_worker_slot(batch_cancel_event):
-            return (buffer_idx, self._build_interrupted_result(None, batch_cancel_event))
+        if not self._acquire_worker_slot(batch_cancel_event, shutdown_event):
+            return (buffer_idx, self._build_interrupted_result(None, batch_cancel_event, shutdown_event))
         holding_semaphore = True
 
         try:
@@ -574,15 +582,15 @@ class PooledExecutor:
                 # sleep is for THIS worker's cooldown, but OTHER workers may have
                 # dispatched while we slept. We must check the global gate to maintain
                 # min_dispatch_delay_ms between ALL dispatches across ALL workers.
-                if not self._wait_for_dispatch_gate(batch_cancel_event):
-                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event))
+                if not self._wait_for_dispatch_gate(batch_cancel_event, shutdown_event):
+                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event, shutdown_event))
 
                 if retryable_error is not None and time.monotonic() >= max_time:
                     return (buffer_idx, self._build_retry_timeout_result(retryable_error, start_time))
 
                 # Check shutdown before dispatching to external service
-                if self._is_interrupted(batch_cancel_event):
-                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event))
+                if self._is_interrupted(batch_cancel_event, shutdown_event):
+                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event, shutdown_event))
 
                 try:
                     result = process_fn(row, state_id)
@@ -609,8 +617,8 @@ class PooledExecutor:
                 if time.monotonic() >= max_time:
                     return (buffer_idx, self._build_retry_timeout_result(retryable_error, start_time))
 
-                if self._is_interrupted(batch_cancel_event):
-                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event))
+                if self._is_interrupted(batch_cancel_event, shutdown_event):
+                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event, shutdown_event))
 
                 self._throttle.on_capacity_error()
 
@@ -625,17 +633,17 @@ class PooledExecutor:
                 if retry_delay_ms > 0:
                     remaining_retry_budget_s = max(0.0, max_time - time.monotonic())
                     retry_sleep_s = min(retry_delay_ms / 1000, remaining_retry_budget_s)
-                    interrupted, waited_ms = self._wait_interruptibly(retry_sleep_s, batch_cancel_event)
+                    interrupted, waited_ms = self._wait_interruptibly(retry_sleep_s, batch_cancel_event, shutdown_event)
                     self._throttle.record_throttle_wait(waited_ms)
                     if interrupted:
-                        return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event))
+                        return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event, shutdown_event))
 
                 if time.monotonic() >= max_time:
                     return (buffer_idx, self._build_retry_timeout_result(retryable_error, start_time))
 
                 # Re-acquire semaphore for retry
-                if not self._acquire_worker_slot(batch_cancel_event):
-                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event))
+                if not self._acquire_worker_slot(batch_cancel_event, shutdown_event):
+                    return (buffer_idx, self._build_interrupted_result(retryable_error, batch_cancel_event, shutdown_event))
                 holding_semaphore = True
 
                 # Continue to top of loop for retry

@@ -439,6 +439,7 @@ class TestRunDiagnosticsEndpoint:
                 finished_at=None,
                 error=None,
                 landscape_run_id=None,
+                cancel_requested=True,
             )
         )
         captured: dict[str, Any] = {}
@@ -449,6 +450,7 @@ class TestRunDiagnosticsEndpoint:
                 run_id=str(run_id),
                 landscape_run_id=str(run_id),
                 run_status="running",
+                cancel_requested=kwargs["cancel_requested"],
                 summary=RunDiagnosticSummary(
                     token_count=0,
                     preview_limit=12,
@@ -481,6 +483,8 @@ class TestRunDiagnosticsEndpoint:
         assert captured["run_id"] == str(run_id)
         assert captured["landscape_run_id"] == str(run_id)
         assert captured["run_status"] == "running"
+        assert captured["cancel_requested"] is True
+        assert response.cancel_requested is True
         assert captured["limit"] == 12
 
     @pytest.mark.asyncio
@@ -1104,6 +1108,31 @@ class TestCancelEndpoint:
             assert resp.status_code == 200
             body = resp.json()
             assert body["status"] == "cancelled"
+            assert body["cancel_requested"] is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_returns_cancel_requested_for_draining_run(self) -> None:
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.cancel = AsyncMock()
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(tz=UTC),
+                finished_at=None,
+                accounting=None,
+                error=None,
+                landscape_run_id=str(run_id),
+                cancel_requested=True,
+            )
+        )
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/runs/{run_id}/cancel")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "running", "cancel_requested": True}
 
     @pytest.mark.asyncio
     async def test_cancel_returns_404_when_run_disappears_after_cancel(self) -> None:

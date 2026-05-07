@@ -6,6 +6,7 @@ import type { Run, RunAccounting, RunDiagnostics, RunEvent, ValidationResult } f
 // Mock the API client
 vi.mock("@/api/client", () => ({
   validatePipeline: vi.fn(),
+  cancelRun: vi.fn(),
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
   evaluateRunDiagnostics: vi.fn(),
@@ -129,6 +130,7 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
     run_id: "run-1",
     landscape_run_id: "run-1",
     run_status: "running",
+    cancel_requested: false,
     summary: {
       token_count: 1,
       preview_limit: 50,
@@ -223,6 +225,43 @@ describe("executionStore failed run events", () => {
       status: "failed",
       error: "Pipeline execution failed (FrameworkBugError)",
     });
+  });
+});
+
+describe("executionStore.cancel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+  });
+
+  it("marks an active run as cancelling while the backend drains work", async () => {
+    const { cancelRun } = await import("@/api/client");
+    (cancelRun as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "running",
+      cancel_requested: true,
+    });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        cancel_requested: false,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    await useExecutionStore.getState().cancel("run-1");
+
+    const state = useExecutionStore.getState();
+    expect(state.runs[0].cancel_requested).toBe(true);
+    expect(state.progress?.cancel_requested).toBe(true);
   });
 });
 

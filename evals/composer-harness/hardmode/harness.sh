@@ -97,6 +97,30 @@ export EVALS_JWT_FILE="$out/jwt.txt"
 
 evals_log INFO "scenario=$scenario_id out=$out"
 
+suite_manifest="$runs_root/suite_manifest.json"
+if [[ ! -s "$suite_manifest" ]]; then
+  python3 - "$suite_manifest" "$HARNESS_ROOT" "$LIB_DIR/dispatch-protocol.md" <<'PY'
+import datetime as dt
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+harness_root = pathlib.Path(sys.argv[2])
+protocol_path = pathlib.Path(sys.argv[3])
+manifest = {
+    "schema_version": 1,
+    "suite": "hardmode",
+    "created_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+    "harness_root": str(harness_root),
+    "dispatch_protocol_path": str(protocol_path),
+    "dispatch_contract": "fresh_persona_subagent_for_turns_2_plus",
+    "message_budget_user_turns": 5,
+}
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+fi
+
 # Snapshot the immutable scenario fixture into the run dir.
 cp "$scen_path" "$out/scenario.json"
 
@@ -136,6 +160,61 @@ if [[ -n "$csv_filename" ]]; then
 else
   evals_log INFO "scenario has no csv_content — skipping blob upload"
 fi
+
+persona_id=$(jq -r '.persona // empty' "$out/scenario.json")
+persona_path="$HARNESS_ROOT/personas/$persona_id.md"
+[[ -f "$persona_path" ]] || evals_die 65 "persona spec not found: $persona_id"
+python3 - \
+  "$out/run_manifest.json" \
+  "$scenario_id" \
+  "$scen_path" \
+  "$out/scenario.json" \
+  "$persona_id" \
+  "$persona_path" \
+  "$sid" \
+  "$runs_root" \
+  "$HARNESS_ROOT" \
+  "$LIB_DIR/dispatch-protocol.md" <<'PY'
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+scenario_id = sys.argv[2]
+scenario_fixture_path = sys.argv[3]
+scenario_snapshot_path = pathlib.Path(sys.argv[4])
+persona_id = sys.argv[5]
+persona_path = pathlib.Path(sys.argv[6])
+session_id = sys.argv[7]
+runs_root = pathlib.Path(sys.argv[8])
+harness_root = pathlib.Path(sys.argv[9])
+protocol_path = pathlib.Path(sys.argv[10])
+
+def sha256_file(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+manifest = {
+    "schema_version": 1,
+    "suite": "hardmode",
+    "scenario_id": scenario_id,
+    "created_at": dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z"),
+    "runs_root": str(runs_root),
+    "harness_root": str(harness_root),
+    "session_id": session_id,
+    "scenario_fixture_path": scenario_fixture_path,
+    "scenario_snapshot_path": str(scenario_snapshot_path),
+    "scenario_fixture_sha256": sha256_file(scenario_snapshot_path),
+    "persona_id": persona_id,
+    "persona_spec_path": str(persona_path),
+    "persona_spec_sha256": sha256_file(persona_path),
+    "dispatch_protocol_path": str(protocol_path),
+    "dispatch_contract": "fresh_persona_subagent_for_turns_2_plus",
+    "message_budget_user_turns": 5,
+}
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+PY
 
 # ---------- Done ------------------------------------------------------------
 

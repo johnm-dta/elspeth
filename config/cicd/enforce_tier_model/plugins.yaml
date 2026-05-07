@@ -236,11 +236,6 @@ allow_hits:
   reason: Worker threads must capture arbitrary plugin exceptions and relay them back to the orchestrator thread through ExceptionResult
   safety: Every caught exception is wrapped with its traceback, stored on the ticket, and re-raised by the waiter path; nothing is downgraded into a success or silent row drop
   expires: '2026-07-02'
-- key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_complete_ticket:fp=ce9c49bd8369212f
-  owner: bugfix
-  reason: Completing a timed-out ticket races with timeout eviction from the reorder buffer
-  safety: KeyError only triggers the late_result_discarded debug path; the row was already marked timed out, so no success is fabricated and no waiter is left unresolved
-  expires: '2026-07-02'
 - key: plugins/infrastructure/batching/mixin.py:R9:BatchTransformMixin:_release_loop:fp=2f93bd40222e5b89
   owner: architecture
   reason: Cleanup/pop with default - key may not exist in race or optional scenarios
@@ -495,4 +490,12 @@ allow_hits:
   owner: web-execution
   reason: ContextVar.get() is not dict.get() — _PLUGIN_PREFLIGHT_MODE is a ContextVar[bool]; .get() returns the current context value, not a dict lookup
   safety: Returns bool default (False); no silent None default; ContextVar.get() cannot return an absent key
+  expires: null
+- key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_complete_ticket:fp=9b67bbe4194832ff
+  owner: web-execution
+  reason: >-
+    Completing a worker result can race with timeout eviction or shutdown of the batching buffer.
+  safety: >-
+    Only KeyError and ShutdownError are discarded; the row was already timed out or shutdown, so no success
+    is fabricated and no waiter is stranded.
   expires: null

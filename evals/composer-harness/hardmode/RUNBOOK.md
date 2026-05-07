@@ -33,7 +33,10 @@ a fixture under `scenarios/hardmode/`.
 ### Step 1: Bootstrap
 
 ```bash
-hardmode/harness.sh p1_t1_happy
+SCENARIO=p1_t1_happy
+export ELSPETH_EVAL_RUNS_DIR="${ELSPETH_EVAL_RUNS_DIR:-runs/$(date -u +%Y-%m-%d)-hardmode}"
+RUN_DIR="$ELSPETH_EVAL_RUNS_DIR/$SCENARIO"
+hardmode/harness.sh "$SCENARIO"
 ```
 
 This logs in, creates a composer session, uploads the CSV (if the fixture
@@ -41,9 +44,12 @@ has one), and writes scaffolding into:
 
 ```
 runs/<UTC-date>-hardmode/p1_t1_happy/
-  scenario.json  session.json  sid.txt  jwt.txt
+  scenario.json  run_manifest.json  session.json  sid.txt  jwt.txt
   blob.req.json  blob.json     harness.log
 ```
+
+The run root also gets `suite_manifest.json`, which records the hardmode
+dispatch contract and message budget for the whole suite.
 
 The script prints the next-step commands at the end. Note the run dir.
 
@@ -53,9 +59,8 @@ The opening prompt is verbatim from the fixture. Don't paraphrase it; that's
 the deterministic entry condition.
 
 ```bash
-RUN_DIR=runs/$(date -u +%Y-%m-%d)-hardmode/p1_t1_happy
 jq -r '.opening_prompt' "$RUN_DIR/scenario.json" > "$RUN_DIR/turn1.user.txt"
-hardmode/post_message.sh p1_t1_happy 1 "$RUN_DIR/turn1.user.txt"
+hardmode/post_message.sh "$SCENARIO" 1 "$RUN_DIR/turn1.user.txt"
 ```
 
 Read the composer's reply:
@@ -63,6 +68,11 @@ Read the composer's reply:
 ```bash
 jq -r '.message.content' "$RUN_DIR/msg.t1.resp.json"
 ```
+
+Each posted turn writes `turn<N>.manifest.json` in addition to
+`metrics.t<N>.json`. If `/messages` returns non-2xx, the response body is still
+preserved and the turn manifest/metrics record `turn_status.status =
+"transport_error"`.
 
 ### Step 3: Decide whether to continue
 
@@ -116,7 +126,7 @@ Loop back to step 3.
 ### Step 5: Finalize
 
 ```bash
-hardmode/finalize_scenario.sh p1_t1_happy
+hardmode/finalize_scenario.sh "$SCENARIO"
 ```
 
 This runs `/validate`. If valid, runs `/execute` and polls `/api/runs/<rid>`
@@ -163,6 +173,7 @@ broke character).
 Sequentially is fine — most scenarios converge in 60-180s of LLM time.
 
 ```bash
+export ELSPETH_EVAL_RUNS_DIR="${ELSPETH_EVAL_RUNS_DIR:-runs/$(date -u +%Y-%m-%d)-hardmode}"
 for sid in p1_t1_happy p1_t2_edge p1_t3_limit p1_t4_stress \
            p2_t1_happy p2_t2_edge p2_t3_limit p2_t4_stress \
            p3_t1_happy p3_t2_edge p3_t3_limit p3_t4_stress \
@@ -174,17 +185,18 @@ for sid in p1_t1_happy p1_t2_edge p1_t3_limit p1_t4_stress \
     hardmode/finalize_scenario.sh "$sid"
 done
 
-hardmode/aggregate.sh
-cat runs/$(date -u +%Y-%m-%d)-hardmode/SCORECARD.md
+hardmode/aggregate.sh "$ELSPETH_EVAL_RUNS_DIR"
+cat "$ELSPETH_EVAL_RUNS_DIR/SCORECARD.md"
 ```
 
-`aggregate.sh` writes three run-root artifacts:
+`aggregate.sh` writes four run-root artifacts:
 
 - `aggregate.json` — one record per scenario, including artifact errors,
   provider usage metadata, and cost metadata.
+- `aggregate_errors.json` — malformed ledger and aggregation evidence errors.
 - `aggregate_summary.json` — suite-level wall time, artifact error totals,
-  provider token totals, token-usage coverage, provider-reported cost, and cost
-  coverage.
+  aggregate error totals, provider token totals, token-usage coverage,
+  provider-reported cost, and cost coverage.
 - `SCORECARD.md` — human-readable table plus persona/class matrix.
 
 The persona loop in the middle is *not* automatable from bash alone — it

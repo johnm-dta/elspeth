@@ -36,6 +36,7 @@ from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
 from elspeth.web.execution.outputs import (
+    RunOutputsAuditUnavailableError,
     load_run_outputs_for_settings,
     path_or_uri_to_filesystem_path,
 )
@@ -300,6 +301,8 @@ def _summarize_counts(prefix: str, counts: dict[str, int]) -> str | None:
 def _diagnostics_evidence(diagnostics: RunDiagnosticsResponse) -> list[str]:
     """Build plain-English evidence from the visible diagnostics snapshot."""
     evidence: list[str] = []
+    if diagnostics.cancel_requested:
+        evidence.append("Cancellation has been requested; active work is draining toward a terminal cancelled status.")
     token_count = diagnostics.summary.token_count
     if token_count > 0:
         evidence.append(f"{_counted('token', token_count)} {'is' if token_count == 1 else 'are'} visible in the runtime trace.")
@@ -340,6 +343,8 @@ def _fallback_diagnostics_working_view(
     )
     if diagnostics.artifacts:
         headline = "The run has produced saved output"
+    elif diagnostics.cancel_requested:
+        headline = "Cancellation requested"
     elif has_runtime_records:
         headline = "Runtime records are updating"
     else:
@@ -347,6 +352,8 @@ def _fallback_diagnostics_working_view(
 
     if explanation.strip():
         meaning = explanation.strip()
+    elif diagnostics.cancel_requested:
+        meaning = "The server has received the cancel request and is waiting for active work to stop."
     elif has_runtime_records:
         meaning = "The run has visible runtime records, so the server is doing work beyond showing the spinner."
     else:
@@ -599,6 +606,7 @@ def create_execution_router() -> APIRouter:
             run_id=status.run_id,
             landscape_run_id=landscape_run_id,
             run_status=status.status,
+            cancel_requested=status.cancel_requested,
             limit=limit,
         )
 
@@ -629,6 +637,7 @@ def create_execution_router() -> APIRouter:
             run_id=status.run_id,
             landscape_run_id=landscape_run_id,
             run_status=status.status,
+            cancel_requested=status.cancel_requested,
             limit=limit,
         )
 
@@ -655,7 +664,7 @@ def create_execution_router() -> APIRouter:
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
-    ) -> dict[str, str]:
+    ) -> dict[str, str | bool]:
         """Cancel a run. Idempotent on terminal runs."""
         await _verify_run_ownership(run_id, user, request)
         try:
@@ -665,7 +674,7 @@ def create_execution_router() -> APIRouter:
             raise _run_not_found_http() from None
         except (ValidationError, _RunStatusIntegrityError) as exc:
             raise _run_integrity_http(exc) from exc
-        return {"status": status.status}
+        return {"status": status.status, "cancel_requested": status.cancel_requested}
 
     @router.get(
         "/api/runs/{run_id}/results",
@@ -859,12 +868,22 @@ def create_execution_router() -> APIRouter:
             raise _run_integrity_http(exc) from exc
 
         landscape_run_id = status.landscape_run_id or status.run_id
-        return await run_sync_in_worker(
-            load_run_outputs_for_settings,
-            request.app.state.settings,
-            run_id=status.run_id,
-            landscape_run_id=landscape_run_id,
-        )
+        try:
+            return await run_sync_in_worker(
+                load_run_outputs_for_settings,
+                request.app.state.settings,
+                run_id=status.run_id,
+                landscape_run_id=landscape_run_id,
+            )
+        except RunOutputsAuditUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_type": "run_outputs_audit_unavailable",
+                    "landscape_run_id": exc.landscape_run_id,
+                    "audit_location": exc.audit_location,
+                },
+            ) from exc
 
     @router.get("/api/runs/{run_id}/outputs/{artifact_id}/content")
     async def get_run_output_content(
@@ -898,12 +917,22 @@ def create_execution_router() -> APIRouter:
             raise _run_integrity_http(exc) from exc
 
         landscape_run_id = status.landscape_run_id or status.run_id
-        manifest = await run_sync_in_worker(
-            load_run_outputs_for_settings,
-            request.app.state.settings,
-            run_id=status.run_id,
-            landscape_run_id=landscape_run_id,
-        )
+        try:
+            manifest = await run_sync_in_worker(
+                load_run_outputs_for_settings,
+                request.app.state.settings,
+                run_id=status.run_id,
+                landscape_run_id=landscape_run_id,
+            )
+        except RunOutputsAuditUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_type": "run_outputs_audit_unavailable",
+                    "landscape_run_id": exc.landscape_run_id,
+                    "audit_location": exc.audit_location,
+                },
+            ) from exc
         artifact = next(
             (a for a in manifest.artifacts if a.artifact_id == artifact_id),
             None,

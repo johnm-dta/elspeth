@@ -86,10 +86,12 @@ evals_get_state "$sid" "$out/state.after.t${turn}.json" 2>/dev/null || \
   echo 'null' > "$out/state.after.t${turn}.json"
 
 # Compute metrics. Use python3 — the JSON shapes are too gnarly for jq one-liners.
-python3 - "$out" "$turn" <<'PY'
+python3 - "$out" "$turn" "$sid" "$scenario_id" <<'PY'
 import json, pathlib, sys, re
 out = pathlib.Path(sys.argv[1])
 turn = int(sys.argv[2])
+sid = sys.argv[3]
+scenario_id = sys.argv[4]
 
 def load_json(p, default):
     try:
@@ -107,6 +109,13 @@ sa = load_json(out / f"state.after.t{turn}.json", None)
 curl_meta = (out / f"msg.t{turn}.curl_meta").read_text().strip().splitlines()
 http_code = curl_meta[0].split()[0] if curl_meta else "?"
 wall = float(curl_meta[1]) if len(curl_meta) > 1 else None
+http_ok = http_code.isdigit() and 200 <= int(http_code) < 300
+turn_status = {
+    "status": "ok" if http_ok else "transport_error",
+    "http_ok": http_ok,
+    "http_code": http_code,
+    "transport_error": None if http_ok else f"post_message HTTP {http_code}",
+}
 
 events = (prog.get("events") or [])
 tool_calls = [e for e in events if e.get("kind") == "tool_call"]
@@ -140,6 +149,7 @@ volunteered_limit_keyword_match = (
 metrics = dict(
     turn=turn,
     http_code=http_code,
+    turn_status=turn_status,
     wall_seconds=wall,
     tool_call_count=len(tool_calls),
     in_loop_recovery_count=len(val_errs),
@@ -153,5 +163,27 @@ metrics = dict(
     note="*_keyword_match metrics are heuristic; verify by reading msg.t{N}.resp.json directly.",
 )
 (out / f"metrics.t{turn}.json").write_text(json.dumps(metrics, indent=2))
+
+turn_manifest = {
+    "schema_version": 1,
+    "scenario_id": scenario_id,
+    "session_id": sid,
+    "turn": turn,
+    "user_message_path": f"turn{turn}.user.txt",
+    "request_path": f"msg.t{turn}.req.json",
+    "response_path": f"msg.t{turn}.resp.json",
+    "curl_meta_path": f"msg.t{turn}.curl_meta",
+    "progress_path": f"progress.t{turn}.json",
+    "state_before_path": f"state.before.t{turn}.json",
+    "state_after_path": f"state.after.t{turn}.json",
+    "metrics_path": f"metrics.t{turn}.json",
+    "status": turn_status,
+    "persona_dispatch": {
+        "required": turn >= 2,
+        "verified_by_harness": False,
+        "evidence": None,
+    },
+}
+(out / f"turn{turn}.manifest.json").write_text(json.dumps(turn_manifest, indent=2))
 print(json.dumps(metrics, indent=2))
 PY

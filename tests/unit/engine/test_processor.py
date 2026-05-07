@@ -432,6 +432,7 @@ class TestGetGateDestinations:
         child_b.branch_name = "path_b"
         outcome = Mock()
         outcome.sink_name = None
+        outcome.discarded = False
         outcome.result.action.kind = RoutingKind.FORK_TO_PATHS
         outcome.child_tokens = [child_a, child_b]
         assert processor._get_gate_destinations(outcome) == ("path_a", "path_b")
@@ -442,6 +443,7 @@ class TestGetGateDestinations:
         processor = _make_processor(factory)
         outcome = Mock()
         outcome.sink_name = None
+        outcome.discarded = False
         outcome.result.action.kind = RoutingKind.CONTINUE
         outcome.next_node_id = None
         assert processor._get_gate_destinations(outcome) == ("continue",)
@@ -452,6 +454,7 @@ class TestGetGateDestinations:
         processor = _make_processor(factory)
         outcome = Mock()
         outcome.sink_name = None
+        outcome.discarded = False
         outcome.next_node_id = NodeID("transform-2")
         outcome.result.action.kind = RoutingKind.ROUTE
         outcome.result.action.destinations = ("high",)
@@ -3531,7 +3534,7 @@ class TestRoutingInvariantFailures:
 
     def test_unhandled_config_gate_routing_kind_raises(self) -> None:
         """ROUTE outcome with no sink_name or next_node_id is caught at GateOutcome construction."""
-        with pytest.raises(ValueError, match="ROUTE action must have either sink_name or next_node_id"):
+        with pytest.raises(ValueError, match="ROUTE action must have exactly one of sink_name, next_node_id, or discarded=True"):
             GateOutcome(
                 result=GateResult(
                     row={"value": 10},

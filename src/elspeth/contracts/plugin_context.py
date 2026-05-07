@@ -10,6 +10,7 @@ The PluginContext carries everything a plugin needs during execution:
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -86,6 +87,7 @@ class PluginContext:
     payload_store: PayloadStore | None = None
     rate_limit_registry: RateLimitRegistry | None = None
     concurrency_config: RuntimeConcurrencyConfig | None = None
+    shutdown_event: threading.Event | None = None
 
     # Additional metadata
     node_id: str | None = field(default=None)

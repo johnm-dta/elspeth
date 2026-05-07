@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final, NoReturn, cast
+from typing import Any, Final, NoReturn, TypedDict, cast
 
 import structlog
 from opentelemetry import metrics
@@ -148,6 +148,12 @@ class _BadRequestLLMError(ComposerServiceError):
     """Internal carrier for provider bad-request failures."""
 
 
+class _ReasoningMetadata(TypedDict):
+    reasoning_content: str | None
+    reasoning_details: Any | None
+    thinking_blocks: Any | None
+
+
 async def _litellm_acompletion(**kwargs: Any) -> Any:
     """Call LiteLLM lazily so app startup never imports provider machinery."""
     import litellm
@@ -168,6 +174,14 @@ def _composer_llm_seed_for_model(model: str) -> int | None:
     if _litellm_completion_supports_param(model, _COMPOSER_LLM_SEED_PARAM):
         return _COMPOSER_LLM_SEED
     return None
+
+
+def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if value is None:
+        return None
+    return {field: getattr(value, field, None) for field in fields}
 
 
 def _token_usage_from_response(response: Any | None) -> TokenUsage:
@@ -210,30 +224,40 @@ def _token_usage_from_response(response: Any | None) -> TokenUsage:
     usage = getattr(response, "usage", None)
     if isinstance(usage, Mapping):
         details = usage.get("prompt_tokens_details")
+        completion_details = usage.get("completion_tokens_details")
+        output_details = usage.get("output_tokens_details")
         usage_data = {
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
             "prompt_tokens_details": details if isinstance(details, Mapping) else None,
+            "completion_tokens_details": completion_details if isinstance(completion_details, Mapping) else None,
+            "output_tokens_details": output_details if isinstance(output_details, Mapping) else None,
             "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
             "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+            "reasoning_tokens": usage.get("reasoning_tokens"),
         }
     else:
         details_attr = getattr(usage, "prompt_tokens_details", None)
-        if isinstance(details_attr, Mapping):
-            details_payload: Any = details_attr
-        elif details_attr is not None:
-            # OpenAI Pydantic-shaped objects expose cached_tokens as an attribute.
-            details_payload = {"cached_tokens": getattr(details_attr, "cached_tokens", None)}
-        else:
-            details_payload = None
+        details_payload = _provider_details_payload(details_attr, fields=("cached_tokens",))
+        completion_details_payload = _provider_details_payload(
+            getattr(usage, "completion_tokens_details", None),
+            fields=("reasoning_tokens",),
+        )
+        output_details_payload = _provider_details_payload(
+            getattr(usage, "output_tokens_details", None),
+            fields=("reasoning_tokens",),
+        )
         usage_data = {
             "prompt_tokens": getattr(usage, "prompt_tokens", None),
             "completion_tokens": getattr(usage, "completion_tokens", None),
             "total_tokens": getattr(usage, "total_tokens", None),
             "prompt_tokens_details": details_payload,
+            "completion_tokens_details": completion_details_payload,
+            "output_tokens_details": output_details_payload,
             "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None),
             "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+            "reasoning_tokens": getattr(usage, "reasoning_tokens", None),
         }
     if usage_data["cache_read_input_tokens"] is not None or usage_data["cache_creation_input_tokens"] is not None:
         usage_data["prompt_tokens_details"] = None
@@ -282,6 +306,71 @@ def _safe_provider_request_id(response: Any | None) -> str | None:
     return None
 
 
+def _response_field(value: Any, field: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(field)
+    return getattr(value, field, None)
+
+
+def _first_response_message(response: Any | None) -> Any | None:
+    if response is None:
+        return None
+    choices = _response_field(response, "choices")
+    if not isinstance(choices, list | tuple) or not choices:
+        return None
+    return _response_field(choices[0], "message")
+
+
+def _json_safe_provider_artifact(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_provider_artifact(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe_provider_artifact(item) for item in value]
+    if isinstance(value, set | frozenset):
+        return [_json_safe_provider_artifact(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_safe_provider_artifact(model_dump(mode="json"))
+        except TypeError:
+            return _json_safe_provider_artifact(model_dump())
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _json_safe_provider_artifact(to_dict())
+    dict_method = getattr(value, "dict", None)
+    if callable(dict_method):
+        return _json_safe_provider_artifact(dict_method())
+    return repr(value)
+
+
+def _reasoning_metadata_from_response(response: Any | None) -> _ReasoningMetadata:
+    message = _first_response_message(response)
+    if message is None:
+        return {
+            "reasoning_content": None,
+            "reasoning_details": None,
+            "thinking_blocks": None,
+        }
+    reasoning_content = _response_field(message, "reasoning")
+    if not isinstance(reasoning_content, str):
+        reasoning_content = _response_field(message, "reasoning_content")
+    if not isinstance(reasoning_content, str):
+        reasoning_content = None
+
+    reasoning_details = _response_field(message, "reasoning_details")
+    if reasoning_details is None:
+        provider_specific = _response_field(message, "provider_specific_fields")
+        reasoning_details = _response_field(provider_specific, "reasoning_details") if provider_specific is not None else None
+
+    return {
+        "reasoning_content": reasoning_content,
+        "reasoning_details": _json_safe_provider_artifact(reasoning_details),
+        "thinking_blocks": _json_safe_provider_artifact(_response_field(message, "thinking_blocks")),
+    }
+
+
 def _build_llm_call_record(
     *,
     model_requested: str,
@@ -298,6 +387,7 @@ def _build_llm_call_record(
 ) -> ComposerLLMCall:
     usage = _token_usage_from_response(response)
     provider_cost, provider_cost_source = _provider_cost_from_response(response)
+    reasoning_metadata = _reasoning_metadata_from_response(response)
     return ComposerLLMCall(
         model_requested=model_requested,
         model_returned=_safe_response_model(response),
@@ -308,6 +398,10 @@ def _build_llm_call_record(
         cached_prompt_tokens=usage.cached_prompt_tokens,
         cache_creation_input_tokens=usage.cache_creation_input_tokens,
         cache_read_input_tokens=usage.cache_read_input_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+        reasoning_content=reasoning_metadata["reasoning_content"],
+        reasoning_details=reasoning_metadata["reasoning_details"],
+        thinking_blocks=reasoning_metadata["thinking_blocks"],
         provider_cost=provider_cost,
         provider_cost_source=provider_cost_source,
         latency_ms=(time.monotonic_ns() - started_ns) // 1_000_000,

@@ -6,6 +6,112 @@ All notable changes to ELSPETH are documented here.
 
 ## [Unreleased]
 
+Draft consolidation for the final RC5-UX branch update. This section captures
+the extended user-facing story that landed after the first `0.5.0` changelog
+stamp and should be refined before the release branch is pushed.
+
+### Added
+
+#### RC5-UX Substrate, Composer, and Execution Evidence
+
+- **Substrate-first README story** — README now presents ELSPETH as a
+  high-assurance pipeline substrate with two authoring surfaces: hand-edited
+  YAML for operators and the Web Composer for LLM-assisted authoring by
+  non-pipeline-engineers.
+- **Validator-mediated authoring framing** — the README now emphasizes that
+  both surfaces target the same primitives, runtime assembly, graph-validation
+  contracts, executor, Landscape audit trail, and run-accounting model instead
+  of treating the web UI as a bolt-on workflow builder.
+- **Expanded Web Composer surface** — authenticated sessions, versioned
+  composition state, blob management, secret references, chat-first pipeline
+  authoring, graph/spec/YAML inspection, validation, execution, cancellation,
+  diagnostics, and output artifact review are now described as part of the
+  authoring surface.
+- **Audited composer tool loop** — the composer surface is now described as a
+  tool-governed authoring loop: plugin discovery, state mutation, validation,
+  YAML export, blob tools, secret-reference tools, and optional advisor hints
+  all happen through explicit tool contracts.
+- **Runtime-shaped validation and preflight** — composer previews, YAML export,
+  `/validate`, and `/execute` are documented as using runtime assembly and graph
+  validation contracts instead of a separate best-effort UI validator, while the
+  compiled-artifact compiler boundary is stated as future direction.
+- **Run evidence endpoints** — web execution now exposes Landscape-derived run
+  accounting, diagnostics snapshots, discard summaries, and the full output
+  artifact manifest/content surfaces for a run.
+- **Cancellation visibility** — in-progress runs can carry a distinct
+  cancellation-requested state while active work drains toward a terminal
+  `cancelled` status.
+
+#### Composer Reliability and Operator Visibility
+
+- **Deterministic composer calls** — composer LLM requests use deterministic
+  sampling where supported and record temperature/seed metadata in the LLM
+  audit sidecar.
+- **Prompt-cache-aware composer audit** — provider cache counters and
+  Anthropic-style prompt-cache markers are captured without fabricating missing
+  values.
+- **Reasoning metadata capture** — composer LLM audit records can carry
+  provider-reported reasoning token counts and reasoning artifacts when a
+  provider exposes them; normal chat history still hides those internals.
+- **Advisor escalation contract** — the optional advisor tool is gated behind
+  explicit trigger categories so the composer can ask for frontier-model help
+  only under mechanically validated conditions.
+- **Hard-mode composer evaluation harness** — reusable shell tooling and
+  scenario fan-out capture validation transport failures, composer regressions,
+  and per-row output evidence for demo-readiness checks.
+
+#### Plugin and Contract Surface
+
+- **Plugin-declared semantic contracts** — plugins can now publish semantic
+  facts, requirements, comparison outcomes, and composer assistance text; the
+  composer, MCP server, HTTP validation, and `/execute` surfaces expose the
+  same contract shape.
+- **Statistical batch plugin family** — added runnable local examples for
+  `batch_distribution_profile`, `batch_experiment_compare`,
+  `batch_classifier_metrics`, `batch_paired_preference`,
+  `batch_drift_compare`, `batch_outlier_annotator`,
+  `batch_data_quality_report`, `batch_top_k`, `batch_threshold_summary`, and
+  `batch_effect_size`.
+- **Value-source and schema-contract guidance** — plugin catalogs and composer
+  guidance now carry richer missing-dependency, schema vocabulary, and repair
+  hints so an invalid pipeline points at the contract it violated.
+
+#### Audit and Accounting Model
+
+- **Two-axis terminal outcome model** — RC5-UX separates lifecycle outcome from
+  terminal path/provenance so success, failure, routed, discarded, fallback, and
+  structural bookkeeping cases no longer overload a single row outcome.
+- **Run accounting split** — routed success/failure, token lifecycle counts,
+  source-row counts, discard summaries, and closure integrity are reported as
+  distinct units instead of being inferred from one `rows_routed` number.
+- **Per-tool-call composer audit** — both the web composer and the standalone
+  composer MCP server persist the tool-call decision trail that produced a
+  pipeline.
+
+#### CI, Policy, and Test Surface
+
+- **Policy gates expanded** — branch work added or tightened gates for
+  component types, guard symmetry, audit evidence nominal typing, tier-1
+  decoration, contract manifests, composer exception channels, composer catch
+  order, and tier-model allowlists.
+- **Frontend Playwright baseline** — a real browser E2E harness now boots the
+  FastAPI backend and Vite frontend, with an initial smoke proof and fixme
+  specs for composer-correctness acceptance paths.
+
+### Changed
+
+- **README front door refreshed for RC-5** — the README now leads with the
+  high-assurance substrate, the gap ELSPETH closes, the two authoring audiences,
+  architecture at a glance, parallel YAML/Web Composer start paths, capability
+  map, audit/assurance model, and shipped-vs-direction compiler status.
+- **Web quickstart port corrected** — the README quickstart now uses the
+  `elspeth web` default port `8451`.
+- **Batch-specific LLM transforms retired from the public story** —
+  `azure_batch_llm` and `openrouter_batch_llm` are no longer advertised. Use
+  the regular `llm` transform with provider pooling/multi-query for LLM
+  throughput and the statistical batch transforms for audit-attributable local
+  aggregation.
+
 ---
 
 ## [0.5.0] (RC-5 — Web UX Composer + Systematic Hardening)

@@ -82,6 +82,26 @@ class TestBatchEffectSize:
         assert result.row["baseline_missing_count"] == 1
         assert result.row["variant_non_finite_count"] == 1
 
+    @pytest.mark.parametrize("variant_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_variant_returns_error_before_success_output(self, ctx: PluginContext, variant_value: float) -> None:
+        from elspeth.plugins.transforms.batch_effect_size import BatchEffectSize
+
+        transform = BatchEffectSize({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "A", "score": 1.0}),
+            _make_row({"variant": variant_value, "score": 2.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_variant"
+        assert result.reason["field"] == "variant"
+        assert result.reason["row_errors"] == [{"row_index": 1, "reason": "non_finite_variant"}]
+        assert not result.retryable
+
     def test_non_numeric_score_raises_type_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_effect_size import BatchEffectSize
 

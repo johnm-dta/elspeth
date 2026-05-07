@@ -78,6 +78,9 @@ function summarizeCounts(prefix: string, counts: Record<string, number>): string
 
 function buildVisibleEvidence(diagnostics: RunDiagnostics): string[] {
   const evidence: string[] = [];
+  if (diagnostics.cancel_requested) {
+    evidence.push("Cancellation has been requested; active work is draining toward a terminal cancelled status.");
+  }
   const tokenCount = diagnostics.summary.token_count;
   if (tokenCount > 0) {
     evidence.push(`${counted("token", tokenCount)} ${tokenCount === 1 ? "is" : "are"} visible in the runtime trace.`);
@@ -230,6 +233,9 @@ export function RunsView() {
               `sink ${run.discard_summary.sink_discards.toLocaleString()}`,
             ].join(", ")
           : undefined;
+        const displayStatus = run.cancel_requested && run.status === "running"
+          ? "cancelling"
+          : STATUS_DISPLAY_LABELS[run.status];
 
         return (
           <div key={run.id}>
@@ -254,7 +260,7 @@ export function RunsView() {
               >
                 {/* Status badge: uses CSS class from App.css */}
                 <span className={STATUS_BADGE_CLASSES[run.status]}>
-                  {STATUS_DISPLAY_LABELS[run.status]}
+                  {displayStatus}
                 </span>
                 <span
                   style={{
@@ -348,7 +354,9 @@ export function RunsView() {
                   </span>
                 )}
                 <span>
-                  {run.status === "running"
+                  {run.cancel_requested && run.status === "running"
+                    ? "cancelling..."
+                    : run.status === "running"
                     ? "running..."
                     : formatDuration(run.started_at, run.finished_at)}
                 </span>

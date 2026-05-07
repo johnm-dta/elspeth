@@ -178,6 +178,49 @@ def test_cache_token_fields_round_trip_when_known() -> None:
     assert payload["cache_read_input_tokens"] == 900
 
 
+def test_provider_reasoning_fields_round_trip_when_reported() -> None:
+    """Provider-supplied reasoning artifacts are retained on the hidden audit sidecar.
+
+    These fields are intentionally separate from normal assistant message
+    content: they exist so operators can diagnose tool-call/config failures
+    against provider metadata without exposing hidden reasoning in the user
+    chat transcript.
+    """
+    reasoning_details = [
+        {"type": "reasoning.text", "text": "checked available pipeline tools"},
+        {"type": "reasoning.signature", "signature": "opaque-provider-signature"},
+    ]
+    thinking_blocks = [{"type": "thinking", "thinking": "provider-supplied thinking block"}]
+
+    call = _make_call(
+        reasoning_tokens=12,
+        reasoning_content="provider supplied reasoning text",
+        reasoning_details=reasoning_details,
+        thinking_blocks=thinking_blocks,
+    )
+
+    payload = call.to_dict()
+
+    assert payload["reasoning_tokens"] == 12
+    assert payload["reasoning_content"] == "provider supplied reasoning text"
+    assert payload["reasoning_details"] == reasoning_details
+    assert payload["thinking_blocks"] == thinking_blocks
+
+
+def test_provider_reasoning_fields_default_to_none() -> None:
+    call = _make_call()
+    payload = call.to_dict()
+
+    assert call.reasoning_tokens is None
+    assert call.reasoning_content is None
+    assert call.reasoning_details is None
+    assert call.thinking_blocks is None
+    assert payload["reasoning_tokens"] is None
+    assert payload["reasoning_content"] is None
+    assert payload["reasoning_details"] is None
+    assert payload["thinking_blocks"] is None
+
+
 def test_composer_llm_call_records_temperature_and_seed() -> None:
     """temperature and seed are required audit fields and round-trip through to_dict().
 

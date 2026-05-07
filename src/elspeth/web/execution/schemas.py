@@ -557,6 +557,7 @@ class RunDiagnosticsResponse(_StrictResponse):
     run_id: str
     landscape_run_id: str
     run_status: SessionRunStatus
+    cancel_requested: bool = False
     summary: RunDiagnosticSummary
     tokens: list[RunDiagnosticToken]
     operations: list[RunDiagnosticOperation]
@@ -597,10 +598,13 @@ class RunStatusResponse(_StrictResponse):
     error: str | None
     landscape_run_id: str | None
     discard_summary: DiscardSummary | None = None
+    cancel_requested: bool = False
 
     @model_validator(mode="after")
     def _check_status_contract(self) -> Self:
         """Enforce terminal field requirements and token-accounting taxonomy."""
+        if self.cancel_requested and self.status in RUN_STATUS_TERMINAL_VALUES:
+            raise ValueError(f"status={self.status!r} cannot also be cancel_requested")
         if self.status in RUN_STATUS_TERMINAL_VALUES:
             _require_terminal_run_fields(
                 self.status,

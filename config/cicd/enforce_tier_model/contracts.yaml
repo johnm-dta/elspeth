@@ -131,7 +131,7 @@ per_file_rules:
     elspeth-4e79436719 §Bug C). All absence cases coerce to None,
     never zero — the audit row records what the provider actually said.
   expires: null
-  max_hits: 20
+  max_hits: 22
 - pattern: contracts/transform_contract.py
   rules:
   - R5
@@ -196,19 +196,6 @@ allow_hits:
   owner: bugfix
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
   safety: Falls back to str(a) for display purposes only; used in error message, not logic
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=5f98b5ff50815b81
-  owner: architecture
-  reason: Tier 3 boundary — response_snapshot.get('usage') accesses external LLM response data
-  safety: Missing key returns None; no fabrication
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=e521b01314bc1086
-  owner: tier1-hygiene-cleanup
-  reason: Telemetry transport failures (OSError, ConnectionError, TimeoutError, KeyError) are expected and must not corrupt the audit call recording
-  safety: Exception logged via structlog; call recording completes without telemetry; no data loss
-  expires: '2026-10-08'
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=0a4ebf6ba2f86eb1
-  owner: architecture
-  reason: Tier 3 boundary — ValueError/TypeError from stable_hash on non-canonical data falls back to repr_hash
-  safety: Warning logged (without row content); row_id still generated via repr_hash for audit trail continuity
 - key: contracts/declaration_contracts.py:R5:BoundaryInputs:__post_init__:fp=db78bae36c2f61ba
   owner: architecture
   reason: Row-attributed source/sink boundary DTO — row_data must be a mapping before deep_freeze so declaration-contract adopters never receive arbitrary sequence/scalar payloads
@@ -310,4 +297,30 @@ allow_hits:
   safety: >-
     The field remains present in the propagated contract as object/any; non-finite
     values still raise ValueError and no row data is dropped or coerced.
+  expires: null
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=ded2e01b10149753
+  owner: composer-audit
+  reason: >-
+    Tier 3 boundary - response_snapshot.get('usage') reads optional usage metadata from an external LLM
+    response snapshot.
+  safety: >-
+    Missing usage preserves None; TokenUsage.from_dict validates present mappings before telemetry emission.
+  expires: null
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=482af02b41f7c916
+  owner: composer-audit
+  reason: >-
+    Telemetry transport failures must not corrupt the primary Landscape call recording after it has already
+    succeeded.
+  safety: >-
+    Only OSError, ConnectionError, and TimeoutError are caught; the warning carries class metadata and call
+    recording still returns.
+  expires: null
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=55506bc73df2d0c0
+  owner: composer-audit
+  reason: >-
+    Tier 3 boundary - stable_hash can reject non-canonical external row data such as NaN or non-serializable
+    values.
+  safety: >-
+    Narrow ValueError/TypeError catch falls back to repr_hash, logs no row content, and still records a
+    validation-error token.
   expires: null

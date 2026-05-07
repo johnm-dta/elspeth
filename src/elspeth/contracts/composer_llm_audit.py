@@ -1,8 +1,9 @@
 """Composer LLM-call audit primitives (L0).
 
 Captures metadata for each outbound model call made by the web composer.
-The record deliberately stores only request/response metadata and integrity
-hashes, never raw prompts, system prompt text, tool specs, or provider
+The record deliberately stores request/response metadata, integrity hashes,
+and provider-supplied reasoning artifacts only when the provider returns them.
+It never stores raw prompts, system prompt text, tool specs, or full provider
 responses. Construction sites in L3 compute canonical hashes for the actual
 messages/tools payloads sent to LiteLLM.
 
@@ -12,10 +13,12 @@ Layer: L0 (contracts). Imports nothing above contracts.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal, Protocol
+
+from elspeth.contracts.freeze import deep_thaw, freeze_fields, require_int
 
 ComposerLLMProviderCostSource = Literal["not_available", "response_usage.cost"]
 
@@ -58,6 +61,15 @@ class ComposerLLMCall:
     auditor can then distinguish "no cache reported" from "cache reported
     zero hits."
 
+    ``reasoning_tokens`` and the reasoning artifact fields capture
+    provider-reported reasoning metadata from APIs that expose it (for
+    example OpenRouter ``message.reasoning`` / ``message.reasoning_details``
+    and LiteLLM ``reasoning_content`` / ``thinking_blocks`` shapes). These
+    fields are hidden audit data for operator debugging of tool-call and
+    config failures; normal session-message APIs must not surface them as
+    assistant chat content. Missing fields stay ``None`` rather than being
+    fabricated.
+
     ``temperature`` and ``seed`` capture deterministic-sampling parameters
     set on composer LLM requests. Temperature is constant in the current
     implementation (``0.0``). Seed is ``42`` only for LiteLLM providers that
@@ -89,10 +101,18 @@ class ComposerLLMCall:
     cached_prompt_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    reasoning_content: str | None = None
+    reasoning_details: Any | None = None
+    thinking_blocks: Any | None = None
     provider_cost: float | None = None
     provider_cost_source: ComposerLLMProviderCostSource = PROVIDER_COST_SOURCE_NOT_AVAILABLE
 
     def __post_init__(self) -> None:
+        require_int(self.reasoning_tokens, "reasoning_tokens", optional=True, min_value=0)
+        if self.reasoning_content is not None and type(self.reasoning_content) is not str:
+            raise TypeError(f"reasoning_content must be str or None, got {type(self.reasoning_content).__name__}")
+        freeze_fields(self, "reasoning_details", "thinking_blocks")
         if self.provider_cost is not None:
             if (
                 type(self.provider_cost) is bool
@@ -109,7 +129,7 @@ class ComposerLLMCall:
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict for sidecar serialization."""
-        raw = asdict(self)
+        raw = {field.name: deep_thaw(getattr(self, field.name)) for field in fields(self)}
         raw["status"] = self.status.value
         raw["started_at"] = self.started_at.isoformat()
         raw["finished_at"] = self.finished_at.isoformat()

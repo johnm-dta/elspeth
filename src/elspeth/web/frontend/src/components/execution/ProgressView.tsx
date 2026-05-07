@@ -32,6 +32,7 @@ export function ProgressView() {
     progress.status === "empty" ||
     progress.status === "cancelled" ||
     progress.status === "failed";
+  const cancelRequested = progress.cancel_requested === true && !isTerminal;
 
   return (
     <div className="progress-container">
@@ -50,9 +51,9 @@ export function ProgressView() {
         <span className="progress-status-label">
           {/* Render underscored identifiers like ``completed_with_failures``
               as space-separated for human reading; CSS handles uppercasing. */}
-          {progress.status.replace(/_/g, " ")}
+          {cancelRequested ? "cancelling" : progress.status.replace(/_/g, " ")}
         </span>
-        {!isTerminal && (
+        {!isTerminal && !cancelRequested && (
           <button
             onClick={() => setShowCancelConfirm(true)}
             aria-label="Cancel pipeline execution"

@@ -1524,6 +1524,8 @@ class RowProcessor:
         token: TokenInfo,
         ctx: Any,
         reason: TransformErrorCategory,
+        *,
+        retryable: bool = True,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Convert a retryable exception to a TransformResult.error when no retry manager is configured.
 
@@ -1569,7 +1571,7 @@ class RowProcessor:
             )
 
         return (
-            TransformResult.error(error_details, retryable=True),
+            TransformResult.error(error_details, retryable=retryable),
             token,
             on_error,
         )
@@ -1610,6 +1612,15 @@ class RowProcessor:
                     ctx=ctx,
                     attempt=0,
                 )
+            except InterruptedError as e:
+                return self._convert_retryable_to_error_result(
+                    e,
+                    transform,
+                    token,
+                    ctx,
+                    reason="shutdown_requested",
+                    retryable=False,
+                )
             except PluginRetryableError as e:
                 return self._convert_retryable_to_error_result(
                     e,
@@ -1641,14 +1652,27 @@ class RowProcessor:
             )
 
         def is_retryable(e: BaseException) -> bool:
+            if isinstance(e, InterruptedError):
+                return False
             if isinstance(e, PluginRetryableError):
                 return e.retryable
             return isinstance(e, ConnectionError | TimeoutError | OSError | CapacityError)
 
-        return self._retry_manager.execute_with_retry(
-            operation=execute_attempt,
-            is_retryable=is_retryable,
-        )
+        try:
+            return self._retry_manager.execute_with_retry(
+                operation=execute_attempt,
+                is_retryable=is_retryable,
+                shutdown_event=ctx.shutdown_event,
+            )
+        except InterruptedError as e:
+            return self._convert_retryable_to_error_result(
+                e,
+                transform,
+                token,
+                ctx,
+                reason="shutdown_requested",
+                retryable=False,
+            )
 
     def _record_source_node_state(
         self,

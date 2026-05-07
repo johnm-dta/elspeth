@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+AGENT_PROMPT = REPO_ROOT / "evals" / "composer-harness" / "AGENT_PROMPT.md"
+AGGREGATE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "aggregate.sh"
 FINALIZE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "finalize_scenario.sh"
+HARNESS_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "harness.sh"
+POST_MESSAGE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "post_message.sh"
+SWEEP_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "sweep_simplified.sh"
 LEGACY_BASIC_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "basic" / "finalize_scenario.sh"
 LEGACY_HARDMODE_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "hardmode" / "finalize_scenario.sh"
 
@@ -248,6 +253,258 @@ esac
     fake_sleep.chmod(0o755)
 
 
+def _write_fake_bootstrap_curl(bin_dir: Path) -> None:
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+out=""
+url=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+write_body() {
+  if [[ -n "$out" ]]; then
+    printf '%s' "$1" > "$out"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+case "$url" in
+  */api/auth/login)
+    write_body '{"access_token":"header.eyJleHAiOjQxMDI0NDQ4MDB9.signature"}'
+    printf '\\n200'
+    ;;
+  */api/sessions)
+    write_body '{"id":"session-1"}'
+    printf '201'
+    ;;
+  *)
+    write_body '{}'
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
+
+
+def _write_fake_post_message_curl(bin_dir: Path, *, message_http: str = "502") -> None:
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+
+out=""
+url=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+write_body() {{
+  if [[ -n "$out" ]]; then
+    printf '%s' "$1" > "$out"
+  else
+    printf '%s' "$1"
+  fi
+}}
+
+case "$url" in
+  */api/sessions/session-1/messages)
+    write_body '{{"detail":"upstream unavailable"}}'
+    printf '{message_http} 0.03\\n'
+    ;;
+  */api/sessions/session-1/composer-progress)
+    write_body '{{"events":[]}}'
+    printf '200'
+    ;;
+  */api/sessions/session-1/state)
+    write_body '{{"version":1,"is_valid":false}}'
+    printf '200'
+    ;;
+  *)
+    write_body '{{}}'
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
+
+
+def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:
+    """Bootstrap should leave machine-readable evidence about the scenario contract."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_bootstrap_curl(fake_bin)
+
+    runs_root = tmp_path / "runs"
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "ELSPETH_EVAL_RUNS_DIR": str(runs_root),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(HARNESS_SCRIPT), "p1_t3_limit"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    suite_manifest = json.loads((runs_root / "suite_manifest.json").read_text())
+    assert suite_manifest["suite"] == "hardmode"
+    assert suite_manifest["dispatch_contract"] == "fresh_persona_subagent_for_turns_2_plus"
+
+    run_manifest = json.loads((runs_root / "p1_t3_limit" / "run_manifest.json").read_text())
+    assert run_manifest["scenario_id"] == "p1_t3_limit"
+    assert run_manifest["session_id"] == "session-1"
+    assert run_manifest["scenario_fixture_sha256"]
+    assert run_manifest["persona_spec_sha256"]
+    assert run_manifest["message_budget_user_turns"] == 5
+
+
+def test_post_message_records_turn_manifest_and_non_2xx_status(tmp_path: Path) -> None:
+    """A composer POST transport failure must be first-class evidence, not a normal turn."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_post_message_curl(fake_bin, message_http="502")
+
+    runs_root = tmp_path / "runs"
+    scenario_dir = runs_root / "s1"
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "sid.txt").write_text("session-1")
+    (scenario_dir / "turn1.user.txt").write_text("hello")
+    _write_valid_jwt(scenario_dir / "jwt.txt")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "ELSPETH_EVAL_RUNS_DIR": str(runs_root),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(POST_MESSAGE_SCRIPT), "s1", "1", str(scenario_dir / "turn1.user.txt")],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    metrics = json.loads((scenario_dir / "metrics.t1.json").read_text())
+    assert metrics["turn_status"] == {
+        "status": "transport_error",
+        "http_ok": False,
+        "http_code": "502",
+        "transport_error": "post_message HTTP 502",
+    }
+    turn_manifest = json.loads((scenario_dir / "turn1.manifest.json").read_text())
+    assert turn_manifest["turn"] == 1
+    assert turn_manifest["status"] == metrics["turn_status"]
+    assert turn_manifest["persona_dispatch"] == {
+        "required": False,
+        "verified_by_harness": False,
+        "evidence": None,
+    }
+
+
+def test_sweep_simplified_help_exits_before_side_effects(tmp_path: Path) -> None:
+    """`--help` must not be interpreted as a run label and start a sweep."""
+
+    harness_root = tmp_path / "composer-harness"
+    hardmode_dir = harness_root / "hardmode"
+    scenarios_dir = harness_root / "scenarios" / "hardmode"
+    hardmode_dir.mkdir(parents=True)
+    scenarios_dir.mkdir(parents=True)
+
+    script = hardmode_dir / "sweep_simplified.sh"
+    script.write_text(SWEEP_SCRIPT.read_text())
+    script.chmod(0o755)
+
+    harness_called = tmp_path / "harness-called"
+    (hardmode_dir / "harness.sh").write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$1" > {harness_called}
+mkdir -p "$ELSPETH_EVAL_RUNS_DIR/$1"
+printf '{{"opening_prompt":"hello"}}' > "$ELSPETH_EVAL_RUNS_DIR/$1/scenario.json"
+"""
+    )
+    (hardmode_dir / "harness.sh").chmod(0o755)
+    (hardmode_dir / "post_message.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n")
+    (hardmode_dir / "post_message.sh").chmod(0o755)
+    (scenarios_dir / "p1_t1_happy_categorize.json").write_text(json.dumps({"opening_prompt": "hello"}))
+
+    result = subprocess.run(
+        [str(script), "--help"],
+        cwd=harness_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Usage:" in result.stdout
+    assert not harness_called.exists()
+    assert not (harness_root / "runs").exists()
+
+
 def test_finalize_scenario_exits_74_when_validate_http_fails(tmp_path: Path) -> None:
     """A validation transport/auth failure is infrastructure failure, not invalid YAML."""
 
@@ -475,7 +732,7 @@ def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(
     )
 
     result = subprocess.run(
-        [str(REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "aggregate.sh"), str(runs_root)],
+        [str(AGGREGATE_SCRIPT), str(runs_root)],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
@@ -503,6 +760,62 @@ def test_aggregate_reports_artifact_errors_and_provider_usage_without_fake_cost(
     assert "Tokens" in scorecard
     assert "Cost" in scorecard
     assert "| legacy | tester | limit | 1 | 1.0 | — | — |" in scorecard
+
+
+def test_aggregate_reports_malformed_ledger_errors(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    good_dir = runs_root / "good"
+    bad_dir = runs_root / "bad"
+    good_dir.mkdir(parents=True)
+    bad_dir.mkdir()
+    (good_dir / "ledger.json").write_text(
+        json.dumps(
+            {
+                "scenario_id": "good",
+                "persona": "tester",
+                "task_class": "happy",
+                "user_turn_count": 1,
+                "is_valid": True,
+                "ran_engine": False,
+                "run_status": None,
+                "poll_status": "ok",
+                "total_wall_seconds": 1.0,
+                "total_tool_calls": 0,
+                "total_in_loop_recoveries": 0,
+                "clarifying_keyword_turns": [],
+                "limit_keyword_turns": [],
+                "failed_validate_checks": [],
+                "run_error": None,
+            }
+        )
+    )
+    (bad_dir / "ledger.json").write_text("{not json")
+
+    result = subprocess.run(
+        [str(AGGREGATE_SCRIPT), str(runs_root)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads((runs_root / "aggregate_summary.json").read_text())
+    assert summary["scenario_count"] == 1
+    assert summary["aggregate_error_count"] == 1
+    errors = json.loads((runs_root / "aggregate_errors.json").read_text())
+    assert errors[0]["kind"] == "malformed_ledger"
+    assert errors[0]["path"] == "bad/ledger.json"
+    scorecard = (runs_root / "SCORECARD.md").read_text()
+    assert "Aggregate errors" in scorecard
+
+
+def test_agent_prompt_does_not_estimate_provider_cost_from_wall_time() -> None:
+    prompt = AGENT_PROMPT.read_text()
+
+    assert "total_wall_seconds across ledgers" not in prompt
+    assert "$0.05/sec" not in prompt
+    assert "do not estimate dollars from wall time" in prompt
 
 
 @pytest.mark.parametrize(

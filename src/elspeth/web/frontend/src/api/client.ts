@@ -15,6 +15,7 @@ import type {
   CompositionState,
   CompositionStateVersion,
   ComposerProgressSnapshot,
+  CancelRunResponse,
   PluginSchemaInfo,
   PluginSummary,
   Run,
@@ -462,14 +463,12 @@ export async function getRunStatus(runId: string): Promise<Run> {
 }
 
 /** Cancel a running pipeline execution. */
-export async function cancelRun(runId: string): Promise<void> {
+export async function cancelRun(runId: string): Promise<CancelRunResponse> {
   const response = await fetch(`/api/runs/${runId}/cancel`, {
     method: "POST",
     headers: authHeaders("application/json"),
   });
-  if (!response.ok) {
-    await parseResponse<never>(response);
-  }
+  return parseResponse<CancelRunResponse>(response);
 }
 
 /** Get the results/summary of a completed run. */

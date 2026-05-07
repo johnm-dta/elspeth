@@ -57,6 +57,7 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
     run_id: "run-1",
     landscape_run_id: "run-1",
     run_status: "running",
+    cancel_requested: false,
     summary: {
       token_count: 1,
       preview_limit: 50,

@@ -190,51 +190,24 @@ class SinkContractTestBase(ABC):
     # Protocol Attribute Contracts
     # =========================================================================
 
-    def test_sink_has_name(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST have a 'name' attribute."""
+    def test_sink_engine_identity_surface_is_coherent(self, sink: SinkProtocol) -> None:
+        """Contract: engine-facing identity and audit metadata MUST be well formed."""
         assert isinstance(sink.name, str)
         assert len(sink.name) > 0
-
-    def test_sink_has_input_schema(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST have an 'input_schema' that is a PluginSchema subclass."""
         assert isinstance(sink.input_schema, type)
         assert issubclass(sink.input_schema, PluginSchema)
-
-    def test_sink_has_determinism(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST have a 'determinism' attribute."""
         assert isinstance(sink.determinism, Determinism)
-
-    def test_sink_has_plugin_version(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST have a 'plugin_version' attribute."""
         assert isinstance(sink.plugin_version, str)
-
-    def test_sink_has_idempotent_flag(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST have an 'idempotent' attribute."""
-        assert isinstance(sink.idempotent, bool)
-
-    def test_sink_has_config(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST expose its configuration dict."""
         assert isinstance(sink.config, dict)
-
-    def test_sink_has_optional_node_id(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST expose the orchestrator-assigned node id slot."""
         assert sink.node_id is None or isinstance(sink.node_id, str)
-
-    def test_sink_has_optional_file_hash(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST expose source-file hash audit metadata."""
         assert sink.source_file_hash is None or isinstance(sink.source_file_hash, str)
 
-    def test_sink_has_resume_capability_flag(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST declare whether it supports resume."""
+    def test_sink_durability_and_routing_surface_is_coherent(self, sink: SinkProtocol) -> None:
+        """Contract: durability, resume, and failsink surfaces MUST be normalized."""
+        assert isinstance(sink.idempotent, bool)
         assert isinstance(sink.supports_resume, bool)
-
-    def test_sink_has_declared_required_fields(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST expose required-field declarations for the executor."""
         assert isinstance(sink.declared_required_fields, frozenset)
         assert all(isinstance(field, str) for field in sink.declared_required_fields)
-
-    def test_sink_has_optional_write_failure_route(self, sink: SinkProtocol) -> None:
-        """Contract: Sink MUST expose write-failure routing injected by the orchestrator."""
         assert sink._on_write_failure is None or isinstance(sink._on_write_failure, str)
 
     def test_sink_can_reset_diversion_log(self, sink: SinkProtocol) -> None:
@@ -422,25 +395,25 @@ class SinkContractTestBase(ABC):
         if artifact_snapshot is not None:
             assert _local_file_artifact_snapshot(result) == artifact_snapshot
 
-    def test_on_start_does_not_raise(
+    def test_on_start_preserves_sink_contract_metadata(
         self,
         sink: SinkProtocol,
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_start() lifecycle hook preserves sink contract metadata."""
+        """Contract: on_start() MUST preserve sink contract metadata."""
         boundary_snapshot = _sink_boundary_snapshot(sink)
 
         assert sink.on_start(ctx) is None
 
         assert _sink_boundary_snapshot(sink) == boundary_snapshot
 
-    def test_on_complete_does_not_raise(
+    def test_on_complete_preserves_sink_contract_metadata(
         self,
         sink: SinkProtocol,
         sample_rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> None:
-        """Contract: on_complete() preserves sink metadata and written artifacts."""
+        """Contract: on_complete() MUST preserve sink metadata and written artifacts."""
         result = _write_rows(sink, sample_rows, ctx)
         boundary_snapshot = _sink_boundary_snapshot(sink)
         artifact_snapshot = _local_file_artifact_snapshot(result)

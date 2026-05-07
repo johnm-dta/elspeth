@@ -673,6 +673,30 @@ class TestCancelMechanism:
         assert event.is_set(), "cancel() must set the threading.Event so the Orchestrator detects it during row processing"
 
     @pytest.mark.asyncio
+    async def test_get_status_marks_active_set_event_as_cancel_requested(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        run_id = uuid4()
+        event = threading.Event()
+        event.set()
+        service._shutdown_events[str(run_id)] = event
+        mock_session_service.get_run.return_value = MagicMock(
+            id=run_id,
+            status="running",
+            started_at=datetime.now(UTC),
+            finished_at=None,
+            error=None,
+            landscape_run_id=None,
+        )
+
+        status = await service.get_status(run_id)
+
+        assert status.status == "running"
+        assert status.cancel_requested is True
+
+    @pytest.mark.asyncio
     async def test_cancel_pending_run_updates_status(
         self,
         service: ExecutionServiceImpl,

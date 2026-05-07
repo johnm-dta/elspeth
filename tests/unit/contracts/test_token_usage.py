@@ -392,6 +392,39 @@ class TestTokenUsageProviderCacheFields:
         assert usage.cache_creation_input_tokens is None
         assert usage.cache_read_input_tokens is None
 
+
+class TestTokenUsageReasoningTokens:
+    """Provider-reported reasoning-token counters are audit data, not inferred data."""
+
+    def test_reasoning_tokens_round_trip_when_provider_reports_top_level_counter(self) -> None:
+        original = TokenUsage(prompt_tokens=100, completion_tokens=20, reasoning_tokens=12)
+
+        payload = original.to_dict()
+        restored = TokenUsage.from_dict(payload)
+
+        assert payload["reasoning_tokens"] == 12
+        assert restored.reasoning_tokens == 12
+
+    def test_reasoning_tokens_extract_from_openai_completion_details_shape(self) -> None:
+        usage = TokenUsage.from_dict(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "completion_tokens_details": {"reasoning_tokens": 12},
+            }
+        )
+
+        assert usage.reasoning_tokens == 12
+
+    @pytest.mark.parametrize(
+        "raw_value",
+        [None, -1, True, 2.5, "12"],
+    )
+    def test_reasoning_tokens_invalid_external_values_become_unknown(self, raw_value: object) -> None:
+        usage = TokenUsage.from_dict({"reasoning_tokens": raw_value})
+
+        assert usage.reasoning_tokens is None
+
     def test_negative_cached_tokens_coerced_to_none(self) -> None:
         """Tier-3 boundary: negative values mean broken provider, not negative cache."""
         usage = TokenUsage.from_dict(

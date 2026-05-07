@@ -184,6 +184,8 @@ def parallel_multi_query_result() -> TransformResult:
     def _fake_execute_batch(
         contexts: list[RowContext],
         process_fn: Callable[[dict[str, Any], str], TransformResult],
+        *,
+        shutdown_event: Any | None = None,
     ) -> list[BufferEntry[TransformResult]]:
         entries: list[BufferEntry[TransformResult]] = []
         for i, ctx in enumerate(contexts):

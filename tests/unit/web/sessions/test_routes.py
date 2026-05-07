@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -1774,7 +1775,7 @@ class TestMessageRoutes:
     def test_send_message_persists_llm_call_audit_sidecars_with_precompose_state(self, tmp_path) -> None:
         app, service = _make_app(tmp_path)
         llm_calls = (
-            _llm_call(provider_request_id="chatcmpl-a", prompt_tokens=13, completion_tokens=8, total_tokens=21),
+            _llm_call(provider_request_id="chatcmpl-a", prompt_tokens=13, completion_tokens=8, total_tokens=21, reasoning_tokens=12),
             _llm_call(provider_request_id="chatcmpl-b", prompt_tokens=5, completion_tokens=16, total_tokens=21),
         )
         composer = AsyncMock()
@@ -1810,6 +1811,8 @@ class TestMessageRoutes:
         assert {row.composition_state_id for row, _tool_call in llm_audit_rows} == {pre_state.id}
         assert [tool_call["call"]["provider_request_id"] for _row, tool_call in llm_audit_rows] == ["chatcmpl-a", "chatcmpl-b"]
         assert sum(tool_call["call"]["total_tokens"] for _row, tool_call in llm_audit_rows) == 42
+        assert llm_audit_rows[0][1]["call"]["reasoning_tokens"] == 12
+        assert json.loads(llm_audit_rows[0][0].content)["reasoning_tokens"] == 12
 
         messages_resp = client.get(f"/api/sessions/{session_id}/messages")
         assert messages_resp.status_code == 200

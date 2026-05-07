@@ -190,6 +190,59 @@ class TestDataclassToDict:
         result = dataclass_to_dict({"a": 1})
         assert result == {"a": 1}
 
+    def test_lineage_result_source_data_mapping_is_json_serializable(self) -> None:
+        """Frozen source payload mappings become JSON-serializable dicts."""
+        from elspeth.contracts import RowLineage, Token
+        from elspeth.core.landscape.lineage import LineageResult
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        lineage = LineageResult(
+            token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
+            source_row=RowLineage(
+                row_id="row-456",
+                run_id="run-001",
+                source_node_id="src-node",
+                row_index=0,
+                source_data_hash="abc123",
+                created_at=now,
+                source_data={"id": 1, "seen_at": now},
+                payload_available=True,
+            ),
+            node_states=(),
+            routing_events=(),
+            calls=(),
+            parent_tokens=(),
+        )
+
+        result = dataclass_to_dict(lineage)
+
+        source_data = result["source_row"]["source_data"]
+        assert isinstance(source_data, dict)
+        assert source_data == {"id": 1, "seen_at": "2026-01-29T12:00:00+00:00"}
+        json.dumps(result)
+
+    def test_dataclass_to_dict_excludes_classvar_pseudo_fields(self) -> None:
+        """Dataclass ClassVar constants are not serialized as instance data."""
+        from elspeth.contracts import Checkpoint
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        checkpoint = Checkpoint(
+            checkpoint_id="chk-1",
+            run_id="run-001",
+            token_id="tok-123",
+            node_id="node-1",
+            sequence_number=1,
+            created_at=now,
+            upstream_topology_hash="topology-hash",
+            checkpoint_node_config_hash="config-hash",
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+
+        result = dataclass_to_dict(checkpoint)
+
+        assert "CURRENT_FORMAT_VERSION" not in result
+        assert result["format_version"] == Checkpoint.CURRENT_FORMAT_VERSION
+
 
 class TestCSVFormatter:
     """CSVFormatter flattens nested structures for CSV output."""
@@ -524,6 +577,37 @@ class TestLineageTextFormatter:
         assert "Token: tok-123" in text
         assert "Row: row-456" in text
         assert "Source Data Hash: abc123" in text
+
+    def test_formats_empty_source_data_when_payload_is_available(self) -> None:
+        """Explicitly empty source payloads are shown, not treated as absent."""
+        from elspeth.contracts import RowLineage, Token
+        from elspeth.core.landscape.formatters import LineageTextFormatter
+        from elspeth.core.landscape.lineage import LineageResult
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        result = LineageResult(
+            token=Token(token_id="tok-123", row_id="row-456", created_at=now, run_id="run-001"),
+            source_row=RowLineage(
+                row_id="row-456",
+                run_id="run-001",
+                source_node_id="src-node",
+                row_index=0,
+                source_data_hash="abc123",
+                created_at=now,
+                source_data={},
+                payload_available=True,
+            ),
+            node_states=(),
+            routing_events=(),
+            calls=(),
+            parent_tokens=(),
+        )
+
+        formatter = LineageTextFormatter()
+        text = formatter.format(result)
+
+        assert "Payload Available: True" in text
+        assert "Source Data: {}" in text
 
     def test_formats_with_outcome(self) -> None:
         """Includes outcome when present."""

@@ -409,7 +409,7 @@ class TransformExecutor:
                         # Timeout is derived from transform's batch_wait_timeout config
                         # (default 3600s = 1 hour) to allow for sustained rate limiting
                         # and AIMD backoff during capacity errors.
-                        result = waiter.wait(timeout=mixin._batch_wait_timeout)
+                        result = waiter.wait(timeout=mixin._batch_wait_timeout, shutdown_event=ctx.shutdown_event)
                     else:
                         # Regular transform: synchronous process()
                         result = transform.process(token.row_data, ctx)

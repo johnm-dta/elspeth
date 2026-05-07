@@ -170,6 +170,7 @@ class TestTransformProtocol:
             plugin_version = "1.0.0"
             source_file_hash: str | None = None
             is_batch_aware = False  # Batch support (structural aggregation)
+            supports_row_mode_when_batch_aware = False  # Batch-aware transforms only
             creates_tokens = False  # Deaggregation (multi-row output)
             passes_through_input = False  # ADR-007: pass-through contract flag
             can_drop_rows = False  # ADR-012: empty-emission governance flag

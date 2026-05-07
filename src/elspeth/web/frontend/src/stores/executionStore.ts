@@ -143,6 +143,11 @@ function applyRunEvent(
       ? (data as RunEventCompleted).accounting
       : null;
   const accounting = completedAccounting ?? state.progress?.accounting ?? null;
+  const isTerminal =
+    event.event_type === "completed" ||
+    event.event_type === "cancelled" ||
+    event.event_type === "failed";
+  const cancelRequested = isTerminal ? false : (state.progress?.cancel_requested ?? false);
 
   // Progress and cancelled events carry best-known live counters. Completed
   // events carry the canonical Landscape accounting projection instead.
@@ -186,6 +191,7 @@ function applyRunEvent(
     tokens_quarantined: tokensQuarantined,
     tokens_routed_success: tokensRoutedSuccess,
     tokens_routed_failure: tokensRoutedFailure,
+    cancel_requested: cancelRequested,
     accounting,
     recent_errors: recentErrors,
     status: deriveStatus(event),
@@ -194,10 +200,6 @@ function applyRunEvent(
   // Run records mirror the REST shape: terminal completed runs receive
   // accounting; in-flight counters stay in `progress` rather than being
   // reintroduced as legacy rows_* fields on Run.
-  const isTerminal =
-    event.event_type === "completed" ||
-    event.event_type === "cancelled" ||
-    event.event_type === "failed";
   let updatedRuns = state.runs;
   if (isTerminal) {
     updatedRuns = state.runs.map((r) =>
@@ -205,6 +207,7 @@ function applyRunEvent(
         ? {
             ...r,
             status: newProgress.status,
+            cancel_requested: false,
             accounting: completedAccounting ?? r.accounting,
             error:
               event.event_type === "failed"
@@ -275,6 +278,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
           tokens_quarantined: 0,
           tokens_routed_success: 0,
           tokens_routed_failure: 0,
+          cancel_requested: false,
           accounting: null,
           recent_errors: [],
           status: "running",
@@ -349,7 +353,27 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
 
   async cancel(runId: string) {
     try {
-      await api.cancelRun(runId);
+      const result = await api.cancelRun(runId);
+      set((state) => ({
+        runs: state.runs.map((run) =>
+          run.id === runId
+            ? {
+                ...run,
+                status: result.status,
+                cancel_requested: result.cancel_requested,
+              }
+            : run,
+        ),
+        progress:
+          state.activeRunId === runId && state.progress
+            ? {
+                ...state.progress,
+                status: result.status,
+                cancel_requested: result.cancel_requested,
+              }
+            : state.progress,
+        error: null,
+      }));
     } catch (err) {
       const apiErr = err as ApiError;
       set({ error: apiErr.detail ?? "Failed to cancel run." });

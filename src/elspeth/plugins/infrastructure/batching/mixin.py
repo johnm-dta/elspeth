@@ -302,12 +302,12 @@ class BatchTransformMixin:
         """Complete a ticket, discarding late results after timeout eviction."""
         try:
             self._batch_buffer.complete(ticket, (token, result, state_id))
-        except KeyError:
+        except (KeyError, ShutdownError):
             _logger.debug(
                 "late_result_discarded",
                 token_id=token.token_id,
                 state_id=state_id,
-                reason="timeout_evicted",
+                reason="timeout_evicted_or_shutdown",
             )
 
     def _release_loop(self) -> None:
@@ -449,7 +449,7 @@ class BatchTransformMixin:
 
         return self._batch_buffer.evict(ticket)
 
-    def shutdown_batch_processing(self, timeout: float = 30.0) -> None:
+    def shutdown_batch_processing(self, timeout: float = 30.0, *, wait_for_workers: bool = True) -> None:
         """Shutdown batch processing gracefully.
 
         Call this in close() or cleanup.
@@ -464,6 +464,11 @@ class BatchTransformMixin:
         the buffer raises ShutdownError. This ensures the loop keeps emitting
         completed results until the buffer is explicitly shut down AFTER
         workers have finished.
+
+        When wait_for_workers is False, shutdown is cancellation-oriented:
+        queued work is cancelled and completed late results are discarded
+        rather than blocking close() behind provider calls that the run has
+        already abandoned.
         """
         # 1. Signal shutdown (accept_row will raise ShutdownError on new submits)
         self._batch_shutdown.set()
@@ -471,7 +476,7 @@ class BatchTransformMixin:
         # 2. Wait for worker pool to finish current tasks.
         #    After this returns, all workers have called complete() on their
         #    tickets, so the release loop can drain every remaining entry.
-        self._batch_executor.shutdown(wait=True)
+        self._batch_executor.shutdown(wait=wait_for_workers, cancel_futures=not wait_for_workers)
 
         # 3. Shutdown buffer -- this wakes the release thread with ShutdownError
         #    so it exits after draining all completed entries.

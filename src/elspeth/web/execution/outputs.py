@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.engine.url import make_url
 
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import artifacts_table
@@ -28,6 +29,20 @@ from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
 from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputsResponse
 
 _FILE_URI_PREFIX = "file://"
+
+
+class RunOutputsAuditUnavailableError(RuntimeError):
+    """Raised when the full output manifest cannot read its audit source."""
+
+    def __init__(self, *, landscape_run_id: str, landscape_url: str) -> None:
+        parsed = make_url(landscape_url)
+        if parsed.drivername.startswith("sqlite"):
+            audit_location = parsed.database or landscape_url
+        else:
+            audit_location = parsed.render_as_string(hide_password=True)
+        self.landscape_run_id = landscape_run_id
+        self.audit_location = audit_location
+        super().__init__(f"Run outputs audit database is unavailable for landscape_run_id={landscape_run_id!r} at {audit_location!r}")
 
 
 def path_or_uri_to_filesystem_path(path_or_uri: str) -> Path | None:
@@ -67,20 +82,19 @@ def load_run_outputs_from_db(
     artifacts: list[RunOutputArtifact] = []
     with db.read_only_connection() as conn:
         for row in conn.execute(stmt):
-            fs_path = path_or_uri_to_filesystem_path(str(row.path_or_uri))
-            exists_now = fs_path.exists() if fs_path is not None else False
-            artifacts.append(
-                RunOutputArtifact(
-                    artifact_id=str(row.artifact_id),
-                    sink_node_id=str(row.sink_node_id),
-                    artifact_type=str(row.artifact_type),
-                    path_or_uri=str(row.path_or_uri),
-                    content_hash=str(row.content_hash),
-                    size_bytes=int(row.size_bytes),
-                    created_at=row.created_at,
-                    exists_now=exists_now,
-                )
+            artifact = RunOutputArtifact(
+                artifact_id=row.artifact_id,
+                sink_node_id=row.sink_node_id,
+                artifact_type=row.artifact_type,
+                path_or_uri=row.path_or_uri,
+                content_hash=row.content_hash,
+                size_bytes=row.size_bytes,
+                created_at=row.created_at,
+                exists_now=False,
             )
+            fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
+            exists_now = fs_path.exists() if fs_path is not None else False
+            artifacts.append(artifact.model_copy(update={"exists_now": exists_now}))
     return RunOutputsResponse(
         run_id=run_id,
         landscape_run_id=landscape_run_id,
@@ -102,11 +116,7 @@ def load_run_outputs_for_settings(
     """
     landscape_url = settings.get_landscape_url()
     if _sqlite_database_file_missing(landscape_url):
-        return RunOutputsResponse(
-            run_id=run_id,
-            landscape_run_id=landscape_run_id,
-            artifacts=[],
-        )
+        raise RunOutputsAuditUnavailableError(landscape_run_id=landscape_run_id, landscape_url=landscape_url)
     with LandscapeDB.from_url(
         landscape_url,
         passphrase=settings.landscape_passphrase,

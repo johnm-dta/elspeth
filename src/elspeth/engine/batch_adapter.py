@@ -35,6 +35,7 @@ from __future__ import annotations
 __all__ = ["ExceptionResult", "RowWaiter", "SharedBatchAdapter", "WaiterKey", "_WaiterEntry"]
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -103,11 +104,14 @@ class RowWaiter:
         self._entries = entries
         self._lock = lock
 
-    def wait(self, timeout: float = 300.0) -> TransformResult:
+    def wait(self, timeout: float = 300.0, shutdown_event: threading.Event | None = None) -> TransformResult:
         """Block until this row's result arrives.
 
         Args:
             timeout: Maximum seconds to wait
+            shutdown_event: Optional run-cancellation signal. When set, the
+                waiter returns a row-scoped shutdown_requested result instead
+                of waiting for the full transform timeout.
 
         Returns:
             TransformResult for this row
@@ -117,19 +121,38 @@ class RowWaiter:
             Exception: Re-raised from worker thread if plugin bug occurred
         """
         token_id, state_id = self._key
-        if not self._event.wait(timeout=timeout):
-            # Clean up entry on timeout to prevent memory leak.
-            # Guarded delete: clear() can race with timeout during shutdown — the
-            # only path that removes entries we did not pop ourselves. Explicit
-            # membership check expresses the cleanup intent without R9's pop-default.
-            with self._lock:
-                if self._key in self._entries:
-                    del self._entries[self._key]
-            raise TimeoutError(
-                f"No result received for token {token_id} (state {state_id}) within {timeout}s. "
-                f"This may indicate a hung transform, rate limit exhaustion, or "
-                f"insufficient timeout."
-            )
+        deadline = time.monotonic() + timeout
+        while not self._event.is_set():
+            if shutdown_event is not None and shutdown_event.is_set():
+                with self._lock:
+                    if self._key in self._entries:
+                        del self._entries[self._key]
+                from elspeth.contracts import TransformResult
+
+                return TransformResult.error(
+                    {
+                        "reason": "shutdown_requested",
+                        "error": f"Shutdown requested while waiting for token {token_id} (state {state_id})",
+                    },
+                    retryable=False,
+                )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Clean up entry on timeout to prevent memory leak.
+                # Guarded delete: clear() can race with timeout during shutdown — the
+                # only path that removes entries we did not pop ourselves. Explicit
+                # membership check expresses the cleanup intent without R9's pop-default.
+                with self._lock:
+                    if self._key in self._entries:
+                        del self._entries[self._key]
+                raise TimeoutError(
+                    f"No result received for token {token_id} (state {state_id}) within {timeout}s. "
+                    f"This may indicate a hung transform, rate limit exhaustion, or "
+                    f"insufficient timeout."
+                )
+
+            self._event.wait(timeout=min(remaining, 0.05))
 
         with self._lock:
             entry = self._entries.pop(self._key)

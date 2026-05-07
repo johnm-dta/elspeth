@@ -37,7 +37,33 @@ set -euo pipefail
 
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
-LABEL="${1:-tier1.5sweep}"
+
+usage() {
+  sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+if (( $# > 1 )); then
+  usage >&2
+  exit 64
+fi
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  -*)
+    echo "unknown flag: $1" >&2
+    usage >&2
+    exit 64
+    ;;
+  "")
+    LABEL="tier1.5sweep"
+    ;;
+  *)
+    LABEL=$1
+    ;;
+esac
 
 PUSHBACK_MESSAGE="Please proceed with the workflow you've described."
 

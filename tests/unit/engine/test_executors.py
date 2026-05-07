@@ -5388,7 +5388,7 @@ class TestTransformExecutorBatchPath:
         # Verify register was called before accept (via call_args_list order is not
         # available across objects, so we verify both were called — the production code
         # structurally guarantees register-before-accept by line order)
-        mock_waiter.wait.assert_called_once_with(timeout=transform._batch_wait_timeout)
+        mock_waiter.wait.assert_called_once_with(timeout=transform._batch_wait_timeout, shutdown_event=None)
 
     # --- Timeout and eviction ---
 

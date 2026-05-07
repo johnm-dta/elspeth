@@ -983,6 +983,52 @@ class TestPooledExecutorBugFixes:
         assert entries[0].result.reason is not None
         assert entries[0].result.reason["reason"] == "shutdown_requested"
 
+    def test_external_shutdown_event_prevents_initial_dispatch(self) -> None:
+        """Run cancellation must stop query workers before the provider call boundary."""
+        config = PoolConfig(pool_size=1, min_dispatch_delay_ms=0)
+        executor = PooledExecutor(config)
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+        call_count = 0
+
+        def should_not_dispatch(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            call_count += 1
+            return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "processed"})
+
+        ctx = [RowContext(row={"v": 1}, state_id="s1", row_index=0)]
+        entries = executor.execute_batch(ctx, should_not_dispatch, shutdown_event=shutdown_event)
+
+        assert call_count == 0
+        assert len(entries) == 1
+        assert entries[0].result.status == "error"
+        assert entries[0].result.reason is not None
+        assert entries[0].result.reason["reason"] == "shutdown_requested"
+
+    def test_external_shutdown_event_stops_capacity_retry_wait(self) -> None:
+        """Run cancellation must interrupt AIMD retry sleeps between provider attempts."""
+        config = PoolConfig(pool_size=1, max_capacity_retry_seconds=30)
+        executor = PooledExecutor(config)
+        shutdown_event = threading.Event()
+        call_count = 0
+        lock = Lock()
+
+        def fail_once_then_cancel(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            with lock:
+                call_count += 1
+                shutdown_event.set()
+            raise CapacityError(429, "Rate limited")
+
+        ctx = [RowContext(row={"v": 1}, state_id="s1", row_index=0)]
+        entries = executor.execute_batch(ctx, fail_once_then_cancel, shutdown_event=shutdown_event)
+
+        assert call_count == 1
+        assert len(entries) == 1
+        assert entries[0].result.status == "error"
+        assert entries[0].result.reason is not None
+        assert entries[0].result.reason["reason"] == "shutdown_requested"
+
     def test_dispatch_gate_uses_only_static_delay(self) -> None:
         """Dispatch gate should use only min_dispatch_delay_ms, NOT AIMD delay.
 

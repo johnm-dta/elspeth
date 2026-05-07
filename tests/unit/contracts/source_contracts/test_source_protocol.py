@@ -147,48 +147,24 @@ class SourceContractTestBase(ABC):
     # Protocol Attribute Contracts
     # =========================================================================
 
-    def test_source_has_name(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST have a 'name' attribute."""
+    def test_source_engine_identity_surface_is_coherent(self, source: SourceProtocol) -> None:
+        """Contract: engine-facing identity and audit metadata MUST be well formed."""
         assert isinstance(source.name, str)
         assert len(source.name) > 0
-
-    def test_source_has_output_schema(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST have an 'output_schema' that is a PluginSchema subclass."""
         assert isinstance(source.output_schema, type)
         assert issubclass(source.output_schema, PluginSchema)
-
-    def test_source_has_determinism(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST have a 'determinism' attribute."""
         assert isinstance(source.determinism, Determinism)
-
-    def test_source_has_plugin_version(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST have a 'plugin_version' attribute."""
         assert isinstance(source.plugin_version, str)
-
-    def test_source_has_config(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST expose its configuration dict."""
         assert isinstance(source.config, dict)
-
-    def test_source_has_optional_node_id(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST expose the orchestrator-assigned node id slot."""
         assert source.node_id is None or isinstance(source.node_id, str)
-
-    def test_source_has_optional_file_hash(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST expose source-file hash audit metadata."""
         assert source.source_file_hash is None or isinstance(source.source_file_hash, str)
 
-    def test_source_has_validation_failure_route(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST expose the validation-failure route."""
+    def test_source_routing_and_declaration_surface_is_coherent(self, source: SourceProtocol) -> None:
+        """Contract: source routing and guaranteed-field surfaces MUST be normalized."""
         assert isinstance(source._on_validation_failure, str)
         assert source._on_validation_failure
-
-    def test_source_has_success_route(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST expose the success route."""
         assert isinstance(source.on_success, str)
         assert source.on_success
-
-    def test_source_has_declared_guaranteed_fields(self, source: SourceProtocol) -> None:
-        """Contract: Source MUST expose runtime guaranteed-field declarations."""
         assert isinstance(source.declared_guaranteed_fields, frozenset)
         assert all(isinstance(field, str) for field in source.declared_guaranteed_fields)
 
@@ -280,9 +256,12 @@ class SourceContractTestBase(ABC):
         assert source.close() is None
         assert _source_boundary_snapshot(source) == before_close
 
-    def test_on_start_does_not_raise(self, source: SourceProtocol, ctx: PluginContext) -> None:
-        """Contract: on_start() lifecycle hook MUST complete without returning control data."""
+    def test_on_start_preserves_source_contract_metadata(self, source: SourceProtocol, ctx: PluginContext) -> None:
+        """Contract: on_start() MUST not erase source boundary contract metadata."""
+        before_start = _source_boundary_snapshot(source)
+
         assert source.on_start(ctx) is None
+        assert _source_boundary_snapshot(source) == before_start
 
     def test_on_complete_preserves_source_contract_metadata(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: on_complete() MUST not erase the completed source boundary contract."""

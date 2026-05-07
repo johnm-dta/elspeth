@@ -1,6 +1,8 @@
 # tests/unit/engine/test_retry.py
 """Tests for RetryManager."""
 
+import threading
+
 import pytest
 
 from elspeth.contracts.config import RuntimeRetryConfig
@@ -131,6 +133,27 @@ class TestRetryManager:
         # With 3 max attempts, on_retry fires after attempts 0 and 1 (before retries 2 and 3)
         # It should NOT fire after attempt 2 (the final attempt)
         assert attempts == [0, 1], f"Expected [0, 1], got {attempts}"
+
+    def test_shutdown_event_interrupts_retry_sleep(self) -> None:
+        """A run cancellation must stop retry backoff instead of sleeping out the delay."""
+        manager = RetryManager(RuntimeRetryConfig(max_attempts=3, base_delay=30.0, max_delay=30.0, jitter=0.0, exponential_base=2.0))
+        shutdown_event = threading.Event()
+        call_count = 0
+
+        def cancelled_after_first_failure() -> None:
+            nonlocal call_count
+            call_count += 1
+            shutdown_event.set()
+            raise ValueError("transient provider failure")
+
+        with pytest.raises(InterruptedError, match="shutdown requested"):
+            manager.execute_with_retry(
+                cancelled_after_first_failure,
+                is_retryable=lambda e: isinstance(e, ValueError),
+                shutdown_event=shutdown_event,
+            )
+
+        assert call_count == 1
 
     def test_from_policy_none_returns_no_retry(self) -> None:
         """Missing policy defaults to no-retry for safety."""

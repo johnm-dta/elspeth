@@ -36,14 +36,13 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import Determinism, PluginSchema, TransformResult
+from elspeth.contracts import Determinism, PluginSchema, TransformProtocol, TransformResult
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.transforms.passthrough import PassThrough
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
 
 if TYPE_CHECKING:
-    from elspeth.contracts import TransformProtocol
     from elspeth.contracts.plugin_context import PluginContext
 
 
@@ -156,80 +155,38 @@ class TransformContractTestBase(ABC):
     # Protocol Attribute Contracts
     # =========================================================================
 
-    def test_transform_has_name(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'name' attribute."""
+    def test_transform_satisfies_runtime_protocol(self, transform: TransformProtocol) -> None:
+        """Contract: Transform MUST satisfy the runtime engine protocol."""
+        assert isinstance(transform, TransformProtocol)
+
+    def test_transform_engine_identity_surface_is_coherent(self, transform: TransformProtocol) -> None:
+        """Contract: engine-facing identity and routing metadata MUST be well formed."""
         assert isinstance(transform.name, str)
         assert len(transform.name) > 0
-
-    def test_transform_has_input_schema(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have an 'input_schema' attribute that is a PluginSchema subclass."""
         assert isinstance(transform.input_schema, type)
         assert issubclass(transform.input_schema, PluginSchema)
-
-    def test_transform_has_output_schema(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have an 'output_schema' attribute that is a PluginSchema subclass."""
         assert isinstance(transform.output_schema, type)
         assert issubclass(transform.output_schema, PluginSchema)
-
-    def test_transform_has_determinism(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'determinism' attribute."""
         assert isinstance(transform.determinism, Determinism)
-
-    def test_transform_has_plugin_version(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have a 'plugin_version' attribute."""
         assert isinstance(transform.plugin_version, str)
-
-    def test_transform_has_batch_awareness_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have 'is_batch_aware' attribute."""
-        assert isinstance(transform.is_batch_aware, bool)
-
-    def test_transform_has_batch_row_mode_opt_in_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST declare whether batch-aware row mode is supported."""
-        assert isinstance(transform.supports_row_mode_when_batch_aware, bool)
-
-    def test_transform_has_creates_tokens_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST have 'creates_tokens' attribute."""
-        assert isinstance(transform.creates_tokens, bool)
-
-    def test_transform_has_config_dict(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose its original config dict."""
         assert isinstance(transform.config, dict)
-
-    def test_transform_has_optional_node_id(self, transform: TransformProtocol) -> None:
-        """Contract: Transform node_id is None before registration or a string after registration."""
         assert transform.node_id is None or isinstance(transform.node_id, str)
-
-    def test_transform_has_optional_source_file_hash(self, transform: TransformProtocol) -> None:
-        """Contract: Transform source_file_hash is None or a string fingerprint."""
         assert transform.source_file_hash is None or isinstance(transform.source_file_hash, str)
-
-    def test_transform_has_lifecycle_guard_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose the on_start lifecycle guard flag."""
         assert isinstance(transform._on_start_called, bool)
-
-    def test_transform_has_routing_configuration(self, transform: TransformProtocol) -> None:
-        """Contract: Transform routing configuration is unset or string-valued."""
         assert transform.on_error is None or isinstance(transform.on_error, str)
         assert transform.on_success is None or isinstance(transform.on_success, str)
 
-    def test_transform_has_passthrough_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST declare whether it preserves all input fields."""
+    def test_transform_behavior_flags_are_boolean(self, transform: TransformProtocol) -> None:
+        """Contract: engine dispatch and governance flags MUST be explicit booleans."""
+        assert isinstance(transform.is_batch_aware, bool)
+        assert isinstance(transform.supports_row_mode_when_batch_aware, bool)
+        assert isinstance(transform.creates_tokens, bool)
         assert isinstance(transform.passes_through_input, bool)
-
-    def test_transform_has_can_drop_rows_flag(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST declare whether it may intentionally emit zero rows."""
         assert isinstance(transform.can_drop_rows, bool)
 
-    def test_transform_has_declared_output_fields(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose centralized output-field declarations."""
-        _assert_frozenset_of_str(transform.declared_output_fields, attr_name="declared_output_fields")
-
-    def test_transform_has_declared_input_fields(self, transform: TransformProtocol) -> None:
-        """Contract: Transform MUST expose pre-emission required-input declarations."""
+    def test_declaration_surfaces_are_normalized_and_effective(self, transform: TransformProtocol) -> None:
+        """Contract: declared fields are normalized and included in the static contract."""
         _assert_frozenset_of_str(transform.declared_input_fields, attr_name="declared_input_fields")
-
-    def test_effective_static_contract_returns_declared_surface(self, transform: TransformProtocol) -> None:
-        """Contract: effective_static_contract() MUST expose declared output guarantees."""
         static_contract = _assert_frozenset_of_str(
             transform.effective_static_contract(),
             attr_name="effective_static_contract()",

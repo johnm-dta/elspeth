@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -25,6 +25,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.routing import Route
 
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.execution.outputs import RunOutputsAuditUnavailableError
 from elspeth.web.execution.schemas import (
     RunOutputArtifact,
     RunOutputsResponse,
@@ -78,7 +79,7 @@ def _create_test_app(
     return app
 
 
-def _running_status(run_id: uuid4) -> RunStatusResponse:
+def _running_status(run_id: UUID) -> RunStatusResponse:
     return RunStatusResponse(
         run_id=str(run_id),
         status="running",
@@ -148,6 +149,32 @@ class TestRunOutputsManifestEndpoint:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get(f"/api/runs/{run_id}/outputs")
         assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_503_when_audit_database_unavailable(self, monkeypatch) -> None:
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            raise RunOutputsAuditUnavailableError(landscape_run_id=str(run_id), landscape_url="sqlite:////missing/audit.db")
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs")
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == {
+            "error_type": "run_outputs_audit_unavailable",
+            "landscape_run_id": str(run_id),
+            "audit_location": "/missing/audit.db",
+        }
 
 
 # ── Content streaming endpoint tests ────────────────────────────────

@@ -15,8 +15,11 @@ and requires the agent to read them.
 ================ BEGIN PROMPT ================
 
 You are running a full hard-mode evaluation of the ELSPETH composer's
-LLM-driven pipeline-building behaviour. The model under test is
-**openai/gpt-5-mini**.
+LLM-driven pipeline-building behaviour. The composer model under test is the
+running service's `WebSettings.composer_model` (`ELSPETH_WEB__COMPOSER_MODEL`
+in env form); record it during pre-flight. Do not assume it is
+`openai/gpt-5-mini` — that id is a scenario-requested LLM transform model in
+P4 T1, not the composer LLM.
 
 ## Your mission
 
@@ -28,9 +31,10 @@ in `notes/composer-eval-hardmode-<UTC-date>.md` summarising findings.
 
 ## Authorization
 
-- **Budget**: ~$8-12 of OpenRouter credit is authorized. Don't ask before
-  running scenarios. If you blow past $20 of cost (estimable from
-  total_wall_seconds across ledgers × ~$0.05/sec), stop and report.
+- **Budget**: ~$10 of OpenRouter credit is anticipated. Don't ask before
+  running scenarios. Track spend from provider billing and harness cost
+  metadata; do not estimate dollars from wall time. If provider billing shows
+  actual spend above $20, stop and report.
 - **Time**: ~2-3 hours of supervised dispatch work plus engine time. Don't
   ask whether to continue between scenarios; just continue.
 - **Side effects authorized**: HTTP calls to the staging deploy at
@@ -62,6 +66,8 @@ prompt does not duplicate them.
 cd /home/john/elspeth/evals/composer-harness
 ls .env || echo "ENV MISSING — ask user for ELSPETH_EVAL_BASE_URL/USER/PASS"
 hardmode/harness.sh --doctor
+grep '^ELSPETH_WEB__COMPOSER_MODEL=' /home/john/elspeth/deploy/elspeth-web.env || \
+  echo "composer model not found in deploy env; record the verified source"
 ```
 
 Expected: `all preflight checks passed`. If `.env` is missing, ask the user
@@ -87,8 +93,9 @@ budget-stop doesn't lose the cheap data).
 For each scenario, the loop is exactly what RUNBOOK.md describes. Briefly:
 
 ```
+export ELSPETH_EVAL_RUNS_DIR="${ELSPETH_EVAL_RUNS_DIR:-runs/$(date -u +%Y-%m-%d)-hardmode}"
+RUN_DIR="$ELSPETH_EVAL_RUNS_DIR/<sid>"
 hardmode/harness.sh <sid>
-RUN_DIR=runs/$(date -u +%Y-%m-%d)-hardmode/<sid>
 jq -r '.opening_prompt' "$RUN_DIR/scenario.json" > "$RUN_DIR/turn1.user.txt"
 hardmode/post_message.sh <sid> 1 "$RUN_DIR/turn1.user.txt"
 # ... persona-subagent loop for turn 2+ until DONE or budget (5 turns)
@@ -172,8 +179,8 @@ ledger even on failure. Don't abort the suite on a single scenario failure.
 After all 15 scenarios:
 
 ```bash
-hardmode/aggregate.sh
-cat runs/$(date -u +%Y-%m-%d)-hardmode/SCORECARD.md
+hardmode/aggregate.sh "$ELSPETH_EVAL_RUNS_DIR"
+cat "$ELSPETH_EVAL_RUNS_DIR/SCORECARD.md"
 ```
 
 Then write a report at `/home/john/elspeth/notes/composer-eval-hardmode-<UTC-date>.md`
@@ -192,7 +199,8 @@ following the structure of `notes/composer-eval-hardmode-2026-05-03.md`. Include
    `evals/2026-05-03-composer/hardmode/aggregate.json` and call out what
    changed (which scenarios moved from `failed` to `completed`, which
    regressed, which are new in the matrix).
-6. **Cost summary** — sum total_wall_seconds across ledgers, estimate cost.
+6. **Cost summary** — report `aggregate_summary.json` cost metadata and
+   provider billing observations; do not estimate dollars from wall time.
 7. **Path to evidence** — point at `evals/composer-harness/runs/<date>-hardmode/`.
 
 ## Things to NOT do
@@ -233,7 +241,7 @@ the run outcome is data.
 - The 15-scenario suite takes ~2-3 hours of supervised time. Plan accordingly;
   if you need to interrupt, the harness state on disk is fully recoverable
   (`--reuse-sid` resumes a partial scenario).
-- The model under test is set in two places (P4-T1 prompt, P4 persona
-  shorthand). For P1/P2/P3 the composer auto-picks; if you need uniform
-  `gpt-5-mini` across all scenarios, set the composer's server-side default
-  before running (see README "Model under test" section).
+- The composer model under test is the running service's `composer_model`.
+  P4-T1 and the P4 persona mention `gpt-5-mini` as generated pipeline model
+  probes; those strings do not set the composer LLM (see README "Composer
+  model and generated model fields").

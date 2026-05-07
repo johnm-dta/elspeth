@@ -8,6 +8,7 @@ tracer wiring, and multi-query partial failure atomicity.
 
 from __future__ import annotations
 
+import threading
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import Mock, patch
@@ -48,6 +49,7 @@ def _make_ctx() -> Mock:
     ctx.run_id = "run-123"
     ctx.token = Mock()
     ctx.token.token_id = "token-1"
+    ctx.shutdown_event = None
     return ctx
 
 
@@ -221,6 +223,27 @@ class TestErrorClassification:
 
 class TestSingleQuerySuccess:
     """Verify single-query happy path."""
+
+    def test_shutdown_event_prevents_provider_call(self) -> None:
+        """Run cancellation must stop before dispatching a new provider call."""
+        transform, mock_provider = _make_transform_with_mock_provider()
+        mock_provider.execute_query.return_value = LLMQueryResult(
+            content="classified as: positive",
+            usage=TokenUsage.known(10, 5),
+            model="gpt-4o",
+            finish_reason=FinishReason.STOP,
+        )
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+        ctx = _make_ctx()
+        ctx.shutdown_event = shutdown_event
+
+        result = transform._process_row(_make_row(), ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "shutdown_requested"
+        mock_provider.execute_query.assert_not_called()
 
     def test_single_query_success_produces_output(self) -> None:
         transform, mock_provider = _make_transform_with_mock_provider()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
@@ -111,7 +112,7 @@ class BatchEffectSize(BaseTransform):
 
     name = "batch_effect_size"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b11ba2333e990cb2"
+    source_file_hash: str | None = "sha256:22ff716dde30a996"
     config_model = BatchEffectSizeConfig
     is_batch_aware = True
 
@@ -171,6 +172,32 @@ class BatchEffectSize(BaseTransform):
         candidate = self._augment_invariant_probe_row(probe, field_name=self._variant_field, value="candidate")
         candidate = self._augment_invariant_probe_row(candidate, field_name=self._score_field, value=2.0)
         return [baseline, candidate]
+
+    @staticmethod
+    def _is_non_finite_variant(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_variant_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            variant_value = row[self._variant_field]
+            if self._is_non_finite_variant(variant_value):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_variant"})
+
+        if not row_errors:
+            return None
+
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_variant",
+            "field": self._variant_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _group_rows(self, rows: list[PipelineRow]) -> list[tuple[Any, list[tuple[int, PipelineRow]]]]:
         """Partition rows by variant while preserving first-seen order."""
@@ -353,6 +380,10 @@ class BatchEffectSize(BaseTransform):
         """Compute effect-size rows over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+
+        non_finite_variant_error = self._non_finite_variant_error(rows)
+        if non_finite_variant_error is not None:
+            return non_finite_variant_error
 
         grouped = self._group_rows(rows)
         stats_by_variant = [self._stats_for_group(variant_value, grouped_rows) for variant_value, grouped_rows in grouped]

@@ -1960,6 +1960,7 @@ class Orchestrator:
         include_source_on_start: bool = True,
         restored_aggregation_state: Mapping[str, AggregationCheckpointState] | None = None,
         restored_coalesce_state: CoalesceCheckpointState | None = None,
+        shutdown_event: threading.Event | None = None,
     ) -> RunContext:
         """Initialize run context: assign node IDs, create PluginContext, call on_start, build processor.
 
@@ -2000,6 +2001,7 @@ class Orchestrator:
             rate_limit_registry=self._rate_limit_registry,
             concurrency_config=self._concurrency_config,
             telemetry_emit=self._emit_telemetry,
+            shutdown_event=shutdown_event,
         )
 
         # Set node_id on context for source validation error attribution
@@ -2979,6 +2981,7 @@ class Orchestrator:
             settings,
             artifacts,
             payload_store,
+            shutdown_event=shutdown_event,
         )
 
         loop_ctx = LoopContext(
@@ -3445,6 +3448,7 @@ class Orchestrator:
             include_source_on_start=False,
             restored_aggregation_state=restored_aggregation_state,
             restored_coalesce_state=restored_coalesce_state,
+            shutdown_event=shutdown_event,
         )
 
         # Restore contract from parameter (already retrieved by resume() caller)

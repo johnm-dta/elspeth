@@ -41,6 +41,10 @@ class _FakeToolCall:
 class _FakeMessage:
     content: str | None
     tool_calls: list[_FakeToolCall] | None
+    reasoning: str | None = None
+    reasoning_content: str | None = None
+    reasoning_details: list[dict[str, Any]] | None = None
+    thinking_blocks: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -106,6 +110,11 @@ def _make_llm_response(
     total_tokens: int | None = None,
     request_id: str | None = "chatcmpl-123",
     cost: float | int | str | None = None,
+    reasoning_tokens: int | None = None,
+    reasoning: str | None = None,
+    reasoning_content: str | None = None,
+    reasoning_details: list[dict[str, Any]] | None = None,
+    thinking_blocks: list[dict[str, Any]] | None = None,
 ) -> _FakeLLMResponse:
     fake_tool_calls: list[_FakeToolCall] | None = None
     if tool_calls:
@@ -116,9 +125,26 @@ def _make_llm_response(
             )
             for tc in tool_calls
         ]
-    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, cost=cost)
+    usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost=cost,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=reasoning_tokens),
+    )
     return _FakeLLMResponse(
-        choices=[_FakeChoice(message=_FakeMessage(content=content, tool_calls=fake_tool_calls))],
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=content,
+                    tool_calls=fake_tool_calls,
+                    reasoning=reasoning,
+                    reasoning_content=reasoning_content,
+                    reasoning_details=reasoning_details,
+                    thinking_blocks=thinking_blocks,
+                )
+            )
+        ],
         model=model,
         usage=usage,
         id=request_id,
@@ -178,6 +204,32 @@ async def test_success_records_provider_cost_from_usage_metadata() -> None:
     call = result.llm_calls[0]
     assert call.provider_cost == 0.0037
     assert call.provider_cost_source == "response_usage.cost"
+
+
+@pytest.mark.asyncio
+async def test_success_records_provider_reasoning_metadata() -> None:
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    state = _empty_state()
+    reasoning_details = [{"type": "reasoning.text", "text": "selected set_pipeline"}]
+    thinking_blocks = [{"type": "thinking", "thinking": "checked required output options"}]
+    llm_response = _make_llm_response(
+        content="Done.",
+        reasoning_tokens=12,
+        reasoning="openrouter native reasoning",
+        reasoning_content="litellm normalized reasoning",
+        reasoning_details=reasoning_details,
+        thinking_blocks=thinking_blocks,
+    )
+
+    with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response):
+        result = await service.compose("Build a CSV pipeline", [], state)
+
+    call = result.llm_calls[0]
+    payload = call.to_dict()
+    assert call.reasoning_tokens == 12
+    assert call.reasoning_content == "openrouter native reasoning"
+    assert payload["reasoning_details"] == reasoning_details
+    assert payload["thinking_blocks"] == thinking_blocks
 
 
 @pytest.mark.asyncio

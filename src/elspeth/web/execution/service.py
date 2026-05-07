@@ -549,6 +549,10 @@ class ExecutionServiceImpl:
             run = run_record
         else:
             run = await self._session_service.get_run(run_id)
+        event_key = str(run_id)
+        with self._shutdown_events_lock:
+            event = self._shutdown_events[event_key] if event_key in self._shutdown_events else None
+        cancel_requested = event is not None and event.is_set() and run.status not in SESSION_TERMINAL_RUN_STATUS_VALUES
         return RunStatusResponse(
             run_id=str(run.id),
             status=run.status,
@@ -557,6 +561,7 @@ class ExecutionServiceImpl:
             accounting=accounting,
             error=run.error,
             landscape_run_id=run.landscape_run_id,
+            cancel_requested=cancel_requested,
         )
 
     async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult:

@@ -9,12 +9,17 @@ can enumerate and re-fetch every sink output the run produced.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy import text
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.web.execution.outputs import load_run_outputs_from_db
+from elspeth.web.execution.outputs import load_run_outputs_for_settings, load_run_outputs_from_db
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
@@ -114,6 +119,37 @@ def test_load_run_outputs_records_exists_now_filesystem_check(tmp_path: Path) ->
         by_id = {a.artifact_id: a for a in response.artifacts}
         assert by_id["art-present"].exists_now is True
         assert by_id["art-absent"].exists_now is False
+
+
+def test_load_run_outputs_for_settings_raises_when_sqlite_audit_db_missing(tmp_path: Path) -> None:
+    settings = MagicMock()
+    settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'missing-audit.db'}"
+    settings.landscape_passphrase = None
+
+    with pytest.raises(RuntimeError, match="audit database"):
+        load_run_outputs_for_settings(
+            settings,
+            run_id="web-run-missing-audit",
+            landscape_run_id="landscape-run-missing-audit",
+        )
+
+
+def test_load_run_outputs_rejects_corrupt_artifact_types(tmp_path: Path) -> None:
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-corrupt-artifact"
+        output_path = tmp_path / "result.csv"
+        output_path.write_text("x\n")
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(output_path), "a" * 64, output_path.stat().st_size, "sink_r")],
+        )
+
+        with db.connection() as conn:
+            conn.execute(text("UPDATE artifacts SET size_bytes = 7.5 WHERE artifact_id = 'art-1'"))
+
+        with pytest.raises(ValidationError, match="size_bytes"):
+            load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
 
 
 def test_load_run_outputs_strips_file_uri_prefix_in_exists_check(tmp_path: Path) -> None:

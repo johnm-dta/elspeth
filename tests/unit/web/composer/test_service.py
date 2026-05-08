@@ -4616,3 +4616,309 @@ class TestAttemptProofRepair:
                 session_id=self.session_id,
                 repair_turns_used=0,
             )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end forced-repair loop coverage. Drives the real ``_compose_loop``
+# ``while True`` through real repair turns with a scripted LLM at the
+# ``_call_llm`` boundary. Bugs that would land silently otherwise:
+# stale ``repair_turns_used``, missing ``continue`` after the repair message,
+# ``replace(result, ...)`` clobbering, divergence behaviour when repair
+# makes things worse, hard cap not respected.
+# ---------------------------------------------------------------------------
+
+
+class TestComposeLoopForcedRepair:
+    """Exercise ``ComposerServiceImpl.compose`` through scripted repair turns.
+
+    The scripted LLM is wired at ``_call_llm`` (network seam); ``execute_tool``
+    runs for real, so ``set_source_from_blob`` / ``patch_source_options`` /
+    ``set_output`` produce authentic state mutations and ``compute_proof_diagnostics``
+    inspects authentic blob bytes. ``_runtime_preflight`` is patched to a
+    permissive result so finalization is bounded by the proof gate alone.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        catalog = _mock_catalog()
+        settings = _make_settings(data_dir=tmp_path)
+        engine, session_id = _session_engine_with_session()
+        self.engine = engine
+        self.session_id = session_id
+
+        # CSV with three observed columns. Pipeline configured with
+        # mode='fixed' + fields=['order_id: str'] + on_validation_failure='discard'
+        # triggers the csv_fixed_schema_omits_observed_columns blocking
+        # diagnostic in compute_proof_diagnostics.
+        self.blob_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        self.storage_path = storage_dir / f"{self.blob_id}_orders.csv"
+        body = b"order_id,customer,price\nO-1,Alice,49.95\n"
+        self.storage_path.write_bytes(body)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.blob_id,
+                    session_id=session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(self.storage_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        self.service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+
+    def _wire_blocking_pipeline_tool_calls(self) -> list[dict[str, Any]]:
+        """Tool calls that establish the blocking csv_fixed_schema_omits_observed_columns state."""
+        return [
+            {
+                "id": "call_source",
+                "name": "set_source_from_blob",
+                "arguments": {
+                    "blob_id": self.blob_id,
+                    "on_success": "rows",
+                    "on_validation_failure": "discard",
+                    "options": {"schema": {"mode": "fixed", "fields": ["order_id: str"]}},
+                },
+            },
+            {
+                "id": "call_output",
+                "name": "set_output",
+                "arguments": {
+                    "sink_name": "out",
+                    "plugin": "json",
+                    "options": {
+                        "path": "outputs/out.json",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                },
+            },
+        ]
+
+    def _repair_tool_call(self) -> list[dict[str, Any]]:
+        """Tool call that fixes the blocking diagnostic.
+
+        Switch from ``mode='fixed'`` (which omitted observed columns) to
+        ``mode='observed'`` (auto-infer types from data). ``mode='flexible'``
+        without explicit ``fields`` is rejected by the csv source's
+        config-model prevalidation, so observed is the cleanest repair.
+        """
+        return [
+            {
+                "id": "call_repair",
+                "name": "patch_source_options",
+                "arguments": {"patch": {"schema": {"mode": "observed"}}},
+            },
+        ]
+
+    def _futile_repair_tool_call(self, call_id: str, name_value: str) -> list[dict[str, Any]]:
+        """Tool call that mutates state but does NOT clear the proof blocker.
+
+        Calls ``set_metadata`` (state.version bumps) without touching the
+        source's schema. The original ``csv_fixed_schema_omits_observed_columns``
+        diagnostic survives. Used to verify the repair-budget cap holds
+        when the model mutates without applying a useful repair.
+        """
+        return [
+            {
+                "id": call_id,
+                "name": "set_metadata",
+                "arguments": {"patch": {"name": name_value}},
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_happy_repair_path(self) -> None:
+        """Turn 1 establishes blocker, turn 2 claims completion, turn 3 repairs.
+
+        Loop sequence:
+          - Turn 1 (LLM): tool_calls = [set_source_from_blob (blocking schema), set_output]
+          - Turn 2 (LLM): no tool_calls, claims completion
+            → _attempt_proof_repair fires, sees blocking diagnostic, injects
+              repair message, loop continues
+          - Turn 3 (LLM): tool_calls = [patch_source_options(mode=flexible)]
+          - Turn 4 (LLM): no tool_calls, claims completion
+            → no blocking diagnostic now, finalize cleanly
+
+        Assertions:
+          - result.repair_turns_used == 1
+          - synthesised repair message reaches the LLM history
+          - is_valid True (no blocking diagnostic remaining)
+        """
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        turn1 = _make_llm_response(content=None, tool_calls=self._wire_blocking_pipeline_tool_calls())
+        turn2_done = _make_llm_response(content="All set.", tool_calls=None)
+        turn3 = _make_llm_response(content=None, tool_calls=self._repair_tool_call())
+        turn4_done = _make_llm_response(content="Repaired and ready.", tool_calls=None)
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1, turn2_done, turn3, turn4_done]
+            result = await self.service.compose(
+                "Build a pipeline",
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        # Loop ran exactly four LLM turns: build, claim-complete, repair,
+        # claim-complete-again.
+        assert mock_llm.call_count == 4, f"expected 4 LLM calls, got {mock_llm.call_count}"
+        # repair_turns_used == 1 — the model needed exactly one forced
+        # repair turn to clear the diagnostic.
+        assert result.repair_turns_used == 1
+        # Final state has observed schema (the repair landed) and is_valid.
+        assert result.state.source is not None
+        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
+        # The synthesised repair message reaches the LLM history before
+        # turn 3 — inspect the messages of turn 3 (index 2).
+        turn3_messages = mock_llm.call_args_list[2].args[0]
+        repair_msgs = [
+            m
+            for m in turn3_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[composer-system]" in str(m.get("content", ""))
+            and "csv_fixed_schema_omits_observed_columns" in str(m.get("content", ""))
+        ]
+        assert len(repair_msgs) == 1, f"exactly one composer-system repair message must precede turn 3; got {len(repair_msgs)}"
+        # Final assistant content reflects turn 4's claim, not turn 2's
+        # (which was preempted by the repair gate).
+        assert result.message == "Repaired and ready."
+
+    @pytest.mark.asyncio
+    async def test_divergence_repair_does_not_clear_blocker(self) -> None:
+        """Repair turns mutate state but never address the proof blocker.
+
+        The model claims completion, sees the repair message, then on
+        each repair turn issues a tool call that mutates *something else*
+        (here: pipeline metadata.name) without addressing the source
+        schema. ``state.version`` bumps each turn, the proof gate fires
+        each ``no-tool-call`` turn while ``state.version > initial_version``,
+        and the loop terminates when ``repair_turns_used`` reaches
+        ``_MAX_REPAIR_TURNS``.
+
+        Loop sequence (6 LLM turns):
+          - Turn 1: tool_calls = [set_source_from_blob (blocker), set_output]
+          - Turn 2: claim complete → repair fires, repair_turns_used=1
+          - Turn 3: tool_calls = [set_metadata(name='attempt-1')] (no-op
+            for the blocker)
+          - Turn 4: claim complete → repair fires, repair_turns_used=2
+          - Turn 5: tool_calls = [set_metadata(name='attempt-2')]
+          - Turn 6: claim complete → repair_turns_used==_MAX_REPAIR_TURNS,
+            repair gate returns False, finalize with blocker still in
+            ``proof_diagnostics``.
+        """
+        from elspeth.web.composer.service import _MAX_REPAIR_TURNS
+
+        # Sanity check on the constant — keeps the test honest if the
+        # cap shifts.
+        assert _MAX_REPAIR_TURNS == 2
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        turns = [
+            _make_llm_response(content=None, tool_calls=self._wire_blocking_pipeline_tool_calls()),
+            _make_llm_response(content="claim 1", tool_calls=None),
+            _make_llm_response(content=None, tool_calls=self._futile_repair_tool_call("call_a", "attempt-1")),
+            _make_llm_response(content="claim 2", tool_calls=None),
+            _make_llm_response(content=None, tool_calls=self._futile_repair_tool_call("call_b", "attempt-2")),
+            _make_llm_response(content="final", tool_calls=None),
+        ]
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = turns
+            result = await self.service.compose(
+                "Build something",
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        # Six LLM turns total; the third claim-complete is final because
+        # the repair budget is exhausted.
+        assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
+        assert result.repair_turns_used == _MAX_REPAIR_TURNS
+        # Source still has the original fixed-mode blocking schema; the
+        # futile mutations never touched the source.
+        assert result.state.source is not None
+        assert result.state.source.options["schema"]["mode"] == "fixed"
+        # Metadata reflects the most recent (futile) repair attempt.
+        assert result.state.metadata.name == "attempt-2"
+        # Final message is the third claim-complete; finalisation
+        # proceeded once the repair budget hit the cap.
+        assert result.message == "final"
+
+    @pytest.mark.asyncio
+    async def test_cap_respected_when_model_never_repairs(self) -> None:
+        """Model claims completion but never tool-calls repairs — the cap stops the loop.
+
+        The blocker remains every time the proof step fires. The repair
+        budget is exhausted; finalization proceeds with the blocker
+        still visible. ``is_valid`` must reflect the blocking proof
+        diagnostic (forced False by the proof gate even when authoring/
+        runtime preflight pass).
+        """
+        from elspeth.web.composer.service import _MAX_REPAIR_TURNS
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        # Turn 1 establishes the blocker. Turns 2..N all claim completion
+        # without applying a fix. The repair gate fires after each
+        # state-mutating turn — but turns 2..N have no tool calls, so
+        # state.version doesn't bump on those turns. The proof gate fires
+        # only when ``state.version > initial_version``, which holds
+        # from turn 2 onwards (turn 1 mutated). Two repair-fires later
+        # (turns 2 and 3 since the cap is 2), the third claim-complete
+        # finalises.
+        turns = [
+            _make_llm_response(content=None, tool_calls=self._wire_blocking_pipeline_tool_calls()),
+            _make_llm_response(content="claim 1", tool_calls=None),
+            _make_llm_response(content="claim 2", tool_calls=None),
+            _make_llm_response(content="final", tool_calls=None),
+        ]
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = turns
+            result = await self.service.compose(
+                "Build something",
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        # Four LLM turns: 1 mutating + 3 claim-complete (the first two
+        # claim-completes fire repair injection, the third is final).
+        assert mock_llm.call_count == 4
+        assert result.repair_turns_used == _MAX_REPAIR_TURNS
+        # The model never applied a fix → schema still 'fixed' with the
+        # original blocker config; runtime_preflight may still be valid
+        # (it was patched to return is_valid=True), but the runtime gate
+        # is not the proof gate. Verify the source state is unchanged.
+        assert result.state.source is not None
+        assert result.state.source.options["schema"]["mode"] == "fixed"

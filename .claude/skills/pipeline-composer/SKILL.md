@@ -66,6 +66,8 @@ In YAML write `routes: {"true": high, "false": normal}` — never `routes: {true
 
 Every pipeline needs: **one source**, **one or more sinks**, and **connections between them**. Orphan nodes cause validation errors.
 
+For source row validation failures, use `on_validation_failure: "discard"` unless you have already configured a dedicated output/sink for failed rows. Quarantine is a conventional output name, not a built-in sink; `on_validation_failure: "quarantine"` is valid only when an output/sink named `quarantine` exists in the same pipeline.
+
 ### Node Types
 
 | Type | Required fields | Key behaviour |
@@ -99,6 +101,24 @@ A pipeline is **not complete** until:
 2. medium/high severity warnings are resolved
 3. required plugin options are filled with meaningful values
 4. all `edge_contracts` reported by `preview_pipeline` are satisfied
+5. `preview_pipeline.proof_diagnostics` has no `blocking` entries (Stage 3 — input-shape proof against blob-backed sources)
+
+### Convergence Guardrails — Source-aware Authoring
+
+Five rules cover the historical convergence-failure modes for CSV/JSON/text-source pipelines. Apply them before declaring `set_pipeline` or `apply_pipeline_recipe`:
+
+1. **Inspect source facts before declaring a fixed schema.** Use `inspect_source(blob_id)` to discover observed headers, sample row count, and inferred scalar types. Do not guess column names.
+2. **Include observed columns or use observed/flexible mode.** A `mode: fixed` schema that omits an observed column combined with `on_validation_failure: "discard"` silently drops every row. The proof step catches this with `csv_fixed_schema_omits_observed_columns`.
+3. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** Either declare `field: int|float` in the source schema or insert a `type_coerce` node upstream of the gate.
+4. **Default `on_validation_failure: "discard"`.** Quarantine is a conventional output name, not a built-in sink.
+5. **Don't ask technical implementation questions for ordinary intent.** Pick conservative defaults and proceed; the proof step + repair loop will surface real misjudgements as `proof_diagnostics`.
+
+**Recipe-first heuristic.** If operator intent matches a registered recipe (call `list_recipes` to discover), prefer `apply_pipeline_recipe` — it produces the same state as a hand-authored `set_pipeline` but with slot-schema validation that rejects URL-as-blob_id and bool-as-numeric-threshold at the boundary:
+
+| Intent phrase | Recipe |
+|---|---|
+| "Classify these rows / tickets / reviews" | `classify-rows-llm-jsonl` |
+| "Split rows by price > N", "route scores >= 0.8" | `split-by-numeric-threshold` |
 
 **Important contract rules:**
 - `edge_contracts: []` is not contract success — it means no field contracts were declared, even if the preview is otherwise structurally valid

@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, TypedDict, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from opentelemetry import metrics
 from pydantic import ValidationError as PydanticValidationError
@@ -36,7 +36,17 @@ from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import _guard_blob_row_literals, _source_references_blob, content_hash, sanitize_filename
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
+from elspeth.web.composer.recipes import (
+    RecipeValidationError,
+    apply_recipe,
+    list_recipes,
+)
 from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.source_inspection import (
+    derive_extra_column_risk,
+    facts_to_dict,
+    inspect_blob_content,
+)
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
@@ -64,6 +74,11 @@ _AUTHORING_VALIDATION_COUNTER = metrics.get_meter(__name__).create_counter(
 _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
+_DEFAULT_SOURCE_VALIDATION_FAILURE: Final[str] = "discard"
+_SOURCE_VALIDATION_FAILURE_DESCRIPTION: Final[str] = (
+    "How to handle source validation failures. Use 'discard' to drop invalid rows without routing. "
+    "Any other value, including 'quarantine', must match a configured output/sink name."
+)
 
 
 class _SemanticEdgeContractPayload(TypedDict):
@@ -633,8 +648,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "options": {"type": "object", "description": "Plugin-specific config."},
                     "on_validation_failure": {
                         "type": "string",
-                        "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                        "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                     },
                 },
                 "required": ["plugin", "on_success", "options", "on_validation_failure"],
@@ -961,8 +975,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                             },
                             "on_validation_failure": {
                                 "type": "string",
-                                "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                                "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                             },
                             "inline_blob": {
                                 "type": "object",
@@ -1334,9 +1347,8 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     },
                     "on_validation_failure": {
                         "type": "string",
-                        "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                        "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
-                        "default": "quarantine",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                        "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
                     },
                     "options": {
                         "type": "object",
@@ -1424,6 +1436,64 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "blob_id": {
                         "type": "string",
                         "description": "ID of the blob to read.",
+                    },
+                },
+                "required": ["blob_id"],
+            },
+        },
+        {
+            "name": "list_recipes",
+            "description": (
+                "List the registered pipeline recipes — deterministic scaffolds for common simple "
+                "intents. Each recipe declares its required slots; apply_pipeline_recipe then "
+                "instantiates the recipe with operator-supplied slot values. Recipes accelerate "
+                "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
+                "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "apply_pipeline_recipe",
+            "description": (
+                "Apply a registered pipeline recipe with operator-supplied slot values and replace "
+                "the current pipeline state with the resulting configuration. Slots are validated "
+                "against the recipe's declared schema before scaffolding — invalid slots are "
+                "rejected with a repair hint. Call list_recipes to discover available recipes and "
+                "their slot schemas. The resulting state is identical to a hand-authored "
+                "set_pipeline call; the model can refine via patch_*_options afterwards."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipe_name": {
+                        "type": "string",
+                        "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
+                    },
+                    "slots": {
+                        "type": "object",
+                        "description": "Operator-supplied slot values; must match the recipe's slot schema",
+                    },
+                },
+                "required": ["recipe_name", "slots"],
+            },
+        },
+        {
+            "name": "inspect_source",
+            "description": (
+                "Return bounded structural facts about a blob-backed source: source kind, observed "
+                "headers, sample row count, inferred scalar types per column, URL candidates, and "
+                "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
+                "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
+                "tell you which fields the source actually contains and what numeric coercion is "
+                "needed before any gate or value_transform numeric op. Never returns raw row "
+                "content; only summary facts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {
+                        "type": "string",
+                        "description": "ID of the blob to inspect.",
                     },
                 },
                 "required": ["blob_id"],
@@ -1710,7 +1780,8 @@ def _vf_destination_note(
         return {
             "note": (
                 f"on_validation_failure='{on_vf}' does not match any configured output. "
-                f"Add an output named '{on_vf}' before running the pipeline. "
+                "Use 'discard' to drop invalid rows without routing, or "
+                f"add an output named '{on_vf}' before running the pipeline. "
                 f"Current outputs: {current}."
             ),
         }
@@ -2192,7 +2263,7 @@ def validate_composer_file_sink_collision_policy(
 def _prevalidate_source(
     plugin_name: str,
     options: Mapping[str, Any],
-    on_validation_failure: str = "quarantine",
+    on_validation_failure: str = _DEFAULT_SOURCE_VALIDATION_FAILURE,
 ) -> str | None:
     """Pre-validate source options, injecting on_validation_failure and filtering web-only keys."""
     filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
@@ -2251,7 +2322,7 @@ def _execute_set_source(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    on_vf = args.get("on_validation_failure", "quarantine")
+    on_vf = args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     prevalidation_error = _prevalidate_source(plugin, options, on_vf)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
@@ -2588,7 +2659,7 @@ def _execute_set_source_from_blob(
             expected="an object",
             actual_type=type(caller_options).__name__,
         )
-    on_vf = arguments.get("on_validation_failure", "quarantine")
+    on_vf = arguments.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     resolved = _resolve_source_blob(
         blob_id=arguments["blob_id"],
         explicit_plugin=arguments.get("plugin"),
@@ -3392,6 +3463,31 @@ def _execute_delete_blob(
     return _discovery_result(state, {"blob_id": blob_id, "deleted": True})
 
 
+def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
+    """Verify on-disk blob bytes match the stored content_hash.
+
+    Tier-1 invariant: a ``ready`` blob's stored ``content_hash`` is
+    enforced non-NULL by the ``ck_blobs_ready_hash`` CHECK constraint
+    at write time. Reading NULL here is therefore a DB-integrity
+    anomaly (someone bypassed the constraint, the row was tampered
+    with, or the constraint is missing in this database). A SHA-256
+    mismatch between recomputed bytes and stored hash is filesystem
+    corruption, tampering, or a write-path bug.
+
+    Both conditions ESCALATE via ``AuditIntegrityError`` /
+    ``BlobIntegrityError`` rather than degrading to a soft result;
+    silently passing through unverified bytes would let the audit
+    trail confidently record decisions made on garbage.
+    """
+    blob_id = blob["id"]
+    stored_hash = blob["content_hash"]
+    if stored_hash is None:
+        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
+    actual_hash = content_hash(data)
+    if not hmac.compare_digest(actual_hash, stored_hash):
+        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+
+
 def _execute_get_blob_content(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -3418,6 +3514,8 @@ def _execute_get_blob_content(
        (our hash, our file) indicating filesystem corruption,
        tampering, or a write-path bug; it must ESCALATE via
        ``BlobIntegrityError``, not degrade to a tool-failure result.
+       Implemented by ``_verify_blob_content_integrity`` (shared with
+       ``_execute_inspect_source`` and ``compute_proof_diagnostics``).
     3. **Decode safety** — the MIME allowlist admits encodings other
        than UTF-8 (``text/csv`` is frequently latin-1 in the wild).
        ``UnicodeDecodeError`` is converted to a ``_failure_result``
@@ -3452,16 +3550,9 @@ def _execute_get_blob_content(
 
     data = storage_path.read_bytes()
 
-    # Guard 2 — integrity.  A ``ready`` blob must always have a
-    # content_hash (enforced by the ``ck_blobs_ready_hash`` CHECK
-    # constraint at write time); NULL here is a DB-integrity anomaly
-    # and must escalate, not silently fall through to a bytes-return.
-    stored_hash = blob["content_hash"]
-    if stored_hash is None:
-        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
-    if not hmac.compare_digest(actual_hash, stored_hash):
-        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+    # Guard 2 — integrity.  Shared helper: NULL stored_hash escalates
+    # via AuditIntegrityError, mismatch via BlobIntegrityError.
+    _verify_blob_content_integrity(blob, data)
 
     # Guard 3 — decode safety.  Non-UTF-8 bytes are a Tier-3 external
     # input condition (the operator supplied content in an encoding we
@@ -3493,6 +3584,170 @@ def _execute_get_blob_content(
             "size_bytes": blob["size_bytes"],
         },
     )
+
+
+def _execute_inspect_source(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Inspect a blob-backed source and return bounded structural facts.
+
+    Mirrors the lifecycle and integrity guards of ``_execute_get_blob_content``
+    (only ``ready`` blobs are readable; SHA-256 verified; UnicodeDecodeError
+    surfaced as tool-failure) but returns ``SourceInspectionFacts`` rather
+    than raw content. Reads at most 8 KiB and parses at most 100 rows.
+
+    Never returns raw row content — only summary facts (headers, inferred
+    types, URL candidates, warnings, redacted identity).
+    """
+    if session_engine is None or session_id is None:
+        return _failure_result(state, "Blob tools require session context.")
+
+    blob_id = arguments["blob_id"]
+    blob = _sync_get_blob(session_engine, blob_id, session_id)
+    if blob is None:
+        return _failure_result(state, f"Blob '{blob_id}' not found.")
+
+    blob_status = blob["status"]
+    if blob_status != "ready":
+        return _failure_result(
+            state,
+            f"Blob '{blob_id}' is not readable — status is '{blob_status}', expected 'ready'.",
+        )
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        return _failure_result(state, f"Blob storage file missing for '{blob_id}'.")
+
+    data = storage_path.read_bytes()
+
+    _verify_blob_content_integrity(blob, data)
+
+    blob_id_warning: str | None = None
+    try:
+        blob_uuid = UUID(blob_id)
+    except ValueError:
+        blob_uuid = None
+        truncated = blob_id if len(blob_id) <= 64 else blob_id[:64] + "..."
+        blob_id_warning = (
+            f"blob_id_not_uuid: matched blob_id {truncated!r} is not a parseable "
+            "UUID — redacted_identity will omit blob_id and surface "
+            "content_hash_prefix only"
+        )
+
+    facts = inspect_blob_content(
+        content=data,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        blob_id=blob_uuid,
+        content_hash=blob["content_hash"],
+    )
+    if blob_id_warning is not None:
+        facts = replace(facts, warnings=(blob_id_warning, *facts.warnings))
+    return _discovery_result(state, facts_to_dict(facts))
+
+
+def _execute_list_recipes(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return discovery metadata for every registered pipeline recipe."""
+    return _discovery_result(state, {"recipes": list_recipes()})
+
+
+def _execute_apply_pipeline_recipe(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
+
+    ``set_pipeline`` is full state replacement, so a ``replaced_pipeline_note`` is
+    emitted to make the destructive replacement visible to the LLM/operator. The
+    note is suppressed when the prior pipeline is empty — a no-op replacement
+    needs no flag, and emitting one would be noise on a fresh-session apply.
+    """
+    recipe_name = arguments.get("recipe_name")
+    raw_slots = arguments.get("slots")
+    if not isinstance(recipe_name, str) or not recipe_name:
+        return _failure_result(
+            state,
+            "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
+        )
+    if not isinstance(raw_slots, Mapping):
+        return _failure_result(
+            state,
+            "apply_pipeline_recipe requires 'slots' as a JSON object whose keys match the recipe's declared slot names.",
+        )
+
+    try:
+        pipeline_args = apply_recipe(recipe_name, dict(raw_slots))
+    except RecipeValidationError as exc:
+        return _failure_result(state, str(exc))
+
+    # Capture pre-replacement counts BEFORE delegating to the destructive
+    # set_pipeline path. Frozen-dataclass fields, so capturing the integers
+    # now is sufficient — the post-call result.updated_state is a fresh
+    # CompositionState produced by set_pipeline.
+    pre_source_present = state.source is not None
+    pre_node_count = len(state.nodes)
+    pre_output_count = len(state.outputs)
+
+    # Delegate to the existing set_pipeline executor — recipes produce the
+    # exact arguments shape set_pipeline accepts, so validation and state
+    # mutation flow through the canonical mutation path.
+    result = _execute_set_pipeline(
+        pipeline_args,
+        state,
+        catalog,
+        data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+
+    # Only annotate successful replacements over a non-empty prior state.
+    # On failure, set_pipeline returned ``state`` unchanged and the note
+    # would be misleading. On a fresh-session apply, there is nothing to
+    # call out and a note would be noise.
+    if not result.success:
+        return result
+    if not (pre_source_present or pre_node_count or pre_output_count):
+        return result
+
+    note = (
+        f"apply_pipeline_recipe replaced the existing pipeline "
+        f"(prior state had source={'set' if pre_source_present else 'unset'}, "
+        f"{pre_node_count} node(s), {pre_output_count} output(s)). "
+        "Recipes are full-state scaffolds; the prior composition was discarded."
+    )
+
+    # Preserve any existing data payload from set_pipeline (e.g. inline-blob
+    # creation summary) by merging into a single dict. set_pipeline's
+    # ``data`` is currently None on the recipe path because recipes don't
+    # use inline_blob, but merging is forward-compatible.
+    existing_data = result.data
+    if existing_data is None:
+        merged_data: Any = {"replaced_pipeline_note": note}
+    elif isinstance(existing_data, Mapping):
+        merged_data = {**dict(existing_data), "replaced_pipeline_note": note}
+    else:
+        # set_pipeline contract: ``data`` is None or a Mapping. Anything
+        # else is a contract drift bug — surface the note alongside in a
+        # wrapper rather than silently dropping either.
+        merged_data = {"replaced_pipeline_note": note, "set_pipeline_data": existing_data}
+
+    return replace(result, data=merged_data)
 
 
 # Blob tool handler type — extended signature with session context
@@ -3675,6 +3930,7 @@ def _execute_set_pipeline(
     resolved_source_blob: _ResolvedSourceBlob | None = None
     source_blob_id = src_args.get("blob_id")
     inline_blob = src_args.get("inline_blob")
+    src_on_vf = src_args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     if source_blob_id is not None and inline_blob is not None:
         return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
     if source_blob_id is not None:
@@ -3688,7 +3944,7 @@ def _execute_set_pipeline(
             blob_id=source_blob_id,
             explicit_plugin=src_plugin,
             caller_options=src_options,
-            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            on_validation_failure=src_on_vf,
             state=state,
             catalog=catalog,
             session_engine=session_engine,
@@ -3741,7 +3997,6 @@ def _execute_set_pipeline(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    src_on_vf = src_args.get("on_validation_failure", "quarantine")
     src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
     if src_prevalidation is not None:
         return _failure_result(state, src_prevalidation)
@@ -3838,7 +4093,7 @@ def _execute_set_pipeline(
             plugin=src_plugin,
             on_success=src_args["on_success"],
             options=src_options,
-            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            on_validation_failure=src_on_vf,
         )
 
         node_specs = []
@@ -4632,6 +4887,247 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
     }
 
 
+# Canonical registry of every diagnostic code ``compute_proof_diagnostics``
+# may emit at ``severity='blocking'``. The skill markdown that drives the
+# composer LLM cites these codes by name, and the forced-repair loop keys off
+# ``severity == 'blocking'`` to decide whether to inject a repair message.
+# Drift between this set and the actual emission sites would silently break
+# the LLM's expected vocabulary, so ``_blocking_diagnostic`` enforces that
+# every blocking dict's ``code`` appears here at construction time.
+_BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "csv_duplicate_headers",
+        "csv_fixed_schema_omits_observed_columns",
+        "text_source_url_without_web_scrape",
+        "source_inspection_failed",
+    }
+)
+
+
+def _blocking_diagnostic(
+    *,
+    code: str,
+    message: str,
+    suggested_repair: str,
+    evidence_locator: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a blocking diagnostic dict and assert the code is registered.
+
+    Offensive: a contributor who adds a new blocker without registering it in
+    ``_BLOCKING_DIAGNOSTIC_CODES`` (and the matching skill-markdown vocabulary)
+    crashes immediately rather than shipping an unrecognised code into the
+    audit trail and the LLM's repair-message context.
+    """
+    if code not in _BLOCKING_DIAGNOSTIC_CODES:
+        raise AssertionError(
+            f"blocking diagnostic code {code!r} is not registered in "
+            f"_BLOCKING_DIAGNOSTIC_CODES. Add it there (and to the skill-"
+            f"markdown vocabulary the composer LLM consumes) before emitting "
+            f"a blocking diagnostic with this code."
+        )
+    return {
+        "code": code,
+        "severity": "blocking",
+        "message": message,
+        "suggested_repair": suggested_repair,
+        "evidence_locator": evidence_locator,
+    }
+
+
+def compute_proof_diagnostics(
+    state: CompositionState,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Compute machine-readable proof diagnostics for a composer state.
+
+    Promotes ``preview_pipeline`` from a "state validates" check into a
+    "state is plausibly runnable against observed input" proof. Returns a
+    machine-readable list of diagnostics — each entry has::
+
+        {
+            "code": "csv_fixed_schema_omits_observed_columns",
+            "severity": "blocking" | "warning" | "info",
+            "message": "human-readable description",
+            "suggested_repair": "tool/options the LLM should call",
+            "evidence_locator": {"source": "...", "node_id": "...", ...},
+        }
+
+    Diagnostics surfaced:
+
+      * ``csv_fixed_schema_omits_observed_columns`` — fixed CSV schema +
+        on_validation_failure=discard + at least one observed column
+        absent from declared fields. The combination silently discards
+        every row, which is the #1 historical convergence-failure mode.
+      * ``text_source_url_without_web_scrape`` — text source whose blob
+        content is a single URL but no web_scrape node downstream. The
+        URL string itself reaches sinks instead of the URL's content.
+      * ``source_inspection_warning`` — every warning surfaced by
+        ``inspect_blob_content`` is mirrored here at ``info`` severity
+        so the model sees them in the same array as blocking issues.
+
+    Bounded I/O: at most one blob read per call, bounded by
+    ``inspect_blob_content``'s 8 KiB / 100 row caps.
+
+    No-op (returns an empty list) if the source is not blob-backed or
+    if session context is absent.
+    """
+    diagnostics: list[dict[str, Any]] = []
+
+    source = state.source
+    if source is None:
+        return diagnostics
+
+    # Only blob-backed sources are inspectable from preview_pipeline; for
+    # path-based sources we have no bytes to peek at.
+    options = source.options or {}
+    blob_id = options.get("blob_ref") if isinstance(options, Mapping) else None
+    if blob_id is None or session_engine is None or session_id is None:
+        return diagnostics
+
+    blob = _sync_get_blob(session_engine, str(blob_id), session_id)
+    # ``blob`` is a BlobToolRecord (TypedDict produced by
+    # ``_blob_row_to_tool_dict`` from a validated blobs row). Direct
+    # subscript access is mandatory — a missing key is a Tier-1
+    # contract violation in our own dict shape, not external data.
+    if blob is None or blob["status"] != "ready":
+        return diagnostics
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        diagnostics.append(
+            _blocking_diagnostic(
+                code="source_inspection_failed",
+                message=(f"Source blob '{blob_id}' storage file is missing — pipeline cannot run until the blob is re-uploaded."),
+                suggested_repair="create_blob with the original content and re-wire via set_source_from_blob",
+                evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+            )
+        )
+        return diagnostics
+
+    # Tier 1 (our data, our file): an OSError between exists() and
+    # read_bytes() is a real anomaly (concurrent delete, fs corruption,
+    # permission revocation). Per CLAUDE.md offensive-programming
+    # policy, let it propagate so the operator sees an informative
+    # exception rather than a synthesised soft-degraded diagnostic
+    # that could let downstream act on absent bytes.
+    content = storage_path.read_bytes()
+
+    # Tier 1 integrity verification — same shared helper as the two
+    # other composer-tool blob readers. Without this, the proof step
+    # would feed unverified bytes into ``inspect_blob_content`` and
+    # repair-loop, undermining the audit trail's "decisions made on
+    # verified inputs" invariant.
+    _verify_blob_content_integrity(blob, content)
+
+    facts = inspect_blob_content(
+        content=content,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        content_hash=blob["content_hash"],
+    )
+
+    # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
+    if facts.source_kind in {"csv", "json", "jsonl"}:
+        schema = options.get("schema") if isinstance(options, Mapping) else None
+        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+            declared = schema.get("fields") or ()
+            if isinstance(declared, (list, tuple)):
+                missing = derive_extra_column_risk(facts, tuple(declared))
+                if missing and source.on_validation_failure == "discard":
+                    diagnostics.append(
+                        _blocking_diagnostic(
+                            code="csv_fixed_schema_omits_observed_columns",
+                            message=(
+                                f"Source schema is mode=fixed but omits observed columns "
+                                f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
+                                "Combined with on_validation_failure='discard', every row will be "
+                                "dropped because each contains an undeclared column."
+                            ),
+                            suggested_repair=(
+                                "patch_source_options with schema.mode='flexible' to accept extra "
+                                "columns, OR add the missing columns to schema.fields, OR set "
+                                "on_validation_failure to a configured output for inspection."
+                            ),
+                            evidence_locator={
+                                "source": "blob",
+                                "blob_id": str(blob_id),
+                                "missing_columns": list(missing),
+                                "observed_columns": list(facts.observed_headers or ()),
+                            },
+                        )
+                    )
+
+    # 2. Text source containing a single URL but no web_scrape downstream.
+    if facts.source_kind == "text" and facts.url_candidates:
+        node_plugins = {(n.plugin or "").lower() for n in state.nodes}
+        if "web_scrape" not in node_plugins:
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="text_source_url_without_web_scrape",
+                    message=(
+                        f"Source blob contains URL(s) {list(facts.url_candidates)} but no "
+                        "web_scrape transform is wired downstream. The URL string itself will "
+                        "flow to sinks, not the URL's content."
+                    ),
+                    suggested_repair=(
+                        "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
+                        "input: <source on_success>, options: {url_field: '<column>'}}) and route "
+                        "the source on_success to it."
+                    ),
+                    evidence_locator={
+                        "source": "blob",
+                        "blob_id": str(blob_id),
+                        "url_candidates": list(facts.url_candidates),
+                    },
+                )
+            )
+
+    # 3. Surface inspection warnings as info-severity diagnostics so the model
+    #    sees them in the same array as blocking issues. These are *advisory*
+    #    only — the model can ignore them if the operator's intent justifies.
+    #
+    #    Exception: ``csv_duplicate_headers`` is promoted to blocking. Duplicate
+    #    headers cause silent column collapse in csv.DictReader (last-write-
+    #    wins) and similar libraries, fabricating a single column from multiple
+    #    source columns. That is a Tier-1 audit-integrity violation — the
+    #    audit trail would silently contain data that "looks single-column"
+    #    when the source had two — and must force the repair loop, not pass
+    #    through as advisory. The repair vocabulary is: rename headers,
+    #    declare ``columns`` explicitly, configure ``field_mapping``, or set
+    #    ``on_validation_failure`` to a configured quarantine output.
+    for warning in facts.warnings:
+        if warning.startswith("csv_duplicate_headers:"):
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="csv_duplicate_headers",
+                    message=warning,
+                    suggested_repair=(
+                        "Rename the duplicate header(s) at the source, OR declare "
+                        "explicit `columns` in the source options, OR configure "
+                        "`field_mapping` to disambiguate the collapsed names, OR "
+                        "set `on_validation_failure` to a configured quarantine "
+                        "output so the silent column collapse does not poison the "
+                        "audit trail."
+                    ),
+                    evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+                )
+            )
+            continue
+        diagnostics.append(
+            {
+                "code": "source_inspection_warning",
+                "severity": "info",
+                "message": warning,
+                "suggested_repair": None,
+                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
+            }
+        )
+
+    return diagnostics
+
+
 def _execute_preview_pipeline(
     args: dict[str, Any],
     state: CompositionState,
@@ -4639,12 +5135,16 @@ def _execute_preview_pipeline(
     data_dir: str | None = None,
     *,
     runtime_preflight: RuntimePreflight | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
 ) -> ToolResult:
     """Preview pipeline configuration — dry-run validation with source summary.
 
-    V1: Returns validation result + source/node/output summary without
-    executing. Full data-flow preview (actually running the source and
-    returning sample rows) is a future enhancement.
+    Returns ``authoring_validation`` (Stage 1), ``runtime_preflight``
+    (Stage 2 from the caller-supplied callback), and ``proof_diagnostics``
+    (Stage 3 — operator-input-aware proof against the observed source
+    blob). The presence of any blocking ``proof_diagnostics`` entry means
+    ``is_valid=False`` even when authoring + runtime checks pass.
     """
     validation = state.validate()
     _AUTHORING_VALIDATION_COUNTER.add(
@@ -4654,8 +5154,21 @@ def _execute_preview_pipeline(
     authoring_payload = _authoring_validation_payload(state, validation)
     runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
 
+    proof_diagnostics = compute_proof_diagnostics(
+        state,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+    has_blocking_proof = any(d["severity"] == "blocking" for d in proof_diagnostics)
+
+    is_valid = validation.is_valid
+    if runtime_result is not None:
+        is_valid = is_valid and runtime_result.is_valid
+    if has_blocking_proof:
+        is_valid = False
+
     summary: dict[str, Any] = {
-        "is_valid": validation.is_valid if runtime_result is None else validation.is_valid and runtime_result.is_valid,
+        "is_valid": is_valid,
         "errors": authoring_payload["errors"],
         "warnings": authoring_payload["warnings"],
         "suggestions": authoring_payload["suggestions"],
@@ -4664,6 +5177,7 @@ def _execute_preview_pipeline(
         "graph_repair_suggestions": authoring_payload["graph_repair_suggestions"],
         "authoring_validation": authoring_payload,
         "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
+        "proof_diagnostics": proof_diagnostics,
         "source": None,
         "node_count": len(state.nodes),
         "output_count": len(state.outputs),
@@ -4731,6 +5245,7 @@ _DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "explain_validation_error": _execute_explain_validation_error,
     "get_plugin_assistance": _execute_get_plugin_assistance,
     "list_models": _execute_list_models,
+    "list_recipes": _execute_list_recipes,
     "get_pipeline_state": _execute_get_pipeline_state,
     "preview_pipeline": _execute_preview_pipeline,
     "diff_pipeline": _execute_diff_pipeline,
@@ -4768,6 +5283,7 @@ _BLOB_DISCOVERY_TOOLS: dict[str, BlobToolHandler] = {
     "list_blobs": _handle_list_blobs,
     "get_blob_metadata": _handle_get_blob_metadata,
     "get_blob_content": _execute_get_blob_content,
+    "inspect_source": _execute_inspect_source,
 }
 
 _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
@@ -4775,6 +5291,7 @@ _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
     "create_blob": _execute_create_blob,
     "update_blob": _execute_update_blob,
     "delete_blob": _execute_delete_blob,
+    "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
 }
 
 # Secret tools use an extended handler signature with secret_service + user_id kwargs
@@ -4878,6 +5395,8 @@ def execute_tool(
             so execute_tool() stays synchronous.
     """
     # preview_pipeline has an extended signature with runtime_preflight kwarg
+    # plus session context (session_engine, session_id) so the proof step
+    # can inspect blob-backed sources.
     if tool_name == "preview_pipeline":
         return _execute_preview_pipeline(
             arguments,
@@ -4885,6 +5404,8 @@ def execute_tool(
             catalog,
             data_dir,
             runtime_preflight=runtime_preflight,
+            session_engine=session_engine,
+            session_id=session_id,
         )
 
     # diff_pipeline has an extended signature with baseline kwarg

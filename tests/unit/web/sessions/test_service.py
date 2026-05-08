@@ -304,6 +304,56 @@ class TestCompositionStateVersioning:
         assert current is None
 
     @pytest.mark.asyncio
+    async def test_composer_meta_roundtrips_through_persistence(
+        self,
+        service,
+    ) -> None:
+        """``composer_meta`` survives DB roundtrip and reaches state record.
+
+        Regression for the ``state.composer_meta.repair_turns_used`` surface
+        — the convergence-suite eval scorer reads this field via
+        ``GET /api/sessions/{id}/state``. If the DB column is dropped or the
+        envelope wrap/unwrap is misaligned, scoring silently ambers.
+        """
+        session = await service.create_session("alice", "Pipeline", "local")
+        state_data = CompositionStateData(
+            is_valid=True,
+            composer_meta={"repair_turns_used": 1},
+        )
+        saved = await service.save_composition_state(session.id, state_data)
+        assert saved.composer_meta is not None
+        assert saved.composer_meta["repair_turns_used"] == 1
+
+        # Load via a different code path (get_current_state hits
+        # _row_to_state_record / _unwrap_envelope) to prove the value survives
+        # the JSON envelope wrap and unwrap.
+        loaded = await service.get_current_state(session.id)
+        assert loaded is not None
+        assert loaded.composer_meta is not None
+        assert loaded.composer_meta["repair_turns_used"] == 1
+
+    @pytest.mark.asyncio
+    async def test_composer_meta_absent_persists_as_none(
+        self,
+        service,
+    ) -> None:
+        """``composer_meta`` defaulting to ``None`` round-trips as ``None``.
+
+        Honest absence: revert/fork paths and historical pre-plumbing rows
+        must not synthesise a fake ``repair_turns_used: 0``. The eval scorer
+        relies on this distinction (absent => AMBER with explanation, not
+        silent pass).
+        """
+        session = await service.create_session("alice", "Pipeline", "local")
+        state_data = CompositionStateData(is_valid=True)
+        saved = await service.save_composition_state(session.id, state_data)
+        assert saved.composer_meta is None
+
+        loaded = await service.get_current_state(session.id)
+        assert loaded is not None
+        assert loaded.composer_meta is None
+
+    @pytest.mark.asyncio
     async def test_get_state_versions_returns_all_ascending(
         self,
         service,

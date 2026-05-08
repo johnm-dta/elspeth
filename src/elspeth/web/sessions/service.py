@@ -575,9 +575,10 @@ class SessionServiceImpl:
         SELECT-INSERT makes one a defensive-programming anti-pattern.
 
         Writes the real per-column schema (source/nodes/edges/outputs/
-        metadata_/is_valid/validation_errors/derived_from_state_id),
-        using the shared ``_enveloped_state_column(...)`` and
-        ``deep_thaw(...)`` patterns the existing inline inserts use today.
+        metadata_/is_valid/validation_errors/composer_meta/
+        derived_from_state_id), using the shared
+        ``_enveloped_state_column(...)`` and ``deep_thaw(...)`` patterns
+        the existing inline inserts use today.
 
         The ``provenance`` argument must satisfy the
         ``ck_composition_states_provenance`` CHECK constraint added in
@@ -630,6 +631,7 @@ class SessionServiceImpl:
                 metadata_=_enveloped_state_column(state.metadata_),
                 is_valid=state.is_valid,
                 validation_errors=deep_thaw(state.validation_errors),
+                composer_meta=_enveloped_state_column(state.composer_meta),
                 derived_from_state_id=derived_from_state_id,
                 provenance=provenance,
                 created_at=created_at if created_at is not None else datetime.now(UTC),
@@ -1011,6 +1013,7 @@ class SessionServiceImpl:
                             metadata_=_enveloped_state_column(state.metadata_),
                             is_valid=state.is_valid,
                             validation_errors=deep_thaw(state.validation_errors),
+                            composer_meta=_enveloped_state_column(state.composer_meta),
                             derived_from_state_id=None,
                             provenance="session_seed",
                             created_at=now,
@@ -1033,6 +1036,7 @@ class SessionServiceImpl:
             validation_errors=state.validation_errors,
             created_at=now,
             derived_from_state_id=None,
+            composer_meta=state.composer_meta,
         )
 
     async def get_current_state(
@@ -1115,6 +1119,7 @@ class SessionServiceImpl:
             validation_errors=row.validation_errors,
             created_at=self._ensure_utc(row.created_at),
             derived_from_state_id=(UUID(row.derived_from_state_id) if row.derived_from_state_id is not None else None),
+            composer_meta=self._unwrap_envelope(row.composer_meta),
         )
 
     async def create_run(
@@ -1465,6 +1470,7 @@ class SessionServiceImpl:
                             metadata_=prior_row.metadata_,
                             is_valid=prior_row.is_valid,
                             validation_errors=prior_row.validation_errors,
+                            composer_meta=prior_row.composer_meta,
                             derived_from_state_id=str(state_id),
                             provenance="session_seed",
                             created_at=now,
@@ -1487,6 +1493,7 @@ class SessionServiceImpl:
             validation_errors=prior_row.validation_errors,
             created_at=now,
             derived_from_state_id=state_id,
+            composer_meta=self._unwrap_envelope(prior_row.composer_meta),
         )
 
     async def cancel_orphaned_runs(
@@ -1879,6 +1886,7 @@ class SessionServiceImpl:
                                 metadata_=source_state_record.metadata_,
                                 is_valid=source_state_record.is_valid,
                                 validation_errors=source_state_record.validation_errors,
+                                composer_meta=source_state_record.composer_meta,
                             ),
                             derived_from_state_id=None,
                             provenance="session_fork",
@@ -1952,6 +1960,7 @@ class SessionServiceImpl:
                 validation_errors=source_state_record.validation_errors,
                 created_at=now,
                 derived_from_state_id=None,
+                composer_meta=source_state_record.composer_meta,
             )
 
         return new_session, new_messages, copied_state

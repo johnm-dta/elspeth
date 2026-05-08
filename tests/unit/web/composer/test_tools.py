@@ -410,6 +410,7 @@ class TestVfDestinationAdvisory:
         assert result.data is not None
         assert "nonexistent" in result.data["note"]
         assert "output" in result.data["note"].lower()
+        assert "discard" in result.data["note"]
 
     def test_set_source_discard_vf_no_note(self) -> None:
         """'discard' is a built-in value — no advisory needed."""
@@ -1659,6 +1660,19 @@ class TestToolDefinitions:
         for defn in get_tool_definitions():
             self._assert_no_enum_on_validation_failure(defn.get("parameters", {}), defn["name"])
 
+    def test_on_validation_failure_descriptions_match_runtime_contract(self) -> None:
+        """Tool docs must not advertise a non-existent built-in quarantine sink."""
+        descriptions: list[tuple[str, str]] = []
+        for defn in get_tool_definitions():
+            self._collect_on_validation_failure_descriptions(defn.get("parameters", {}), defn["name"], descriptions)
+
+        assert descriptions, "expected at least one on_validation_failure schema description"
+        for tool_name, description in descriptions:
+            lowered = description.lower()
+            assert "built-in quarantine" not in lowered, tool_name
+            assert "discard" in description, tool_name
+            assert "Any other value, including 'quarantine', must match a configured output/sink name." in description, tool_name
+
     def test_upsert_node_trigger_schema_documents_end_of_source_only_shape(self) -> None:
         """Aggregation trigger schema must expose the end-of-source-only shape."""
         upsert_node = next(defn for defn in get_tool_definitions() if defn["name"] == "upsert_node")
@@ -1714,6 +1728,25 @@ class TestToolDefinitions:
         elif isinstance(schema, list):
             for item in schema:
                 self._assert_no_enum_on_validation_failure(item, tool_name)
+
+    def _collect_on_validation_failure_descriptions(
+        self,
+        schema: object,
+        tool_name: str,
+        descriptions: list[tuple[str, str]],
+    ) -> None:
+        """Collect on_validation_failure descriptions from nested tool schemas."""
+        if isinstance(schema, dict):
+            for key, value in schema.items():
+                if key == "on_validation_failure" and isinstance(value, dict):
+                    description = value.get("description")
+                    assert isinstance(description, str), f"Tool {tool_name!r} on_validation_failure lacks description"
+                    descriptions.append((tool_name, description))
+                elif isinstance(value, (dict, list)):
+                    self._collect_on_validation_failure_descriptions(value, tool_name, descriptions)
+        elif isinstance(schema, list):
+            for item in schema:
+                self._collect_on_validation_failure_descriptions(item, tool_name, descriptions)
 
     def _assert_arrays_have_items(self, schema: object, tool_name: str, path: tuple[str, ...]) -> None:
         """Recursively walk a JSON schema and assert all arrays declare items."""
@@ -2111,6 +2144,7 @@ class TestToolRegistry:
             "explain_validation_error",
             "get_plugin_assistance",
             "list_models",
+            "list_recipes",
             "get_pipeline_state",
             "preview_pipeline",
             "diff_pipeline",
@@ -2714,6 +2748,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.updated_state.source is not None
         assert result.updated_state.source.plugin == "csv"
+        assert result.updated_state.source.on_validation_failure == "discard"
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
@@ -2926,6 +2961,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.data is not None
         assert "nonexistent" in result.data["note"]
+        assert "discard" in result.data["note"]
 
     def test_create_blob_cleans_file_on_db_failure(self, tmp_path: Path) -> None:
         """DB failure during create_blob must delete the orphaned storage file."""
@@ -5249,6 +5285,20 @@ class TestSetPipeline:
         assert result.validation is not None
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
+
+    def test_set_pipeline_source_defaults_validation_failures_to_discard(self) -> None:
+        """Omitting on_validation_failure must not synthesize an absent quarantine sink."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        del args["source"]["on_validation_failure"]
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.updated_state.source is not None
+        assert result.updated_state.source.on_validation_failure == "discard"
+        assert result.data is None
 
     def test_set_pipeline_missing_json_output_options_returns_exact_repair_hint(self) -> None:
         state = _empty_state()
@@ -7980,3 +8030,850 @@ class TestUpdateBlobAtomicWrite:
         assert self.storage_path.read_bytes() == self.original_content
         leftovers = [p for p in self.storage_dir.iterdir() if p != self.storage_path]
         assert leftovers == [], f"Tempfiles leaked after DB failure: {leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# inspect_source mirrors get_blob_content's lifecycle/integrity/decode
+# guards, but returns SourceInspectionFacts as a structured dict rather than
+# raw bytes — so the LLM can reason about headers and types without seeing
+# row content.
+# ---------------------------------------------------------------------------
+
+
+class TestInspectSourceTool:
+    """``inspect_source`` returns bounded structural facts about a blob."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        self.engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(self.engine)
+
+        self.session_id = str(uuid4())
+        self.blob_id = str(uuid4())
+        now = datetime.now(UTC)
+
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True)
+        self.storage_path = storage_dir / f"{self.blob_id}_orders.csv"
+        self.content_bytes = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        self.content_hash_hex = _content_hash(self.content_bytes)
+        self.storage_path.write_bytes(self.content_bytes)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=self.session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.blob_id,
+                    session_id=self.session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(self.content_bytes),
+                    content_hash=self.content_hash_hex,
+                    storage_path=str(self.storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+    def _set_status(self, status: str) -> None:
+        from elspeth.web.sessions.models import blobs_table
+
+        with self.engine.begin() as conn:
+            conn.execute(blobs_table.update().where(blobs_table.c.id == self.blob_id).values(status=status))
+
+    def test_returns_csv_facts_for_ready_blob(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        data = result.data
+        assert data["source_kind"] == "csv"
+        # Data is deep-frozen by ToolResult.__post_init__: lists become tuples,
+        # dicts become MappingProxyType. Compare against the frozen forms.
+        assert tuple(data["observed_headers"]) == ("order_id", "customer", "price")
+        assert dict(data["inferred_types"]) == {
+            "order_id": "str",
+            "customer": "str",
+            "price": "float",
+        }
+        assert data["sample_row_count"] == 2
+        assert data["redacted_identity"]["filename"] == "orders.csv"
+        assert data["redacted_identity"]["mime_type"] == "text/csv"
+        # Identity must NOT include storage_path
+        assert "storage_path" not in data["redacted_identity"]
+
+    def test_returns_url_candidates_when_present(self) -> None:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        # Add a second blob with URL content
+        url_blob_id = str(uuid4())
+        url_path = self.storage_path.parent / f"{url_blob_id}_urls.txt"
+        url_bytes = b"https://example.com/api\n"
+        url_path.write_bytes(url_bytes)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=url_blob_id,
+                    session_id=self.session_id,
+                    filename="urls.txt",
+                    mime_type="text/plain",
+                    size_bytes=len(url_bytes),
+                    content_hash=_content_hash(url_bytes),
+                    storage_path=str(url_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": url_blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        assert result.data["source_kind"] == "text"
+        assert tuple(result.data["url_candidates"]) == ("https://example.com/api",)
+        assert any("web_scrape" in w for w in result.data["warnings"])
+
+    def test_pending_blob_refused(self) -> None:
+        self._set_status("pending")
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is False
+        # Failure messages live in result.data["error"] (set by _failure_result).
+        assert "pending" in result.data["error"].lower()
+
+    def test_missing_blob_returns_failure(self) -> None:
+        from uuid import uuid4
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": str(uuid4())},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is False
+        assert "not found" in result.data["error"].lower()
+
+    def test_without_session_context_returns_failure(self) -> None:
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+        )
+        assert result.success is False
+
+    def test_hash_mismatch_raises_blob_integrity_error(self) -> None:
+        """Tier-1 invariant — corrupted blob must escalate, not return facts."""
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        # Tamper with the on-disk bytes so SHA-256 mismatches the stored hash.
+        self.storage_path.write_bytes(b"tampered,content\n9,9\n")
+        with pytest.raises(BlobIntegrityError):
+            execute_tool(
+                "inspect_source",
+                {"blob_id": self.blob_id},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+    def test_non_uuid_blob_id_surfaces_warning_fact(self, tmp_path: Path) -> None:
+        """A blob row whose id is not a parseable UUID must surface a
+        ``blob_id_not_uuid:`` warning to the audit trail, never silently
+        dropping the identifier."""
+        from datetime import UTC, datetime
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        non_uuid_id = "not-a-uuid-but-a-real-row"
+        body = b"a,b,c\n1,2,3\n"
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        non_uuid_path = storage_dir / f"{non_uuid_id}_x.csv"
+        non_uuid_path.write_bytes(body)
+        now = datetime.now(UTC)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=non_uuid_id,
+                    session_id=self.session_id,
+                    filename="x.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(non_uuid_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": non_uuid_id},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        warnings = tuple(result.data["warnings"])
+        matched = [w for w in warnings if w.startswith("blob_id_not_uuid:")]
+        assert len(matched) == 1, f"expected exactly one blob_id_not_uuid warning, got {warnings!r}"
+        assert non_uuid_id in matched[0]
+        identity = result.data["redacted_identity"]
+        assert "blob_id" not in identity
+        assert "content_hash_prefix" in identity
+
+
+# ---------------------------------------------------------------------------
+# preview_pipeline proof step. proof_diagnostics surfaces blocking issues that
+# depend on observed input shape: fixed CSV schema omitting observed columns,
+# text source containing a URL with no web_scrape downstream, missing or
+# unreadable blob storage. is_valid is forced to False when any proof
+# diagnostic is blocking, even if authoring/runtime checks pass.
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewProofStep:
+    """preview_pipeline must surface input-shape diagnostics when session context is supplied."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        self.engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(self.engine)
+
+        self.session_id = str(uuid4())
+        self.csv_blob_id = str(uuid4())
+        self.url_blob_id = str(uuid4())
+        now = datetime.now(UTC)
+
+        # CSV blob with three observed columns
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True)
+        self.csv_storage_path = storage_dir / f"{self.csv_blob_id}_orders.csv"
+        csv_content = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        self.csv_storage_path.write_bytes(csv_content)
+
+        # Text blob with a single URL
+        self.url_storage_path = storage_dir / f"{self.url_blob_id}_url.txt"
+        url_content = b"https://example.com/data.json\n"
+        self.url_storage_path.write_bytes(url_content)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=self.session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.csv_blob_id,
+                    session_id=self.session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                    storage_path=str(self.csv_storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.url_blob_id,
+                    session_id=self.session_id,
+                    filename="url.txt",
+                    mime_type="text/plain",
+                    size_bytes=len(url_content),
+                    content_hash=_content_hash(url_content),
+                    storage_path=str(self.url_storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+    def _state_with_csv_source(
+        self,
+        *,
+        schema_mode: str = "fixed",
+        fields: tuple[str, ...] = (),
+        on_validation_failure: str = "discard",
+    ):
+        """Build a state with a CSV blob source via the composer tool API."""
+        schema: dict[str, object] = {"mode": schema_mode}
+        if fields:
+            schema["fields"] = list(fields)
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # Wire source via set_source_from_blob — this is the canonical way to
+        # produce a state with source.options.blob_ref set.
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.csv_blob_id,
+                "on_success": "rows",
+                "on_validation_failure": on_validation_failure,
+                "options": {"schema": schema},
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    def _state_with_text_url_source(self, *, with_web_scrape: bool):
+        """Build a state with a text URL blob source, optionally with web_scrape."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.url_blob_id,
+                "on_success": "url_rows" if with_web_scrape else "content",
+                "on_validation_failure": "discard",
+                "options": {
+                    "column": "url",
+                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                },
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        if with_web_scrape:
+            result = execute_tool(
+                "upsert_node",
+                {
+                    "id": "fetch",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "url_rows",
+                    "on_success": "content",
+                    "on_error": "discard",
+                    "options": {
+                        "url_field": "url",
+                        "schema": {"mode": "fixed", "fields": ["url: str"]},
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "format": "text",
+                        "text_separator": "\n",
+                        "http": {
+                            "abuse_contact": "test@example.com",
+                            "scraping_reason": "test",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                state,
+                catalog,
+            )
+            assert result.success, result.data
+            state = result.updated_state
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    # -- Empty / no-op cases ------------------------------------------------
+
+    def test_proof_empty_when_no_blob_source(self) -> None:
+        """Path-based source has no blob to inspect — diagnostics empty."""
+        # Build a state via set_pipeline using a path-based source (no blob_ref)
+        args = _valid_pipeline_args()
+        args["source"]["on_validation_failure"] = "discard"
+        result = execute_tool("set_pipeline", args, _empty_state(), _mock_catalog())
+        assert result.success, result.data
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            result.updated_state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        assert result.data["proof_diagnostics"] == ()
+
+    def test_proof_empty_when_no_session_context(self) -> None:
+        """Blob source with no session_engine — proof step degrades to empty."""
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool("preview_pipeline", {}, state, _mock_catalog())
+        assert result.success is True
+        assert result.data["proof_diagnostics"] == ()
+
+    # -- csv_fixed_schema_omits_observed_columns ----------------------------
+
+    def test_fixed_csv_omits_columns_with_discard_blocks(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "csv_fixed_schema_omits_observed_columns" in codes
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert blocking, "expected a blocking diagnostic for omitted observed columns"
+        # is_valid is forced False by the blocking proof diagnostic.
+        assert result.data["is_valid"] is False
+
+    def test_fixed_csv_with_all_columns_does_not_block(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str", "customer: str", "price: float"),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_flexible_csv_does_not_block(self) -> None:
+        """Flexible mode accepts extra columns by design."""
+        state = self._state_with_csv_source(schema_mode="flexible", fields=("order_id: str",))
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_fixed_csv_with_routed_failures_does_not_block(self) -> None:
+        """on_validation_failure routes to a sink → not silent discard, not blocking."""
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="quarantine_sink",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    # -- text_source_url_without_web_scrape ---------------------------------
+
+    def test_text_url_without_web_scrape_blocks(self) -> None:
+        state = self._state_with_text_url_source(with_web_scrape=False)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "text_source_url_without_web_scrape" in codes
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert blocking
+        assert result.data["is_valid"] is False
+
+    def test_text_url_with_web_scrape_does_not_block(self) -> None:
+        state = self._state_with_text_url_source(with_web_scrape=True)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "text_source_url_without_web_scrape" not in codes
+
+    # -- inspection warnings surfaced as info -------------------------------
+
+    def test_inspection_warnings_surfaced_as_info(self) -> None:
+        """The text source's web_scrape warning is mirrored in proof_diagnostics as info."""
+        state = self._state_with_text_url_source(with_web_scrape=True)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        info = [d for d in diagnostics if d["severity"] == "info"]
+        # web_scrape warning from inspection should be mirrored — as info, not blocking
+        assert any(d["code"] == "source_inspection_warning" for d in info)
+
+    # -- csv_duplicate_headers (promoted to blocking) -----------------------
+    # Duplicate CSV headers cause silent column collapse in csv.DictReader
+    # (last-write-wins) and similar libraries, fabricating a single column
+    # from multiple source columns. That is a Tier-1 audit-integrity
+    # violation and must force the repair loop, not pass through as
+    # advisory info.
+
+    def _replace_csv_blob_with_duplicate_headers(self) -> None:
+        """Overwrite the seeded CSV blob's bytes + content_hash so it has
+        duplicate headers. Must update content_hash to match the new bytes
+        or the proof step's BlobIntegrityError check will fire instead.
+        """
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        new_bytes = b"order_id,name,name,price\nO-1,Alice,Smith,49.95\nO-2,Bob,Jones,150.00\n"
+        self.csv_storage_path.write_bytes(new_bytes)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(new_bytes),
+                    content_hash=_content_hash(new_bytes),
+                )
+            )
+
+    def test_csv_duplicate_headers_blocks(self) -> None:
+        """Duplicate CSV headers must surface as a blocking proof diagnostic."""
+        self._replace_csv_blob_with_duplicate_headers()
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "csv_duplicate_headers" in codes, diagnostics
+        # Severity is blocking, not info.
+        dup = next(d for d in diagnostics if d["code"] == "csv_duplicate_headers")
+        assert dup["severity"] == "blocking", dup
+        # Must carry an actionable suggested_repair string (not None) so the
+        # forced-repair loop has a concrete remedy to relay to the LLM.
+        assert isinstance(dup["suggested_repair"], str) and dup["suggested_repair"], dup
+        # The warning text must reach the LLM verbatim — it names the
+        # offending header(s).
+        assert "name" in dup["message"], dup
+        # is_valid is forced False by the blocking proof diagnostic.
+        assert result.data["is_valid"] is False
+
+    def test_csv_without_duplicate_headers_does_not_block(self) -> None:
+        """Clean headers must not produce a csv_duplicate_headers diagnostic."""
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_duplicate_headers" not in codes
+
+    def test_csv_duplicate_headers_registered_as_blocking_code(self) -> None:
+        """Registry membership ripples — the constructor would crash if the
+        emission site used an unregistered code, so this test pins the
+        canonical-vocabulary contract independently of emission."""
+        from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES
+
+        assert "csv_duplicate_headers" in _BLOCKING_DIAGNOSTIC_CODES
+
+    # -- missing/unreadable blob --------------------------------------------
+
+    def test_missing_storage_file_blocks(self) -> None:
+        self.csv_storage_path.unlink()
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "source_inspection_failed" in codes
+        assert result.data["is_valid"] is False
+
+    def test_blocking_proof_overrides_authoring_validation(self) -> None:
+        """Authoring may be valid but blocking proof_diagnostics still flips is_valid."""
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        # Stage 1 might be valid, but proof step blocks → is_valid False.
+        assert result.data["is_valid"] is False
+        # The state-level validation still reflects authoring shape, only
+        # the summary-level is_valid is forced. authoring_validation is
+        # deep-frozen to MappingProxyType by ToolResult.__post_init__.
+        from collections.abc import Mapping as _Mapping
+
+        assert isinstance(result.data["authoring_validation"], _Mapping)
+
+    # -- proof step integrity verification -----------------------------------
+    # The proof step reads blob bytes through the same Tier-1 invariants as
+    # _execute_get_blob_content and _execute_inspect_source: NULL stored
+    # content_hash escalates via AuditIntegrityError; SHA-256 mismatch
+    # escalates via BlobIntegrityError. Without these the audit trail would
+    # accept LLM repair turns driven by unverified bytes.
+
+    def test_proof_raises_blob_integrity_error_on_hash_mismatch(self) -> None:
+        """Tampering with on-disk bytes after upload must raise, not soft-fail.
+
+        The proof step reads the blob's bytes; if SHA-256 of the bytes
+        does not match the stored content_hash, that's a Tier-1 anomaly
+        (filesystem corruption, tampering, or write-path bug) and must
+        ESCALATE — not silently let downstream LLM repair turns act on
+        garbage.
+        """
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        state = self._state_with_csv_source(schema_mode="observed")
+        # Tamper with the on-disk bytes after the row was inserted.
+        self.csv_storage_path.write_bytes(b"tampered,data\nX,Y\n")
+        with pytest.raises(BlobIntegrityError):
+            execute_tool(
+                "preview_pipeline",
+                {},
+                state,
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+    def test_proof_raises_audit_integrity_error_on_null_content_hash(self) -> None:
+        """A ``ready`` blob with NULL content_hash is a DB-integrity anomaly.
+
+        Enforced at write time by the ``ck_blobs_ready_hash`` CHECK
+        constraint. If the proof step ever observes NULL here, the
+        constraint was bypassed (or the database is corrupt). Must
+        ESCALATE via AuditIntegrityError; cannot soft-degrade to "no
+        diagnostics" because that would let an unverified blob drive
+        repair turns.
+        """
+        from sqlalchemy import update
+
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.web.sessions.models import blobs_table
+
+        # Bypass the CHECK constraint by suspending it; sqlite respects
+        # ``PRAGMA defer_foreign_keys`` but not check toggles inline,
+        # so we drop and recreate without the constraint for the test
+        # row. Simpler: directly patch via raw SQL with a workaround
+        # — but the cleanest test path is to set status='ready' and
+        # NULL the hash explicitly via UPDATE; sqlite will reject the
+        # CHECK if defined. Use a raw SQL UPDATE that violates the
+        # check guard if present, else falls through; the row's
+        # presence on read with NULL hash is what we need.
+        state = self._state_with_csv_source(schema_mode="observed")
+        with self.engine.begin() as conn:
+            # Disable the row-level check by toggling pragma; sqlite
+            # 3.x respects this for the connection. Then null the hash.
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+            conn.execute(update(blobs_table).where(blobs_table.c.id == self.csv_blob_id).values(content_hash=None))
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+        with pytest.raises(AuditIntegrityError, match="NULL content_hash"):
+            execute_tool(
+                "preview_pipeline",
+                {},
+                state,
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+
+class TestBlockingDiagnosticRegistry:
+    """``_blocking_diagnostic`` enforces the canonical-codes invariant.
+
+    The skill markdown that drives the composer LLM cites these codes by
+    name; if a contributor adds a new blocker without registering the code
+    in ``_BLOCKING_DIAGNOSTIC_CODES``, the LLM's repair vocabulary drifts
+    silently. The constructor's runtime assertion turns that drift into a
+    crash at the construction site.
+    """
+
+    def test_unregistered_code_raises_at_construction(self) -> None:
+        from elspeth.web.composer.tools import _blocking_diagnostic
+
+        with pytest.raises(AssertionError, match="not registered in _BLOCKING_DIAGNOSTIC_CODES"):
+            _blocking_diagnostic(
+                code="this_code_was_never_registered",
+                message="msg",
+                suggested_repair="repair",
+                evidence_locator={},
+            )
+
+    def test_registered_codes_construct_successfully(self) -> None:
+        from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES, _blocking_diagnostic
+
+        for code in _BLOCKING_DIAGNOSTIC_CODES:
+            d = _blocking_diagnostic(
+                code=code,
+                message="msg",
+                suggested_repair="repair",
+                evidence_locator={"source": "blob", "blob_id": "abc"},
+            )
+            # Construction sets severity blocking and preserves the inputs.
+            assert d["code"] == code
+            assert d["severity"] == "blocking"
+            assert d["message"] == "msg"
+            assert d["suggested_repair"] == "repair"
+            assert d["evidence_locator"] == {"source": "blob", "blob_id": "abc"}

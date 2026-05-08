@@ -31,21 +31,80 @@ if TYPE_CHECKING:
 
 _HTTPX_CLIENT_CLASS = httpx.Client
 _TEST_IP = "93.184.216.34"
-_METADATA_IP = "169.254.169.254"
+
+# SSRF blocked-IP coverage matrix.
+#
+# Each entry is (resolved_ip, blocklist_tier) where blocklist_tier is the
+# verbatim prefix of the SSRFBlockedError message produced by
+# elspeth.core.security.web._validate_ip_address(). The two prefixes are
+# load-bearing: they distinguish ALWAYS_BLOCKED_RANGES (cannot be bypassed
+# by allowed_ranges) from BLOCKED_IP_RANGES (bypassable). Both must be
+# covered to verify the full SSRF surface — the previous single-case test
+# (169.254.169.254 only) only exercised the ALWAYS_BLOCKED tier and would
+# pass even if the entire BLOCKED_IP_RANGES check was deleted.
+#
+# Sourced from BLOCKED_IP_RANGES + ALWAYS_BLOCKED_RANGES in
+# src/elspeth/core/security/web.py. Do NOT shrink this list without a
+# matching change there — the ranges and these test cases must move together.
+#
+# Falsifiability check (run manually after any change to either the
+# production blocklist or this matrix): remove a single range from
+# production and confirm exactly the matching parametrised case fails.
+# Production code at security/web.py:61 specifically calls
+# ::ffff:0:0/96 a "CRITICAL: bypass vector!" — the ipv4_mapped_ipv6 case
+# below is the falsifiable proof that the IPv6-side check fires before
+# any IPv4-mapping path could leak through. ::ffff:10.0.0.1 is chosen
+# because it is in ::ffff:0:0/96 but NOT in ::ffff:169.254.0.0/112
+# (which would short-circuit on the always-blocked tier first).
+_SSRF_BLOCKED_CASES: tuple[tuple[str, str, str], ...] = (
+    # ALWAYS_BLOCKED_RANGES (unconditional — no allowlist bypass)
+    ("aws_metadata_v4", "169.254.169.254", "Always-blocked IP range"),
+    ("ipv4_mapped_metadata", "::ffff:169.254.169.254", "Always-blocked IP range"),
+    ("ipv6_link_local", "fe80::1", "Always-blocked IP range"),
+    ("broadcast_v4", "255.255.255.255", "Always-blocked IP range"),
+    ("multicast_v4", "224.0.0.1", "Always-blocked IP range"),
+    ("multicast_v6", "ff02::1", "Always-blocked IP range"),
+    # BLOCKED_IP_RANGES (default blocklist; bypassable only via allowed_ranges)
+    ("current_network_v4", "0.0.0.1", "Blocked IP range"),
+    ("loopback_v4", "127.0.0.1", "Blocked IP range"),
+    ("loopback_v6", "::1", "Blocked IP range"),
+    ("rfc1918_class_a", "10.0.0.1", "Blocked IP range"),
+    ("rfc1918_class_b", "172.16.0.1", "Blocked IP range"),
+    ("rfc1918_class_c", "192.168.1.1", "Blocked IP range"),
+    ("cgnat_v4", "100.64.0.1", "Blocked IP range"),
+    ("ipv6_ula", "fc00::1", "Blocked IP range"),
+    ("ipv4_mapped_ipv6", "::ffff:10.0.0.1", "Blocked IP range"),
+)
 
 
 def _mock_getaddrinfo(ip: str = _TEST_IP) -> Any:
-    """Create a deterministic DNS resolver for SSRF validation."""
+    """Create a deterministic DNS resolver for SSRF validation.
+
+    The shape of the returned tuple matches what ``socket.getaddrinfo``
+    actually produces and what
+    ``elspeth.core.security.web._resolve_hostname`` consumes:
+    ``(family, type, proto, canonname, sockaddr)``.
+
+    For IPv4: sockaddr = ``(ip, port)``
+    For IPv6: sockaddr = ``(ip, port, flowinfo, scopeid)``
+
+    The IP family is detected from the literal so callers can pass either
+    form without a separate flag.
+    """
+
+    is_ipv6 = ":" in ip
+    family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
+    sockaddr: tuple[Any, ...] = (ip, 0, 0, 0) if is_ipv6 else (ip, 0)
 
     def _getaddrinfo(
         host: str,
         port: Any,
-        family: int = 0,
+        family_arg: int = 0,
         type: int = 0,
         proto: int = 0,
         flags: int = 0,
     ) -> list[tuple[Any, ...]]:
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
 
     return _getaddrinfo
 
@@ -194,25 +253,66 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         assert call_kwargs["status"] is CallStatus.SUCCESS
         payload_store.store.assert_called_once_with(result.row["page_content"].encode())
 
-    def test_ssrf_blocked_url_returns_validation_error_before_external_call(
+    @pytest.mark.parametrize(
+        ("case_id", "resolved_ip", "tier_prefix"),
+        _SSRF_BLOCKED_CASES,
+        ids=[case[0] for case in _SSRF_BLOCKED_CASES],
+    )
+    def test_ssrf_blocked_resolved_ip_quarantines_before_external_call(
         self,
         transform: TransformProtocol,
         ctx: PluginContext,
         mock_httpx: Mock,
+        case_id: str,
+        resolved_ip: str,
+        tier_prefix: str,
     ) -> None:
-        """SSRF rejection is a pre-fetch validation result, not an audited HTTP call."""
-        row = make_pipeline_row({"url": "https://metadata.example/latest/meta-data"})
+        """SSRF rejection is a pre-fetch validation result, not an audited HTTP call.
 
-        with patch("socket.getaddrinfo", side_effect=_mock_getaddrinfo(_METADATA_IP)):
+        Coverage rationale: WebScrapeTransform delegates to
+        ``elspeth.core.security.web.validate_url_for_ssrf``, which checks
+        resolved IPs against two distinct blocklist tiers
+        (``ALWAYS_BLOCKED_RANGES`` and ``BLOCKED_IP_RANGES``). A test that
+        only exercises one tier — as the previous single-case version did
+        with ``169.254.169.254`` — would silently pass even if the other
+        tier's check was deleted. This parametrisation covers both tiers
+        across IPv4 loopback, IPv4 link-local/metadata, IPv4 RFC-1918
+        (Class A/B/C), IPv6 loopback, and IPv6 link-local. See
+        ``_SSRF_BLOCKED_CASES`` for the matrix and its source-of-truth
+        cross-reference.
+
+        DNS path: the only resolution path in the SSRF check is
+        ``_resolve_hostname`` → ``socket.getaddrinfo`` (called via the
+        bounded ``_dns_pool`` ThreadPoolExecutor). No alternative DNS APIs
+        (``gethostbyname``, async resolvers, etc.) are used by the
+        production code, so a single ``socket.getaddrinfo`` patch covers
+        the whole surface. Redirect re-validation in
+        ``AuditedHTTPClient._follow_redirects`` also funnels through
+        ``validate_url_for_ssrf``, so it inherits the same DNS path.
+        """
+        row = make_pipeline_row({"url": "https://blocked.example/path"})
+
+        with patch("socket.getaddrinfo", side_effect=_mock_getaddrinfo(resolved_ip)):
             result = transform.process(row, ctx)
 
-        assert result.status == "error"
-        assert result.reason is not None
-        assert result.reason["reason"] == "validation_failed"
-        assert result.reason["error_type"] == "SSRFBlockedError"
-        assert f"Always-blocked IP range: {_METADATA_IP}" in result.reason["error"]
-        assert result.retryable is False
+        assert result.status == "error", f"case {case_id}: expected error, got {result.status!r}"
+        assert result.reason is not None, f"case {case_id}: missing reason payload"
+        assert result.reason["reason"] == "validation_failed", (
+            f"case {case_id}: expected reason=validation_failed, got {result.reason['reason']!r}"
+        )
+        assert result.reason["error_type"] == "SSRFBlockedError", (
+            f"case {case_id}: expected SSRFBlockedError, got {result.reason['error_type']!r}"
+        )
+        # The error message must include the verbatim resolved IP and the
+        # blocklist-tier prefix. Both are load-bearing for audit clarity:
+        # downstream tooling distinguishes the tiers when reporting.
+        assert f"{tier_prefix}: {resolved_ip}" in result.reason["error"], (
+            f"case {case_id}: error message {result.reason['error']!r} did not contain {tier_prefix!r}: {resolved_ip!r}"
+        )
+        assert result.retryable is False, f"case {case_id}: SSRF rejection must not be retryable"
 
+        # SSRF is rejected before any HTTP call; the audit recorder, payload
+        # store, and httpx client must not see this request.
         _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
         mock_httpx.return_value.get.assert_not_called()

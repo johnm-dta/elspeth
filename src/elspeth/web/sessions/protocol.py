@@ -161,6 +161,10 @@ class CompositionStateData:
     metadata_: Mapping[str, Any] | None = None
     is_valid: bool = False
     validation_errors: Sequence[str] | None = None
+    # Operational/audit meta describing how this state was reached. Distinct
+    # from ``metadata_`` which carries user-facing PipelineMetadata. ``None``
+    # is honest for revert/fork paths and for non-compose write paths.
+    composer_meta: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         non_none = []
@@ -176,6 +180,8 @@ class CompositionStateData:
             non_none.append("metadata_")
         if self.validation_errors is not None:
             non_none.append("validation_errors")
+        if self.composer_meta is not None:
+            non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
 
@@ -199,6 +205,10 @@ class CompositionStateRecord:
     validation_errors: Sequence[str] | None
     created_at: datetime
     derived_from_state_id: UUID | None
+    # Operational/audit meta describing how this state was reached. Distinct
+    # from ``metadata_`` which carries user-facing PipelineMetadata. ``None``
+    # is honest for revert/fork paths and for non-compose write paths.
+    composer_meta: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         non_none = []
@@ -214,6 +224,8 @@ class CompositionStateRecord:
             non_none.append("metadata_")
         if self.validation_errors is not None:
             non_none.append("validation_errors")
+        if self.composer_meta is not None:
+            non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
 

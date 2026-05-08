@@ -105,6 +105,13 @@ class SourceProtocol(Protocol):
     # Set from the source's effective SchemaConfig guarantees at construction.
     declared_guaranteed_fields: frozenset[str]
 
+    # Lifecycle guards (set by BaseSource.on_start()/on_complete()).
+    # All sources must inherit BaseSource which manages these. Contract tests
+    # use these flags as falsifiable post-conditions for lifecycle invocation
+    # (a stub override that forgets super() flips the flag, breaking the test).
+    _on_start_called: bool
+    _on_complete_called: bool
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         ...
@@ -260,10 +267,14 @@ class TransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
-    # Lifecycle guard (set by BaseTransform.on_start()).
-    # The TransformExecutor checks this before process() to ensure on_start()
-    # was called. All transforms must inherit BaseTransform which manages this.
+    # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
+    # The TransformExecutor checks _on_start_called before process() to ensure
+    # on_start() was called. All transforms must inherit BaseTransform which
+    # manages these. Contract tests use these flags as falsifiable
+    # post-conditions for lifecycle invocation (a stub override that forgets
+    # super() flips the flag, breaking the test).
     _on_start_called: bool
+    _on_complete_called: bool
 
     # Batch support flag (must be False for TransformProtocol)
     # When True, transform must implement BatchTransformProtocol instead
@@ -452,6 +463,13 @@ class BatchTransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
+    # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
+    # Batch transforms inherit BaseTransform which manages these. Contract tests
+    # use these flags as falsifiable post-conditions for lifecycle invocation
+    # (a stub override that forgets super() flips the flag, breaking the test).
+    _on_start_called: bool
+    _on_complete_called: bool
+
     # Batch support flag (must be True for BatchTransformProtocol)
     is_batch_aware: bool
 
@@ -602,6 +620,13 @@ class SinkProtocol(Protocol):
     # Write failure routing — injected by cli_helpers from SinkSettings.
     # "discard" = drop failed rows with audit record, else = failsink name.
     _on_write_failure: str | None
+
+    # Lifecycle guards (set by BaseSink.on_start()/on_complete()).
+    # All sinks must inherit BaseSink which manages these. Contract tests
+    # use these flags as falsifiable post-conditions for lifecycle invocation
+    # (a stub override that forgets super() flips the flag, breaking the test).
+    _on_start_called: bool
+    _on_complete_called: bool
 
     def _reset_diversion_log(self) -> None:
         """Clear diversion log before each write() call."""

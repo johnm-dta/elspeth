@@ -56,6 +56,17 @@ class ComposerResult:
     # returned text-only).
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
     llm_calls: tuple[ComposerLLMCall, ...] = ()
+    # Number of forced repair turns the proof step injected into this compose
+    # invocation. Capped at 2 by the loop. 0 means first-pass success; 1 or 2
+    # means the model was given proof_diagnostics back as a synthesized
+    # message and asked to iterate. Surfaced on the compose-produced
+    # ``composition_states`` row via the ``composer_meta`` JSON column (see
+    # web/sessions/models.py and
+    # web/sessions/protocol.py::CompositionStateData.composer_meta) and
+    # returned by ``GET /api/sessions/{id}/state`` under
+    # ``composer_meta.repair_turns_used`` for the convergence-suite eval
+    # scorer.
+    repair_turns_used: int = 0
 
     def __post_init__(self) -> None:
         # Bidirectional iff enforcement of the field-pairing invariant
@@ -83,6 +94,26 @@ class ComposerResult:
                 "the failed preflight should have replaced message with a "
                 "synthetic summary and parked the original LLM text in "
                 "raw_assistant_content for audit-trail recovery."
+            )
+        # Cap-assert on repair_turns_used. The loop enforces the bound
+        # informally via ``_MAX_REPAIR_TURNS`` (web/composer/service.py),
+        # but the field flows into the audit trail via
+        # ``composition_states.composer_meta.repair_turns_used`` and is
+        # consumed by the convergence-suite eval scorer. An out-of-range
+        # value here would land in the legal record and be silently
+        # accepted by downstream consumers. Literal[0, 1, 2] would have
+        # been the mechanical mypy-checked form, but the compose loop
+        # mutates a plain ``int`` counter and threads it via
+        # ``dataclasses.replace`` — mypy cannot narrow ``int`` to a
+        # Literal at that site. The runtime check is the fallback that
+        # still mechanically rejects the bad value at the construction
+        # boundary. Keep this bound aligned with ``_MAX_REPAIR_TURNS``
+        # in web/composer/service.py.
+        if not 0 <= self.repair_turns_used <= 2:
+            raise ValueError(
+                "ComposerResult.repair_turns_used must be 0, 1, or 2 "
+                "(capped by _MAX_REPAIR_TURNS in web/composer/service.py); "
+                f"got {self.repair_turns_used}."
             )
 
 

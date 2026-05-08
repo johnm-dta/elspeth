@@ -179,7 +179,11 @@ class TestTransformProtocol:
             _output_schema_config: SchemaConfig | None = None  # Set by BaseTransform
             on_error: str | None = None  # Error routing (WP-11.99b)
             on_success: str | None = None  # Success routing
-            _on_start_called: bool = False  # Lifecycle guard (managed by BaseTransform)
+            # Lifecycle guards managed by BaseTransform; declared here for the
+            # hand-rolled structural fake to satisfy TransformProtocol's
+            # @runtime_checkable structural typing.
+            _on_start_called: bool = False
+            _on_complete_called: bool = False
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config

@@ -19,11 +19,10 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
 from openai.types.completion_usage import CompletionUsage
 
-from elspeth.contracts import TransformResult
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.llm.transform import LLMTransform
-from elspeth.testing import make_pipeline_row
 
+from ._azure_batch_helpers import submit_and_collect_single_result
 from .test_batch_transform_protocol import BatchTransformContractTestBase, CollectingOutputPort
 
 
@@ -63,24 +62,6 @@ class _FakeAzureOpenAI:
 
     def close(self) -> None:
         pass
-
-
-def _submit_and_collect_single_result(
-    started_transform: BatchTransformMixin,
-    row_data: dict[str, Any],
-    ctx: Any,
-    output_port: CollectingOutputPort,
-) -> TransformResult:
-    started_transform.accept(make_pipeline_row(row_data), ctx)
-
-    arrived = output_port.wait_for_results(1, timeout=10.0)
-    assert arrived, "Result did not arrive via OutputPort within timeout"
-
-    results = output_port.get_results()
-    assert len(results) == 1
-    _token, result, _state_id = results[0]
-    assert isinstance(result, TransformResult)
-    return result
 
 
 class TestMultiQueryLLMSpecific:
@@ -211,7 +192,7 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
         """Contract: malformed LLM JSON fails closed through the batch output path."""
         mock_azure_openai.chat.completions.content = "not valid JSON"
 
-        result = _submit_and_collect_single_result(
+        result = submit_and_collect_single_result(
             started_transform,
             valid_input,
             mock_ctx_factory(),

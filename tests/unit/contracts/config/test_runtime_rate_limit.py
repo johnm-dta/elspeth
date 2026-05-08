@@ -7,6 +7,15 @@ are in test_runtime_common.py.
 
 from types import MappingProxyType
 
+import pytest
+
+from elspeth.contracts.config import FIELD_MAPPINGS
+from elspeth.contracts.config.runtime import (
+    RuntimeRateLimitConfig,
+    RuntimeServiceRateLimit,
+)
+from elspeth.core.config import RateLimitSettings, ServiceRateLimit
+
 # NOTE: Protocol compliance, orphan detection, frozen/slots tests are in test_runtime_common.py
 
 
@@ -15,8 +24,6 @@ class TestRuntimeRateLimitAllFields:
 
     def test_has_all_settings_fields(self) -> None:
         """RuntimeRateLimitConfig must have all RateLimitSettings fields."""
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
-
         # All 4 fields from RateLimitSettings (simplified to per-minute only)
         expected_fields = {
             "enabled",
@@ -41,8 +48,6 @@ class TestRateLimitFieldNameMapping:
 
     def test_no_field_name_mappings_needed(self) -> None:
         """RateLimitSettings uses same names - no mappings needed."""
-        from elspeth.contracts.config import FIELD_MAPPINGS
-
         # RateLimitSettings should not have any field mappings
         # because all field names are the same between Settings and Runtime
         mappings: dict[str, str] | MappingProxyType[str, str] = FIELD_MAPPINGS.get("RateLimitSettings", {})
@@ -55,9 +60,6 @@ class TestRuntimeRateLimitFromSettings:
 
     def test_from_settings_maps_all_fields(self) -> None:
         """from_settings() must map all Settings fields correctly."""
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig, RuntimeServiceRateLimit
-        from elspeth.core.config import RateLimitSettings, ServiceRateLimit
-
         # Create settings with non-default values
         services = {"openai": ServiceRateLimit(requests_per_minute=100)}
         settings = RateLimitSettings(
@@ -78,9 +80,6 @@ class TestRuntimeRateLimitFromSettings:
 
     def test_from_settings_with_defaults(self) -> None:
         """from_settings() should handle default values from Settings."""
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
-        from elspeth.core.config import RateLimitSettings
-
         # Use Settings defaults
         settings = RateLimitSettings()
         config = RuntimeRateLimitConfig.from_settings(settings)
@@ -97,8 +96,6 @@ class TestRuntimeRateLimitConvenienceFactories:
 
     def test_default_creates_disabled_config(self) -> None:
         """default() should create a disabled rate limit config."""
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
-
         config = RuntimeRateLimitConfig.default()
 
         # Default should be disabled (no rate limiting by default)
@@ -112,28 +109,14 @@ class TestRuntimeRateLimitPostInit:
     """Tests for RuntimeServiceRateLimit and RuntimeRateLimitConfig __post_init__."""
 
     def test_service_rate_limit_rejects_zero(self) -> None:
-        import pytest
-
-        from elspeth.contracts.config.runtime import RuntimeServiceRateLimit
-
         with pytest.raises(ValueError, match="requests_per_minute must be >= 1"):
             RuntimeServiceRateLimit(requests_per_minute=0)
 
     def test_service_rate_limit_rejects_negative(self) -> None:
-        import pytest
-
-        from elspeth.contracts.config.runtime import RuntimeServiceRateLimit
-
         with pytest.raises(ValueError, match="requests_per_minute must be >= 1"):
             RuntimeServiceRateLimit(requests_per_minute=-5)
 
     def test_config_rejects_zero_default_rpm(self) -> None:
-        from types import MappingProxyType
-
-        import pytest
-
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
-
         with pytest.raises(ValueError, match="default_requests_per_minute must be >= 1"):
             RuntimeRateLimitConfig(
                 enabled=True,
@@ -144,10 +127,6 @@ class TestRuntimeRateLimitPostInit:
 
     def test_config_freezes_services_mapping(self) -> None:
         """Direct construction should freeze the services mapping."""
-        from types import MappingProxyType
-
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig, RuntimeServiceRateLimit
-
         mutable_dict = {"svc": RuntimeServiceRateLimit(requests_per_minute=10)}
         config = RuntimeRateLimitConfig(
             enabled=True,
@@ -159,21 +138,11 @@ class TestRuntimeRateLimitPostInit:
 
     def test_service_rate_limit_rejects_bool(self) -> None:
         """requests_per_minute=True should raise TypeError — bool is not int."""
-        import pytest
-
-        from elspeth.contracts.config.runtime import RuntimeServiceRateLimit
-
         with pytest.raises(TypeError, match="requests_per_minute must be int"):
             RuntimeServiceRateLimit(requests_per_minute=True)
 
     def test_config_rejects_bool_default_rpm(self) -> None:
         """default_requests_per_minute=True should raise TypeError — bool is not int."""
-        from types import MappingProxyType
-
-        import pytest
-
-        from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
-
         with pytest.raises(TypeError, match="default_requests_per_minute must be int"):
             RuntimeRateLimitConfig(
                 enabled=True,

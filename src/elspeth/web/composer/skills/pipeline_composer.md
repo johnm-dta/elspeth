@@ -25,11 +25,11 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 
 **Step 0 (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
 
-- **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`
+- **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`, `list_recipes`
 - **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
-- **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
+- **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `apply_pipeline_recipe`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
 - **Diagnostics:** `explain_validation_error`, `request_advisor_hint`
-- **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `update_blob`, `delete_blob`
+- **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `inspect_source`, `update_blob`, `delete_blob`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 
 When an LLM transform needs a model identifier, do not assume a familiar model is available in this deployment. Use `list_models` first: the no-argument form gives provider counts, and a provider-filtered call gives the concrete model IDs that validation accepts.
@@ -59,6 +59,52 @@ This rule overrides any default LLM tendency to "summarise progress so far" befo
 
 **Out of scope.** This skill is for *composing* pipelines. Forensic queries about past runs (token lineage, audit lookups, debug analysis) belong to the Landscape MCP tools, not the composer. If the user asks "what happened in run X?", do not reach for `set_pipeline` — say the request needs the run-analysis tools and stop.
 
+### Convergence Guardrails — Source-aware Authoring
+
+Six rules that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
+
+1. **Inspect source facts before declaring a fixed schema.** When the operator has already attached a blob (or `set_source_from_blob` has been called), use `inspect_source(blob_id)` to discover the observed headers, sample row count, and inferred scalar types. Do not guess column names. Do not fabricate a schema from the user's prose — the blob is the truth, the prose is the wish.
+
+2. **Include observed CSV columns or use observed/flexible mode.** A `mode: fixed` schema that omits an observed column combined with `on_validation_failure: "discard"` silently drops every row. The proof step in `preview_pipeline` (Stage 3 — `proof_diagnostics`) catches this with code `csv_fixed_schema_omits_observed_columns` and forces a repair turn. Do not wait for the repair turn — call `inspect_source` first and choose the schema accordingly:
+   - `mode: "observed"` for exploratory or unknown-shape input (lowest friction).
+   - `mode: "flexible"` with declared fields when downstream needs typed access AND the source may carry extras.
+   - `mode: "fixed"` only when the operator explicitly asked to project to a smaller schema.
+
+3. **Reject CSV blobs with duplicate headers.** When `inspect_source` warnings include `csv_duplicate_headers`, the underlying CSV reader (`csv.DictReader` and similar) silently collapses duplicate-named columns last-write-wins, fabricating a single column from multiple source columns. The proof step promotes this to blocking with code `csv_duplicate_headers` and forces a repair turn. Resolve before previewing: rename the offending header at the source, declare explicit `columns` in source options, configure `field_mapping` to disambiguate, or route the source to a configured quarantine output via `on_validation_failure`. Do not ignore the warning — silent column collapse is a Tier-1 audit-integrity violation.
+
+4. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
+   - Declare the field as `int` or `float` in the source schema (`fields: ["price: float"]`), or
+   - Insert a `type_coerce` node upstream that converts the field to `float`.
+   The threshold recipe (`apply_pipeline_recipe('split-by-numeric-threshold', ...)`) already does this in the right order — prefer it for "split rows by N" intents.
+
+5. **Default `on_validation_failure: "discard"` for source validation.** Quarantine is a conventional output name, not a built-in sink. `on_validation_failure: "quarantine"` is valid only when an output named `quarantine` exists in the same pipeline. For ordinary intent, use `discard`.
+
+6. **Do not ask the user technical implementation questions for ordinary simple intent.** If the operator says "classify these tickets" or "split these orders by price," the answer is to inspect, decide, and build — not to ask "do you want me to use OpenRouter or Azure?" or "what columns does your CSV have?" Ask only when the ambiguity is genuinely product-level ("which business category should count as high priority?"). Pick conservative defaults for technical questions (OpenRouter + a current Anthropic model is a reasonable default) and proceed; the proof step will surface any blocking misjudgement.
+
+**Recipe-first heuristic.** If operator intent maps to one of these shapes, prefer `apply_pipeline_recipe` — it produces the same state as a hand-authored `set_pipeline`, but with slot validation that rejects the URL-as-blob_id and bool-as-numeric-threshold failure modes at the boundary:
+
+| Intent phrase | Recipe |
+|---|---|
+| "Classify these rows / tickets / reviews", "tag each row", "categorise" | `classify-rows-llm-jsonl` |
+| "Split rows by price > N", "route scores >= 0.8", "separate orders by amount" | `split-by-numeric-threshold` |
+
+Call `list_recipes` to see the registered recipes and their slot schemas. For shapes outside the recipe set, hand-author with `set_pipeline`.
+
+### Shape Catalog — Plain-English Intent → Tool Sequence
+
+These are the canonical tool sequences for the most common novice phrasings. Recognising the shape on the *first* turn avoids the model spending budget on discovery for already-known patterns.
+
+| Operator phrase | Pattern | Tools (in order) |
+|---|---|---|
+| "Use this URL: https://…" | URL must be wrapped, then fetched | `create_blob` (text/plain) → `set_source_from_blob` → `upsert_node` (web_scrape) → `set_output` |
+| "Classify these CSV rows" | LLM transform on every row | `apply_pipeline_recipe('classify-rows-llm-jsonl', …)` (or hand-author) |
+| "Split rows where X > N" | type_coerce + gate | `apply_pipeline_recipe('split-by-numeric-threshold', …)` |
+| "Summarise each line of this URL/file" | URL → web_scrape → line_explode → llm | `create_blob` → `set_source_from_blob` → `upsert_node` (web_scrape) → `upsert_node` (line_explode) → `upsert_node` (llm) → `set_output` |
+| "Filter rows mentioning [keyword]" | keyword_filter routing | `set_pipeline` with `keyword_filter` transform routing to two outputs |
+| "Compute aggregates over rows" | batch_stats / batch_distribution_profile | `set_pipeline` with the appropriate `batch_*` plugin and a trigger config |
+
+For each pattern: after the structural setup, run `preview_pipeline`. If `proof_diagnostics` returns blocking entries, apply the suggested repair (which is in `proof_diagnostics[].suggested_repair`) and re-preview. The forced-repair loop in the server caps clarification-style stalling at two turns; do not stall.
+
 ### Connection Model
 
 **Connections are named strings, not node IDs.** This is the most common schema-blindness failure in `set_pipeline` — get this wrong and every preview will return `No producer for connection 'X'. Available connections: ...` no matter how many times you retry.
@@ -75,6 +121,8 @@ A connection has **two endpoints**, and the same string value must appear on bot
 `node.input` is **NOT** the upstream node's `id`. `node.input` is the connection-name string that some upstream `on_success` (or `routes` value, or `on_error`) **publishes**. The runtime resolves wiring by matching strings, not by graph topology in `edges`.
 
 Gate route target `"discard"` is a virtual terminal destination, not a published connection. Use it only when that branch should stop with an audited `gate_discarded` outcome; do not create a node or sink named `discard`.
+
+For source row validation failures, use `on_validation_failure: "discard"` unless you have already configured a dedicated output/sink for failed rows. Quarantine is a conventional output name, not a built-in sink; `on_validation_failure: "quarantine"` is valid only when an output/sink named `quarantine` exists in the same pipeline.
 
 The `edges` array in `set_pipeline` carries metadata (id, label) about each connection but does **not** define the wiring. Wiring is exclusively via the `on_success` / `input` / `sink_name` strings above. If you write `edges: [{from_node: "source", to_node: "fetch"}]` but no `on_success` produces a connection named `"fetch"` and no `input: "fetch"` exists on a real node, the wiring is broken regardless of what `edges` says.
 
@@ -1045,7 +1093,7 @@ For non-standard MIME types, pass the `plugin` parameter explicitly.
   "options": {
     "schema": {"mode": "observed"}
   },
-  "on_validation_failure": "quarantine"
+  "on_validation_failure": "discard"
 }
 ```
 
@@ -1106,7 +1154,7 @@ The very first tool call for a URL-input pipeline must be `create_blob` with the
 **Examples:**
 - User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:
   1. `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")`
-  2. `set_source_from_blob({blob_id, on_success: "url_rows", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
+  2. `set_source_from_blob({blob_id, on_success: "url_rows", on_validation_failure: "discard", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
   3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "url_rows", on_success: "scraped_content", options: {schema: {mode: "fixed", fields: ["url: str"]}, url_field: "url", content_field: "content", fingerprint_field: "content_fingerprint", format: "text", text_separator: "\n", http: {abuse_contact: "compliance@example.com", scraping_reason: "Download a public URL and process its content", allowed_hosts: "public_only"}}})`
   ⚠ Skipping step 3 means the pipeline emits the URL string itself, not the URL's content. Downstream transforms like `line_explode` or `llm` will see the URL text instead of what was at the URL, and the validator will reject the pipeline. See Pattern 1 (`URL → Scrape → Extract → JSON`) and Pattern 1b (`URL → Download → Split into Lines → JSON`) under "Common Pipeline Patterns" for full chains.
 - User provides JSON data → `create_blob(filename="data.json", mime_type="application/json", content='[{"id": 1, "name": "test"}]')` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`

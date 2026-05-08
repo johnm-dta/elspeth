@@ -421,6 +421,65 @@ class TestComposerResultPairingInvariant:
             )
 
 
+class TestComposerResultRepairTurnsCap:
+    """Mechanical cap-assert on ``ComposerResult.repair_turns_used``.
+
+    The compose loop in ``web/composer/service.py`` enforces the bound
+    informally via ``_MAX_REPAIR_TURNS = 2`` (``if repair_turns_used >=
+    _MAX_REPAIR_TURNS: return False`` before each ``+= 1``). The field
+    flows into the audit trail via
+    ``composition_states.composer_meta.repair_turns_used`` and is
+    consumed by the convergence-suite eval scorer; an out-of-range value
+    would land in the legal record and be silently accepted by
+    downstream consumers.
+
+    ``Literal[0, 1, 2]`` would have been the static-typed form, but the
+    loop mutates a plain ``int`` counter and threads it via
+    ``dataclasses.replace`` — mypy cannot narrow ``int`` to a Literal at
+    that site. The runtime check in ``__post_init__`` is the fallback
+    that mechanically rejects an out-of-range value at the construction
+    boundary regardless of how callers obtained the integer. These tests
+    pin the bound so future edits cannot relax it silently. Keep
+    aligned with ``_MAX_REPAIR_TURNS`` in ``web/composer/service.py``.
+    """
+
+    def test_zero_is_valid(self) -> None:
+        """First-pass success — no repair turns used."""
+        result = ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=0)
+        assert result.repair_turns_used == 0
+
+    def test_one_is_valid(self) -> None:
+        """One forced repair turn — within budget."""
+        result = ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=1)
+        assert result.repair_turns_used == 1
+
+    def test_two_is_valid_at_cap(self) -> None:
+        """Two forced repair turns — exactly at ``_MAX_REPAIR_TURNS``."""
+        result = ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=2)
+        assert result.repair_turns_used == 2
+
+    def test_three_is_rejected_above_cap(self) -> None:
+        """Three repair turns — above ``_MAX_REPAIR_TURNS``, must be rejected.
+
+        If the compose loop ever forgets to clamp before a ``+= 1`` (or a
+        future edit relaxes the loop's pre-increment guard), the audit
+        row must not silently record an over-budget count.
+        """
+        with pytest.raises(ValueError, match=r"repair_turns_used must be 0, 1, or 2"):
+            ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=3)
+
+    def test_negative_is_rejected_below_zero(self) -> None:
+        """Negative repair turns — nonsensical, must be rejected.
+
+        The counter starts at 0 and only increments; a negative value
+        could only arise from a programming bug threading the wrong
+        integer through ``dataclasses.replace``. Crash informatively
+        rather than land it in the audit trail.
+        """
+        with pytest.raises(ValueError, match=r"repair_turns_used must be 0, 1, or 2"):
+            ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=-1)
+
+
 # ---------------------------------------------------------------------------
 # ComposerConvergenceError
 # ---------------------------------------------------------------------------

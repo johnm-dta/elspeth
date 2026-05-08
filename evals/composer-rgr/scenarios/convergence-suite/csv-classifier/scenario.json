@@ -1,0 +1,38 @@
+{
+  "scenario_id": "convergence_csv_classifier",
+  "summary": "Convergence-bar scenario: operator supplies an inline CSV and asks for an LLM classification with structured output. The historical failure mode this catches is the model declaring a fixed CSV schema that omits one or more observed columns, which combined with on_validation_failure=discard silently drops every row. GREEN requires the source schema to cover the observed columns (observed/flexible mode, or fixed mode listing all columns), an LLM transform in the node chain, and a JSON/JSONL output. The repair loop (max=2) must converge without bouncing back to the user.",
+  "opening_prompt": "Please classify these customer support tickets by urgency (high/medium/low) using an LLM and write the results as JSONL. Each row should keep all original fields plus a new urgency field. Use OpenRouter with anthropic/claude-3.5-sonnet. Tickets (CSV):\nticket_id,customer_name,subject,body,received_at\nT-001,Alice Wong,Refund timeline,My order #4421 has not arrived in 3 weeks and I want to cancel.,2026-05-06T09:14:00Z\nT-002,Bob Singh,Discount enquiry,Can I get a 5% loyalty code for my next order?,2026-05-06T09:18:00Z\nT-003,Carla Diaz,System down,Login page returns 500 errors on Firefox and Safari for the last 2 hours.,2026-05-06T09:22:00Z\nT-004,Dan O'Brien,Address change,Please update shipping address for upcoming delivery.,2026-05-06T09:25:00Z\nT-005,Eve Kim,Severe outage,Production reporting pipeline crashed at 09:20 UTC; payroll run is at risk.,2026-05-06T09:31:00Z",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i ",
+      "let me know if"
+    ],
+    "passivity_phrases_note": "Anti-tail-offer rule applies. The convergence bar additionally forbids the model asking the user technical clarification questions; the runtime repair loop should suppress those before they reach the user, and any that escape are caught by the passivity phrase set.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "build_failure_note": "Server-injected from service.py:_build_runtime_preflight_message() on completion-claim with failed preflight.",
+    "must_be_valid": true,
+    "must_be_valid_note": "Final state must have is_valid=true."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_node_chain_in_order": ["llm"],
+    "must_have_node_chain_in_order_note": "An LLM transform must be in the chain. Order is trivially the only constraint.",
+    "must_include_observed_columns": ["ticket_id", "customer_name", "subject", "body", "received_at"],
+    "must_include_observed_columns_note": "These five columns are explicitly present in the prompt's CSV. A fixed schema that omits any of them combined with on_validation_failure=discard would drop every row. observed and flexible modes pass; fixed mode must list all five.",
+    "must_have_outputs_min": 1,
+    "max_repair_turns": 2,
+    "max_repair_turns_note": "First-pass success is target; one internal repair turn is allowed; never a user clarification turn. Surfaced via composition_states.composer_meta.repair_turns_used (see web/sessions/models.py).",
+    "must_not_contain_passivity": true
+  }
+}

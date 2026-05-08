@@ -21,7 +21,6 @@ from .test_source_protocol import SourceContractPropertyTestBase
 
 if TYPE_CHECKING:
     from elspeth.contracts import SourceProtocol
-    from elspeth.contracts.plugin_context import PluginContext
 
 
 class TestCSVSourceContract(SourceContractPropertyTestBase):
@@ -50,7 +49,15 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
     # Additional CSVSource-specific contract tests
 
     def test_csv_source_respects_delimiter(self, tmp_path: Path) -> None:
-        """CSVSource MUST respect delimiter configuration."""
+        """CSVSource MUST respect delimiter configuration.
+
+        Asserts column-presence unconditionally for every yielded row and
+        explicitly asserts no rows are quarantined. A delimiter regression
+        (e.g., comma used when ``\\t`` was configured) would produce
+        single-column rows whose only field is the entire ``id\\tname`` blob
+        — these would either fail "id"/"name" key membership or, in stricter
+        modes, be quarantined. Either failure mode is detectable here.
+        """
         tsv_file = tmp_path / "data.tsv"
         tsv_file.write_text("id\tname\n1\tAlice\n2\tBob\n")
 
@@ -71,10 +78,22 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
         assert len(rows) == 2
         for row in rows:
             assert isinstance(row, SourceRow)
-            if not row.is_quarantined:
-                # Should have correctly parsed columns
-                assert "id" in row.row
-                assert "name" in row.row
+            # Happy-path TSV with valid rows: no row should be quarantined.
+            # If the delimiter is mishandled the row will either be
+            # quarantined (strict modes) or arrive with a single combined
+            # column — both are caught below.
+            assert not row.is_quarantined, f"Unexpected quarantine for row {row.row!r}: {row.quarantine_error!r}"
+            # Column-presence assertions run UNCONDITIONALLY — a delimiter
+            # regression that produced a single 'id\tname' column would
+            # fail these even if the row weren't quarantined.
+            assert "id" in row.row, f"Expected 'id' column in row {row.row!r}; delimiter likely mishandled"
+            assert "name" in row.row, f"Expected 'name' column in row {row.row!r}; delimiter likely mishandled"
+
+        # Stronger contract: the actual parsed values must match the TSV.
+        assert [dict(r.row) for r in rows] == [
+            {"id": "1", "name": "Alice"},
+            {"id": "2", "name": "Bob"},
+        ]
 
     def test_csv_source_handles_empty_file(self, tmp_path: Path) -> None:
         """CSVSource: Empty files return no rows gracefully.
@@ -178,41 +197,25 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
         assert load_snapshot("test-determinism-a") == load_snapshot("test-determinism-b")
 
 
-class TestCSVSourceQuarantineContract(SourceContractPropertyTestBase):
-    """Contract tests for CSVSource quarantine behavior.
+class TestCSVSourceQuarantineContract:
+    """Quarantine-specific behaviour for CSVSource.
 
-    Verifies that validation failures produce proper SourceRow.quarantined() results
-    and are recorded in the audit trail.
+    Standalone (no protocol-base inheritance) — full SourceProtocol coverage is
+    already exercised by ``TestCSVSourceContract`` against a CSV source. Re-running
+    the entire property suite under a quarantine-configured fixture added no
+    protocol coverage; this class now contains only the quarantine-specific
+    assertion that validation failures produce proper SourceRow.quarantined()
+    results and are recorded in the audit trail.
     """
 
-    @pytest.fixture
-    def ctx(self) -> PluginContext:
-        """Override base ctx to include landscape (quarantine records validation errors)."""
-        setup = make_recorder_with_run(
-            run_id="test-run-001",
-            source_node_id="test-source",
-            source_plugin_name="csv",
-            canonical_version=CANONICAL_VERSION,
-        )
-        return make_context(
-            run_id=setup.run_id,
-            landscape=setup.factory.plugin_audit_writer(),
-            node_id=setup.source_node_id,
-        )
-
-    @pytest.fixture
-    def source_data_with_invalid(self, tmp_path: Path) -> Path:
-        """Create a CSV file with rows that will fail strict validation."""
+    def test_invalid_rows_are_quarantined(self, tmp_path: Path) -> None:
+        """Contract: Invalid rows MUST be yielded as SourceRow.quarantined()."""
         csv_file = tmp_path / "mixed_data.csv"
         csv_file.write_text("id,name\n1,Alice\nnot_an_int,Bob\n3,Charlie\n")
-        return csv_file
 
-    @pytest.fixture
-    def source(self, source_data_with_invalid: Path) -> SourceProtocol:
-        """Create a CSVSource with strict schema that will quarantine bad rows."""
         source = CSVSource(
             {
-                "path": str(source_data_with_invalid),
+                "path": str(csv_file),
                 "schema": {
                     "mode": "fixed",
                     "fields": ["id: int", "name: str"],
@@ -221,10 +224,7 @@ class TestCSVSourceQuarantineContract(SourceContractPropertyTestBase):
             }
         )
         source.on_success = "output"
-        return source
 
-    def test_invalid_rows_are_quarantined(self, source: SourceProtocol) -> None:
-        """Contract: Invalid rows MUST be yielded as SourceRow.quarantined()."""
         setup = make_recorder_with_run(
             run_id="test-quarantine",
             source_node_id="csv_source",

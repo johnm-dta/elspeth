@@ -21,7 +21,7 @@ import os
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final, NoReturn, TypedDict, cast
 
@@ -74,6 +74,7 @@ from elspeth.web.composer.tools import (
     ADVISOR_TRIGGER_VALUES,
     RuntimePreflight,
     ToolResult,
+    compute_proof_diagnostics,
     execute_tool,
     get_tool_definitions,
     is_cacheable_discovery_tool,
@@ -900,6 +901,36 @@ _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 # module docstring for the contract details.
 
 
+# Hard cap on proof-step-driven repair turns. When the assistant claims
+# completion but preview_pipeline's proof_diagnostics still has blocking
+# entries, the loop may inject a synthetic repair message and continue for
+# at most this many additional iterations. After the cap, the original
+# termination path runs — preventing indefinite spin against a model that
+# refuses to apply the suggested repair.
+_MAX_REPAIR_TURNS: Final[int] = 2
+
+
+def _proof_repair_is_applicable(state: CompositionState) -> bool:
+    """Return True iff the proof step has any input it can inspect.
+
+    The forced-repair gate must fire whenever ``compute_proof_diagnostics``
+    might find blocking diagnostics. The proof step is a no-op for sources
+    that aren't blob-backed (no bytes to read), so the gate's predicate is
+    "source is present AND options carries a ``blob_ref``" — *not* "state
+    changed this turn", because a blocker can survive session resume into
+    a turn where the LLM does no mutations.
+
+    ``SourceSpec.options`` is internally typed as ``Mapping[str, Any]``
+    (Tier-1 dataclass invariant — no isinstance probe needed). ``blob_ref``
+    is an optional, well-known key set by the binding tools; its absence
+    is a documented part of the contract (path-based sources don't have
+    one), so containment checking is the appropriate primitive here.
+    """
+    if state.source is None:
+        return False
+    return "blob_ref" in state.source.options
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -1051,6 +1082,86 @@ class ComposerServiceImpl:
         if failed_checks:
             return f"I cannot mark this pipeline complete yet because runtime preflight failed: {failed_checks[0].detail}."
         return "I cannot mark this pipeline complete yet because runtime preflight failed."
+
+    def _attempt_proof_repair(
+        self,
+        *,
+        state: CompositionState,
+        llm_messages: list[dict[str, Any]],
+        session_id: str | None,
+        repair_turns_used: int,
+    ) -> bool:
+        """Pre-finalize proof gate.
+
+        When the assistant emits no tool_calls (claiming completion), check
+        ``preview_pipeline``'s ``proof_diagnostics`` for blocking entries.
+        If any are found AND the repair-turn budget has not been exhausted,
+        synthesize a user-attributed message describing each diagnostic plus
+        its ``suggested_repair`` and append it to ``llm_messages``. The
+        outer compose loop then continues for one more iteration so the
+        model can apply the suggested fix.
+
+        Returns True when a repair message was injected (the loop should
+        ``continue`` and skip finalization). Returns False when there are
+        no blocking diagnostics OR the repair budget is exhausted.
+
+        Boundary contract: this helper NEVER catches plugin exceptions.
+        It only repairs *configurations* via composer-tool calls. Plugin
+        bugs (transform.process raising) propagate to the operator per the
+        Plugin Ownership policy in CLAUDE.md.
+
+        The synthesised message is appended verbatim into chat history. It
+        contains operator-supplied column names and the diagnostic-message
+        text (which may name CSV paths the operator wrote). No secrets are
+        carried — proof_diagnostics never reads source bytes through any
+        path that retains decoded content; only inspect_blob_content's
+        bounded-summary facts are surfaced.
+        """
+        if repair_turns_used >= _MAX_REPAIR_TURNS:
+            return False
+
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self._session_engine,
+            session_id=session_id,
+        )
+        # The diagnostic dict shape is the documented contract of
+        # ``compute_proof_diagnostics`` (see ``tools.py``): every entry
+        # has ``severity``, ``code``, ``message``, ``suggested_repair``,
+        # ``evidence_locator``. This is an internal-package invariant,
+        # not a Tier-3 trust boundary — a missing key is a bug in the
+        # diagnostic builder, not malformed external data, so direct
+        # subscript access is correct and a ``KeyError`` here is the
+        # right failure mode (informative crash) per CLAUDE.md
+        # offensive-programming policy. ``.get()`` fallbacks would bury
+        # contract drift and ship ``[unknown]`` codes / empty messages
+        # into the audit trail and the LLM's repair-message context.
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        if not blocking:
+            return False
+
+        # Cap at 3 blocking entries in the synthesised message to keep the
+        # context window manageable. The model can call preview_pipeline to
+        # see the full list.
+        rendered = []
+        for i, d in enumerate(blocking[:3], start=1):
+            rendered.append(f"{i}. [{d['code']}] {d['message']}\n   Suggested repair: {d['suggested_repair']}")
+
+        next_turn = repair_turns_used + 1
+        budget_note = (
+            f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}. "
+            "Apply the suggested repair via the appropriate composer tool, then call "
+            "preview_pipeline to verify the diagnostics are cleared before finalising again."
+        )
+
+        message = (
+            "[composer-system] Pre-finalisation proof step found blocking "
+            "diagnostic(s) — the pipeline cannot run as currently configured. "
+            "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note
+        )
+
+        llm_messages.append({"role": "user", "content": message})
+        return True
 
     async def _finalize_no_tool_response(
         self,
@@ -1403,6 +1514,13 @@ class ComposerServiceImpl:
         # toggle is disabled the counter is never read.
         advisor_calls_used = 0
 
+        # Forced-repair counter. When the assistant emits no tool_calls but
+        # the proof step found blocking diagnostics, the loop synthesises a
+        # repair message and continues for at most _MAX_REPAIR_TURNS
+        # additional iterations. NEVER catches plugin exceptions — only
+        # configuration diagnostics.
+        repair_turns_used = 0
+
         while True:
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -1417,6 +1535,33 @@ class ComposerServiceImpl:
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
+                # Forced-repair gate: when the model claims completion but
+                # the proof step still has blocking diagnostics, inject a
+                # repair message and continue. Capped at _MAX_REPAIR_TURNS so
+                # the loop can never spin indefinitely. NEVER catches plugin
+                # exceptions — only repairs configurations.
+                #
+                # The gate fires whenever the proof step is applicable —
+                # i.e. there is a blob-backed source to inspect. The earlier
+                # ``state.version > initial_version`` guard skipped the gate
+                # on the first compose turn of a resumed session whose
+                # blob-backed source was bound on a prior turn (state already
+                # carries the source, no mutation this turn). That is exactly
+                # the cross-turn scenario the gate exists to catch (e.g.
+                # ``csv_fixed_schema_omits_observed_columns`` blockers
+                # surviving session resume). For chat-only turns where the
+                # source is absent or not blob-backed, ``_attempt_proof_repair``
+                # short-circuits cheaply via ``compute_proof_diagnostics``'s
+                # own early return.
+                if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
+                    state=state,
+                    llm_messages=llm_messages,
+                    session_id=session_id,
+                    repair_turns_used=repair_turns_used,
+                ):
+                    repair_turns_used += 1
+                    continue
+
                 await _emit_progress(
                     progress,
                     ComposerProgressEvent(
@@ -1427,7 +1572,7 @@ class ComposerServiceImpl:
                         reason="composer_complete",
                     ),
                 )
-                return await self._finalize_no_tool_response(
+                result = await self._finalize_no_tool_response(
                     content=assistant_message.content or "",
                     state=state,
                     initial_version=initial_version,
@@ -1440,6 +1585,13 @@ class ComposerServiceImpl:
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
+                # Thread repair_turns_used through to the result so the
+                # route handler can persist it onto the new
+                # ``composition_states.composer_meta`` row (and the API state
+                # response can surface ``composer_meta.repair_turns_used``)
+                # — see web/sessions/routes.py::_state_data_from_composer_state
+                # call sites in the compose / recompose paths.
+                return replace(result, repair_turns_used=repair_turns_used)
 
             await _emit_progress(
                 progress,

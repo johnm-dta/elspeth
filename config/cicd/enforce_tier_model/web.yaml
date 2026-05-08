@@ -419,12 +419,12 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=557570ade7c5fe66
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=c4bf1dc85f5a1133
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=9b5174a43d7f3b2e
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=6b87a12e8db864bf
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
     rollback expected; programmer bugs still propagate
@@ -432,11 +432,212 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=460c23d550fc07ed
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=c3d41af469725b39
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
     primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
+  expires: null
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=c5cc7590743a1d99
+  owner: web-composer
+  reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure
+    mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content).
+    Failure is NOT silent — a blob_id_not_uuid warning fact is prepended to facts.warnings so the audit trail records
+    why redacted_identity omits blob_id.
+  safety: blob_uuid=None on parse failure; inspection still runs against the resolved blob row (already validated by
+    the _sync_get_blob lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the
+    audit-bound facts.warnings tuple; integrity guards (status=ready, hash match) remain authoritative.
+  expires: null
+- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=02dcba287d1b3ce7
+  owner: web-composer
+  reason: Tier-3 trust boundary — JSONL line-by-line parsing of operator-supplied blob content. JSONDecodeError on a
+    single line is the documented Tier-3 failure mode; the line is counted as a parse failure and surfaced via the
+    "N jsonl line(s) failed to parse" warning. Subsequent lines still inspected.
+  safety: parse_failures counter accumulates and is reported in warnings; no row is fabricated and the partial sample
+    that did parse is still surfaced.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_jsonl:fp=c6f41432cbaf78af
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a parsed JSONL line is a dict (object). External JSONL is zero-trust
+    and may contain top-level non-objects (arrays, scalars). isinstance is the correct Tier-3 coercion gate.
+  safety: Non-dict values are rejected as parse failures; the partial sample that was dict-shaped still surfaces.
+  expires: null
+- key: web/composer/source_inspection.py:R6:_inspect_json:fp=2d530f250d4c7266
+  owner: web-composer
+  reason: Tier-3 trust boundary — full JSON document parsing of operator-supplied blob content. JSONDecodeError is
+    expected when the 8 KiB peek truncates mid-object on a large file. Surfaced via warning.
+  safety: loaded=None on parse failure; inspection returns 0 sampled rows with the truncation warning, so caller
+    cannot confuse "no rows" with "successfully parsed empty array".
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=f017758d8e2160b1
+  owner: web-composer
+  reason: Tier-3 trust boundary — discriminating between JSON array, wrapped object, and single object shapes. Each
+    branch routes to the correct extraction; without isinstance, the boundary cannot be enforced.
+  safety: Each branch handles its shape explicitly; unexpected shapes (e.g., scalar at top level) fall through to
+    the "single object" branch which still produces a faithful one-row inspection.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=dd094eb33f16cc79
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that an array element is a dict before treating it as a row. JSON arrays
+    can contain mixed types per RFC 8259; non-dict elements are skipped, not coerced.
+  safety: Non-dict array elements silently skipped from row sample; matches Tier-3 quarantine semantics.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=0cc810474bf90776
+  owner: web-composer
+  reason: 'Tier-3 trust boundary — checking that a wrapped object''s value is a list (data_key shape detection). The
+    wrapped-object pattern is `{"results": [...]}` and the value-must-be-a-list check is the heuristic for it.'
+  safety: If the wrapped value is not a list, the heuristic falls through to the next value or to the "single
+    object" branch; no row is fabricated.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=b950006dea2a8e4c
+  owner: web-composer
+  reason: Tier-3 trust boundary — same wrapped-object value-is-list check (sibling check on data_key path).
+  safety: Same as the prior entry; the heuristic only fires when both the value is a list AND its first element is
+    a dict.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=cd1ca795d54bfce7
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a wrapped-list element is a dict before treating it as a row.
+  safety: Non-dict elements within the wrapped list are skipped; matches Tier-3 quarantine semantics.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=69d61f954d1b400a
+  owner: web-composer
+  reason: Tier-3 trust boundary — final isinstance check confirms the picked element is dict-shaped before adding it
+    to the sampled-objects list.
+  safety: Non-dict elements skipped; no fabrication.
+  expires: null
+- key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=bae7c85c095a2ddc
+  owner: web-composer
+  reason: 'Tier-3 trust boundary — `objects: list[dict[str, Any]]` is the natural shape of parsed JSON sample rows
+    and serves as the input contract to the type-inference helper. A TypedDict cannot describe arbitrary external
+    JSON without enumerating every possible operator-supplied schema.'
+  safety: All access is via isinstance dispatch (allowlisted as R5 Tier-3) so there is no key-error path; keys
+    absent from a particular row record as "null" rather than crashing or coercing.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=49c1fdeaa9a232d0
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a sampled row entry is a dict before iterating its keys.
+  safety: Non-dict entries silently skipped from row sample; matches Tier-3 quarantine semantics.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=6bca32144439a076
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that an observed value is a bool before promoting bool. Required because
+    bool is a subclass of int in Python; without the bool isinstance check first, every bool would be misclassified
+    as int (a fabrication).
+  safety: bool check is ordered before int check; mismatched values fall through to the str branch which is the
+    type-conservative answer per the merge ladder.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=0dea7337cc179dbd
+  owner: web-composer
+  reason: Tier-3 trust boundary — int isinstance check during type inference of operator-supplied JSON values.
+  safety: Mis-typed values fall through to the str branch.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=df6e4a3440e67e6f
+  owner: web-composer
+  reason: Tier-3 trust boundary — float isinstance check during type inference of operator-supplied JSON values.
+  safety: Mis-typed values fall through to the str branch.
+  expires: null
+- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=085dc55ef33d506f
+  owner: web-composer
+  reason: Tier-3 trust boundary — `obj.get(h)` for membership probing on operator-supplied JSON. Returns None for
+    absent fields (not a fabricated default — None is "absence" per the manifesto), then the next isinstance check
+    routes the value or falls through.
+  safety: None values caught explicitly by the isinstance(v, list/dict) gate; no fabrication, no coercion.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=44a662ccdd0e79e8
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking whether a probed JSON value is a list or dict (nested structure). Used to
+    emit the json_explode warning so the operator knows the field will need exploding before downstream consumption.
+  safety: Only used to surface a warning; no row is dropped or coerced.
+  expires: null
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=4d5d902b2a8e9445
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a value is a string before scanning it for URL candidates. Non-string
+    values skipped from URL extraction.
+  safety: Non-string values silently skipped; URL candidates list is best-effort.
+  expires: null
+# Recipe slot validation — Step 5 of the simple-pipeline-convergence program.
+# Operator-supplied slot values (Tier-3) are validated and coerced at the
+# recipe boundary before scaffolding. Each isinstance check below routes to
+# either a coercion or an explicit RecipeValidationError with a repair hint
+# (e.g., "use create_blob first" for a URL passed where a blob_id is required).
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=c4263279c40a5961
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a blob_id slot value is a string before UUID parsing. Operator may
+    supply any JSON type; non-string values are rejected with a repair hint pointing to create_blob.
+  safety: Non-string values raise RecipeValidationError with repair guidance; never silently coerced.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=69736596ab831836
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a str slot value is actually a string before passing through.
+  safety: Non-string values raise RecipeValidationError; never silently coerced.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=32ce9b85f3061d4a
+  owner: web-composer
+  reason: Tier-3 trust boundary — explicit bool check before numeric coercion. bool is a subclass of int in Python,
+    so without this guard True/False would silently coerce to 1.0/0.0 (a fabrication risk).
+  safety: bool values raise RecipeValidationError telling operator to use 0.0/1.0 explicitly.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=37c487dc79354562
+  owner: web-composer
+  reason: Tier-3 trust boundary — int/float check for numeric-slot pass-through. Both are valid numeric
+    representations and are coerced to float for downstream gate comparisons.
+  safety: Other types fall through to the str-coercion branch or to the type-mismatch error.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=4ef2359b87975a9c
+  owner: web-composer
+  reason: Tier-3 trust boundary — string check before float coercion. Operator may supply numeric thresholds as
+    strings ("99.95"); we coerce explicitly at the boundary.
+  safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=3340edc2278b02c2
+  owner: web-composer
+  reason: Tier-3 trust boundary — bool check for the int slot type (same fabrication-risk reason as the float branch).
+  safety: bool values raise RecipeValidationError; never coerced.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=26252daa7c5d88b7
+  owner: web-composer
+  reason: Tier-3 trust boundary — int check for int-slot pass-through.
+  safety: Non-int values fall through to the str-coercion branch or the type-mismatch error.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=7a2c78322baa89e8
+  owner: web-composer
+  reason: Tier-3 trust boundary — string check before int coercion. Same pattern as the float branch.
+  safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=be30a8e022576252
+  owner: web-composer
+  reason: Tier-3 trust boundary — list/tuple check for str_list slot type before iteration. Operator-supplied
+    JSON arrays arrive at this boundary with no static type guarantee; rejecting non-iterables with a
+    RecipeValidationError preserves the explicit-failure-mode contract for the apply_pipeline_recipe entrypoint.
+  safety: Non-iterable values raise RecipeValidationError naming the slot and observed type — never silently
+    coerces or fabricates a list.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=f611b51374d3f4ea
+  owner: web-composer
+  reason: Tier-3 trust boundary — per-element string check inside str_list slot iteration. Same fabrication
+    risk reasoning as the str/blob_id branches; rejecting non-string elements before they pass through to
+    LLM/transform options preserves the recipe's explicit-failure-mode contract.
+  safety: Non-string elements raise RecipeValidationError with the offending index in the message — never
+    silently coerces or fabricates a string element.
+  expires: null
+- key: web/composer/recipes.py:R1:get_recipe:fp=fa88d94e82804c1f
+  owner: web-composer
+  reason: Internal-registry membership probe — `_RECIPES.get(name)` returns None when ``name`` is not a
+    registered recipe. Not a Tier-3 trust boundary; the registry itself is system-owned data and the
+    None-or-spec signal is the function's documented contract (``RecipeSpec | None`` return type).
+    Equivalent to ``dict.get`` used as a probe rather than as a defensive default.
+  safety: None return is the documented "unknown recipe" signal; the caller (apply_recipe) raises
+    RecipeValidationError listing the registered names.
+  expires: null
+- key: web/composer/recipes.py:R1:apply_recipe:fp=1696d1cf63bcf4a7
+  owner: web-composer
+  reason: >-
+    Internal-registry membership probe — `_RECIPES.get(name)` is followed by an immediate
+    `if recipe is None` arm that raises RecipeValidationError listing the registered names. Not a
+    Tier-3 boundary; the registry is system-owned data. Same pattern as get_recipe.
+  safety: None branch raises RecipeValidationError listing available recipe names; never silently
+    fabricates a recipe or coerces a missing entry.
   expires: null
 - key: web/execution/validation.py:R5:validate_pipeline:fp=eccc733dc0a2259d
   owner: web-execution
@@ -1935,7 +2136,7 @@ allow_hits:
     Malformed shapes become structured argument errors returned to the LLM, not crashes or silent tool
     execution.
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=60ddf123415ae14d
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=5935b9a13c0eaa96
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1944,7 +2145,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=7b4a2dd2adfe5c01
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=25346c11e7080c17
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1953,7 +2154,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=50f9947df69b3ce2
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=d54ce303c2449ff4
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1962,7 +2163,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=2f6894f2d1273534
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=2faf2b8e74aa2ad0
   owner: web-composer
   reason: >-
     Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache
@@ -1971,7 +2172,7 @@ allow_hits:
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=adbbe3441b336017
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=6129184d1efa84aa
   owner: composer-advisor
   reason: >-
     Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted
@@ -1980,7 +2181,7 @@ allow_hits:
     Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as
     bounded tool results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=8d88ebd4d30ba958
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=7078df0baf7a8444
   owner: composer-advisor
   reason: >-
     Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted
@@ -1989,7 +2190,7 @@ allow_hits:
     Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as
     bounded tool results.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2a180b1f10822c6d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=8d35200772608e2a
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -1997,7 +2198,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=17fd860da93d6177
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=336bb18e3ea32a2b
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2005,7 +2206,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=38cb0ff12213bbb0
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9e76965f3dd9a281
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2013,7 +2214,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=7f849414256a5713
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=b9056e1cdc12cc02
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2021,7 +2222,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=bbc9dca579f3a3a4
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=c4f79301946afa54
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2029,7 +2230,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=0a5b6aa60a45c562
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9fcfc0604597f00c
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor
@@ -2037,7 +2238,7 @@ allow_hits:
   safety: >-
     Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=c41115c4b4a308ae
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=995d6958f36c616a
   owner: composer-advisor
   reason: >-
     Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor

@@ -58,7 +58,7 @@ class RAGRetrievalTransform(BaseTransform):
 
     name = "rag_retrieval"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9026ebd1220106b1"
+    source_file_hash: str | None = "sha256:146ccd250aefa105"
     determinism: Determinism = Determinism.EXTERNAL_CALL
     config_model = RAGRetrievalConfig
     passes_through_input = True
@@ -440,6 +440,7 @@ class RAGRetrievalTransform(BaseTransform):
 
     def on_complete(self, ctx: LifecycleContext) -> None:
         """Emit telemetry with run statistics."""
+        super().on_complete(ctx)
         score_std = 0.0
         if self._score_count >= 2:
             score_std = math.sqrt(self._score_m2 / (self._score_count - 1))

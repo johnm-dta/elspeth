@@ -250,6 +250,7 @@ class BaseTransform(ABC):
         self.config = config
         # Per-instance, not per-class — class-level defaults would be shared across instances.
         self._on_start_called: bool = False
+        self._on_complete_called: bool = False
         self.declared_input_fields = frozenset()
         self._output_schema_config: SchemaConfig | None = None
 
@@ -605,7 +606,7 @@ class BaseTransform(ABC):
         """
         self._on_start_called = True
 
-    def on_complete(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional hook
+    def on_complete(self, ctx: LifecycleContext) -> None:
         """Called after all rows are processed (or after pipeline error).
 
         Override for recording final metrics, flushing application-level
@@ -614,8 +615,10 @@ class BaseTransform(ABC):
         Called on the main thread. Receives LifecycleContext so it can
         interact with the landscape and telemetry. Individually protected:
         if this raises, other plugins still get their on_complete/close calls.
+
+        Subclasses MUST call super().on_complete(ctx) to set the lifecycle flag.
         """
-        pass
+        self._on_complete_called = True
 
     # ── Plugin-declared semantics (Phase 1: optional, default empty) ──
     # Override on a subclass to declare what the plugin emits / requires.
@@ -835,6 +838,9 @@ class BaseSink(ABC):
             config: Plugin configuration
         """
         self.config = config
+        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        self._on_start_called: bool = False
+        self._on_complete_called: bool = False
         self._on_write_failure: str | None = None
         self._output_contract = None
         self._needs_resume_field_resolution = False
@@ -934,23 +940,27 @@ class BaseSink(ABC):
     # Call ordering: on_start -> write/flush -> on_complete -> close
     # See class docstring for full lifecycle contract and guarantees.
 
-    def on_start(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional hook
+    def on_start(self, ctx: LifecycleContext) -> None:
         """Called once before any write() call.
 
         Override for per-run initialization. Called on the main thread.
         If this raises, the pipeline aborts and neither on_complete()
         nor close() will be called.
-        """
-        pass
 
-    def on_complete(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional hook
+        Subclasses MUST call super().on_start(ctx) to set the lifecycle flag.
+        """
+        self._on_start_called = True
+
+    def on_complete(self, ctx: LifecycleContext) -> None:
         """Called after all rows are written (or after pipeline error), before close().
 
         Override for finalizing output format, recording metrics, or
         updating audit state. Called on the main thread. Individually
         protected: if this raises, other plugins still get their calls.
+
+        Subclasses MUST call super().on_complete(ctx) to set the lifecycle flag.
         """
-        pass
+        self._on_complete_called = True
 
 
 class BaseSource(ABC):
@@ -1054,6 +1064,9 @@ class BaseSource(ABC):
             config: Plugin configuration
         """
         self.config = config
+        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        self._on_start_called: bool = False
+        self._on_complete_called: bool = False
         self._schema_contract = None
         self.declared_guaranteed_fields = frozenset()
 
@@ -1129,7 +1142,7 @@ class BaseSource(ABC):
     # See class docstring for full lifecycle contract and guarantees.
     # Skipped entirely during resume runs (NullSource is used instead).
 
-    def on_start(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional hook
+    def on_start(self, ctx: LifecycleContext) -> None:
         """Called once before load().
 
         Override for per-run initialization. Called on the main thread.
@@ -1137,10 +1150,12 @@ class BaseSource(ABC):
         nor close() will be called.
 
         Skipped during resume runs.
-        """
-        pass
 
-    def on_complete(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional hook
+        Subclasses MUST call super().on_start(ctx) to set the lifecycle flag.
+        """
+        self._on_start_called = True
+
+    def on_complete(self, ctx: LifecycleContext) -> None:
         """Called after load() completes (or after pipeline error), before close().
 
         Override for recording final metrics or updating audit state.
@@ -1148,8 +1163,10 @@ class BaseSource(ABC):
         other plugins still get their on_complete/close calls.
 
         Skipped during resume runs.
+
+        Subclasses MUST call super().on_complete(ctx) to set the lifecycle flag.
         """
-        pass
+        self._on_complete_called = True
 
     # === Audit Trail Metadata ===
 

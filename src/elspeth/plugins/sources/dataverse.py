@@ -185,7 +185,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:809dab6944940c9c"
+    source_file_hash: str | None = "sha256:3ba64a1228760240"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -239,6 +239,7 @@ class DataverseSource(BaseSource):
 
         Called before load() — acquires resources from lifecycle context.
         """
+        super().on_start(ctx)
         # Construct credential (azure-identity) — validates early
         credential = self._auth_config.create_credential()
 
@@ -701,6 +702,7 @@ class DataverseSource(BaseSource):
         load() for diagnostic access. When a SourceCompleted event is added
         to contracts/events.py, emit here via ctx.telemetry_emit.
         """
+        super().on_complete(ctx)
         # Counters stored by load(): _pages_fetched, _rows_yielded, _quarantine_count
 
     def get_field_resolution(self) -> tuple[Mapping[str, str], str | None] | None:

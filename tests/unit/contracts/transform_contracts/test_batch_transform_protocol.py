@@ -683,7 +683,15 @@ class BatchTransformContractTestBase(ABC):
         mock_ctx_factory: Any,
         output_port: CollectingOutputPort,
     ) -> None:
-        """Contract: on_complete() MUST run after accepted work has emitted."""
+        """Contract: on_complete() MUST run after accepted work has emitted.
+
+        Asserts ``_on_complete_called`` as a falsifiable post-condition,
+        mirroring the ``_on_start_called`` pattern in
+        ``test_on_start_records_lifecycle_state``. A subclass override that
+        forgets ``super().on_complete(ctx)`` leaves the flag False and breaks
+        this test, eliminating a class of latent silent failures (a stub
+        override would no-op while satisfying a "doesn't raise" oracle).
+        """
         # Process something first
         ctx = mock_ctx_factory()
         pipeline_row = make_pipeline_row(valid_input)
@@ -692,14 +700,11 @@ class BatchTransformContractTestBase(ABC):
         assert arrived, "accepted work must emit before on_complete() runs"
         assert len(output_port.get_results()) == 1
 
-        # Restore Fix 3's accidental deletion: on_complete must actually be
-        # invoked for the test name to be honest. Stronger lifecycle-flag
-        # observability (mirroring _on_start_called on BaseTransform) requires
-        # a production-side lifecycle-flag pattern across BaseTransform /
-        # BaseSink / BaseSource and would ripple through plugin overrides
-        # that don't call super(); tracked separately. This restores the
-        # pre-Fix-3 contract: "on_complete runs after emit and does not raise".
+        assert started_transform._on_complete_called is False, "fixture invariant: on_complete() must not yet have been called"
         started_transform.on_complete(ctx)
+        assert started_transform._on_complete_called is True, (
+            "on_complete() override must call super().on_complete(ctx) to record lifecycle invocation"
+        )
 
 
 # =============================================================================

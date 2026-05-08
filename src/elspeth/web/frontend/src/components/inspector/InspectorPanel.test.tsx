@@ -295,22 +295,24 @@ describe("Version selector and catalog", () => {
   });
 });
 
-describe("InspectorPanel — validation dot colour", () => {
-  it("renders unchecked state in muted text colour, not warning orange", () => {
-    // Arrange: a session with a non-empty composition but no validation result
+describe("InspectorPanel validation dot colour", () => {
+  beforeEach(() => {
     useSessionStore.setState({
-      activeSessionId: "s1",
-      compositionState: {
-        version: 1,
-        source: { id: "src", type: "csv_file", options: {} },
-        nodes: [],
-        edges: [],
-        outputs: [],
-        metadata: { name: null, description: null },
-      } as any,
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+      stateVersions: [],
+      isLoadingVersions: false,
     });
-    useExecutionStore.setState({ validationResult: null });
+    useExecutionStore.setState({
+      validationResult: null,
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+  });
 
+  it("renders unchecked state in muted text colour, not warning orange", () => {
     render(<InspectorPanel />);
 
     const dot = screen.getByLabelText("Not validated");
@@ -319,17 +321,6 @@ describe("InspectorPanel — validation dot colour", () => {
   });
 
   it("renders warning state in warning colour", () => {
-    useSessionStore.setState({
-      activeSessionId: "s1",
-      compositionState: {
-        version: 1,
-        source: { id: "src", type: "csv_file", options: {} },
-        nodes: [],
-        edges: [],
-        outputs: [],
-        metadata: { name: null, description: null },
-      } as any,
-    });
     useExecutionStore.setState({
       validationResult: {
         is_valid: true,
@@ -337,7 +328,7 @@ describe("InspectorPanel — validation dot colour", () => {
         checks: [],
         errors: [],
         warnings: [{ component_id: "src", component_type: "source", message: "x", suggestion: null }],
-      } as any,
+      },
     });
 
     render(<InspectorPanel />);

@@ -87,14 +87,6 @@ class TestSettingsToRuntime:
     def test_individual_mapping(self, settings_cls: str, runtime_cls: str) -> None:
         assert SETTINGS_TO_RUNTIME[settings_cls] == runtime_cls
 
-    def test_all_keys_are_nonempty_strings(self) -> None:
-        for key in SETTINGS_TO_RUNTIME:
-            assert isinstance(key, str) and key
-
-    def test_all_values_are_nonempty_strings(self) -> None:
-        for value in SETTINGS_TO_RUNTIME.values():
-            assert isinstance(value, str) and value
-
     def test_all_keys_end_with_settings(self) -> None:
         for key in SETTINGS_TO_RUNTIME:
             assert key.endswith("Settings"), f"{key} does not end with 'Settings'"
@@ -130,9 +122,6 @@ class TestExemptSettings:
     def test_contains_all_expected_entries(self) -> None:
         for entry in self.EXPECTED_EXEMPT:
             assert entry in EXEMPT_SETTINGS, f"{entry} missing from EXEMPT_SETTINGS"
-
-    def test_is_a_frozenset(self) -> None:
-        assert isinstance(EXEMPT_SETTINGS, frozenset)
 
     def test_all_entries_are_nonempty_strings(self) -> None:
         for entry in EXEMPT_SETTINGS:

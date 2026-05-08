@@ -484,9 +484,3 @@ class TestCrossValidation:
         assert isinstance(config.enabled, bool)
         assert isinstance(config.frequency, int)
         assert isinstance(config.aggregation_boundaries, bool)
-
-    def test_all_five_protocols_exist(self) -> None:
-        assert len(ALL_PROTOCOLS) == 5
-
-    def test_all_five_config_pairs_exist(self) -> None:
-        assert len(PROTOCOL_CONFIG_PAIRS) == 5

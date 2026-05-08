@@ -343,3 +343,143 @@ class TestFactsToDict:
         assert d["observed_headers"] is None
         assert d["inferred_types"] is None
         assert d["url_candidates"] == []
+
+
+# --------------------------------------------------------------------------
+# Tier-3 hostile-input coverage.
+# ``inspect_blob_content`` is the Tier-3 boundary at which raw operator-
+# uploaded bytes enter the proof step. Per the function's contract,
+# partial inspection must always succeed — any unhandled exception
+# crashes ``preview_pipeline`` end-to-end. These tests pin that contract
+# against a deliberate set of pathological inputs (depth bombs, oversize
+# fields, control bytes, mid-codepoint truncation) and a Hypothesis
+# property that drives random binary garbage through the entry point.
+# --------------------------------------------------------------------------
+
+
+class TestInspectBlobContentHostileInputs:
+    """Pin ``inspect_blob_content``'s "always returns facts" contract."""
+
+    @pytest.mark.parametrize("mime_type", ["text/csv", "application/json", "application/jsonl", "application/octet-stream"])
+    def test_empty_bytes_returns_facts(self, mime_type: str) -> None:
+        f = inspect_blob_content(content=b"", filename="x", mime_type=mime_type)
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.byte_range_inspected[1] == 0
+
+    def test_json_deeply_nested_array_does_not_crash(self) -> None:
+        """JSON nesting depth bomb (within the 8 KiB peek)."""
+        depth = 2000
+        payload = ("[" * depth) + "1" + ("]" * depth)
+        f = inspect_blob_content(
+            content=payload.encode("utf-8"),
+            filename="x.json",
+            mime_type="application/json",
+        )
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "json"
+
+    def test_json_deeply_nested_object_does_not_crash(self) -> None:
+        """JSON depth bomb via nested objects."""
+        depth = 1500
+        opens = '{"a":' * depth
+        closes = "}" * depth
+        payload = opens + "1" + closes
+        f = inspect_blob_content(
+            content=payload.encode("utf-8"),
+            filename="x.json",
+            mime_type="application/json",
+        )
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "json"
+
+    def test_csv_single_oversize_quoted_field_does_not_crash(self) -> None:
+        """CSV with an 8-KiB single quoted field with embedded newlines."""
+        big_value = "x" * 7000 + "\n" + "y" * 1000
+        body = b'col_a,col_b\n"' + big_value.encode("utf-8") + b'",2\n'
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "csv"
+
+    def test_csv_more_cells_than_headers_does_not_crash(self) -> None:
+        """Row has more cells than the header row — must surface as facts.
+
+        Already partially covered in TestCsvInspection but pinned here
+        too as part of the hostile-input contract.
+        """
+        body = b"a,b\n1,2,3,4,5\n6,7,8,9,10\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "csv"
+        assert f.observed_headers == ("a", "b")
+
+    def test_csv_fewer_cells_than_headers_does_not_crash(self) -> None:
+        """Row has fewer cells than the header row — observed_headers
+        unaffected, missing values treated as empty.
+        """
+        body = b"a,b,c,d\n1\n2,3\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.observed_headers == ("a", "b", "c", "d")
+
+    def test_csv_null_bytes_in_headers_does_not_crash(self) -> None:
+        """Null bytes / control characters embedded in header bytes."""
+        body = b"a\x00b,c\x01d,e\x02f\n1,2,3\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "csv"
+
+    def test_csv_truncated_mid_utf8_codepoint_does_not_crash(self) -> None:
+        """Bytes truncated mid-UTF-8 — common at the 8 KiB sample boundary."""
+        # ``\xe2\x9c`` is a partial 3-byte UTF-8 sequence (CHECK MARK ✓
+        # is U+2713 = e2 9c 93 — drop the last byte).
+        body = b"name,marker\nAlice,\xe2\x9c"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "csv"
+
+    def test_jsonl_garbage_lines_does_not_crash(self) -> None:
+        """JSONL with a mix of garbage lines, non-objects, and valid rows."""
+        body = b'{"a": 1}\nnot json\n[1, 2, 3]\n{"b": 2}\n\n\n{"c": 3}\n'
+        f = inspect_blob_content(content=body, filename="x.jsonl", mime_type="application/jsonl")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "jsonl"
+        assert any("failed to parse" in w for w in f.warnings)
+
+    def test_non_utf8_binary_garbage_does_not_crash(self) -> None:
+        """High-bit binary garbage with no MIME / extension hint."""
+        body = bytes(range(256))
+        f = inspect_blob_content(content=body, filename="data.bin", mime_type="application/octet-stream")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "unknown"
+
+    def test_long_key_payload_object_does_not_crash(self) -> None:
+        """JSON with a single long key — checks the inferred-type loop
+        does not blow up on the large header.
+        """
+        long_key = "k" * 4000
+        body = b'{"' + long_key.encode() + b'": 1}'
+        f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
+        assert isinstance(f, SourceInspectionFacts)
+        assert f.source_kind == "json"
+
+
+class TestInspectBlobContentHypothesis:
+    """Hypothesis-driven property test: random binary garbage at all four
+    kind hints must always return ``SourceInspectionFacts`` and never raise.
+    """
+
+    def test_random_bytes_never_crash(self) -> None:
+        from hypothesis import HealthCheck, given, settings
+        from hypothesis import strategies as st
+
+        @given(
+            payload=st.binary(max_size=16384),
+            mime=st.sampled_from(["text/csv", "application/json", "application/jsonl", "application/octet-stream", "text/plain"]),
+            filename=st.sampled_from(["x", "data.csv", "data.json", "data.jsonl", "data.txt", "data.bin"]),
+        )
+        @settings(deadline=None, max_examples=200, suppress_health_check=[HealthCheck.function_scoped_fixture])
+        def _prop(payload: bytes, mime: str, filename: str) -> None:
+            facts = inspect_blob_content(content=payload, filename=filename, mime_type=mime)
+            assert isinstance(facts, SourceInspectionFacts)
+
+        _prop()

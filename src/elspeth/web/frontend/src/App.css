@@ -865,21 +865,38 @@ summary:focus-visible {
   bottom: 0;
   width: 20px;
   cursor: col-resize;
-  background-color: transparent;
+  background: transparent;
   z-index: var(--z-panel-controls);
   touch-action: none;
+  transition: background var(--transition-fast);
 }
 
-.resize-handle:hover {
-  background-color: var(--color-focus-ring);
-  opacity: 0.5;
-  transition: background-color var(--transition-normal);
+/* Static visible bar — 2px wide, centered, low-contrast neutral */
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 9px;
+  width: 2px;
+  background: var(--color-border-strong);
+  transition: background var(--transition-fast);
 }
 
-.resize-handle:focus-visible {
-  background-color: var(--color-focus-ring);
-  opacity: 0.6;
-  outline: none; /* the bar itself IS the indicator */
+.resize-handle:hover::before,
+.resize-handle:focus-visible::before {
+  background: var(--color-focus-ring);
+}
+
+/* Touch breakpoint — widen the hit zone without enlarging the visible bar */
+@media (max-width: 900px), (pointer: coarse) {
+  .resize-handle {
+    width: 36px;
+    left: -16px;
+  }
+  .resize-handle::before {
+    left: 17px;
+  }
 }
 
 /* ---------------------------------------------------------------------------

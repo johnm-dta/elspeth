@@ -59,6 +59,50 @@ This rule overrides any default LLM tendency to "summarise progress so far" befo
 
 **Out of scope.** This skill is for *composing* pipelines. Forensic queries about past runs (token lineage, audit lookups, debug analysis) belong to the Landscape MCP tools, not the composer. If the user asks "what happened in run X?", do not reach for `set_pipeline` — say the request needs the run-analysis tools and stop.
 
+### Convergence Guardrails — Source-aware Authoring
+
+Five rules that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
+
+1. **Inspect source facts before declaring a fixed schema.** When the operator has already attached a blob (or `set_source_from_blob` has been called), use `inspect_source(blob_id)` to discover the observed headers, sample row count, and inferred scalar types. Do not guess column names. Do not fabricate a schema from the user's prose — the blob is the truth, the prose is the wish.
+
+2. **Include observed CSV columns or use observed/flexible mode.** A `mode: fixed` schema that omits an observed column combined with `on_validation_failure: "discard"` silently drops every row. The proof step in `preview_pipeline` (Stage 3 — `proof_diagnostics`) catches this with code `csv_fixed_schema_omits_observed_columns` and forces a repair turn. Do not wait for the repair turn — call `inspect_source` first and choose the schema accordingly:
+   - `mode: "observed"` for exploratory or unknown-shape input (lowest friction).
+   - `mode: "flexible"` with declared fields when downstream needs typed access AND the source may carry extras.
+   - `mode: "fixed"` only when the operator explicitly asked to project to a smaller schema.
+
+3. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
+   - Declare the field as `int` or `float` in the source schema (`fields: ["price: float"]`), or
+   - Insert a `type_coerce` node upstream that converts the field to `float`.
+   The threshold recipe (`apply_pipeline_recipe('split-by-numeric-threshold', ...)`) already does this in the right order — prefer it for "split rows by N" intents.
+
+4. **Default `on_validation_failure: "discard"` for source validation.** Quarantine is a conventional output name, not a built-in sink. `on_validation_failure: "quarantine"` is valid only when an output named `quarantine` exists in the same pipeline. For ordinary intent, use `discard`.
+
+5. **Do not ask the user technical implementation questions for ordinary simple intent.** If the operator says "classify these tickets" or "split these orders by price," the answer is to inspect, decide, and build — not to ask "do you want me to use OpenRouter or Azure?" or "what columns does your CSV have?" Ask only when the ambiguity is genuinely product-level ("which business category should count as high priority?"). Pick conservative defaults for technical questions (OpenRouter + a current Anthropic model is a reasonable default) and proceed; the proof step will surface any blocking misjudgement.
+
+**Recipe-first heuristic.** If operator intent maps to one of these shapes, prefer `apply_pipeline_recipe` — it produces the same state as a hand-authored `set_pipeline`, but with slot validation that rejects the URL-as-blob_id and bool-as-numeric-threshold failure modes at the boundary:
+
+| Intent phrase | Recipe |
+|---|---|
+| "Classify these rows / tickets / reviews", "tag each row", "categorise" | `classify-rows-llm-jsonl` |
+| "Split rows by price > N", "route scores >= 0.8", "separate orders by amount" | `split-by-numeric-threshold` |
+
+Call `list_recipes` to see the registered recipes and their slot schemas. For shapes outside the recipe set, hand-author with `set_pipeline`.
+
+### Shape Catalog — Plain-English Intent → Tool Sequence
+
+These are the canonical tool sequences for the most common novice phrasings. Recognising the shape on the *first* turn avoids the model spending budget on discovery for already-known patterns.
+
+| Operator phrase | Pattern | Tools (in order) |
+|---|---|---|
+| "Use this URL: https://…" | URL must be wrapped, then fetched | `create_blob` (text/plain) → `set_source_from_blob` → `upsert_node` (web_scrape) → `set_output` |
+| "Classify these CSV rows" | LLM transform on every row | `apply_pipeline_recipe('classify-rows-llm-jsonl', …)` (or hand-author) |
+| "Split rows where X > N" | type_coerce + gate | `apply_pipeline_recipe('split-by-numeric-threshold', …)` |
+| "Summarise each line of this URL/file" | URL → web_scrape → line_explode → llm | `create_blob` → `set_source_from_blob` → `upsert_node` (web_scrape) → `upsert_node` (line_explode) → `upsert_node` (llm) → `set_output` |
+| "Filter rows mentioning [keyword]" | keyword_filter routing | `set_pipeline` with `keyword_filter` transform routing to two outputs |
+| "Compute aggregates over rows" | batch_stats / batch_distribution_profile | `set_pipeline` with the appropriate `batch_*` plugin and a trigger config |
+
+For each pattern: after the structural setup, run `preview_pipeline`. If `proof_diagnostics` returns blocking entries, apply the suggested repair (which is in `proof_diagnostics[].suggested_repair`) and re-preview. The forced-repair loop in the server caps clarification-style stalling at two turns; do not stall.
+
 ### Connection Model
 
 **Connections are named strings, not node IDs.** This is the most common schema-blindness failure in `set_pipeline` — get this wrong and every preview will return `No producer for connection 'X'. Available connections: ...` no matter how many times you retry.

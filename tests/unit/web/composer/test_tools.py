@@ -8688,3 +8688,42 @@ class TestPreviewProofStep:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+
+
+class TestBlockingDiagnosticRegistry:
+    """``_blocking_diagnostic`` enforces the canonical-codes invariant.
+
+    The skill markdown that drives the composer LLM cites these codes by
+    name; if a contributor adds a new blocker without registering the code
+    in ``_BLOCKING_DIAGNOSTIC_CODES``, the LLM's repair vocabulary drifts
+    silently. The constructor's runtime assertion turns that drift into a
+    crash at the construction site.
+    """
+
+    def test_unregistered_code_raises_at_construction(self) -> None:
+        from elspeth.web.composer.tools import _blocking_diagnostic
+
+        with pytest.raises(AssertionError, match="not registered in _BLOCKING_DIAGNOSTIC_CODES"):
+            _blocking_diagnostic(
+                code="this_code_was_never_registered",
+                message="msg",
+                suggested_repair="repair",
+                evidence_locator={},
+            )
+
+    def test_registered_codes_construct_successfully(self) -> None:
+        from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES, _blocking_diagnostic
+
+        for code in _BLOCKING_DIAGNOSTIC_CODES:
+            d = _blocking_diagnostic(
+                code=code,
+                message="msg",
+                suggested_repair="repair",
+                evidence_locator={"source": "blob", "blob_id": "abc"},
+            )
+            # Construction sets severity blocking and preserves the inputs.
+            assert d["code"] == code
+            assert d["severity"] == "blocking"
+            assert d["message"] == "msg"
+            assert d["suggested_repair"] == "repair"
+            assert d["evidence_locator"] == {"source": "blob", "blob_id": "abc"}

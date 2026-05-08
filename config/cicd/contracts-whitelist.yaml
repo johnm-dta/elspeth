@@ -607,9 +607,14 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/source_inspection.py:facts_to_dict:return"
   # proof_diagnostics — JSON-safe dicts returned to the LLM tool channel.
   # Each entry has {code, severity, message, suggested_repair, evidence_locator}
-  # and is consumed by Step 4's repair loop (service.py) and the convergence
+  # and is consumed by the forced-repair loop (service.py) and the convergence
   # eval harness (evals/lib/composer_rgr_score.py).
   - "src/elspeth/web/composer/tools.py:compute_proof_diagnostics:return (list)"
+  # _blocking_diagnostic constructor for the same dict shape — registry-checked
+  # against _BLOCKING_DIAGNOSTIC_CODES at construction so the LLM's repair
+  # vocabulary cannot drift silently.
+  - "src/elspeth/web/composer/tools.py:_blocking_diagnostic:evidence_locator"
+  - "src/elspeth/web/composer/tools.py:_blocking_diagnostic:return"
   # _attempt_proof_repair appends a synthesised user-role message to the
   # OpenAI-format chat completion list. Each entry is the documented chat
   # message shape ({role, content, ...}) which is inherently dynamic.

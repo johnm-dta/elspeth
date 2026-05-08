@@ -4897,6 +4897,13 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
     }
 
 
+# Canonical registry of every diagnostic code ``compute_proof_diagnostics``
+# may emit at ``severity='blocking'``. The skill markdown that drives the
+# composer LLM cites these codes by name, and the forced-repair loop keys off
+# ``severity == 'blocking'`` to decide whether to inject a repair message.
+# Drift between this set and the actual emission sites would silently break
+# the LLM's expected vocabulary, so ``_blocking_diagnostic`` enforces that
+# every blocking dict's ``code`` appears here at construction time.
 _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
     {
         "csv_fixed_schema_omits_observed_columns",
@@ -4904,6 +4911,36 @@ _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
         "source_inspection_failed",
     }
 )
+
+
+def _blocking_diagnostic(
+    *,
+    code: str,
+    message: str,
+    suggested_repair: str,
+    evidence_locator: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a blocking diagnostic dict and assert the code is registered.
+
+    Offensive: a contributor who adds a new blocker without registering it in
+    ``_BLOCKING_DIAGNOSTIC_CODES`` (and the matching skill-markdown vocabulary)
+    crashes immediately rather than shipping an unrecognised code into the
+    audit trail and the LLM's repair-message context.
+    """
+    if code not in _BLOCKING_DIAGNOSTIC_CODES:
+        raise AssertionError(
+            f"blocking diagnostic code {code!r} is not registered in "
+            f"_BLOCKING_DIAGNOSTIC_CODES. Add it there (and to the skill-"
+            f"markdown vocabulary the composer LLM consumes) before emitting "
+            f"a blocking diagnostic with this code."
+        )
+    return {
+        "code": code,
+        "severity": "blocking",
+        "message": message,
+        "suggested_repair": suggested_repair,
+        "evidence_locator": evidence_locator,
+    }
 
 
 def compute_proof_diagnostics(
@@ -4969,13 +5006,12 @@ def compute_proof_diagnostics(
     storage_path = Path(blob["storage_path"])
     if not storage_path.exists():
         diagnostics.append(
-            {
-                "code": "source_inspection_failed",
-                "severity": "blocking",
-                "message": (f"Source blob '{blob_id}' storage file is missing — pipeline cannot run until the blob is re-uploaded."),
-                "suggested_repair": "create_blob with the original content and re-wire via set_source_from_blob",
-                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
-            }
+            _blocking_diagnostic(
+                code="source_inspection_failed",
+                message=(f"Source blob '{blob_id}' storage file is missing — pipeline cannot run until the blob is re-uploaded."),
+                suggested_repair="create_blob with the original content and re-wire via set_source_from_blob",
+                evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+            )
         )
         return diagnostics
 
@@ -5010,27 +5046,26 @@ def compute_proof_diagnostics(
                 missing = derive_extra_column_risk(facts, tuple(declared))
                 if missing and source.on_validation_failure == "discard":
                     diagnostics.append(
-                        {
-                            "code": "csv_fixed_schema_omits_observed_columns",
-                            "severity": "blocking",
-                            "message": (
+                        _blocking_diagnostic(
+                            code="csv_fixed_schema_omits_observed_columns",
+                            message=(
                                 f"Source schema is mode=fixed but omits observed columns "
                                 f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
                                 "Combined with on_validation_failure='discard', every row will be "
                                 "dropped because each contains an undeclared column."
                             ),
-                            "suggested_repair": (
+                            suggested_repair=(
                                 "patch_source_options with schema.mode='flexible' to accept extra "
                                 "columns, OR add the missing columns to schema.fields, OR set "
                                 "on_validation_failure to a configured output for inspection."
                             ),
-                            "evidence_locator": {
+                            evidence_locator={
                                 "source": "blob",
                                 "blob_id": str(blob_id),
                                 "missing_columns": list(missing),
                                 "observed_columns": list(facts.observed_headers or ()),
                             },
-                        }
+                        )
                     )
 
     # 2. Text source containing a single URL but no web_scrape downstream.
@@ -5038,25 +5073,24 @@ def compute_proof_diagnostics(
         node_plugins = {(n.plugin or "").lower() for n in state.nodes}
         if "web_scrape" not in node_plugins:
             diagnostics.append(
-                {
-                    "code": "text_source_url_without_web_scrape",
-                    "severity": "blocking",
-                    "message": (
+                _blocking_diagnostic(
+                    code="text_source_url_without_web_scrape",
+                    message=(
                         f"Source blob contains URL(s) {list(facts.url_candidates)} but no "
                         "web_scrape transform is wired downstream. The URL string itself will "
                         "flow to sinks, not the URL's content."
                     ),
-                    "suggested_repair": (
+                    suggested_repair=(
                         "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
                         "input: <source on_success>, options: {url_field: '<column>'}}) and route "
                         "the source on_success to it."
                     ),
-                    "evidence_locator": {
+                    evidence_locator={
                         "source": "blob",
                         "blob_id": str(blob_id),
                         "url_candidates": list(facts.url_candidates),
                     },
-                }
+                )
             )
 
     # 3. Surface inspection warnings as info-severity diagnostics so the model

@@ -438,7 +438,7 @@ allow_hits:
     primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=c89e7e44b7cd35e7
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=f78419cd31e0e7ab
   owner: web-composer
   reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure
     mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content).

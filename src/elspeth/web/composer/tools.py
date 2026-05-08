@@ -3463,6 +3463,40 @@ def _execute_delete_blob(
     return _discovery_result(state, {"blob_id": blob_id, "deleted": True})
 
 
+def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
+    """Verify on-disk blob bytes match the stored content_hash.
+
+    Tier-1 invariant: a ``ready`` blob's stored ``content_hash`` is
+    enforced non-NULL by the ``ck_blobs_ready_hash`` CHECK constraint
+    at write time. Reading NULL here is therefore a DB-integrity
+    anomaly (someone bypassed the constraint, the row was tampered
+    with, or the constraint is missing in this database). A SHA-256
+    mismatch between recomputed bytes and stored hash is filesystem
+    corruption, tampering, or a write-path bug.
+
+    Both conditions ESCALATE via ``AuditIntegrityError`` /
+    ``BlobIntegrityError`` rather than degrading to a soft result;
+    silently passing through unverified bytes would let the audit
+    trail confidently record decisions made on garbage.
+
+    Use ``hmac.compare_digest`` (constant-time) for the comparison so
+    a malicious actor cannot leak the stored hash via timing
+    side-channels.
+
+    Used by the three composer-tool callers that read blob bytes
+    (``_execute_get_blob_content``, ``_execute_inspect_source``,
+    ``compute_proof_diagnostics``); each does its own lifecycle and
+    existence pre-checks since their failure-handling differs.
+    """
+    blob_id = blob["id"]
+    stored_hash = blob["content_hash"]
+    if stored_hash is None:
+        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
+    actual_hash = content_hash(data)
+    if not hmac.compare_digest(actual_hash, stored_hash):
+        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+
+
 def _execute_get_blob_content(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -3489,6 +3523,8 @@ def _execute_get_blob_content(
        (our hash, our file) indicating filesystem corruption,
        tampering, or a write-path bug; it must ESCALATE via
        ``BlobIntegrityError``, not degrade to a tool-failure result.
+       Implemented by ``_verify_blob_content_integrity`` (shared with
+       ``_execute_inspect_source`` and ``compute_proof_diagnostics``).
     3. **Decode safety** — the MIME allowlist admits encodings other
        than UTF-8 (``text/csv`` is frequently latin-1 in the wild).
        ``UnicodeDecodeError`` is converted to a ``_failure_result``
@@ -3523,16 +3559,9 @@ def _execute_get_blob_content(
 
     data = storage_path.read_bytes()
 
-    # Guard 2 — integrity.  A ``ready`` blob must always have a
-    # content_hash (enforced by the ``ck_blobs_ready_hash`` CHECK
-    # constraint at write time); NULL here is a DB-integrity anomaly
-    # and must escalate, not silently fall through to a bytes-return.
-    stored_hash = blob["content_hash"]
-    if stored_hash is None:
-        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
-    if not hmac.compare_digest(actual_hash, stored_hash):
-        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+    # Guard 2 — integrity.  Shared helper: NULL stored_hash escalates
+    # via AuditIntegrityError, mismatch via BlobIntegrityError.
+    _verify_blob_content_integrity(blob, data)
 
     # Guard 3 — decode safety.  Non-UTF-8 bytes are a Tier-3 external
     # input condition (the operator supplied content in an encoding we
@@ -3606,12 +3635,7 @@ def _execute_inspect_source(
 
     data = storage_path.read_bytes()
 
-    stored_hash = blob["content_hash"]
-    if stored_hash is None:
-        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
-    if not hmac.compare_digest(actual_hash, stored_hash):
-        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+    _verify_blob_content_integrity(blob, data)
 
     try:
         blob_uuid = UUID(blob_id)
@@ -3623,7 +3647,7 @@ def _execute_inspect_source(
         filename=blob["filename"],
         mime_type=blob["mime_type"],
         blob_id=blob_uuid,
-        content_hash=stored_hash,
+        content_hash=blob["content_hash"],
     )
     return _discovery_result(state, facts_to_dict(facts))
 
@@ -4885,7 +4909,11 @@ def compute_proof_diagnostics(
         return diagnostics
 
     blob = _sync_get_blob(session_engine, str(blob_id), session_id)
-    if blob is None or blob.get("status") != "ready":
+    # ``blob`` is a BlobToolRecord (TypedDict produced by
+    # ``_blob_row_to_tool_dict`` from a validated blobs row). Direct
+    # subscript access is mandatory — a missing key is a Tier-1
+    # contract violation in our own dict shape, not external data.
+    if blob is None or blob["status"] != "ready":
         return diagnostics
 
     storage_path = Path(blob["storage_path"])
@@ -4901,25 +4929,26 @@ def compute_proof_diagnostics(
         )
         return diagnostics
 
-    try:
-        content = storage_path.read_bytes()
-    except OSError as exc:
-        diagnostics.append(
-            {
-                "code": "source_inspection_failed",
-                "severity": "blocking",
-                "message": f"Source blob '{blob_id}' is unreadable: {exc.strerror or exc!s}",
-                "suggested_repair": "Re-upload the blob via create_blob and re-wire via set_source_from_blob",
-                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
-            }
-        )
-        return diagnostics
+    # Tier 1 (our data, our file): an OSError between exists() and
+    # read_bytes() is a real anomaly (concurrent delete, fs corruption,
+    # permission revocation). Per CLAUDE.md offensive-programming
+    # policy, let it propagate so the operator sees an informative
+    # exception rather than a synthesised soft-degraded diagnostic
+    # that could let downstream act on absent bytes.
+    content = storage_path.read_bytes()
+
+    # Tier 1 integrity verification — same shared helper as the two
+    # other composer-tool blob readers. Without this, the proof step
+    # would feed unverified bytes into ``inspect_blob_content`` and
+    # repair-loop, undermining the audit trail's "decisions made on
+    # verified inputs" invariant.
+    _verify_blob_content_integrity(blob, content)
 
     facts = inspect_blob_content(
         content=content,
         filename=blob["filename"],
         mime_type=blob["mime_type"],
-        content_hash=blob.get("content_hash"),
+        content_hash=blob["content_hash"],
     )
 
     # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.

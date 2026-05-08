@@ -8615,3 +8615,76 @@ class TestPreviewProofStep:
         from collections.abc import Mapping as _Mapping
 
         assert isinstance(result.data["authoring_validation"], _Mapping)
+
+    # -- proof step integrity verification -----------------------------------
+    # The proof step reads blob bytes through the same Tier-1 invariants as
+    # _execute_get_blob_content and _execute_inspect_source: NULL stored
+    # content_hash escalates via AuditIntegrityError; SHA-256 mismatch
+    # escalates via BlobIntegrityError. Without these the audit trail would
+    # accept LLM repair turns driven by unverified bytes.
+
+    def test_proof_raises_blob_integrity_error_on_hash_mismatch(self) -> None:
+        """Tampering with on-disk bytes after upload must raise, not soft-fail.
+
+        The proof step reads the blob's bytes; if SHA-256 of the bytes
+        does not match the stored content_hash, that's a Tier-1 anomaly
+        (filesystem corruption, tampering, or write-path bug) and must
+        ESCALATE — not silently let downstream LLM repair turns act on
+        garbage.
+        """
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        state = self._state_with_csv_source(schema_mode="observed")
+        # Tamper with the on-disk bytes after the row was inserted.
+        self.csv_storage_path.write_bytes(b"tampered,data\nX,Y\n")
+        with pytest.raises(BlobIntegrityError):
+            execute_tool(
+                "preview_pipeline",
+                {},
+                state,
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+    def test_proof_raises_audit_integrity_error_on_null_content_hash(self) -> None:
+        """A ``ready`` blob with NULL content_hash is a DB-integrity anomaly.
+
+        Enforced at write time by the ``ck_blobs_ready_hash`` CHECK
+        constraint. If the proof step ever observes NULL here, the
+        constraint was bypassed (or the database is corrupt). Must
+        ESCALATE via AuditIntegrityError; cannot soft-degrade to "no
+        diagnostics" because that would let an unverified blob drive
+        repair turns.
+        """
+        from sqlalchemy import update
+
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.web.sessions.models import blobs_table
+
+        # Bypass the CHECK constraint by suspending it; sqlite respects
+        # ``PRAGMA defer_foreign_keys`` but not check toggles inline,
+        # so we drop and recreate without the constraint for the test
+        # row. Simpler: directly patch via raw SQL with a workaround
+        # — but the cleanest test path is to set status='ready' and
+        # NULL the hash explicitly via UPDATE; sqlite will reject the
+        # CHECK if defined. Use a raw SQL UPDATE that violates the
+        # check guard if present, else falls through; the row's
+        # presence on read with NULL hash is what we need.
+        state = self._state_with_csv_source(schema_mode="observed")
+        with self.engine.begin() as conn:
+            # Disable the row-level check by toggling pragma; sqlite
+            # 3.x respects this for the connection. Then null the hash.
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+            conn.execute(update(blobs_table).where(blobs_table.c.id == self.csv_blob_id).values(content_hash=None))
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+        with pytest.raises(AuditIntegrityError, match="NULL content_hash"):
+            execute_tool(
+                "preview_pipeline",
+                {},
+                state,
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )

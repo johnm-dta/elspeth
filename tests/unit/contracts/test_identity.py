@@ -37,6 +37,7 @@ class TestTokenInfo:
         assert token.row_id == "row-123"
         assert token.token_id == "tok-456"
         assert token.row_data["field"] == "value"
+        assert token.row_data is pipeline_row, "row_data must be a reference to pipeline_row, not a copy"
         assert token.branch_name is None
 
     def test_token_info_with_branch(self) -> None:

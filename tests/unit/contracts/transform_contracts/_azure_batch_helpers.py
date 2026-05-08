@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -29,6 +29,9 @@ from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.testing import make_pipeline_row
 
 from .test_batch_transform_protocol import CollectingOutputPort
+
+if TYPE_CHECKING:
+    from elspeth.contracts.plugin_context import PluginContext
 
 # Bound at import time so the spec_set target is the real httpx.Client class
 # rather than a string lookup against a possibly-patched module attribute.
@@ -93,7 +96,7 @@ def set_httpx_response(
 def submit_and_collect_single_result(
     started_transform: BatchTransformMixin,
     row_data: dict[str, Any],
-    ctx: Any,
+    ctx: PluginContext,
     output_port: CollectingOutputPort,
 ) -> TransformResult:
     """Submit one row through a started batch transform, return the single result.

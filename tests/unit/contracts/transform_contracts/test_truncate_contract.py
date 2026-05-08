@@ -159,7 +159,6 @@ class TestTruncateStrictContract(TransformErrorContractTestBase):
         ctx: Any,
     ) -> None:
         """Contract: Strict mode MUST return error with missing_field reason."""
-        ctx = make_context(run_id="test")
         pipeline_row = make_pipeline_row(error_input)
         result = transform.process(pipeline_row, ctx)
         assert result.status == "error"
@@ -172,7 +171,6 @@ class TestTruncateStrictContract(TransformErrorContractTestBase):
         ctx: Any,
     ) -> None:
         """Contract: Strict mode MUST return error when field is not a string."""
-        ctx = make_context(run_id="test")
         pipeline_row = make_pipeline_row({"required_field": 42, "id": 3})
         result = transform.process(pipeline_row, ctx)
         assert result.status == "error"
@@ -188,7 +186,6 @@ class TestTruncateStrictContract(TransformErrorContractTestBase):
         ctx: Any,
     ) -> None:
         """Contract: Strict mode MUST return error when field value is None."""
-        ctx = make_context(run_id="test")
         pipeline_row = make_pipeline_row({"required_field": None, "id": 4})
         result = transform.process(pipeline_row, ctx)
         assert result.status == "error"
@@ -228,7 +225,6 @@ class TestTruncateNonStringContract(TransformErrorContractTestBase):
         ctx: Any,
     ) -> None:
         """Contract: Non-string configured field MUST return type_mismatch error."""
-        ctx = make_context(run_id="test")
         pipeline_row = make_pipeline_row(error_input)
         result = transform.process(pipeline_row, ctx)
         assert result.status == "error"

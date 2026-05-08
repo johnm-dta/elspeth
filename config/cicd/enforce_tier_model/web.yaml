@@ -559,57 +559,57 @@ allow_hits:
 # recipe boundary before scaffolding. Each isinstance check below routes to
 # either a coercion or an explicit RecipeValidationError with a repair hint
 # (e.g., "use create_blob first" for a URL passed where a blob_id is required).
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=32c9c09b65e93750
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=c4263279c40a5961
   owner: web-composer
   reason: Tier-3 trust boundary — checking that a blob_id slot value is a string before UUID parsing. Operator may
     supply any JSON type; non-string values are rejected with a repair hint pointing to create_blob.
   safety: Non-string values raise RecipeValidationError with repair guidance; never silently coerced.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=1f3fc1b884d7ce0d
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=69736596ab831836
   owner: web-composer
   reason: Tier-3 trust boundary — checking that a str slot value is actually a string before passing through.
   safety: Non-string values raise RecipeValidationError; never silently coerced.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=8fbf3c725ae23060
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=32ce9b85f3061d4a
   owner: web-composer
   reason: Tier-3 trust boundary — explicit bool check before numeric coercion. bool is a subclass of int in Python,
     so without this guard True/False would silently coerce to 1.0/0.0 (a fabrication risk).
   safety: bool values raise RecipeValidationError telling operator to use 0.0/1.0 explicitly.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=0800af07981333d6
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=37c487dc79354562
   owner: web-composer
   reason: Tier-3 trust boundary — int/float check for numeric-slot pass-through. Both are valid numeric
     representations and are coerced to float for downstream gate comparisons.
   safety: Other types fall through to the str-coercion branch or to the type-mismatch error.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=387c3863dfd6f36f
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=4ef2359b87975a9c
   owner: web-composer
   reason: Tier-3 trust boundary — string check before float coercion. Operator may supply numeric thresholds as
     strings ("99.95"); we coerce explicitly at the boundary.
   safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=fd44531342b35fa4
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=3340edc2278b02c2
   owner: web-composer
   reason: Tier-3 trust boundary — bool check for the int slot type (same fabrication-risk reason as the float branch).
   safety: bool values raise RecipeValidationError; never coerced.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=619a904934360b80
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=26252daa7c5d88b7
   owner: web-composer
   reason: Tier-3 trust boundary — int check for int-slot pass-through.
   safety: Non-int values fall through to the str-coercion branch or the type-mismatch error.
   expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=eaf2c8f9f049a556
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=7a2c78322baa89e8
   owner: web-composer
   reason: Tier-3 trust boundary — string check before int coercion. Same pattern as the float branch.
   safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
   expires: null
-- key: web/composer/recipes.py:R1:get_recipe:fp=f01a230b3a75d48c
+- key: web/composer/recipes.py:R1:get_recipe:fp=fa88d94e82804c1f
   owner: web-composer
   reason: Tier-3 trust boundary — `_RECIPES.get(name)` for membership probe on a recipe-name lookup. Returns None
     when the name is not registered; caller (apply_recipe) raises an explicit error with the registered names.
   safety: None return is the documented "unknown recipe" signal; caller produces a helpful error message.
   expires: null
-- key: web/composer/recipes.py:R1:apply_recipe:fp=fa88d94e82804c1f
+- key: web/composer/recipes.py:R1:apply_recipe:fp=1696d1cf63bcf4a7
   owner: web-composer
   reason: Tier-3 trust boundary — `_RECIPES.get(name)` membership probe in apply_recipe. Same pattern as get_recipe;
     None triggers the explicit RecipeValidationError path with available-recipes guidance.

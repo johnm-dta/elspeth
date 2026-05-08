@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 from uuid import UUID
 
+from elspeth.contracts.freeze import freeze_fields
+
 SlotType = Literal["blob_id", "str", "float", "int"]
 
 
@@ -64,6 +66,14 @@ class RecipeSpec:
     slots: Mapping[str, SlotSpec]
     build: Callable[[Mapping[str, Any]], Mapping[str, Any]]
     """Pure function: validated slots → set_pipeline-compatible args dict."""
+
+    def __post_init__(self) -> None:
+        # ``frozen=True`` only blocks attribute reassignment; the underlying
+        # mapping is mutable through the attribute reference. ``freeze_fields``
+        # converts the dict to a MappingProxyType (recursively, including the
+        # SlotSpec values which are themselves frozen) so registry consumers
+        # cannot mutate a recipe's slot table after construction.
+        freeze_fields(self, "slots")
 
 
 class RecipeValidationError(ValueError):

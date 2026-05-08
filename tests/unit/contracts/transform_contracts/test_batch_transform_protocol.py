@@ -692,6 +692,15 @@ class BatchTransformContractTestBase(ABC):
         assert arrived, "accepted work must emit before on_complete() runs"
         assert len(output_port.get_results()) == 1
 
+        # Restore Fix 3's accidental deletion: on_complete must actually be
+        # invoked for the test name to be honest. Stronger lifecycle-flag
+        # observability (mirroring _on_start_called on BaseTransform) requires
+        # a production-side lifecycle-flag pattern across BaseTransform /
+        # BaseSink / BaseSource and would ripple through plugin overrides
+        # that don't call super(); tracked separately. This restores the
+        # pre-Fix-3 contract: "on_complete runs after emit and does not raise".
+        started_transform.on_complete(ctx)
+
 
 # =============================================================================
 # FIFO Stress Base — falsifiable FIFO contract verification

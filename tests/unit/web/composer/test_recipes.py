@@ -738,3 +738,149 @@ class TestApplyRecipeEndToEnd:
         assert coerce.options["conversions"] == ({"field": "price", "to": "float"},) or coerce.options["conversions"] == [
             {"field": "price", "to": "float"}
         ]
+
+    def test_apply_recipe_over_populated_state_emits_replacement_note(self, _seeded) -> None:
+        """When the operator has hand-iterated state and the LLM applies a
+        recipe, the destructive full-state replacement must be visible.
+
+        Regression for the silent-overwrite issue: ``apply_pipeline_recipe``
+        delegates to ``set_pipeline`` (full-state replacement). If the
+        prior state had a source / nodes / outputs, the LLM (and the
+        audit trail) should see a non-blocking note describing what was
+        replaced. This preserves the recipe-on-existing-state ergonomics
+        — we don't refuse the destructive call — but the action is no
+        longer silent.
+        """
+        from elspeth.web.composer.state import (
+            CompositionState,
+            NodeSpec,
+            OutputSpec,
+            PipelineMetadata,
+            SourceSpec,
+        )
+        from elspeth.web.composer.tools import execute_tool
+
+        engine, session_id, blob_id = _seeded
+
+        # Prior state: a hand-iterated pipeline the operator was building
+        # (source set, two transforms, one output). Applying a recipe on
+        # top of this is the silent-overwrite scenario.
+        populated = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="hand_built_a",
+                options={"path": "old-input.csv"},
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="hand_built_a",
+                    node_type="transform",
+                    plugin="select_columns",
+                    input="source",
+                    on_success="hand_built_b",
+                    on_error=None,
+                    options={"fields": ["a", "b"]},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+                NodeSpec(
+                    id="hand_built_b",
+                    node_type="transform",
+                    plugin="select_columns",
+                    input="hand_built_a",
+                    on_success="prior_output",
+                    on_error=None,
+                    options={"fields": ["a"]},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="prior_output",
+                    plugin="json",
+                    options={"path": "old-output.json"},
+                    on_write_failure="quarantine",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=4,
+        )
+
+        result = execute_tool(
+            "apply_pipeline_recipe",
+            {
+                "recipe_name": "split-by-numeric-threshold",
+                "slots": {
+                    "source_blob_id": blob_id,
+                    "field": "price",
+                    "threshold": 100.0,
+                },
+            },
+            populated,
+            self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        assert result.success, getattr(result, "data", result)
+        # The destructive replacement is now audible: data carries a
+        # ``replaced_pipeline_note`` describing the prior counts. ToolResult
+        # post-init deep-freezes the data field, so the type at this point
+        # is a MappingProxyType wrapping the merged dict — accept any
+        # ``Mapping`` rather than asserting ``dict``.
+        from collections.abc import Mapping as _Mapping
+
+        assert isinstance(result.data, _Mapping)
+        note = result.data["replaced_pipeline_note"]
+        assert "source=set" in note
+        assert "2 node(s)" in note
+        assert "1 output(s)" in note
+        # Pre-existing data payload (from set_pipeline's source_blob
+        # resolution) survives the merge — we did not clobber it.
+        assert "source_blob" in result.data
+
+    def test_apply_recipe_over_empty_state_emits_no_replacement_note(self, _seeded) -> None:
+        """Recipe applied to a fresh session is not destructive — no note."""
+        from elspeth.web.composer.state import CompositionState, PipelineMetadata
+        from elspeth.web.composer.tools import execute_tool
+
+        engine, session_id, blob_id = _seeded
+        empty = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = execute_tool(
+            "apply_pipeline_recipe",
+            {
+                "recipe_name": "split-by-numeric-threshold",
+                "slots": {
+                    "source_blob_id": blob_id,
+                    "field": "price",
+                    "threshold": 100.0,
+                },
+            },
+            empty,
+            self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert result.success, getattr(result, "data", result)
+        # No replacement note when there was nothing to replace.
+        if result.data is not None:
+            assert "replaced_pipeline_note" not in result.data

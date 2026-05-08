@@ -3678,6 +3678,16 @@ def _execute_apply_pipeline_recipe(
     URL string passed where a blob_id is required is rejected at the
     recipe boundary with an explicit repair hint, not silently accepted
     into a config that will fail at runtime.
+
+    ``set_pipeline`` is full state replacement. When the operator was
+    hand-iterating and the LLM applied a recipe, prior work is replaced
+    with the recipe's scaffold. To make that destructive action visible
+    (rather than silently overwriting), we capture the pre-replacement
+    counts and surface them as a ``replaced_pipeline`` note on the
+    successful result's ``data`` payload — non-blocking, but visible to
+    both the LLM and the audit trail. No note is emitted when the pre-
+    state was empty (recipe applied to a fresh session) since there
+    is nothing to "replace".
     """
     recipe_name = arguments.get("recipe_name")
     raw_slots = arguments.get("slots")
@@ -3697,10 +3707,18 @@ def _execute_apply_pipeline_recipe(
     except RecipeValidationError as exc:
         return _failure_result(state, str(exc))
 
+    # Capture pre-replacement counts BEFORE delegating to the destructive
+    # set_pipeline path. Frozen-dataclass fields, so capturing the integers
+    # now is sufficient — the post-call result.updated_state is a fresh
+    # CompositionState produced by set_pipeline.
+    pre_source_present = state.source is not None
+    pre_node_count = len(state.nodes)
+    pre_output_count = len(state.outputs)
+
     # Delegate to the existing set_pipeline executor — recipes produce the
     # exact arguments shape set_pipeline accepts, so validation and state
     # mutation flow through the canonical mutation path.
-    return _execute_set_pipeline(
+    result = _execute_set_pipeline(
         pipeline_args,
         state,
         catalog,
@@ -3708,6 +3726,39 @@ def _execute_apply_pipeline_recipe(
         session_engine=session_engine,
         session_id=session_id,
     )
+
+    # Only annotate successful replacements over a non-empty prior state.
+    # On failure, set_pipeline returned ``state`` unchanged and the note
+    # would be misleading. On a fresh-session apply, there is nothing to
+    # call out and a note would be noise.
+    if not result.success:
+        return result
+    if not (pre_source_present or pre_node_count or pre_output_count):
+        return result
+
+    note = (
+        f"apply_pipeline_recipe replaced the existing pipeline "
+        f"(prior state had source={'set' if pre_source_present else 'unset'}, "
+        f"{pre_node_count} node(s), {pre_output_count} output(s)). "
+        "Recipes are full-state scaffolds; the prior composition was discarded."
+    )
+
+    # Preserve any existing data payload from set_pipeline (e.g. inline-blob
+    # creation summary) by merging into a single dict. set_pipeline's
+    # ``data`` is currently None on the recipe path because recipes don't
+    # use inline_blob, but merging is forward-compatible.
+    existing_data = result.data
+    if existing_data is None:
+        merged_data: Any = {"replaced_pipeline_note": note}
+    elif isinstance(existing_data, Mapping):
+        merged_data = {**dict(existing_data), "replaced_pipeline_note": note}
+    else:
+        # set_pipeline contract: ``data`` is None or a Mapping. Anything
+        # else is a contract drift bug — surface the note alongside in a
+        # wrapper rather than silently dropping either.
+        merged_data = {"replaced_pipeline_note": note, "set_pipeline_data": existing_data}
+
+    return replace(result, data=merged_data)
 
 
 # Blob tool handler type — extended signature with session context

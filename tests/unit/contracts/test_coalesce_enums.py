@@ -1,5 +1,7 @@
 """Tests for CoalescePolicy and MergeStrategy enums."""
 
+import pytest
+
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 
 
@@ -16,8 +18,6 @@ class TestCoalescePolicy:
             assert CoalescePolicy(member.value) is member
 
     def test_invalid_value_raises(self) -> None:
-        import pytest
-
         with pytest.raises(ValueError):
             CoalescePolicy("nonexistent")
 
@@ -29,7 +29,5 @@ class TestMergeStrategy:
         assert MergeStrategy.SELECT.value == "select"
 
     def test_invalid_value_raises(self) -> None:
-        import pytest
-
         with pytest.raises(ValueError):
             MergeStrategy("nonexistent")

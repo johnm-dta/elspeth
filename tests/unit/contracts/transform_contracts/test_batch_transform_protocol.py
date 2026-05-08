@@ -8,9 +8,27 @@ Contract guarantees verified:
 1. connect_output() MUST be called before accept()
 2. accept() MUST return immediately (non-blocking except backpressure)
 3. Results MUST arrive via OutputPort
-4. Results MUST arrive in FIFO (submission) order
-5. close() MUST be idempotent
-6. Lifecycle hooks on_start/on_complete MUST not raise
+4. close() MUST be idempotent
+5. Lifecycle hooks on_start/on_complete MUST not raise
+
+FIFO ordering (BatchTransformMixin's reorder buffer guarantee) is NOT verified
+in :class:`BatchTransformContractTestBase`. The FIFO contract belongs to the
+mixin's RowReorderBuffer, not to any individual transform — and verifying it
+against a synchronous, CPU-trivial exemplar produces a non-falsifiable test:
+with no real concurrency the buffer never has out-of-order completions to
+reorder, so a hypothetical LIFO-buggy implementation would still pass. FIFO
+is verified once, in :class:`BatchTransformFIFOStressTestBase`, with reverse
+submission-order latency injection that forces workers to complete in reverse
+order, exercising the buffer's actual reordering behaviour.
+
+Subclasses that need FIFO coverage must inherit
+:class:`BatchTransformFIFOStressTestBase` and provide a transform whose
+``_process_row`` exposes a real concurrency surface (e.g., the
+``_BatchContractExemplarTransform`` here, or a transform under load with
+real I/O). Subclasses with synchronous mocks (e.g., the Azure transforms
+under unittest.mock-patched httpx clients) get no useful FIFO coverage and
+should NOT inherit the stress base — they would only restore the
+non-falsifiability defect this file documents.
 
 Usage:
     Create a subclass with fixtures providing:
@@ -67,7 +85,25 @@ class _BatchContractOutputSchema(PluginSchema):
 
 
 class _BatchContractExemplarTransform(BaseTransform, BatchTransformMixin):
-    """Minimal concrete transform that exercises real BatchTransformMixin behavior."""
+    """Minimal concrete transform that exercises real BatchTransformMixin behavior.
+
+    Optional reverse-latency injection
+    ----------------------------------
+    Set ``config["reverse_latency_unit_seconds"]`` to a positive float to make
+    ``_process_row`` sleep for ``(N - submission_index - 1) * unit`` seconds,
+    where ``N`` is ``config["reverse_latency_total"]`` and ``submission_index``
+    is a monotonic counter incremented on each ``accept_row`` call.
+
+    With a thread pool wide enough to admit all submissions concurrently, this
+    forces worker threads to complete in *reverse* submission order: the first
+    submitted row finishes last. The production ``RowReorderBuffer`` must then
+    restore FIFO output order — a non-FIFO release implementation would emit
+    in worker-completion order (LIFO of submission), which the FIFO stress test
+    detects.
+
+    By default the latency knob is disabled and ``_process_row`` is purely
+    synchronous, so all non-FIFO contract tests run at full speed.
+    """
 
     name = "batch_contract_exemplar"
     input_schema: type[PluginSchema] = _BatchContractInputSchema
@@ -87,6 +123,11 @@ class _BatchContractExemplarTransform(BaseTransform, BatchTransformMixin):
                 "guaranteed_fields": ["processed"],
             }
         )
+        # Reverse-latency injection (off by default). See class docstring.
+        self._reverse_latency_unit = float(config.get("reverse_latency_unit_seconds", 0.0))
+        self._reverse_latency_total = int(config.get("reverse_latency_total", 0))
+        self._submission_counter = 0
+        self._submission_counter_lock = threading.Lock()
 
     def connect_output(self, output: OutputPort, max_pending: int = 30) -> None:
         """Wire the exemplar into the production batch processing machinery."""
@@ -101,13 +142,45 @@ class _BatchContractExemplarTransform(BaseTransform, BatchTransformMixin):
         self._batch_connected = True
 
     def accept(self, row: PipelineRow, ctx: TransformContext) -> None:
-        """Accept one row and process it through BatchTransformMixin."""
+        """Accept one row and process it through BatchTransformMixin.
+
+        Captures a per-submission index *before* delegating to ``accept_row``
+        so that ``_process_row`` (executed asynchronously in a worker thread)
+        can compute the reverse-latency sleep deterministically based on
+        submission order rather than worker-thread arrival order.
+        """
         if not self._batch_connected:
             raise RuntimeError("connect_output() must be called before accept()")
-        self.accept_row(row, ctx, self._process_row)
+        with self._submission_counter_lock:
+            submission_index = self._submission_counter
+            self._submission_counter += 1
 
-    def _process_row(self, row: PipelineRow, ctx: TransformContext) -> TransformResult:
-        """Return a successful enriched row for the submitted input."""
+        def _process_with_latency(row: PipelineRow, ctx: TransformContext) -> TransformResult:
+            return self._process_row(row, ctx, submission_index)
+
+        self.accept_row(row, ctx, _process_with_latency)
+
+    def _process_row(
+        self,
+        row: PipelineRow,
+        ctx: TransformContext,
+        submission_index: int = 0,
+    ) -> TransformResult:
+        """Return a successful enriched row for the submitted input.
+
+        If reverse-latency injection is enabled (see class docstring), sleeps
+        for ``(total - submission_index - 1) * unit`` seconds before returning,
+        forcing workers with smaller submission indices to complete *later*
+        than workers with larger indices.
+        """
+        if self._reverse_latency_unit > 0.0 and self._reverse_latency_total > 0:
+            sleep_seconds = max(
+                0.0,
+                (self._reverse_latency_total - submission_index - 1) * self._reverse_latency_unit,
+            )
+            if sleep_seconds > 0.0:
+                time.sleep(sleep_seconds)
+
         output = row.to_dict()
         output["processed"] = True
         return TransformResult.success(
@@ -130,6 +203,15 @@ def _assert_frozenset_of_str(value: object, *, attr_name: str) -> frozenset[str]
     return value
 
 
+# Mocked-test timeout: short enough to surface hangs quickly, long enough to
+# absorb thread-pool scheduling jitter on busy CI runners. The original 10s
+# value masked hangs in the batch reorder/release loop. Real network paths
+# (e.g. an actual httpx client) need their own bespoke timeouts; the contract
+# tests here run against synchronous in-process exemplars and mocked HTTP
+# clients that should never need more than a few hundred milliseconds.
+_MOCKED_RESULT_TIMEOUT_SECONDS = 3.0
+
+
 def _submit_and_wait_for_single_result(
     started_transform: TransformProtocol,
     valid_input: dict[str, Any],
@@ -141,7 +223,7 @@ def _submit_and_wait_for_single_result(
     accept_result = started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
     assert accept_result is None, f"accept() should return None, got {type(accept_result)}"
 
-    arrived = output_port.wait_for_results(1, timeout=10.0)
+    arrived = output_port.wait_for_results(1, timeout=_MOCKED_RESULT_TIMEOUT_SECONDS)
     assert arrived, "Result did not arrive via OutputPort within timeout"
     results = output_port.get_results()
     assert len(results) == 1, f"Expected 1 result, got {len(results)}"
@@ -406,7 +488,7 @@ class BatchTransformContractTestBase(ABC):
         started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
 
         # Wait for result
-        arrived = output_port.wait_for_results(1, timeout=10.0)
+        arrived = output_port.wait_for_results(1, timeout=_MOCKED_RESULT_TIMEOUT_SECONDS)
         assert arrived, "Result did not arrive via OutputPort within timeout"
 
         results = output_port.get_results()
@@ -495,7 +577,7 @@ class BatchTransformContractTestBase(ABC):
         pipeline_row = make_pipeline_row(valid_input)
         started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
 
-        output_port.wait_for_results(1, timeout=10.0)
+        output_port.wait_for_results(1, timeout=_MOCKED_RESULT_TIMEOUT_SECONDS)
         results = output_port.get_results()
 
         returned_token, _, _ = results[0]
@@ -516,7 +598,7 @@ class BatchTransformContractTestBase(ABC):
         pipeline_row = make_pipeline_row(valid_input)
         started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
 
-        output_port.wait_for_results(1, timeout=10.0)
+        output_port.wait_for_results(1, timeout=_MOCKED_RESULT_TIMEOUT_SECONDS)
         results = output_port.get_results()
 
         _, _, returned_state_id = results[0]
@@ -525,32 +607,24 @@ class BatchTransformContractTestBase(ABC):
     # =========================================================================
     # FIFO Ordering Contract
     # =========================================================================
-
-    def test_results_arrive_in_fifo_order(
-        self,
-        started_transform: TransformProtocol,
-        valid_input: dict[str, Any],
-        mock_ctx_factory: Any,
-        output_port: CollectingOutputPort,
-    ) -> None:
-        """Contract: Results MUST arrive in submission (FIFO) order."""
-        # Submit multiple rows
-        submitted_tokens: list[str] = []
-        for _ in range(5):
-            ctx = mock_ctx_factory()
-            submitted_tokens.append(ctx.token.token_id)
-            pipeline_row = make_pipeline_row(valid_input.copy())
-            started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
-
-        # Wait for all results
-        arrived = output_port.wait_for_results(5, timeout=30.0)
-        assert arrived, f"Not all results arrived, got {len(output_port.get_results())}/5"
-
-        # Verify FIFO order
-        results = output_port.get_results()
-        received_tokens = [token.token_id for token, _, _ in results]
-
-        assert received_tokens == submitted_tokens, f"FIFO order violated!\nSubmitted: {submitted_tokens}\nReceived:  {received_tokens}"
+    #
+    # FIFO output order is a guarantee of BatchTransformMixin's RowReorderBuffer,
+    # not of any individual transform. Verifying it here against subclass
+    # transforms produces a non-falsifiable test:
+    #
+    #   - With a synchronous, CPU-trivial ``_process_row``, worker threads
+    #     complete in close-to-submission order anyway. Even an outright LIFO
+    #     release implementation would pass at small n because the workers
+    #     never have meaningfully out-of-order completions to reorder.
+    #   - Mocked external clients (e.g. ``unittest.mock``-patched httpx) are
+    #     equally synchronous and produce the same false-pass shape.
+    #
+    # FIFO is verified once, in :class:`BatchTransformFIFOStressTestBase`,
+    # against ``_BatchContractExemplarTransform`` configured with reverse
+    # submission-order latency injection. That setup forces workers to
+    # complete in *reverse* order, so a buggy LIFO release implementation
+    # produces output exactly opposite to submission order — making the
+    # test cleanly falsifiable.
 
     # =========================================================================
     # Lifecycle Contracts
@@ -609,64 +683,160 @@ class BatchTransformContractTestBase(ABC):
         mock_ctx_factory: Any,
         output_port: CollectingOutputPort,
     ) -> None:
-        """Contract: on_complete() MUST run after accepted work has emitted."""
+        """Contract: on_complete() MUST run after accepted work has emitted.
+
+        Asserts ``_on_complete_called`` as a falsifiable post-condition,
+        mirroring the ``_on_start_called`` pattern in
+        ``test_on_start_records_lifecycle_state``. A subclass override that
+        forgets ``super().on_complete(ctx)`` leaves the flag False and breaks
+        this test, eliminating a class of latent silent failures (a stub
+        override would no-op while satisfying a "doesn't raise" oracle).
+        """
         # Process something first
         ctx = mock_ctx_factory()
         pipeline_row = make_pipeline_row(valid_input)
         started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
-        arrived = output_port.wait_for_results(1, timeout=10.0)
+        arrived = output_port.wait_for_results(1, timeout=_MOCKED_RESULT_TIMEOUT_SECONDS)
         assert arrived, "accepted work must emit before on_complete() runs"
         assert len(output_port.get_results()) == 1
 
+        assert started_transform._on_complete_called is False, "fixture invariant: on_complete() must not yet have been called"
         started_transform.on_complete(ctx)
+        assert started_transform._on_complete_called is True, (
+            "on_complete() override must call super().on_complete(ctx) to record lifecycle invocation"
+        )
+
+
+# =============================================================================
+# FIFO Stress Base — falsifiable FIFO contract verification
+# =============================================================================
+#
+# Subclasses must provide a ``batch_transform`` whose ``_process_row`` exposes
+# a real concurrency surface. The reverse-latency-injecting exemplar in this
+# file is the canonical implementation; transforms with mocked synchronous
+# clients (e.g. Azure transforms under unittest.mock-patched httpx) cannot
+# meaningfully exercise this base and should NOT inherit it.
+#
+# Falsifiability argument (verified manually on each modification of the
+# stress test or the underlying exemplar — see commit message for proof):
+#
+#   With reverse submission-order latency injection, worker threads complete
+#   in *reverse* submission order. The production RowReorderBuffer must then
+#   restore FIFO order before emitting to the OutputPort. If the buffer's
+#   release loop is replaced with a LIFO (or worker-completion-order) release
+#   strategy, this test sees ``received_tokens == reversed(submitted_tokens)``
+#   and fails with a clear, deterministic diff. A naive synchronous LIFO
+#   exemplar would produce the same failing diff. Therefore the test is
+#   falsifiable: a buggy non-FIFO release implementation cannot pass.
+#
+# The fixture parameters below are tuned so total wall time on the success
+# path is bounded (``_FIFO_STRESS_N * _FIFO_STRESS_LATENCY_UNIT`` ≈ 400ms at
+# n=8, unit=50ms) while leaving enough scheduling headroom that the reverse
+# completion order is reliably reproduced on busy CI runners.
+
+# Number of rows submitted by the FIFO stress test. Chosen large enough that
+# accidental serial dispatch (where workers happen to run in submission order
+# regardless of latency) is statistically negligible — n=5 was demonstrably
+# too small to distinguish FIFO from LIFO under realistic exemplar latency.
+_FIFO_STRESS_N = 8
+
+# Per-step latency unit. The k-th submitted row sleeps
+# ``(_FIFO_STRESS_N - k - 1) * _FIFO_STRESS_LATENCY_UNIT`` seconds, so row 0
+# sleeps longest and row N-1 sleeps zero. With a worker pool wide enough to
+# admit all N submissions concurrently, workers complete in reverse
+# submission order, exercising the reorder buffer's actual sort-on-release.
+_FIFO_STRESS_LATENCY_UNIT_SECONDS = 0.05
+
+# Total wait budget for all results. Computed as the worst-case wall time
+# (longest single sleep: row 0 = (N-1) * unit) plus generous scheduling
+# slack. Far tighter than the original 60s, which masked hangs and made the
+# test unhelpful as a regression detector. Failures should surface within
+# a couple of seconds, not a minute.
+_FIFO_STRESS_TIMEOUT_SECONDS = 5.0
 
 
 class BatchTransformFIFOStressTestBase(BatchTransformContractTestBase):
-    """Extended base with stress tests for FIFO ordering under load.
+    """Extended base providing falsifiable FIFO ordering verification.
 
-    Use this for transforms where FIFO ordering is critical and should
-    be verified under concurrent processing conditions.
+    Subclasses MUST provide a ``batch_transform`` fixture that returns an
+    instance of ``_BatchContractExemplarTransform`` (or another transform
+    with equivalent reverse-latency injection support). The stress test
+    below configures the transform to inject reverse submission-order
+    latency, forcing workers to complete in reverse order so the
+    RowReorderBuffer's FIFO release behaviour is actually exercised.
+
+    This base is intentionally narrow — it does NOT generalise to arbitrary
+    batch transforms. The FIFO contract belongs to BatchTransformMixin
+    (specifically RowReorderBuffer); verifying it once against the exemplar
+    is sufficient. Plugin-level batch transforms whose ``_process_row``
+    cannot expose real concurrency (synchronous mocks, deterministic CPU
+    work) should remain on ``BatchTransformContractTestBase``.
     """
 
-    def test_fifo_order_under_concurrent_load(
+    @pytest.fixture
+    def batch_transform(self) -> TransformProtocol:
+        """Provide an exemplar configured for reverse-latency FIFO stress."""
+        return _BatchContractExemplarTransform(
+            {
+                "reverse_latency_unit_seconds": _FIFO_STRESS_LATENCY_UNIT_SECONDS,
+                "reverse_latency_total": _FIFO_STRESS_N,
+            }
+        )
+
+    @pytest.fixture
+    def valid_input(self) -> dict[str, Any]:
+        return {"value": 1}
+
+    def test_fifo_order_under_reverse_latency_load(
         self,
         started_transform: TransformProtocol,
         valid_input: dict[str, Any],
         mock_ctx_factory: Any,
         output_port: CollectingOutputPort,
     ) -> None:
-        """Property: FIFO order MUST be preserved under concurrent processing."""
-        # Submit many rows rapidly
+        """Contract: FIFO release MUST hold when workers complete in reverse order.
+
+        Submission injects reverse-order latency: row k sleeps
+        ``(N - k - 1) * unit``. Workers therefore complete in reverse
+        submission order. The production ``RowReorderBuffer`` must restore
+        FIFO before emitting; a LIFO/worker-completion-order release
+        implementation produces ``reversed(submitted_tokens)`` and fails.
+        """
         submitted_tokens: list[str] = []
-        for _ in range(20):
+        for _ in range(_FIFO_STRESS_N):
             ctx = mock_ctx_factory()
             submitted_tokens.append(ctx.token.token_id)
             pipeline_row = make_pipeline_row(valid_input.copy())
             started_transform.accept(pipeline_row, ctx)  # type: ignore[attr-defined]
 
-        # Wait for all results
-        arrived = output_port.wait_for_results(20, timeout=60.0)
-        assert arrived, f"Not all results arrived, got {len(output_port.get_results())}/20"
+        arrived = output_port.wait_for_results(
+            _FIFO_STRESS_N,
+            timeout=_FIFO_STRESS_TIMEOUT_SECONDS,
+        )
+        assert arrived, (
+            f"Not all results arrived within {_FIFO_STRESS_TIMEOUT_SECONDS}s, got {len(output_port.get_results())}/{_FIFO_STRESS_N}"
+        )
 
-        # Verify FIFO order
         results = output_port.get_results()
         received_tokens = [token.token_id for token, _, _ in results]
 
         assert received_tokens == submitted_tokens, (
-            f"FIFO order violated under load!\n"
-            f"First mismatch at index {next(i for i, (s, r) in enumerate(zip(submitted_tokens, received_tokens, strict=False)) if s != r)}"
+            f"FIFO order violated under reverse-latency load!\n"
+            f"Submitted: {submitted_tokens}\n"
+            f"Received:  {received_tokens}\n"
+            f"(If this fails with received == reversed(submitted), the "
+            f"reorder buffer is releasing in worker-completion order — a "
+            f"FIFO contract violation, not a flaky test.)"
         )
 
 
-class TestBatchTransformContractBaseExemplar(BatchTransformContractTestBase):
-    """Concrete exemplar so this contract file is directly executable."""
+class TestBatchTransformContractBaseExemplar(BatchTransformFIFOStressTestBase):
+    """Concrete exemplar so this contract file is directly executable.
 
-    @pytest.fixture
-    def batch_transform(self) -> TransformProtocol:
-        """Return the canonical simple batch transform used to prove base collection."""
-        return _BatchContractExemplarTransform({})
+    Inherits from ``BatchTransformFIFOStressTestBase`` (and through it,
+    ``BatchTransformContractTestBase``) so the contract file demonstrates
+    both the per-row contract surface AND the falsifiable FIFO guarantee
+    end-to-end against the production ``BatchTransformMixin`` machinery.
+    """
 
-    @pytest.fixture
-    def valid_input(self) -> dict[str, Any]:
-        """Return input that should process successfully."""
-        return {"value": 1}
+    # batch_transform / valid_input fixtures inherited from the stress base.

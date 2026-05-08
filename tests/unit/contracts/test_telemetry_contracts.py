@@ -348,7 +348,23 @@ class TestOrchestratorTelemetryWiringContract:
         landscape_db: LandscapeDB,
         payload_store,
     ) -> None:
-        """Orchestrator wires real telemetry_emit to PluginContext."""
+        """Orchestrator wires a working telemetry_emit callback into PluginContext.
+
+        Distinct from ``test_orchestrator_emits_lifecycle_telemetry``: that test
+        only verifies the orchestrator emits its own RunStarted/RunFinished
+        events. This test verifies the contract that ``ctx.telemetry_emit`` —
+        the callback exposed to plugins via PluginContext — is itself a working
+        path to the configured exporters. A plugin reaching for
+        ``ctx.telemetry_emit`` and emitting an event must reach the exporter.
+
+        Oracle strategy: capture the callback that the orchestrator wires onto
+        the context, invoke it after the run with a synthetic probe event, and
+        assert the probe lands in the test exporter. A no-op ``def`` or a
+        misconfigured ``partial`` would silently drop the probe and fail the
+        oracle, where the previous lambda-name check would have passed.
+        """
+        from datetime import UTC, datetime
+
         exporter = TelemetryTestExporter()
         config = MockTelemetryConfig(granularity=TelemetryGranularity.FULL)
         telemetry_manager = TelemetryManager(config, exporters=[exporter])
@@ -383,11 +399,38 @@ class TestOrchestratorTelemetryWiringContract:
         )
 
         # CONTRACT: telemetry_emit must be captured (not None)
-        assert captured_callback is not None, "ctx.telemetry_emit was not set"
+        assert captured_callback is not None, "ctx.telemetry_emit was not set on PluginContext"
 
-        # CONTRACT: telemetry_emit must NOT be the default no-op lambda
-        callback_name = getattr(captured_callback, "__name__", str(captured_callback))
-        assert callback_name != "<lambda>", f"ctx.telemetry_emit is still the default no-op lambda. Got: {captured_callback}"
+        # CONTRACT: invoking the captured callback must actually deliver an
+        # event to the configured exporter. Use a sentinel run_id so the probe
+        # is unambiguously distinguishable from any RunStarted/RunFinished
+        # events the orchestrator itself emitted during the run above.
+        probe_run_id = "probe-run-id-wiring-contract"
+        probe_event = ExternalCallCompleted(
+            timestamp=datetime.now(UTC),
+            run_id=probe_run_id,
+            call_type=CallType.HTTP,
+            provider="probe-provider",
+            status=CallStatus.SUCCESS,
+            latency_ms=1.0,
+            state_id="probe-state",
+        )
+
+        captured_callback(probe_event)
+
+        # Drain the async export queue so the exporter has observed the probe.
+        telemetry_manager.flush()
+
+        probe_matches = [event for event in exporter.events if isinstance(event, ExternalCallCompleted) and event.run_id == probe_run_id]
+        assert len(probe_matches) == 1, (
+            "ctx.telemetry_emit did not deliver the probe event to the exporter. "
+            f"Captured callback: {captured_callback!r}. "
+            f"Exporter received {len(exporter.events)} events: "
+            f"{[type(e).__name__ for e in exporter.events]}"
+        )
+        delivered = probe_matches[0]
+        assert delivered.provider == "probe-provider"
+        assert delivered.state_id == "probe-state"
 
     def test_orchestrator_emits_lifecycle_telemetry(
         self,

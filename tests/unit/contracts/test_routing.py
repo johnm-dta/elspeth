@@ -1,8 +1,21 @@
 # tests/unit/contracts/test_routing.py
 """Tests for routing contracts."""
 
+from typing import Any
+
 import pytest
 
+from elspeth.contracts import (
+    EdgeInfo,
+    NodeID,
+    RouteDestination,
+    RouteDestinationKind,
+    RoutingAction,
+    RoutingKind,
+    RoutingMode,
+    RoutingSpec,
+    SinkName,
+)
 from elspeth.contracts.errors import ConfigGateReason
 
 
@@ -11,8 +24,6 @@ class TestRoutingAction:
 
     def test_continue_with_reason(self) -> None:
         """continue_ can include audit reason."""
-        from elspeth.contracts import RoutingAction
-
         reason = ConfigGateReason(condition="passed", result="true")
         action = RoutingAction.continue_(reason=reason)
         assert action.reason is not None
@@ -20,8 +31,6 @@ class TestRoutingAction:
 
     def test_route_default_move(self) -> None:
         """route defaults to MOVE mode."""
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         action = RoutingAction.route("above")
         assert action.kind == RoutingKind.ROUTE
         assert action.destinations == ("above",)
@@ -37,8 +46,6 @@ class TestRoutingAction:
 
         Users should use fork_to_paths() to route to a sink and continue processing.
         """
-        from elspeth.contracts import RoutingAction, RoutingMode
-
         with pytest.raises(
             ValueError,
             match=r"COPY mode not supported for ROUTE kind.*Use FORK_TO_PATHS",
@@ -47,15 +54,11 @@ class TestRoutingAction:
 
     def test_route_with_string_mode_raises_type_error(self) -> None:
         """route requires RoutingMode enum, not a raw string."""
-        from elspeth.contracts import RoutingAction
-
         with pytest.raises(TypeError, match="mode must be RoutingMode"):
             RoutingAction.route("above", mode="move")  # type: ignore[arg-type]
 
     def test_route_with_reason(self) -> None:
         """route can include audit reason."""
-        from elspeth.contracts import RoutingAction
-
         reason = ConfigGateReason(condition="value below threshold", result="below")
         action = RoutingAction.route(
             "below",
@@ -66,8 +69,6 @@ class TestRoutingAction:
 
     def test_fork_always_copy(self) -> None:
         """fork_to_paths always uses COPY mode."""
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         action = RoutingAction.fork_to_paths(["path_a", "path_b"])
         assert action.kind == RoutingKind.FORK_TO_PATHS
         assert action.destinations == ("path_a", "path_b")
@@ -75,8 +76,6 @@ class TestRoutingAction:
 
     def test_fork_with_reason(self) -> None:
         """fork_to_paths can include audit reason."""
-        from elspeth.contracts import RoutingAction
-
         reason = ConfigGateReason(condition="parallel_strategy", result="split")
         action = RoutingAction.fork_to_paths(
             ["a", "b"],
@@ -87,10 +86,6 @@ class TestRoutingAction:
 
     def test_reason_mutation_prevented_by_deep_copy(self) -> None:
         """Mutating original dict should not affect stored reason (deep copy)."""
-        from typing import Any
-
-        from elspeth.contracts import RoutingAction
-
         original: dict[str, Any] = {"rule": "test", "matched_value": 42}
         action = RoutingAction.continue_(reason=original)  # type: ignore[arg-type]
 
@@ -101,10 +96,6 @@ class TestRoutingAction:
 
     def test_reason_deep_copied(self) -> None:
         """Mutating original nested dict should not affect frozen reason."""
-        from typing import Any
-
-        from elspeth.contracts import RoutingAction
-
         # Use nested dict in matched_value (which accepts Any)
         original: dict[str, Any] = {"rule": "test", "matched_value": {"nested": "value"}}
         action = RoutingAction.continue_(reason=original)  # type: ignore[arg-type]
@@ -122,8 +113,6 @@ class TestRoutingAction:
         Per CLAUDE.md "no silent drops" invariant, empty forks would cause
         tokens to disappear without audit trail. This MUST raise immediately.
         """
-        from elspeth.contracts import RoutingAction
-
         with pytest.raises(ValueError, match="at least one destination"):
             RoutingAction.fork_to_paths([])
 
@@ -132,8 +121,6 @@ class TestRoutingAction:
 
         Duplicate paths would cause ambiguous routing and audit integrity issues.
         """
-        from elspeth.contracts import RoutingAction
-
         with pytest.raises(ValueError, match=r"unique path names.*duplicates"):
             RoutingAction.fork_to_paths(["path_a", "path_a", "path_b"])
 
@@ -143,8 +130,6 @@ class TestRoutingAction:
         CONTINUE means "proceed to next node" - destinations are resolved
         from the pipeline graph, not specified in the action.
         """
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         with pytest.raises(ValueError, match="CONTINUE must have empty destinations"):
             RoutingAction(
                 kind=RoutingKind.CONTINUE,
@@ -160,8 +145,6 @@ class TestRoutingAction:
         COPY mode is ONLY valid for FORK_TO_PATHS because it creates child tokens.
         CONTINUE simply advances to the next node - no token cloning occurs.
         """
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         with pytest.raises(ValueError, match="CONTINUE must use MOVE mode"):
             RoutingAction(
                 kind=RoutingKind.CONTINUE,
@@ -175,8 +158,6 @@ class TestRoutingAction:
         FORK creates child tokens - MOVE would violate the fork semantics
         by destroying the parent token prematurely.
         """
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         with pytest.raises(ValueError, match="FORK_TO_PATHS must use COPY mode"):
             RoutingAction(
                 kind=RoutingKind.FORK_TO_PATHS,
@@ -190,8 +171,6 @@ class TestRoutingAction:
         ROUTE must specify exactly one destination - zero destinations
         would cause token to silently drop without audit trail.
         """
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         with pytest.raises(ValueError, match="ROUTE must have exactly one destination"):
             RoutingAction(
                 kind=RoutingKind.ROUTE,
@@ -205,8 +184,6 @@ class TestRoutingAction:
         ROUTE is single-destination routing. For multi-destination,
         use FORK_TO_PATHS which creates separate token lineages.
         """
-        from elspeth.contracts import RoutingAction, RoutingKind, RoutingMode
-
         with pytest.raises(ValueError, match="ROUTE must have exactly one destination"):
             RoutingAction(
                 kind=RoutingKind.ROUTE,
@@ -216,8 +193,6 @@ class TestRoutingAction:
 
     def test_constructor_with_string_mode_raises_type_error(self) -> None:
         """Direct constructor requires enum mode."""
-        from elspeth.contracts import RoutingAction, RoutingKind
-
         with pytest.raises(TypeError, match="mode must be RoutingMode"):
             RoutingAction(
                 kind=RoutingKind.ROUTE,
@@ -231,22 +206,16 @@ class TestRouteDestination:
 
     def test_sink_destination_requires_sink_name(self) -> None:
         """SINK destination must include sink_name."""
-        from elspeth.contracts import RouteDestination, RouteDestinationKind
-
         with pytest.raises(ValueError, match="requires non-empty sink_name"):
             RouteDestination(kind=RouteDestinationKind.SINK)
 
     def test_processing_destination_requires_next_node_id(self) -> None:
         """PROCESSING_NODE destination must include next_node_id."""
-        from elspeth.contracts import RouteDestination, RouteDestinationKind
-
         with pytest.raises(ValueError, match="requires non-empty next_node_id"):
             RouteDestination(kind=RouteDestinationKind.PROCESSING_NODE)
 
     def test_continue_destination_rejects_payload_fields(self) -> None:
         """CONTINUE destination cannot carry sink or node payloads."""
-        from elspeth.contracts import NodeID, RouteDestination, RouteDestinationKind, SinkName
-
         with pytest.raises(ValueError, match="must not include sink_name or next_node_id"):
             RouteDestination(kind=RouteDestinationKind.CONTINUE, sink_name=SinkName("out"))
 
@@ -255,8 +224,6 @@ class TestRouteDestination:
 
     def test_processing_destination_rejects_sink_name(self) -> None:
         """PROCESSING_NODE destination cannot carry sink_name."""
-        from elspeth.contracts import NodeID, RouteDestination, RouteDestinationKind, SinkName
-
         with pytest.raises(ValueError, match="must not include sink_name"):
             RouteDestination(
                 kind=RouteDestinationKind.PROCESSING_NODE,
@@ -270,8 +237,6 @@ class TestRoutingSpec:
 
     def test_parse_from_string(self) -> None:
         """RoutingSpec parses mode from string value."""
-        from elspeth.contracts import RoutingMode, RoutingSpec
-
         spec = RoutingSpec(edge_id="edge-1", mode=RoutingMode.COPY)
         assert spec.mode == RoutingMode.COPY
         assert isinstance(spec.mode, RoutingMode)
@@ -282,8 +247,6 @@ class TestEdgeInfo:
 
     def test_edge_info_label(self) -> None:
         """EdgeInfo preserves label."""
-        from elspeth.contracts import EdgeInfo, NodeID, RoutingMode
-
         edge = EdgeInfo(
             from_node=NodeID("gate-1"),
             to_node=NodeID("sink-1"),

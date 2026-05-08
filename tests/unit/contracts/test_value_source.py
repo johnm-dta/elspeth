@@ -6,9 +6,11 @@ Pins the discriminated-union shape and the catalog registry semantics.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Iterator
 
 import pytest
 
+from elspeth.contracts import value_source as _value_source_mod
 from elspeth.contracts.value_source import (
     CatalogValueSource,
     DerivedFromSiblingValueSource,
@@ -18,6 +20,31 @@ from elspeth.contracts.value_source import (
     list_registered_catalogs,
     register_catalog_reader,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_catalog_registry() -> Iterator[None]:
+    """Restore the catalog reader/dep-hint registries after every test in this module.
+
+    Snapshot/restore mirrors ``conftest.py::reset_tier_registry``. The
+    fixture's finalizer runs unconditionally — if the test raises after
+    mutating the dicts, cleanup still happens. This is more robust than
+    a per-test ``try/finally`` block, which silently stops working if
+    the test is split, helper-extracted, or the private dict is renamed.
+
+    ``autouse=True`` ensures snapshot/restore runs for every test in this
+    module, including tests that don't currently mutate the registry. Without
+    it, a future contributor could add ``register_catalog_reader(...)`` to
+    such a test and silently leak across runs — the snapshot/restore cost
+    on read-only tests is negligible compared to that hazard.
+    """
+    before_readers = dict(_value_source_mod._CATALOG_READERS)
+    before_hints = dict(_value_source_mod._CATALOG_DEP_HINTS)
+    yield
+    _value_source_mod._CATALOG_READERS.clear()
+    _value_source_mod._CATALOG_READERS.update(before_readers)
+    _value_source_mod._CATALOG_DEP_HINTS.clear()
+    _value_source_mod._CATALOG_DEP_HINTS.update(before_hints)
 
 
 class TestCatalogValueSource:
@@ -150,14 +177,8 @@ class TestCatalogRegistry:
             return sentinel
 
         register_catalog_reader(catalog_id, reader)
-        try:
-            assert get_catalog_values(catalog_id) is sentinel
-            assert catalog_id in list_registered_catalogs()
-        finally:
-            # Best-effort cleanup so test reruns are deterministic.
-            from elspeth.contracts.value_source import _CATALOG_READERS
-
-            _CATALOG_READERS.pop(catalog_id, None)
+        assert get_catalog_values(catalog_id) is sentinel
+        assert catalog_id in list_registered_catalogs()
 
     def test_register_idempotent_with_same_reader(self) -> None:
         catalog_id = "test_value_source_register_idempotent"
@@ -166,12 +187,7 @@ class TestCatalogRegistry:
             return frozenset({"x"})
 
         register_catalog_reader(catalog_id, reader)
-        try:
-            register_catalog_reader(catalog_id, reader)  # same reader → ok
-        finally:
-            from elspeth.contracts.value_source import _CATALOG_READERS
-
-            _CATALOG_READERS.pop(catalog_id, None)
+        register_catalog_reader(catalog_id, reader)  # same reader → ok
 
     def test_register_different_reader_for_existing_id_rejected(self) -> None:
         catalog_id = "test_value_source_register_different_reader"
@@ -183,13 +199,8 @@ class TestCatalogRegistry:
             return frozenset({"b"})
 
         register_catalog_reader(catalog_id, reader_a)
-        try:
-            with pytest.raises(ValueError, match="already registered"):
-                register_catalog_reader(catalog_id, reader_b)
-        finally:
-            from elspeth.contracts.value_source import _CATALOG_READERS
-
-            _CATALOG_READERS.pop(catalog_id, None)
+        with pytest.raises(ValueError, match="already registered"):
+            register_catalog_reader(catalog_id, reader_b)
 
     def test_register_empty_catalog_id_rejected(self) -> None:
         with pytest.raises(ValueError, match="catalog_id must be non-empty"):
@@ -213,11 +224,7 @@ class TestCatalogMissingDepHint:
     """
 
     def test_register_with_hint_stores_hint(self) -> None:
-        from elspeth.contracts.value_source import (
-            _CATALOG_DEP_HINTS,
-            _CATALOG_READERS,
-            get_catalog_missing_dep_hint,
-        )
+        from elspeth.contracts.value_source import get_catalog_missing_dep_hint
 
         catalog_id = "test_value_source_register_with_hint"
 
@@ -229,17 +236,10 @@ class TestCatalogMissingDepHint:
             reader,
             missing_dep_hint="install elspeth[fakelib]",
         )
-        try:
-            assert get_catalog_missing_dep_hint(catalog_id) == "install elspeth[fakelib]"
-        finally:
-            _CATALOG_READERS.pop(catalog_id, None)
-            _CATALOG_DEP_HINTS.pop(catalog_id, None)
+        assert get_catalog_missing_dep_hint(catalog_id) == "install elspeth[fakelib]"
 
     def test_register_without_hint_returns_none(self) -> None:
-        from elspeth.contracts.value_source import (
-            _CATALOG_READERS,
-            get_catalog_missing_dep_hint,
-        )
+        from elspeth.contracts.value_source import get_catalog_missing_dep_hint
 
         catalog_id = "test_value_source_no_hint"
 
@@ -247,10 +247,7 @@ class TestCatalogMissingDepHint:
             return frozenset()
 
         register_catalog_reader(catalog_id, reader)
-        try:
-            assert get_catalog_missing_dep_hint(catalog_id) is None
-        finally:
-            _CATALOG_READERS.pop(catalog_id, None)
+        assert get_catalog_missing_dep_hint(catalog_id) is None
 
     def test_unknown_catalog_id_returns_none(self) -> None:
         from elspeth.contracts.value_source import get_catalog_missing_dep_hint

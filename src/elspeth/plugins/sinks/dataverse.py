@@ -223,7 +223,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cf259d9d2a666fb9"
+    source_file_hash: str | None = "sha256:7c4a3db0ccb11e7a"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
@@ -273,6 +273,7 @@ class DataverseSink(BaseSink):
 
     def on_start(self, ctx: LifecycleContext) -> None:
         """Construct credential and DataverseClient."""
+        super().on_start(ctx)
         self._run_id = ctx.run_id
         self._telemetry_emit = ctx.telemetry_emit
 

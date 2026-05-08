@@ -633,9 +633,11 @@ class RuntimeTelemetryConfig:
             NotImplementedError: If backpressure_mode is not yet implemented (e.g., 'slow')
             ValueError: If granularity or backpressure_mode is invalid
         """
-        # Parse enum values from settings strings (lowercase for normalization)
-        granularity = TelemetryGranularity(settings.granularity.lower())
-        backpressure_mode = BackpressureMode(settings.backpressure_mode.lower())
+        # Pydantic Literal["lifecycle", "rows", "full"] / Literal["block", "drop", "slow"]
+        # validates settings.granularity / .backpressure_mode at construction, so the
+        # enum constructors are guaranteed a valid lowercase string. No coercion here.
+        granularity = TelemetryGranularity(settings.granularity)
+        backpressure_mode = BackpressureMode(settings.backpressure_mode)
 
         # Fail fast on unimplemented backpressure modes
         if backpressure_mode not in _IMPLEMENTED_BACKPRESSURE_MODES:

@@ -8,32 +8,90 @@ These parametrized tests verify patterns that apply to ALL runtime configs:
 4. No orphan fields (all fields traceable to Settings or INTERNAL_DEFAULTS)
 
 This consolidates duplicate tests from individual Runtime*Config test files.
+
+``RUNTIME_CONFIGS`` is derived from runtime introspection of
+``elspeth.contracts.config.runtime``. A new ``Runtime*Config`` frozen
+dataclass added in production is automatically picked up by every
+parametrised test below — no test-side edit required. Naming convention:
+
+  - Runtime config class name: ``Runtime<Name>Config`` (frozen dataclass)
+  - Paired Protocol class name: ``Runtime<Name>Protocol``
+  - Paired Settings class name: ``<Name>Settings``
+  - Internal defaults key (optional): snake_case of ``<Name>``;
+    looked up in ``INTERNAL_DEFAULTS``. Returns ``None`` if the kind has no
+    internal defaults.
+
+Discovery raises ``AttributeError`` at module-load / test-collection time
+if the protocol or Settings class is missing — making the convention
+violation a hard error rather than a silent test gap.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
+import re
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from elspeth.contracts.config import INTERNAL_DEFAULTS
+from elspeth.contracts.config import runtime as _runtime_module
+
 if TYPE_CHECKING:
     pass
 
 
 # =============================================================================
-# TEST CONFIGURATION
+# TEST CONFIGURATION (derived from runtime introspection)
 # =============================================================================
 
+
+def _is_runtime_config_class(obj: Any) -> bool:
+    """Match top-level ``Runtime*Config`` frozen dataclasses in the runtime module."""
+    if not inspect.isclass(obj):
+        return False
+    if not (obj.__name__.startswith("Runtime") and obj.__name__.endswith("Config")):
+        return False
+    if not dataclasses.is_dataclass(obj):
+        return False
+    # Frozen dataclasses raise FrozenInstanceError on mutation. Probe the
+    # dataclass metadata rather than constructing an instance (some configs
+    # require non-trivial fixtures via from_settings/default).
+    return obj.__dataclass_params__.frozen  # type: ignore[attr-defined]
+
+
+def _camel_to_snake(camel: str) -> str:
+    """Convert ``RateLimit`` → ``rate_limit`` (single underscore between camel boundaries)."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", camel).lower()
+
+
+def _runtime_config_tuple(config_cls: type) -> tuple[str, str, str, str | None]:
+    """Return (config_name, protocol_name, settings_name, internal_defaults_key) per convention."""
+    config_name = config_cls.__name__
+    kind = config_name.removeprefix("Runtime").removesuffix("Config")  # e.g. "RateLimit"
+
+    protocol_name = f"Runtime{kind}Protocol"
+    settings_name = f"{kind}Settings"
+    internal_key: str | None = _camel_to_snake(kind)
+    if internal_key not in INTERNAL_DEFAULTS:
+        internal_key = None
+
+    return (config_name, protocol_name, settings_name, internal_key)
+
+
+def _discover_runtime_configs() -> list[tuple[str, str, str, str | None]]:
+    """Return RUNTIME_CONFIGS tuples for every ``Runtime*Config`` in the runtime module."""
+    configs = [obj for _name, obj in inspect.getmembers(_runtime_module) if _is_runtime_config_class(obj)]
+    # Sort by class name for deterministic test order.
+    configs.sort(key=lambda cls: cls.__name__)
+    return [_runtime_config_tuple(cls) for cls in configs]
+
+
 # Each tuple: (config_class_name, protocol_class_name, settings_class_name, internal_defaults_key)
-RUNTIME_CONFIGS = [
-    ("RuntimeRetryConfig", "RuntimeRetryProtocol", "RetrySettings", "retry"),
-    ("RuntimeConcurrencyConfig", "RuntimeConcurrencyProtocol", "ConcurrencySettings", None),
-    ("RuntimeRateLimitConfig", "RuntimeRateLimitProtocol", "RateLimitSettings", None),
-    ("RuntimeCheckpointConfig", "RuntimeCheckpointProtocol", "CheckpointSettings", None),
-    ("RuntimeTelemetryConfig", "RuntimeTelemetryProtocol", "TelemetrySettings", None),
-]
+RUNTIME_CONFIGS: list[tuple[str, str, str, str | None]] = _discover_runtime_configs()
 
 
 def get_config_class(name: str) -> Any:
@@ -47,7 +105,15 @@ def get_protocol_class(name: str) -> Any:
     """Import and return a Protocol class by name."""
     from elspeth.contracts import config
 
-    return getattr(config, name)
+    protocol_cls = getattr(config, name, None)
+    if protocol_cls is None:
+        raise AttributeError(
+            f"No Protocol class named {name!r} found. Per the "
+            "Runtime<Name>Config → Runtime<Name>Protocol naming convention, "
+            "every runtime config must have a paired protocol. Add the "
+            "protocol or rename the config."
+        )
+    return protocol_cls
 
 
 def get_settings_class(name: str) -> Any:
@@ -57,7 +123,15 @@ def get_settings_class(name: str) -> Any:
     """
     from elspeth.core import config
 
-    return getattr(config, name)
+    settings_cls = getattr(config, name, None)
+    if settings_cls is None:
+        raise AttributeError(
+            f"No Settings class named {name!r} found in elspeth.core.config. "
+            "Per the Runtime<Name>Config → <Name>Settings naming convention, "
+            "every runtime config must map back to a Pydantic settings class. "
+            "Add the Settings class or rename the config."
+        )
+    return settings_cls
 
 
 # =============================================================================
@@ -93,7 +167,13 @@ class TestRuntimeConfigImmutability:
         """Runtime configs use __slots__ for memory efficiency."""
         config_cls = get_config_class(config_name)
 
-        assert hasattr(config_cls, "__slots__"), f"{config_name} should have __slots__"
+        # __slots__ MUST be declared on the class itself, not inherited.
+        # `hasattr(cls, "__slots__")` is satisfied by an ancestor's slots,
+        # which doesn't constrain *this* class's memory layout. Using
+        # `__dict__` lookup ensures the declaration is local.
+        assert "__slots__" in config_cls.__dict__, (
+            f"{config_name} should declare __slots__ on the class itself (inherited __slots__ does not enforce this class's layout)"
+        )
 
 
 # =============================================================================

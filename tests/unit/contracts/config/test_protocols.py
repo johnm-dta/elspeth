@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
+from elspeth.contracts.config import protocols as _protocols_module
+from elspeth.contracts.config import runtime as _runtime_module
 from elspeth.contracts.config.protocols import (
     RuntimeCheckpointProtocol,
     RuntimeConcurrencyProtocol,
@@ -19,8 +22,6 @@ from elspeth.contracts.config.protocols import (
 from elspeth.contracts.config.runtime import (
     ExporterConfig,
     RuntimeCheckpointConfig,
-    RuntimeConcurrencyConfig,
-    RuntimeRateLimitConfig,
     RuntimeRetryConfig,
     RuntimeTelemetryConfig,
 )
@@ -29,22 +30,66 @@ from elspeth.contracts.enums import BackpressureMode, TelemetryGranularity
 # ============================================================================
 # Protocol / Runtime config pairs for parametrized tests
 # ============================================================================
+#
+# ``ALL_PROTOCOLS`` and ``PROTOCOL_CONFIG_PAIRS`` are derived from runtime
+# introspection of ``elspeth.contracts.config.protocols`` and ``...runtime``.
+# A new ``Runtime*Protocol`` class added in production is automatically
+# picked up by every parametrised test below — no test-side edit required.
+#
+# Naming convention:
+#   - Runtime protocols are top-level ``Runtime<Name>Protocol`` classes that
+#     are ``@runtime_checkable``. ``ServiceRateLimitProtocol`` is intentionally
+#     excluded (no ``Runtime`` prefix because it describes a sub-component,
+#     not a top-level engine boundary).
+#   - Each ``Runtime<Name>Protocol`` MUST have a corresponding
+#     ``Runtime<Name>Config`` class in ``contracts.config.runtime``.
+#     Discovery raises ``AttributeError`` at module-load time if a protocol
+#     has no matching config — making the convention violation a hard error
+#     rather than a silent test gap.
 
-ALL_PROTOCOLS = [
-    RuntimeRetryProtocol,
-    RuntimeRateLimitProtocol,
-    RuntimeConcurrencyProtocol,
-    RuntimeCheckpointProtocol,
-    RuntimeTelemetryProtocol,
-]
 
-PROTOCOL_CONFIG_PAIRS = [
-    pytest.param(RuntimeRetryProtocol, RuntimeRetryConfig, id="retry"),
-    pytest.param(RuntimeRateLimitProtocol, RuntimeRateLimitConfig, id="rate_limit"),
-    pytest.param(RuntimeConcurrencyProtocol, RuntimeConcurrencyConfig, id="concurrency"),
-    pytest.param(RuntimeCheckpointProtocol, RuntimeCheckpointConfig, id="checkpoint"),
-    pytest.param(RuntimeTelemetryProtocol, RuntimeTelemetryConfig, id="telemetry"),
-]
+def _is_runtime_protocol(obj: Any) -> bool:
+    """Match top-level ``Runtime*Protocol`` runtime-checkable Protocol classes."""
+    if not inspect.isclass(obj):
+        return False
+    if not (obj.__name__.startswith("Runtime") and obj.__name__.endswith("Protocol")):
+        return False
+    # Runtime-checkable Protocols expose ``__protocol_attrs__`` on recent
+    # CPython and the legacy ``_is_runtime_protocol`` attribute. Accept either,
+    # mirroring the compound check in ``test_protocol_is_runtime_checkable``.
+    return getattr(obj, "__protocol_attrs__", None) is not None or getattr(obj, "_is_runtime_protocol", False)
+
+
+def _discover_runtime_protocols() -> list[type]:
+    """Return all top-level ``Runtime*Protocol`` classes from the protocols module."""
+    discovered = [obj for _name, obj in inspect.getmembers(_protocols_module) if _is_runtime_protocol(obj)]
+    # Sort by class name so test order is deterministic across CPython versions.
+    return sorted(discovered, key=lambda cls: cls.__name__)
+
+
+def _config_class_for(protocol: type) -> type:
+    """Resolve the ``Runtime<Name>Config`` class paired with a ``Runtime<Name>Protocol``."""
+    config_name = protocol.__name__.removesuffix("Protocol") + "Config"
+    config_cls = getattr(_runtime_module, config_name, None)
+    if config_cls is None:
+        raise AttributeError(
+            f"Protocol {protocol.__name__!r} has no matching runtime config class. "
+            f"Expected ``elspeth.contracts.config.runtime.{config_name}`` per the "
+            "Runtime<Name>Protocol → Runtime<Name>Config naming convention. Add the "
+            "config class or rename the protocol."
+        )
+    return config_cls
+
+
+def _param_id_for(protocol: type) -> str:
+    """Convert ``RuntimeRateLimitProtocol`` → ``rate_limit`` for parametrise IDs."""
+    name = protocol.__name__.removeprefix("Runtime").removesuffix("Protocol")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+ALL_PROTOCOLS: list[type] = _discover_runtime_protocols()
+
+PROTOCOL_CONFIG_PAIRS = [pytest.param(protocol, _config_class_for(protocol), id=_param_id_for(protocol)) for protocol in ALL_PROTOCOLS]
 
 # Expected property names for each protocol (completeness checks)
 PROTOCOL_EXPECTED_PROPERTIES: dict[type, set[str]] = {
@@ -232,57 +277,28 @@ class _FakeServiceRateLimit:
 
 
 class TestRuntimeCheckable:
-    @pytest.mark.parametrize(
-        "protocol",
-        [
-            pytest.param(RuntimeRetryProtocol, id="retry"),
-            pytest.param(RuntimeRateLimitProtocol, id="rate_limit"),
-            pytest.param(RuntimeConcurrencyProtocol, id="concurrency"),
-            pytest.param(RuntimeCheckpointProtocol, id="checkpoint"),
-            pytest.param(RuntimeTelemetryProtocol, id="telemetry"),
-        ],
-    )
+    @pytest.mark.parametrize("protocol", ALL_PROTOCOLS, ids=_param_id_for)
     def test_protocol_is_runtime_checkable(self, protocol: type) -> None:
-        assert getattr(protocol, "__protocol_attrs__", None) is not None or hasattr(protocol, "_is_runtime_protocol")
+        # A non-@runtime_checkable Protocol raises TypeError when used with
+        # isinstance(). Probe the live behaviour rather than introspecting
+        # CPython-private attributes (which differ across versions and may
+        # OR-fall-back into a false pass).
+        try:
+            isinstance(object(), protocol)
+        except TypeError as exc:  # pragma: no cover - failure path
+            pytest.fail(f"{protocol.__name__} is not runtime_checkable: {exc}")
 
-    @pytest.mark.parametrize(
-        "protocol",
-        [
-            pytest.param(RuntimeRetryProtocol, id="retry"),
-            pytest.param(RuntimeRateLimitProtocol, id="rate_limit"),
-            pytest.param(RuntimeConcurrencyProtocol, id="concurrency"),
-            pytest.param(RuntimeCheckpointProtocol, id="checkpoint"),
-            pytest.param(RuntimeTelemetryProtocol, id="telemetry"),
-        ],
-    )
+    @pytest.mark.parametrize("protocol", ALL_PROTOCOLS, ids=_param_id_for)
     def test_protocol_usable_in_isinstance(self, protocol: type) -> None:
         # Verifies isinstance() can be called (does not raise TypeError)
         result = isinstance(object(), protocol)
         assert result is False
 
-    @pytest.mark.parametrize(
-        "protocol",
-        [
-            pytest.param(RuntimeRetryProtocol, id="retry"),
-            pytest.param(RuntimeRateLimitProtocol, id="rate_limit"),
-            pytest.param(RuntimeConcurrencyProtocol, id="concurrency"),
-            pytest.param(RuntimeCheckpointProtocol, id="checkpoint"),
-            pytest.param(RuntimeTelemetryProtocol, id="telemetry"),
-        ],
-    )
+    @pytest.mark.parametrize("protocol", ALL_PROTOCOLS, ids=_param_id_for)
     def test_protocol_rejects_plain_object(self, protocol: type) -> None:
         assert not isinstance(object(), protocol)
 
-    @pytest.mark.parametrize(
-        "protocol",
-        [
-            pytest.param(RuntimeRetryProtocol, id="retry"),
-            pytest.param(RuntimeRateLimitProtocol, id="rate_limit"),
-            pytest.param(RuntimeConcurrencyProtocol, id="concurrency"),
-            pytest.param(RuntimeCheckpointProtocol, id="checkpoint"),
-            pytest.param(RuntimeTelemetryProtocol, id="telemetry"),
-        ],
-    )
+    @pytest.mark.parametrize("protocol", ALL_PROTOCOLS, ids=_param_id_for)
     def test_protocol_rejects_empty_dict(self, protocol: type) -> None:
         assert not isinstance({}, protocol)
 
@@ -293,26 +309,6 @@ class TestRealImplementations:
         instance = config_cls.default()
         assert isinstance(instance, protocol)
 
-    def test_retry_default_satisfies_retry_protocol(self) -> None:
-        config = RuntimeRetryConfig.default()
-        assert isinstance(config, RuntimeRetryProtocol)
-
-    def test_rate_limit_default_satisfies_rate_limit_protocol(self) -> None:
-        config = RuntimeRateLimitConfig.default()
-        assert isinstance(config, RuntimeRateLimitProtocol)
-
-    def test_concurrency_default_satisfies_concurrency_protocol(self) -> None:
-        config = RuntimeConcurrencyConfig.default()
-        assert isinstance(config, RuntimeConcurrencyProtocol)
-
-    def test_checkpoint_default_satisfies_checkpoint_protocol(self) -> None:
-        config = RuntimeCheckpointConfig.default()
-        assert isinstance(config, RuntimeCheckpointProtocol)
-
-    def test_telemetry_default_satisfies_telemetry_protocol(self) -> None:
-        config = RuntimeTelemetryConfig.default()
-        assert isinstance(config, RuntimeTelemetryProtocol)
-
     def test_retry_no_retry_satisfies_protocol(self) -> None:
         config = RuntimeRetryConfig.no_retry()
         assert isinstance(config, RuntimeRetryProtocol)
@@ -320,14 +316,22 @@ class TestRealImplementations:
     @pytest.mark.parametrize("protocol,config_cls", PROTOCOL_CONFIG_PAIRS)
     def test_real_instance_does_not_satisfy_wrong_protocol(self, protocol: type, config_cls: Any) -> None:
         instance = config_cls.default()
-        # Pick a protocol that is NOT the matching one
+        # Sanity: the matching protocol must accept the instance.
+        assert isinstance(instance, protocol), f"{config_cls.__name__}.default() failed identity check against {protocol.__name__}"
+        # Every other protocol in ALL_PROTOCOLS must reject this instance.
+        # Verified empirically: each runtime config has a distinct required-attribute
+        # set under @runtime_checkable structural typing -- shared attribute names
+        # like `enabled` do not cause cross-protocol false matches because the other
+        # protocols always require additional attributes the instance does not expose.
+        # If a future protocol shrinks to a strict subset of another, this test will
+        # surface the structural collision rather than silently pass.
         wrong_protocols = [p for p in ALL_PROTOCOLS if p is not protocol]
-        for _wrong in wrong_protocols:
-            # Not all mismatches will fail (e.g. both checkpoint and rate_limit have 'enabled'),
-            # but at least one wrong protocol should fail for each config.
-            pass
-        # Verify at least the identity protocol matches
-        assert isinstance(instance, protocol)
+        for wrong_protocol in wrong_protocols:
+            assert not isinstance(instance, wrong_protocol), (
+                f"{config_cls.__name__}.default() unexpectedly satisfies "
+                f"{wrong_protocol.__name__}; structural typing collision -- "
+                f"required-attribute sets are no longer disjoint"
+            )
 
 
 class TestStructuralTyping:
@@ -397,36 +401,7 @@ class TestProtocolCompleteness:
             f"{protocol.__name__} properties mismatch.\nMissing: {expected_props - actual}\nExtra: {actual - expected_props}"
         )
 
-    def test_retry_protocol_has_5_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeRetryProtocol)
-        assert len(props) == 5
-
-    def test_rate_limit_protocol_has_3_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeRateLimitProtocol)
-        assert len(props) == 3
-
-    def test_concurrency_protocol_has_1_property(self) -> None:
-        props = _get_protocol_property_names(RuntimeConcurrencyProtocol)
-        assert len(props) == 1
-
-    def test_checkpoint_protocol_has_3_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeCheckpointProtocol)
-        assert len(props) == 3
-
-    def test_telemetry_protocol_has_6_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeTelemetryProtocol)
-        assert len(props) == 6
-
-    @pytest.mark.parametrize(
-        "protocol",
-        [
-            pytest.param(RuntimeRetryProtocol, id="retry"),
-            pytest.param(RuntimeRateLimitProtocol, id="rate_limit"),
-            pytest.param(RuntimeConcurrencyProtocol, id="concurrency"),
-            pytest.param(RuntimeCheckpointProtocol, id="checkpoint"),
-            pytest.param(RuntimeTelemetryProtocol, id="telemetry"),
-        ],
-    )
+    @pytest.mark.parametrize("protocol", ALL_PROTOCOLS, ids=_param_id_for)
     def test_no_non_property_public_methods(self, protocol: type) -> None:
         # Protocols may define explicit methods when required by runtime call sites.
         public_attrs = {name for name in dir(protocol) if not name.startswith("_")}
@@ -435,16 +410,7 @@ class TestProtocolCompleteness:
         non_property = public_attrs - property_attrs - allowed_methods
         assert not non_property, f"{protocol.__name__} has unexpected non-property public attributes: {non_property}"
 
-    @pytest.mark.parametrize(
-        "protocol",
-        [
-            pytest.param(RuntimeRetryProtocol, id="retry"),
-            pytest.param(RuntimeRateLimitProtocol, id="rate_limit"),
-            pytest.param(RuntimeConcurrencyProtocol, id="concurrency"),
-            pytest.param(RuntimeCheckpointProtocol, id="checkpoint"),
-            pytest.param(RuntimeTelemetryProtocol, id="telemetry"),
-        ],
-    )
+    @pytest.mark.parametrize("protocol", ALL_PROTOCOLS, ids=_param_id_for)
     def test_protocol_properties_have_type_annotations(self, protocol: type) -> None:
         expected_props = PROTOCOL_EXPECTED_PROPERTIES[protocol]
         for prop_name in expected_props:
@@ -509,9 +475,3 @@ class TestCrossValidation:
         assert isinstance(config.enabled, bool)
         assert isinstance(config.frequency, int)
         assert isinstance(config.aggregation_boundaries, bool)
-
-    def test_all_five_protocols_exist(self) -> None:
-        assert len(ALL_PROTOCOLS) == 5
-
-    def test_all_five_config_pairs_exist(self) -> None:
-        assert len(PROTOCOL_CONFIG_PAIRS) == 5

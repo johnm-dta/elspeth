@@ -1,9 +1,5 @@
 """Bounded inspection of blob-backed source content.
 
-Surfaces structured facts to the model and to ``preview_pipeline`` so the
-LLM no longer has to guess at CSV column names or numeric types when the
-operator has already supplied an inline blob.
-
 Contract:
   * **Bounded reads.** At most 8 KiB or 100 rows, whichever comes first.
     Inspection MUST be cheap — it runs on every preview_pipeline call.
@@ -19,19 +15,6 @@ Contract:
     plugin runs. We never fabricate a value the blob did not contain;
     if a column is empty in every sampled row, we record ``"null"``,
     not a guessed type.
-
-Facts surfaced:
-  * ``source_kind`` — csv / jsonl / json / text / unknown.
-  * ``observed_headers`` — CSV column names (None for non-CSV).
-  * ``inferred_types`` — column → ``int`` | ``float`` | ``str`` | ``bool``
-    | ``null`` based on the sampled rows.
-  * ``sample_row_count`` — how many rows we actually read.
-  * ``url_candidates`` — for text or single-line content, any URLs found
-    (a strong hint that ``web_scrape`` is needed).
-  * ``warnings`` — observations that should bubble up as proof
-    diagnostics in ``compute_proof_diagnostics`` (e.g., "first row looks
-    like data, not headers", "field 'price' is numeric-shaped but typed
-    str").
 """
 
 from __future__ import annotations
@@ -83,6 +66,15 @@ class SourceInspectionFacts:
         freeze_fields(self, "redacted_identity")
         if self.inferred_types is not None:
             freeze_fields(self, "inferred_types")
+        # Tier-1 invariants on dataclass fields the audit trail will record.
+        # Per CLAUDE.md offensive-programming policy: detect invalid states and
+        # raise meaningful errors at construction so a malformed inspection
+        # cannot propagate into proof diagnostics or the Landscape.
+        start, end = self.byte_range_inspected
+        if start < 0 or end < start:
+            raise ValueError(f"SourceInspectionFacts.byte_range_inspected must satisfy 0 <= start <= end; got ({start}, {end})")
+        if self.sample_row_count < 0:
+            raise ValueError(f"SourceInspectionFacts.sample_row_count must be non-negative; got {self.sample_row_count}")
 
 
 def inspect_blob_content(
@@ -521,9 +513,19 @@ def _inspect_text(
     byte_range: tuple[int, int],
 ) -> SourceInspectionFacts:
     text = _safe_decode(sample)
-    lines = [line for line in text.splitlines() if line.strip()][:_MAX_ROWS]
+    raw_lines = text.splitlines()
+    non_blank_lines = [line for line in raw_lines if line.strip()]
+    blank_dropped = len(raw_lines) - len(non_blank_lines)
+    lines = non_blank_lines[:_MAX_ROWS]
     url_candidates = list(dict.fromkeys(_URL_PATTERN.findall(text)))
     warnings: list[str] = []
+
+    if blank_dropped:
+        # Blank lines silently disappear from the sampled rows; ``sample_row_count``
+        # only reflects the post-filter total. Surface the count so an operator
+        # auditing the facts can distinguish a blank-padded source from one with
+        # zero blank lines, rather than letting the absence go unrecorded.
+        warnings.append(f"text_blank_lines_dropped: {blank_dropped} blank line(s) excluded from the sampled rows")
 
     if len(lines) == 1 and url_candidates and url_candidates[0] == lines[0].strip():
         warnings.append(

@@ -61,7 +61,7 @@ This rule overrides any default LLM tendency to "summarise progress so far" befo
 
 ### Convergence Guardrails — Source-aware Authoring
 
-Five rules that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
+Six rules that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
 
 1. **Inspect source facts before declaring a fixed schema.** When the operator has already attached a blob (or `set_source_from_blob` has been called), use `inspect_source(blob_id)` to discover the observed headers, sample row count, and inferred scalar types. Do not guess column names. Do not fabricate a schema from the user's prose — the blob is the truth, the prose is the wish.
 
@@ -70,14 +70,16 @@ Five rules that cover the historical convergence-failure modes. Apply them on ev
    - `mode: "flexible"` with declared fields when downstream needs typed access AND the source may carry extras.
    - `mode: "fixed"` only when the operator explicitly asked to project to a smaller schema.
 
-3. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
+3. **Reject CSV blobs with duplicate headers.** When `inspect_source` warnings include `csv_duplicate_headers`, the underlying CSV reader (`csv.DictReader` and similar) silently collapses duplicate-named columns last-write-wins, fabricating a single column from multiple source columns. The proof step promotes this to blocking with code `csv_duplicate_headers` and forces a repair turn. Resolve before previewing: rename the offending header at the source, declare explicit `columns` in source options, configure `field_mapping` to disambiguate, or route the source to a configured quarantine output via `on_validation_failure`. Do not ignore the warning — silent column collapse is a Tier-1 audit-integrity violation.
+
+4. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
    - Declare the field as `int` or `float` in the source schema (`fields: ["price: float"]`), or
    - Insert a `type_coerce` node upstream that converts the field to `float`.
    The threshold recipe (`apply_pipeline_recipe('split-by-numeric-threshold', ...)`) already does this in the right order — prefer it for "split rows by N" intents.
 
-4. **Default `on_validation_failure: "discard"` for source validation.** Quarantine is a conventional output name, not a built-in sink. `on_validation_failure: "quarantine"` is valid only when an output named `quarantine` exists in the same pipeline. For ordinary intent, use `discard`.
+5. **Default `on_validation_failure: "discard"` for source validation.** Quarantine is a conventional output name, not a built-in sink. `on_validation_failure: "quarantine"` is valid only when an output named `quarantine` exists in the same pipeline. For ordinary intent, use `discard`.
 
-5. **Do not ask the user technical implementation questions for ordinary simple intent.** If the operator says "classify these tickets" or "split these orders by price," the answer is to inspect, decide, and build — not to ask "do you want me to use OpenRouter or Azure?" or "what columns does your CSV have?" Ask only when the ambiguity is genuinely product-level ("which business category should count as high priority?"). Pick conservative defaults for technical questions (OpenRouter + a current Anthropic model is a reasonable default) and proceed; the proof step will surface any blocking misjudgement.
+6. **Do not ask the user technical implementation questions for ordinary simple intent.** If the operator says "classify these tickets" or "split these orders by price," the answer is to inspect, decide, and build — not to ask "do you want me to use OpenRouter or Azure?" or "what columns does your CSV have?" Ask only when the ambiguity is genuinely product-level ("which business category should count as high priority?"). Pick conservative defaults for technical questions (OpenRouter + a current Anthropic model is a reasonable default) and proceed; the proof step will surface any blocking misjudgement.
 
 **Recipe-first heuristic.** If operator intent maps to one of these shapes, prefer `apply_pipeline_recipe` — it produces the same state as a hand-authored `set_pipeline`, but with slot validation that rejects the URL-as-blob_id and bool-as-numeric-threshold failure modes at the boundary:
 

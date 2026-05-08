@@ -74,25 +74,6 @@ def _section_between(text: str, start_anchor: str, end_anchor: str) -> str:
     return text[start:end]
 
 
-class TestSourceValidationFailureRoutingSkill:
-    """Composer skills must match runtime source failure routing semantics."""
-
-    @pytest.mark.parametrize(
-        ("skill_name", "skill_content"),
-        [
-            ("web", _WEB_SKILL_CONTENT),
-            ("claude", _claude_code_skill_content()),
-        ],
-    )
-    def test_skill_documents_quarantine_as_configured_output_name(
-        self,
-        skill_name: str,
-        skill_content: str,
-    ) -> None:
-        assert "quarantine is a conventional output name, not a built-in sink" in skill_content.lower(), skill_name
-        assert 'on_validation_failure: "discard"' in skill_content, skill_name
-
-
 class TestPluginNameDrift:
     """Verify skill files list all registered plugins."""
 

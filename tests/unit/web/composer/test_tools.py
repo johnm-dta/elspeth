@@ -8209,6 +8209,60 @@ class TestInspectSourceTool:
                 session_id=self.session_id,
             )
 
+    def test_non_uuid_blob_id_surfaces_warning_fact(self, tmp_path: Path) -> None:
+        """A blob row whose id is not a parseable UUID must surface a
+        ``blob_id_not_uuid:`` warning to the audit trail, never silently
+        dropping the identifier."""
+        from datetime import UTC, datetime
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        non_uuid_id = "not-a-uuid-but-a-real-row"
+        body = b"a,b,c\n1,2,3\n"
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        non_uuid_path = storage_dir / f"{non_uuid_id}_x.csv"
+        non_uuid_path.write_bytes(body)
+        now = datetime.now(UTC)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=non_uuid_id,
+                    session_id=self.session_id,
+                    filename="x.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(non_uuid_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": non_uuid_id},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        warnings = tuple(result.data["warnings"])
+        matched = [w for w in warnings if w.startswith("blob_id_not_uuid:")]
+        assert len(matched) == 1, f"expected exactly one blob_id_not_uuid warning, got {warnings!r}"
+        assert non_uuid_id in matched[0]
+        identity = result.data["redacted_identity"]
+        assert "blob_id" not in identity
+        assert "content_hash_prefix" in identity
+
 
 # ---------------------------------------------------------------------------
 # preview_pipeline proof step. proof_diagnostics surfaces blocking issues that
@@ -8572,6 +8626,84 @@ class TestPreviewProofStep:
         info = [d for d in diagnostics if d["severity"] == "info"]
         # web_scrape warning from inspection should be mirrored — as info, not blocking
         assert any(d["code"] == "source_inspection_warning" for d in info)
+
+    # -- csv_duplicate_headers (promoted to blocking) -----------------------
+    # Duplicate CSV headers cause silent column collapse in csv.DictReader
+    # (last-write-wins) and similar libraries, fabricating a single column
+    # from multiple source columns. That is a Tier-1 audit-integrity
+    # violation and must force the repair loop, not pass through as
+    # advisory info.
+
+    def _replace_csv_blob_with_duplicate_headers(self) -> None:
+        """Overwrite the seeded CSV blob's bytes + content_hash so it has
+        duplicate headers. Must update content_hash to match the new bytes
+        or the proof step's BlobIntegrityError check will fire instead.
+        """
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        new_bytes = b"order_id,name,name,price\nO-1,Alice,Smith,49.95\nO-2,Bob,Jones,150.00\n"
+        self.csv_storage_path.write_bytes(new_bytes)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(new_bytes),
+                    content_hash=_content_hash(new_bytes),
+                )
+            )
+
+    def test_csv_duplicate_headers_blocks(self) -> None:
+        """Duplicate CSV headers must surface as a blocking proof diagnostic."""
+        self._replace_csv_blob_with_duplicate_headers()
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "csv_duplicate_headers" in codes, diagnostics
+        # Severity is blocking, not info.
+        dup = next(d for d in diagnostics if d["code"] == "csv_duplicate_headers")
+        assert dup["severity"] == "blocking", dup
+        # Must carry an actionable suggested_repair string (not None) so the
+        # forced-repair loop has a concrete remedy to relay to the LLM.
+        assert isinstance(dup["suggested_repair"], str) and dup["suggested_repair"], dup
+        # The warning text must reach the LLM verbatim — it names the
+        # offending header(s).
+        assert "name" in dup["message"], dup
+        # is_valid is forced False by the blocking proof diagnostic.
+        assert result.data["is_valid"] is False
+
+    def test_csv_without_duplicate_headers_does_not_block(self) -> None:
+        """Clean headers must not produce a csv_duplicate_headers diagnostic."""
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_duplicate_headers" not in codes
+
+    def test_csv_duplicate_headers_registered_as_blocking_code(self) -> None:
+        """Registry membership ripples — the constructor would crash if the
+        emission site used an unregistered code, so this test pins the
+        canonical-vocabulary contract independently of emission."""
+        from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES
+
+        assert "csv_duplicate_headers" in _BLOCKING_DIAGNOSTIC_CODES
 
     # -- missing/unreadable blob --------------------------------------------
 

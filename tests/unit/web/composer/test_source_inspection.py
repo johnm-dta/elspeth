@@ -284,6 +284,28 @@ class TestTextInspection:
         assert f.url_candidates == ()
         assert f.warnings == ()
 
+    def test_blank_lines_dropped_emits_warning_with_count(self) -> None:
+        # Mixed blank/non-blank input: 3 non-blank lines, 3 blank lines.
+        # Body splitlines() yields ["a", "", "b", "", "", "c"] → 3 blanks dropped.
+        f = inspect_blob_content(
+            content=b"a\n\nb\n\n\nc\n",
+            filename="x.txt",
+            mime_type="text/plain",
+        )
+        assert f.sample_row_count == 3
+        blank_warnings = [w for w in f.warnings if w.startswith("text_blank_lines_dropped:")]
+        assert len(blank_warnings) == 1, f.warnings
+        assert "3 blank line(s)" in blank_warnings[0], blank_warnings[0]
+
+    def test_no_blank_lines_no_blank_warning(self) -> None:
+        f = inspect_blob_content(
+            content=b"alpha\nbeta\ngamma\n",
+            filename="x.txt",
+            mime_type="text/plain",
+        )
+        assert f.sample_row_count == 3
+        assert not any(w.startswith("text_blank_lines_dropped:") for w in f.warnings), f.warnings
+
 
 # --------------------------------------------------------------------------
 # Redacted identity
@@ -349,6 +371,86 @@ class TestFrozenInvariants:
     def test_observed_headers_tuple(self) -> None:
         f = inspect_blob_content(content=b"a,b\n1,2\n", filename="x.csv", mime_type="text/csv")
         assert isinstance(f.observed_headers, tuple)
+
+    # --- Numeric invariants enforced in __post_init__ -----------------------
+    #
+    # ``byte_range_inspected`` is a ``(start, end)`` pair where the inspected
+    # window is the half-open slice ``content[start:end]``. The semantic
+    # contract is ``0 <= start <= end``; equality (``(0, 0)`` for an empty
+    # blob) is valid. ``sample_row_count`` records how many rows were actually
+    # parsed from the inspected window — never negative. Both invariants land
+    # in the audit trail via ``facts_to_dict`` / ``preview_pipeline``'s proof
+    # step, so a malformed value would corrupt the audit record. The asserts
+    # in ``__post_init__`` make construction fail fast rather than letting the
+    # malformed facts propagate.
+
+    def test_byte_range_zero_zero_is_valid_empty_window(self) -> None:
+        # Empty blob — both endpoints are zero, half-open slice is empty.
+        f = SourceInspectionFacts(
+            source_kind="unknown",
+            redacted_identity={"filename": "empty", "mime_type": "text/plain", "byte_size": "0"},
+            byte_range_inspected=(0, 0),
+            sample_row_count=0,
+            observed_headers=None,
+            inferred_types=None,
+            url_candidates=(),
+            warnings=(),
+        )
+        assert f.byte_range_inspected == (0, 0)
+        assert f.sample_row_count == 0
+
+    def test_byte_range_normal_window_is_valid(self) -> None:
+        f = SourceInspectionFacts(
+            source_kind="text",
+            redacted_identity={"filename": "x.txt", "mime_type": "text/plain", "byte_size": "100"},
+            byte_range_inspected=(0, 100),
+            sample_row_count=10,
+            observed_headers=None,
+            inferred_types=None,
+            url_candidates=(),
+            warnings=(),
+        )
+        assert f.byte_range_inspected == (0, 100)
+        assert f.sample_row_count == 10
+
+    def test_byte_range_negative_start_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"byte_range_inspected must satisfy 0 <= start <= end"):
+            SourceInspectionFacts(
+                source_kind="unknown",
+                redacted_identity={"filename": "x", "mime_type": "text/plain", "byte_size": "0"},
+                byte_range_inspected=(-1, 100),
+                sample_row_count=0,
+                observed_headers=None,
+                inferred_types=None,
+                url_candidates=(),
+                warnings=(),
+            )
+
+    def test_byte_range_inverted_pair_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"byte_range_inspected must satisfy 0 <= start <= end"):
+            SourceInspectionFacts(
+                source_kind="unknown",
+                redacted_identity={"filename": "x", "mime_type": "text/plain", "byte_size": "0"},
+                byte_range_inspected=(50, 10),
+                sample_row_count=0,
+                observed_headers=None,
+                inferred_types=None,
+                url_candidates=(),
+                warnings=(),
+            )
+
+    def test_sample_row_count_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"sample_row_count must be non-negative"):
+            SourceInspectionFacts(
+                source_kind="unknown",
+                redacted_identity={"filename": "x", "mime_type": "text/plain", "byte_size": "0"},
+                byte_range_inspected=(0, 0),
+                sample_row_count=-1,
+                observed_headers=None,
+                inferred_types=None,
+                url_candidates=(),
+                warnings=(),
+            )
 
 
 # --------------------------------------------------------------------------

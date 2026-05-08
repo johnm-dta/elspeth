@@ -19,6 +19,7 @@ from uuid import uuid4
 import pytest
 
 from elspeth.web.composer.recipes import (
+    RecipeSpec,
     RecipeValidationError,
     SlotSpec,
     apply_recipe,
@@ -954,3 +955,119 @@ class TestApplyRecipeEndToEnd:
         # No replacement note when there was nothing to replace.
         if result.data is not None:
             assert "replaced_pipeline_note" not in result.data
+
+
+# --------------------------------------------------------------------------
+# Deep-freeze invariants on RecipeSpec / SlotSpec
+#
+# RecipeSpec.__post_init__ calls ``freeze_fields(self, "slots")`` so the
+# slot mapping cannot be mutated after construction. These tests pin that
+# contract so a future refactor that swaps freeze_fields for a forbidden
+# pattern (e.g. ``MappingProxyType(self.slots)`` — a CLAUDE.md-banned
+# shallow wrap that leaves the original dict mutable through the wrapped
+# reference) would fail loudly here rather than silently regress recipe
+# integrity. Mirrors the pattern in
+# tests/unit/web/composer/test_source_inspection.py::TestFrozenInvariants.
+# --------------------------------------------------------------------------
+
+
+class TestRecipeSpecFrozenInvariants:
+    """RecipeSpec.slots must be deeply immutable post-construction.
+
+    See ``deep_freeze`` (src/elspeth/contracts/freeze.py): ``Mapping``
+    inputs are converted to a fresh ``MappingProxyType`` over a freshly
+    materialised dict — both the wrapper and the underlying dict are
+    detached from the caller's input, so external mutation of the input
+    cannot leak through to ``recipe.slots``. SlotSpec values themselves
+    are frozen dataclasses (``frozen=True, slots=True``).
+    """
+
+    def test_slots_item_assignment_new_key_raises_typeerror(self) -> None:
+        """Item assignment on a registered recipe's slots is rejected.
+
+        ``MappingProxyType`` raises ``TypeError`` on ``__setitem__``; this
+        is the load-bearing barrier that prevents mutation of a recipe's
+        slot table after construction.
+        """
+        spec = get_recipe("classify-rows-llm-jsonl")
+        assert spec is not None
+        with pytest.raises(TypeError):
+            spec.slots["new_slot"] = SlotSpec(slot_type="str")  # type: ignore[index]
+
+    def test_slots_item_assignment_existing_key_raises_typeerror(self) -> None:
+        """Reassigning an existing slot is also rejected.
+
+        Distinct from the new-key case: a hypothetical regression that
+        wrapped ``self.slots`` in a ``MappingProxyType`` view (without
+        the deep-freeze detach) would still raise ``TypeError`` on the
+        proxy, but the underlying dict would remain mutable through the
+        original reference. This test pins the proxy-level barrier.
+        """
+        spec = get_recipe("split-by-numeric-threshold")
+        assert spec is not None
+        # 'field' is a known slot of the threshold recipe.
+        assert "field" in spec.slots
+        with pytest.raises(TypeError):
+            spec.slots["field"] = SlotSpec(slot_type="str")  # type: ignore[index]
+
+    def test_external_dict_mutation_does_not_leak_into_slots(self) -> None:
+        """Mutating the dict passed into ``RecipeSpec`` must not affect ``recipe.slots``.
+
+        This is the discriminating regression test against a forbidden
+        ``MappingProxyType(self.slots)`` shallow-wrap. ``deep_freeze``
+        materialises a fresh dict from the input's items before wrapping,
+        so post-construction mutations to the original dict are isolated.
+        A shallow-wrap regression with a ``dict`` input would expose the
+        leak — the proxy would be a *view* onto the still-mutable original.
+        """
+        external: dict[str, SlotSpec] = {"k": SlotSpec(slot_type="str")}
+        recipe = RecipeSpec(
+            name="leak-probe",
+            description="test fixture for external-mutation isolation",
+            slots=external,
+            build=lambda _slots: {},
+        )
+        external["leaked"] = SlotSpec(slot_type="str")
+        assert "leaked" not in recipe.slots
+        # The original key survives.
+        assert "k" in recipe.slots
+
+    def test_slots_remain_read_only_when_input_is_already_frozen(self) -> None:
+        """Even when the input is already a ``MappingProxyType``, the
+        resulting ``recipe.slots`` is itself a read-only mapping that
+        rejects item assignment.
+
+        ``deep_freeze`` always returns a *fresh* ``MappingProxyType`` for
+        Mapping inputs (it detaches the proxy from any view onto a
+        possibly-mutable backing dict), so we don't assert identity here
+        — just that the read-only contract holds regardless of input
+        shape.
+        """
+        from types import MappingProxyType
+
+        already_frozen = MappingProxyType({"k": SlotSpec(slot_type="str")})
+        recipe = RecipeSpec(
+            name="frozen-input-probe",
+            description="test fixture for already-frozen-input idempotency",
+            slots=already_frozen,
+            build=lambda _slots: {},
+        )
+        assert isinstance(recipe.slots, MappingProxyType)
+        with pytest.raises(TypeError):
+            recipe.slots["new"] = SlotSpec(slot_type="str")  # type: ignore[index]
+
+    def test_slot_spec_is_itself_frozen(self) -> None:
+        """``SlotSpec`` is ``frozen=True`` so attribute reassignment must raise.
+
+        If a future refactor drops ``frozen=True`` on SlotSpec, the deep
+        freeze on ``RecipeSpec.slots`` would still block dict-level
+        mutation but slot fields could be reassigned in place — undermining
+        the recipe-table integrity the freeze guard is meant to protect.
+        """
+        from dataclasses import FrozenInstanceError
+
+        slot = SlotSpec(slot_type="str", required=True, description="probe")
+        with pytest.raises(FrozenInstanceError):
+            slot.required = False  # type: ignore[misc]
+        with pytest.raises(FrozenInstanceError):
+            slot.slot_type = "int"  # type: ignore[misc]

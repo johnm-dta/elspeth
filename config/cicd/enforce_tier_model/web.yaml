@@ -438,13 +438,15 @@ allow_hits:
     primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=f78419cd31e0e7ab
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=c5cc7590743a1d99
   owner: web-composer
   reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure
     mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content).
+    Failure is NOT silent — a blob_id_not_uuid warning fact is prepended to facts.warnings so the audit trail records
+    why redacted_identity omits blob_id.
   safety: blob_uuid=None on parse failure; inspection still runs against the resolved blob row (already validated by
-    the _sync_get_blob lookup). Identity surfacing degrades gracefully; integrity guards (status=ready, hash match)
-    remain authoritative.
+    the _sync_get_blob lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the
+    audit-bound facts.warnings tuple; integrity guards (status=ready, hash match) remain authoritative.
   expires: null
 - key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=02dcba287d1b3ce7
   owner: web-composer

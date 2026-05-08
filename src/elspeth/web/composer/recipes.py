@@ -1,28 +1,13 @@
-"""Pipeline recipes — deterministic scaffolds for common simple-pipeline intents.
+"""Recipe scaffolding for the composer. Tier-3 boundary; see CLAUDE.md.
 
-A recipe takes operator-supplied slot values, validates them against a
-typed schema, and returns a ``set_pipeline`` arguments dict ready for
-execution. The resulting pipeline state is identical to one a model would
-hand-author via ``set_pipeline`` directly — recipes are accelerators, not
-opaque shortcuts. The model still sees the full state via
-``get_pipeline_state`` after recipe application and can ``patch_*_options``
-to refine.
+Slot validation runs *before* scaffolding, so a wrong-shape slot value (e.g., a
+URL passed where ``blob_id`` is required) is rejected at the recipe boundary
+rather than silently producing a config that fails at runtime — operators get a
+diagnostic that points at the recipe input, not at a downstream plugin.
 
-Slot validation runs *before* scaffolding. This catches the URL-as-path
-class of bugs (a string blob path passed where a blob UUID is required,
-a numeric threshold passed as a string, etc.) at the recipe boundary
-rather than at runtime. Each recipe declares its slot schema as a
-mapping of slot name → ``SlotSpec`` describing the required type and
-optional default.
-
-Boundary contract:
-  * Slot values are operator-supplied — coerce at the boundary (str →
-    UUID, str → float for numeric thresholds) but do NOT fabricate
-    defaults beyond what the slot schema declares.
-  * Recipes never call external services or read blob bytes — they
-    construct config only. Source inspection (``source_inspection.py``)
-    and the preflight proof step (``compute_proof_diagnostics``) handle
-    blob reads.
+Boundary contract: recipes never read blob bytes. Resolving and inspecting blob
+content lives in ``source_inspection.py``; recipes only manipulate the typed
+slot values they were given.
 """
 
 from __future__ import annotations
@@ -39,16 +24,7 @@ SlotType = Literal["blob_id", "str", "float", "int", "str_list"]
 
 @dataclass(frozen=True, slots=True)
 class SlotSpec:
-    """Declares one input slot for a recipe.
-
-    Attributes:
-        slot_type: How to validate the operator-supplied value. ``blob_id``
-            requires a parseable UUID string; ``float``/``int`` allow
-            numeric strings (coerced) or numeric primitives.
-        required: When True, omitting this slot is a validation error.
-        default: Used only when ``required=False`` and the slot is absent.
-        description: Human-readable help text surfaced to the model.
-    """
+    """Declares one input slot for a recipe."""
 
     slot_type: SlotType
     required: bool = True
@@ -261,23 +237,6 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     # ``options`` would skip resolution and leave the source unbound — the
     # proof step (``compute_proof_diagnostics`` reads ``options["blob_ref"]``)
     # would then silently report no diagnostics.
-    #
-    # ``api_key`` is wired as a ``{secret_ref: NAME}`` deferred marker.
-    # ``_credential_wiring_contract_failure`` rejects literal strings, and
-    # ``_prevalidate_plugin_options`` strips the marker before Pydantic sees
-    # the config and filters out the resulting "field required" error for
-    # the wired field. Operators must register the secret via the secret
-    # service (list_secret_refs / validate_secret_ref) before applying the
-    # recipe; ``apply_pipeline_recipe`` returns a credential-wiring repair
-    # error if the name is unknown at runtime.
-    #
-    # ``required_input_fields`` defaults to an empty list — the LLMConfig
-    # ``_validate_required_input_fields_declared`` model_validator treats
-    # ``[]`` as the documented "explicit opt-out (accept runtime risk)"
-    # path. The recipe surfaces this as an optional slot so an operator
-    # who knows the template's field references can declare them up front;
-    # otherwise the safe default flows through and the operator can refine
-    # via ``patch_node_options`` after recipe application.
     required_input_fields = list(slots["required_input_fields"])
     return {
         "source": {

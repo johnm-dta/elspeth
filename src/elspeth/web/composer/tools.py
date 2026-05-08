@@ -3478,15 +3478,6 @@ def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
     ``BlobIntegrityError`` rather than degrading to a soft result;
     silently passing through unverified bytes would let the audit
     trail confidently record decisions made on garbage.
-
-    Use ``hmac.compare_digest`` (constant-time) for the comparison so
-    a malicious actor cannot leak the stored hash via timing
-    side-channels.
-
-    Used by the three composer-tool callers that read blob bytes
-    (``_execute_get_blob_content``, ``_execute_inspect_source``,
-    ``compute_proof_diagnostics``); each does its own lifecycle and
-    existence pre-checks since their failure-handling differs.
     """
     blob_id = blob["id"]
     stored_hash = blob["content_hash"]
@@ -3637,10 +3628,17 @@ def _execute_inspect_source(
 
     _verify_blob_content_integrity(blob, data)
 
+    blob_id_warning: str | None = None
     try:
         blob_uuid = UUID(blob_id)
     except ValueError:
         blob_uuid = None
+        truncated = blob_id if len(blob_id) <= 64 else blob_id[:64] + "..."
+        blob_id_warning = (
+            f"blob_id_not_uuid: matched blob_id {truncated!r} is not a parseable "
+            "UUID — redacted_identity will omit blob_id and surface "
+            "content_hash_prefix only"
+        )
 
     facts = inspect_blob_content(
         content=data,
@@ -3649,6 +3647,8 @@ def _execute_inspect_source(
         blob_id=blob_uuid,
         content_hash=blob["content_hash"],
     )
+    if blob_id_warning is not None:
+        facts = replace(facts, warnings=(blob_id_warning, *facts.warnings))
     return _discovery_result(state, facts_to_dict(facts))
 
 
@@ -3673,20 +3673,10 @@ def _execute_apply_pipeline_recipe(
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
-    Recipes are deterministic scaffolds. Slot validation runs before
-    scaffolding so a URL string passed where a blob_id is required is
-    rejected at the recipe boundary with an explicit repair hint, not
-    silently accepted into a config that will fail at runtime.
-
-    ``set_pipeline`` is full state replacement. When the operator was
-    hand-iterating and the LLM applied a recipe, prior work is replaced
-    with the recipe's scaffold. To make that destructive action visible
-    (rather than silently overwriting), we capture the pre-replacement
-    counts and surface them as a ``replaced_pipeline`` note on the
-    successful result's ``data`` payload — non-blocking, but visible to
-    both the LLM and the audit trail. No note is emitted when the pre-
-    state was empty (recipe applied to a fresh session) since there
-    is nothing to "replace".
+    ``set_pipeline`` is full state replacement, so a ``replaced_pipeline_note`` is
+    emitted to make the destructive replacement visible to the LLM/operator. The
+    note is suppressed when the prior pipeline is empty — a no-op replacement
+    needs no flag, and emitting one would be noise on a fresh-session apply.
     """
     recipe_name = arguments.get("recipe_name")
     raw_slots = arguments.get("slots")
@@ -4906,6 +4896,7 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
 # every blocking dict's ``code`` appears here at construction time.
 _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
     {
+        "csv_duplicate_headers",
         "csv_fixed_schema_omits_observed_columns",
         "text_source_url_without_web_scrape",
         "source_inspection_failed",
@@ -4972,7 +4963,7 @@ def compute_proof_diagnostics(
       * ``text_source_url_without_web_scrape`` — text source whose blob
         content is a single URL but no web_scrape node downstream. The
         URL string itself reaches sinks instead of the URL's content.
-      * ``source_inspection_warnings`` — every warning surfaced by
+      * ``source_inspection_warning`` — every warning surfaced by
         ``inspect_blob_content`` is mirrored here at ``info`` severity
         so the model sees them in the same array as blocking issues.
 
@@ -5096,7 +5087,34 @@ def compute_proof_diagnostics(
     # 3. Surface inspection warnings as info-severity diagnostics so the model
     #    sees them in the same array as blocking issues. These are *advisory*
     #    only — the model can ignore them if the operator's intent justifies.
+    #
+    #    Exception: ``csv_duplicate_headers`` is promoted to blocking. Duplicate
+    #    headers cause silent column collapse in csv.DictReader (last-write-
+    #    wins) and similar libraries, fabricating a single column from multiple
+    #    source columns. That is a Tier-1 audit-integrity violation — the
+    #    audit trail would silently contain data that "looks single-column"
+    #    when the source had two — and must force the repair loop, not pass
+    #    through as advisory. The repair vocabulary is: rename headers,
+    #    declare ``columns`` explicitly, configure ``field_mapping``, or set
+    #    ``on_validation_failure`` to a configured quarantine output.
     for warning in facts.warnings:
+        if warning.startswith("csv_duplicate_headers:"):
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="csv_duplicate_headers",
+                    message=warning,
+                    suggested_repair=(
+                        "Rename the duplicate header(s) at the source, OR declare "
+                        "explicit `columns` in the source options, OR configure "
+                        "`field_mapping` to disambiguate the collapsed names, OR "
+                        "set `on_validation_failure` to a configured quarantine "
+                        "output so the silent column collapse does not poison the "
+                        "audit trail."
+                    ),
+                    evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+                )
+            )
+            continue
         diagnostics.append(
             {
                 "code": "source_inspection_warning",

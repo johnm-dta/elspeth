@@ -11,14 +11,18 @@
 //      discriminator mapping value (e.g., "provider: azure" / "openrouter").
 // ============================================================================
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
+
+export const PREFILL_CHAT_INPUT_EVENT = "composer:prefill-chat-input";
 
 interface PluginCardProps {
   plugin: PluginSummary;
   schema: PluginSchemaInfo | null;
   schemaError?: boolean;
   onExpand: () => void;
+  /** Called when the card initiates an action that should close the drawer. */
+  onCloseDrawer?: () => void;
 }
 
 interface JsonSchemaField {
@@ -75,6 +79,16 @@ function resolveVariants(
   return variants;
 }
 
+function buildInsertionPrompt(plugin: PluginSummary): string {
+  const role =
+    plugin.plugin_type === "source"
+      ? "as the source"
+      : plugin.plugin_type === "sink"
+        ? "as a sink"
+        : "as a transform";
+  return `Add ${plugin.name} ${role} (named "${plugin.name}-1"). Use sensible defaults for required fields and ask me about anything that needs domain context.`;
+}
+
 function renderFields(
   properties: Record<string, JsonSchemaField>,
   required: string[] | undefined,
@@ -94,7 +108,7 @@ function renderFields(
   ));
 }
 
-export function PluginCard({ plugin, schema, schemaError, onExpand }: PluginCardProps) {
+export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawer }: PluginCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   function handleClick() {
@@ -103,6 +117,19 @@ export function PluginCard({ plugin, schema, schemaError, onExpand }: PluginCard
     }
     setExpanded((prev) => !prev);
   }
+
+  const handleUseInPipeline = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const prompt = buildInsertionPrompt(plugin);
+      window.dispatchEvent(
+        new CustomEvent(PREFILL_CHAT_INPUT_EVENT, { detail: prompt }),
+      );
+      onCloseDrawer?.();
+    },
+    [plugin, onCloseDrawer],
+  );
 
   const configSchema = schema?.json_schema as
     | (DiscriminatedSchema & JsonSchemaObject)
@@ -120,12 +147,21 @@ export function PluginCard({ plugin, schema, schemaError, onExpand }: PluginCard
       tabIndex={0}
       role="button"
       aria-expanded={expanded}
+      aria-label={`${plugin.name} plugin details`}
       className="plugin-card"
     >
       {/* Header — always visible */}
       <div className="plugin-card-header">
         <span className="plugin-card-name">{plugin.name}</span>
         <span className="plugin-card-desc">{plugin.description}</span>
+        <button
+          type="button"
+          className="btn plugin-card-use-btn"
+          onClick={handleUseInPipeline}
+          aria-label={`Use ${plugin.name} in pipeline`}
+        >
+          Use in pipeline
+        </button>
       </div>
 
       {/* Expanded content */}

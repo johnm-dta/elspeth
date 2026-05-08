@@ -2,12 +2,14 @@
 import {
   useState,
   useCallback,
+  useEffect,
   useRef,
   type KeyboardEvent,
   type ChangeEvent,
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
+import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -46,6 +48,27 @@ export function ChatInput({
   textRef.current = text;
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const uploadBlob = useBlobStore((s) => s.uploadBlob);
+
+  // Listen for prefill events dispatched by PluginCard "Use in pipeline" action.
+  // Uses setText (the controlled/uncontrolled abstraction) to set the value,
+  // then focuses the textarea via the external inputRef.
+  useEffect(() => {
+    function handlePrefill(e: Event) {
+      const detail = (e as CustomEvent<string>).detail;
+      if (typeof detail !== "string") return;
+      setText(detail);
+      // Defer focus + caret placement to after React re-renders the controlled value.
+      queueMicrotask(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          const len = detail.length;
+          inputRef.current.setSelectionRange(len, len);
+        }
+      });
+    }
+    window.addEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
+    return () => window.removeEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
+  }, [setText, inputRef]);
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();

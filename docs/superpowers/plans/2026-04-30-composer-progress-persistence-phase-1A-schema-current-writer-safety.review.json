@@ -1,10 +1,10 @@
 {
   "verdict": "APPROVED_WITH_WARNINGS",
   "go_no_go": "GO_WITH_WARNINGS",
-  "summary": "First-principles Schedule 1A review found eight blocking issues across the prior handoff and this live-tree refresh. All eight were patched in the plan: forked copied history now preserves stored writer_principal values, Task 8/9/10 red-green commands run the safety regressions they introduce, the static direct-writer guard has explicit fail-closed synthetic tests, shared conftests are committed before Task 7 imports them, rollback now stops on a dirty checkout before switching source refs, the standalone eval decode fixture raw chat_messages writer is included in the schema/current-writer cutover, and evals/lib/decode_tools.py is included in the sequence_no read-side ordering cutover. Remaining warnings are explicit operational boundaries: audit_access_log remains inert schema in 1A, SQLite locking is single-process only, and PostgreSQL operational proof is deferred to Schedule 1C.",
+  "summary": "Day-of-cutover preflight on 2026-05-08 against the live tree on branch feat/composer-progress-persistence-1a (base RC5.1 @ 79cf7ddf, in sync with origin/RC5.1) confirmed the §57-68 reviewed direct-writer snapshot still matches reality with no new writers added since 2026-05-06. One additional blocking issue (B11) was found in the plan's preflight grep wording itself: ripgrep's recursive traversal applies the root .gitignore lib/ directory exclude before the !tests/unit/evals/lib/ negation, so the literal §38, §39, §49, §50 greps silently skip the standalone eval-decode chat_messages writers at tests/unit/evals/lib/test_decode_tools.py lines 107-108 and 186. The plan was patched to require --no-ignore-vcs in all four preflight grep invocations, with an inline rationale block describing the .gitignore directory-negation footgun. Inventory still matches §57-68 with the corrected grep. Operational warnings (audit_access_log inert in 1A, SQLite single-process locking, PostgreSQL deferred to 1C, IntegrityError retry loop debt) remain unchanged. W2 deployment-shape recheck confirms /home/john/elspeth/deploy/elspeth-web.service runs uvicorn without --workers and without WEB_CONCURRENCY, so the SQLite single-process locking assumption holds.",
   "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
-  "reviewed_at": "2026-05-06T14:19:40Z",
-  "reviewed_by": "codex",
+  "reviewed_at": "2026-05-08T00:00:00Z",
+  "reviewed_by": "claude-opus-4-7",
   "reviewers": [
     "reality",
     "architecture",
@@ -82,6 +82,13 @@
       "issue": "evals/lib/decode_tools.py reads chat_messages with raw SQL ordered by created_at, id, which would diverge from 1A's new sequence_no canonical ordering for same-timestamp rows.",
       "status": "patched",
       "change": "Task 14's read-side ordering section now includes evals/lib/decode_tools.py, widens the read-consumer grep to src/tests/evals raw SQL, requires ORDER BY sequence_no for rev-4 DBs, and adds an equal-created_at regression in tests/unit/evals/lib/test_decode_tools.py."
+    },
+    {
+      "id": "B11",
+      "source": "reality",
+      "issue": "The plan's literal preflight greps at §38, §39, §49, §50 silently skip tracked writer files under tests/unit/evals/lib/ because the root .gitignore has a generic lib/ rule that matches the directory and ripgrep's recursive traversal applies the parent directory exclude before the !tests/unit/evals/lib/ negation. A reviewer running the literal grep on 2026-05-08 saw a 'no matches' result for the eval-fixture writer at tests/unit/evals/lib/test_decode_tools.py:108 and :186, even though the file is git-tracked and the static guard added in Step 4 would catch it. This made the operator-facing inventory grep a false-clean unsoundness gate while the static guard alone is sound.",
+      "status": "patched",
+      "change": "All four preflight greps in §38, §39, §49, §50 now require --no-ignore-vcs (preserves manual .ignore / .rgignore rules but bypasses the .gitignore directory-negation footgun). The composition_states preflight greps at §49 and §50 were also widened from `src tests` to `src tests evals` to match the chat_messages anchors and surface any future composition-state writer added under evals/. Inline rationale blocks were added under each grep listing (a) the precise .gitignore line that triggers the exclusion, (b) the negation that fails to propagate, (c) the file paths and line numbers that disappear without --no-ignore-vcs, and (d) the verification step that confirms the eval-fixture writers appear in the corrected output. Inventory was re-run with the corrected greps on 2026-05-08 and matches the §57-68 reviewed snapshot exactly with no new direct writers."
     }
   ],
   "warnings": [
@@ -95,7 +102,7 @@
       "id": "W2",
       "source": "architecture",
       "issue": "SQLite locking is process-local and assumes the current single-worker staging deployment shape.",
-      "recommendation": "Re-check deploy/elspeth-web.service, WEB_CONCURRENCY, the app startup guard, and live process shape before staging deploy."
+      "recommendation": "Re-check deploy/elspeth-web.service, WEB_CONCURRENCY, the app startup guard, and live process shape before staging deploy. Confirmed on 2026-05-08: deploy/elspeth-web.service runs uvicorn elspeth.web.app:create_app without --workers and without WEB_CONCURRENCY in the EnvironmentFile, so single-process locking holds at the time of preflight."
     },
     {
       "id": "W3",
@@ -113,8 +120,9 @@
   "reviewer_summaries": {
     "reality": {
       "status": "PASS_AFTER_PATCH",
-      "blocking": 1,
-      "warnings": 3
+      "blocking": 2,
+      "warnings": 3,
+      "notes_2026_05_08": "Re-ran §38 and §49 greps against live worktree feat/composer-progress-persistence-1a. Plain rg invocation matched §57-68 inventory minus the eval-fixture writer. Adding --no-ignore-vcs surfaced tests/unit/evals/lib/test_decode_tools.py:107-108 and :186 as expected. Confirmed the file is git-tracked via git ls-files and git check-ignore returns exit 1 (not ignored from git's view). Plan grep wording patched in this commit; full inventory now matches §57-68 with corrected grep."
     },
     "architecture": {
       "status": "PASS_AFTER_PATCH",
@@ -141,17 +149,19 @@
     "Ran four parallel first-principles review lenses and synthesized their reports.",
     "Patched the Schedule 1A markdown plan in place for every blocking issue found in this pass.",
     "Validated the updated review sidecar JSON parses cleanly.",
-    "No implementation tests were run because this pass changed planning/review artifacts only."
+    "No implementation tests were run because this pass changed planning/review artifacts only.",
+    "2026-05-08 day-of-cutover preflight on worktree feat/composer-progress-persistence-1a: re-ran the §33-53 inventory greps against the live tree, confirmed the §57-68 snapshot still matches with no new writers, found and patched B11 (.gitignore directory-negation footgun in the literal preflight grep wording), re-ran the corrected greps to verify eval-fixture writers surface, and re-checked W2 (deploy/elspeth-web.service uvicorn invocation has no --workers and no WEB_CONCURRENCY)."
   ],
   "required_next_steps": [
     "Execute Schedule 1A before Schedule 1B.",
     "Keep the direct-writer inventory and static guard as merge gates.",
-    "Re-review Schedules 1B and 1C separately before execution."
+    "Re-review Schedules 1B and 1C separately before execution.",
+    "When recording preflight evidence in the cutover PR body, paste the output of the corrected --no-ignore-vcs greps so the recorded evidence is reproducible against the plan as-merged."
   ],
   "supersedes": {
     "previous_verdict": "APPROVED_WITH_WARNINGS",
     "previous_go_no_go": "GO_WITH_WARNINGS",
-    "previous_reviewed_at": "2026-05-06T03:25:04Z",
-    "reason": "This pass restarted the review from first principles and patched newly found blockers in the plan and sidecar."
+    "previous_reviewed_at": "2026-05-06T14:19:40Z",
+    "reason": "Day-of-cutover preflight on 2026-05-08 patched B11 (preflight grep wording silently skipped tracked eval-fixture writers via .gitignore directory-negation footgun). Inventory still matches §57-68 reviewed snapshot; only the operator-facing grep wording changed."
   }
 }

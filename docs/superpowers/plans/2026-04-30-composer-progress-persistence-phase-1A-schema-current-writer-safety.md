@@ -35,9 +35,11 @@ Before Task 1 changes required columns, inventory every direct writer for both a
 Run:
 
 ```bash
-rg -n "insert\((models\.)?chat_messages_table|chat_messages_table\.insert|insert\(chat_messages_table" src tests evals -g '*.py'
-rg -n "INSERT\s+INTO\s+chat_messages|exec_driver_sql\(|raw_connection\(|cursor\.execute\(|executemany\(" src tests evals -g '*.py'
+rg -n --no-ignore-vcs "insert\((models\.)?chat_messages_table|chat_messages_table\.insert|insert\(chat_messages_table" src tests evals -g '*.py'
+rg -n --no-ignore-vcs "INSERT\s+INTO\s+chat_messages|exec_driver_sql\(|raw_connection\(|cursor\.execute\(|executemany\(" src tests evals -g '*.py'
 ```
+
+`--no-ignore-vcs` is mandatory. The repository's root `.gitignore` has a generic `lib/` rule (Python build artefact) that matches the directory `tests/unit/evals/lib/`; the negation entries `!tests/unit/evals/lib/` and `!tests/unit/evals/lib/**` re-include the path for git tracking but ripgrep's recursive traversal applies the parent directory exclude before the negation, so a plain `rg` invocation silently skips the tracked standalone eval-decode chat-messages writer at `tests/unit/evals/lib/test_decode_tools.py` lines 107-108 and 186. `--no-ignore-vcs` bypasses `.gitignore` while still honoring manual `.ignore` / `.rgignore` rules. Verify the eval-fixture writers appear in the output before treating the inventory as complete; if they do not, the grep is broken and the inventory is unsound.
 
 Expected: every SQLAlchemy-table result is either rewritten in this schedule, routed through the new helper, or explicitly documented as not writing rows. Every raw-SQL result must be inspected and classified as one of: direct writer, corruption fixture that intentionally bypasses the normal writer, or unrelated raw SQL. Do not rely on the SQLAlchemy grep alone; existing tests use raw cursor SQL for integrity/corruption setup, and those sites can otherwise bypass the new required columns.
 
@@ -46,9 +48,11 @@ Expected: every SQLAlchemy-table result is either rewritten in this schedule, ro
 Run:
 
 ```bash
-rg -n "insert\((models\.)?composition_states_table|composition_states_table\.insert|insert\(composition_states_table" src tests -g '*.py'
-rg -n "INSERT\s+INTO\s+composition_states|exec_driver_sql\(|raw_connection\(|cursor\.execute\(" src tests -g '*.py'
+rg -n --no-ignore-vcs "insert\((models\.)?composition_states_table|composition_states_table\.insert|insert\(composition_states_table" src tests evals -g '*.py'
+rg -n --no-ignore-vcs "INSERT\s+INTO\s+composition_states|exec_driver_sql\(|raw_connection\(|cursor\.execute\(" src tests evals -g '*.py'
 ```
+
+`--no-ignore-vcs` is mandatory for the same reason described in Step 1. The `evals` path is included alongside `src` and `tests` so any future composition-state writer added in `evals/lib/` or its tests is surfaced; the current tree has none, but extending the search anchors closes the same negation footgun for both tables.
 
 Expected: every SQLAlchemy-table result supplies `provenance`, uses the new helper, or is rewritten to a canonical test row factory. Every raw-SQL result must be inspected and classified as one of: direct writer, corruption fixture that intentionally bypasses the normal writer, or unrelated raw SQL.
 

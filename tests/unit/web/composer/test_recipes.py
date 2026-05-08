@@ -20,6 +20,7 @@ import pytest
 
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
+    SlotSpec,
     apply_recipe,
     get_recipe,
     list_recipes,
@@ -50,6 +51,75 @@ class TestRecipeRegistry:
                 assert "type" in slot_meta
                 assert "required" in slot_meta
                 assert "description" in slot_meta
+
+
+# --------------------------------------------------------------------------
+# SlotSpec construction: default value validated against slot_type
+# --------------------------------------------------------------------------
+
+
+class TestSlotSpecDefaultValidation:
+    """Recipe authors must declare defaults that satisfy the slot_type contract.
+
+    A typo like ``SlotSpec(slot_type="int", required=False, default="oops")``
+    must crash at construction (i.e. at recipe module import) rather than at
+    recipe-application time on a path the recipe's tests may not exercise.
+    """
+
+    def test_int_default_must_be_int(self) -> None:
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'int'"):
+            SlotSpec(slot_type="int", required=False, default="oops")
+
+    def test_int_default_int_passes(self) -> None:
+        SlotSpec(slot_type="int", required=False, default=42)
+
+    def test_int_default_bool_rejected(self) -> None:
+        # bool is a subclass of int in Python — _coerce_slot rejects it.
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'int'"):
+            SlotSpec(slot_type="int", required=False, default=True)
+
+    def test_float_default_must_be_numeric(self) -> None:
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'float'"):
+            SlotSpec(slot_type="float", required=False, default=[])
+
+    def test_float_default_int_coerces(self) -> None:
+        # _coerce_slot accepts int as a float — mirroring the runtime behaviour.
+        SlotSpec(slot_type="float", required=False, default=1)
+
+    def test_str_default_must_be_str(self) -> None:
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'str'"):
+            SlotSpec(slot_type="str", required=False, default=42)
+
+    def test_blob_id_default_must_be_uuid(self) -> None:
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'blob_id'"):
+            SlotSpec(slot_type="blob_id", required=False, default="not-a-uuid")
+
+    def test_str_list_default_must_be_iterable_of_str(self) -> None:
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'str_list'"):
+            SlotSpec(slot_type="str_list", required=False, default="single-string")
+
+    def test_str_list_default_empty_tuple_passes(self) -> None:
+        # The recipe registry uses ``default=()`` for required_input_fields —
+        # this is the documented "explicit opt-out" path and must remain valid.
+        SlotSpec(slot_type="str_list", required=False, default=())
+
+    def test_str_list_default_with_strs_passes(self) -> None:
+        SlotSpec(slot_type="str_list", required=False, default=("a", "b"))
+
+    def test_str_list_default_with_non_str_rejected(self) -> None:
+        with pytest.raises(ValueError, match="does not satisfy slot_type 'str_list'"):
+            SlotSpec(slot_type="str_list", required=False, default=("a", 42))
+
+    def test_required_slot_default_not_validated(self) -> None:
+        # Required slots never use ``default``; the validator raises on
+        # missing operator input. The default is irrelevant — keeping ``None``
+        # as the sentinel for "no default" should not trip the guard.
+        SlotSpec(slot_type="int", required=True, default=None)
+
+    def test_optional_slot_default_none_skipped(self) -> None:
+        # ``default=None`` is the sentinel for "no operator-visible default";
+        # it bypasses validation regardless of slot_type.
+        SlotSpec(slot_type="int", required=False, default=None)
 
 
 # --------------------------------------------------------------------------

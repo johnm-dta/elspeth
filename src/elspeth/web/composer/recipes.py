@@ -56,6 +56,26 @@ class SlotSpec:
     default: Any = None
     description: str = ""
 
+    def __post_init__(self) -> None:
+        # Offensive validation: if the recipe author declares a default for
+        # an optional slot, it must satisfy the same coercion contract that
+        # operator-supplied values must satisfy. Without this check, a typo
+        # like ``SlotSpec(slot_type="int", required=False, default="oops")``
+        # only surfaces at recipe-application time on a code path that may
+        # not be exercised by the recipe's own unit tests.
+        #
+        # Required slots have no default-as-fallback (the validator raises on
+        # missing operator input), so their ``default`` is irrelevant — skip
+        # the check rather than reject ``None``.
+        if self.required:
+            return
+        if self.default is None:
+            return
+        try:
+            _coerce_slot(f"<default for {self.slot_type}>", self, self.default)
+        except RecipeValidationError as exc:
+            raise ValueError(f"SlotSpec default {self.default!r} does not satisfy slot_type {self.slot_type!r}: {exc}") from exc
+
 
 @dataclass(frozen=True, slots=True)
 class RecipeSpec:

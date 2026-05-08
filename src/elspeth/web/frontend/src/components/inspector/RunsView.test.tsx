@@ -325,3 +325,49 @@ describe("RunsView", () => {
     expect(screen.getByText("Node states include completed=1, running=1.")).toBeInTheDocument();
   });
 });
+
+describe("RunsView Inspect button a11y", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: null });
+  });
+
+  it("declares aria-expanded reflecting diagnostics panel state", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    const inspect = screen.getByRole("button", { name: /inspect/i });
+    expect(inspect.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(inspect);
+
+    const hide = screen.getByRole("button", { name: /hide/i });
+    expect(hide.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("aria-controls points to the diagnostics panel id", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    const inspect = screen.getByRole("button", { name: /inspect/i });
+    const controlsId = inspect.getAttribute("aria-controls");
+    expect(controlsId).toBe("run-diagnostics-run-1");
+
+    await user.click(inspect);
+
+    expect(document.getElementById(controlsId!)).not.toBeNull();
+  });
+});

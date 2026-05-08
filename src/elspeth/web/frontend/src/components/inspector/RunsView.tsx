@@ -362,6 +362,8 @@ export function RunsView() {
                 </span>
                 <button
                   type="button"
+                  aria-expanded={expandedRunId === run.id}
+                  aria-controls={`run-diagnostics-${run.id}`}
                   onClick={() => {
                     const nextRunId = expandedRunId === run.id ? null : run.id;
                     setExpandedRunId(nextRunId);
@@ -369,15 +371,7 @@ export function RunsView() {
                       void loadRunDiagnostics(run.id);
                     }
                   }}
-                  style={{
-                    border: "1px solid var(--color-border)",
-                    borderRadius: "var(--radius-sm)",
-                    background: "var(--color-bg)",
-                    color: "var(--color-text)",
-                    fontSize: 12,
-                    padding: "2px 7px",
-                    cursor: "pointer",
-                  }}
+                  className="btn btn-small"
                 >
                   {expandedRunId === run.id ? "Hide" : "Inspect"}
                 </button>
@@ -419,16 +413,18 @@ export function RunsView() {
               )}
 
               {expandedRunId === run.id && (
-                <RunDiagnosticsPanel
-                  diagnostics={diagnosticsByRunId[run.id]}
-                  error={diagnosticsErrorByRunId[run.id] ?? null}
-                  explanation={diagnosticsExplanationByRunId[run.id] ?? null}
-                  isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
-                  isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
-                  workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
-                  onExplain={() => void evaluateRunDiagnostics(run.id)}
-                  onRefresh={() => void loadRunDiagnostics(run.id)}
-                />
+                <div id={`run-diagnostics-${run.id}`}>
+                  <RunDiagnosticsPanel
+                    diagnostics={diagnosticsByRunId[run.id]}
+                    error={diagnosticsErrorByRunId[run.id] ?? null}
+                    explanation={diagnosticsExplanationByRunId[run.id] ?? null}
+                    isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
+                    isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
+                    workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
+                    onExplain={() => void evaluateRunDiagnostics(run.id)}
+                    onRefresh={() => void loadRunDiagnostics(run.id)}
+                  />
+                </div>
               )}
             </div>
 

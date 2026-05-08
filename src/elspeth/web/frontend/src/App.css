@@ -688,6 +688,11 @@ summary:focus-visible {
   background-color: rgba(232, 86, 83, 0.25);
 }
 
+.btn-small {
+  font-size: var(--font-size-xs);
+  padding: 2px var(--space-sm);
+}
+
 /* ---------------------------------------------------------------------------
    Tab Strip Styles
    --------------------------------------------------------------------------- */

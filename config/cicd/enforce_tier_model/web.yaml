@@ -618,35 +618,35 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan blob_id and target session_id;
     storage file unlinked best-effort; primary copy exception remains the headline
   expires: null
-- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=4ab3f7e9e6db955b
+- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=c8dab838163205a3
   owner: web-sessions
   reason: Type check for envelope format in composition state deserialization
   safety: Handles both raw and enveloped formats
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:save_composition_state:_sync:fp=5492067170547ec7
+- key: web/sessions/service.py:R6:SessionServiceImpl:save_composition_state:_sync:fp=a8deb9f9a01e6f2f
   owner: web-sessions
   reason: IntegrityError on duplicate version is expected race condition
   safety: Upsert-or-skip
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:set_active_state:_sync:fp=083a91bb5f9558d5
+- key: web/sessions/service.py:R6:SessionServiceImpl:set_active_state:_sync:fp=9f4f96d3def4feb3
   owner: web-sessions
   reason: IntegrityError on duplicate active state is expected race condition
   safety: Upsert-or-skip
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=9e6d620e8c66e0c9
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=81338a6f832622ab
   owner: web-sessions
   reason: Narrow OSError during staged blob-directory restore after archive rollback — compensation disk faults must not bury
     the primary archive failure
   safety: Restore failure is attached via add_note() to primary_exc and the original archive exception is re-raised unchanged
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=a993a0b8253a45c8
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=a3a632ac2f0c6cd3
   owner: web-sessions
   reason: Narrow OSError around post-commit quarantine purge — once session rows are deleted, staged blob cleanup is best-effort
     only
   safety: Returns after leaving the staged directory in quarantine for manual cleanup; it does not fabricate a rollback or
     mask the already-completed archive
   expires: null
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=22760e1163ff05ab
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=76a35f8da8e29875
   owner: web-sessions
   reason: Best-effort quarantine-root cleanup after staged blob purge — the parent directory may still contain other files
     or be recreated concurrently
@@ -985,12 +985,12 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan sessions.id; bare `raise` preserves
     primary_exc and its original traceback as the headline (regression-tested by test_fork_cleanup_failure_preserves_primary_exception_with_note)
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=2d5441fcfe90acf5
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=5dd3084bd8535397
   owner: web-sessions
   reason: derived_from_map.get() on seed_id — seed may not exist in derived_from_map (states without derived_from parents)
   safety: Returns None, while-loop terminates naturally
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=3cca7fd69ef2859f
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=bcc83b2e1786ab1d
   owner: web-sessions
   reason: derived_from_map.get() traversing parent chain — parent may reference state outside session or not in map
   safety: Returns None, terminates transitive closure walk
@@ -2140,6 +2140,23 @@ allow_hits:
   safety: >-
     The guard emits only the secret_ref name marker and never resolves or logs the secret value; invalid
     shapes remain unknown for the guard.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=cd7097ee2b02de99
+  owner: web-sessions
+  reason: ContextVar.get() — false-positive R1 match on the method name. ContextVar exposes .get() as the SOLE read API for
+    its current value; there is no contextvar[key] subscript alternative. The tier-model rule's "Access dict keys directly"
+    suggestion is inapplicable here. The ContextVar holds a frozenset of (id(conn), session_id) tokens; the membership check
+    that follows is the actual lock-discipline assertion, not error-suppression.
+  safety: Returns the frozenset value (default empty if no token has been set in this context), feeding directly into the
+    "not in" membership check. No KeyError is possible from a ContextVar read.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=83edde38b07958ad
+  owner: web-sessions
+  reason: ContextVar.get() — false-positive R1 match on the method name. Same as the _assert_session_write_lock_held entry
+    above; ContextVar.get() is the only read API. Used to read the current set of held locks, union with the new (id(conn),
+    session_id) token, and ContextVar.set() the merged frozenset.
+  safety: Returns the frozenset value (default empty), unioned with the new key and reset() in the finally block to restore
+    prior state on context exit.
   expires: null
 - key: web/execution/fanout_guard.py:R5:_credential_ref:fp=cedbffb408e67884
   owner: web-execution

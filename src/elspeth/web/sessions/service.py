@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -18,6 +20,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
@@ -40,6 +43,44 @@ from elspeth.web.sessions.protocol import (
     RunRecord,
     SessionRecord,
     SessionRunStatus,
+)
+
+# Process-wide SQLite session-write lock registry.
+#
+# These three globals back ``_session_write_lock`` and
+# ``_assert_session_write_lock_held`` on ``SessionServiceImpl``. They
+# are MODULE-LEVEL ON PURPOSE -- not instance-level -- because the
+# correctness contract is process-wide, not service-instance-wide.
+#
+# Why process-wide is required (do not refactor to instance state):
+#   * ``run_sync_in_worker`` dispatches DB writes to a thread pool, so
+#     two coroutines holding two different ``SessionServiceImpl``
+#     instances against the same SQLite file MUST serialise on the
+#     same lock or they race on the ``SELECT MAX(...) + 1``
+#     allocator. Instance-local locks would let two services for the
+#     same DB skip past each other's allocator reads.
+#   * Multiple ``SessionServiceImpl`` instances against the same
+#     engine URL are legal (the web app constructs them per request
+#     scope in some configurations). The (database_url, session_id)
+#     key in ``_SQLITE_SESSION_LOCKS`` is what makes process-wide
+#     locking honour multi-instance scope without serialising
+#     UNRELATED databases inside the same process.
+#   * ``ContextVar`` is the standard Python primitive for per-task /
+#     per-thread scoped state. ``_assert_session_write_lock_held``
+#     reads it to verify the calling helper is inside a
+#     ``_session_write_lock`` block without threading the lock state
+#     through every function signature.
+#
+# Module-level mutable state is normally a smell; here it is the
+# correct shape because the resource being guarded (a SQLite file on
+# disk) is itself process-scoped. Refactoring to instance state would
+# break the multi-instance correctness invariant the comment above
+# describes.
+_SQLITE_SESSION_LOCKS_GUARD = threading.RLock()
+_SQLITE_SESSION_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_SESSION_WRITE_LOCK_HELD: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
+    "_SESSION_WRITE_LOCK_HELD",
+    default=frozenset(),
 )
 
 
@@ -187,6 +228,111 @@ class SessionServiceImpl:
         if dt.tzinfo is not None:
             return dt
         return dt.replace(tzinfo=UTC)
+
+    def _acquire_session_advisory_lock(self, conn: Connection, session_id: str) -> None:
+        """Acquire a session write lock for the duration of the
+        current transaction. Released automatically on COMMIT or ROLLBACK.
+
+        SQLite: no-op. SQLite serialization is owned by
+        ``_session_write_lock`` below; this helper exists only for the
+        PostgreSQL advisory-lock SQL and remains no-op on SQLite so callers
+        can test the dialect-specific SQL separately.
+
+        PostgreSQL: pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
+        hashtext(session_id)) -- the **two-argument** form
+        (B3 from the Phase 1 plan-review synthesis). The classid namespace
+        is reserved in src/elspeth/contracts/advisory_locks.py and is
+        on-the-wire ABI under change control; do not open-code the literal
+        here, always import the constant.
+
+        Hash-function notes:
+
+        * ``pg_advisory_xact_lock(int, int)`` requires two signed int4
+          arguments. ``hashtext(text)`` returns int4 directly. Do not use
+          ``hashtextextended(... )::int``: PostgreSQL integer casts are
+          range-checked and may fail before the lock is acquired.
+        * Birthday collisions become probable around ~65k *concurrent*
+          sessions hashing to the same classid slot. This
+          is benign -- the unique index ix_chat_messages_session_sequence
+          is the correctness guarantee; the advisory lock is a
+          contention-reducer ahead of it. Collisions cause spurious
+          serialisation between two unrelated sessions, never duplicate
+          rows or lost writes.
+        * The classid value is **NOT** a deployment knob. Two ELSPETH
+          instances on the same Postgres cluster (including different
+          versions during a rolling deploy) MUST share the same value
+          or they will not mutually exclude each other. See
+          src/elspeth/contracts/advisory_locks.py for the ABI commitment.
+        """
+        dialect = self._engine.dialect.name
+        if dialect == "sqlite":
+            return  # SQLite serialization is owned by _session_write_lock
+        if dialect == "postgresql":
+            conn.exec_driver_sql(
+                "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                (ELSPETH_SESSIONS_LOCK_CLASSID, session_id),
+            )
+            return
+        raise NotImplementedError(f"_acquire_session_advisory_lock not implemented for dialect {dialect}")
+
+    def _sqlite_lock_for_session(self, session_id: str) -> threading.RLock:
+        """Return the process-wide SQLite write lock for one DB/session pair."""
+        key = (str(self._engine.url), session_id)
+        with _SQLITE_SESSION_LOCKS_GUARD:
+            if key in _SQLITE_SESSION_LOCKS:
+                return _SQLITE_SESSION_LOCKS[key]
+            lock = threading.RLock()
+            _SQLITE_SESSION_LOCKS[key] = lock
+            return lock
+
+    def _assert_session_write_lock_held(
+        self,
+        conn: Connection,
+        session_id: str,
+        *,
+        caller: str,
+    ) -> None:
+        """Mechanical precondition guard for session-scoped allocators.
+
+        The docstring precondition on _reserve_sequence_range and
+        _insert_composition_state is not enough: future callers can forget the
+        lock and still pass type checks. _session_write_lock sets a per-thread
+        ContextVar token keyed by (id(conn), session_id); lock-requiring helpers
+        crash immediately if called without that token in the same transaction.
+        """
+        if (id(conn), session_id) not in _SESSION_WRITE_LOCK_HELD.get():
+            raise RuntimeError(
+                f"{caller}: _session_write_lock(conn, {session_id!r}) must be "
+                "held in the same transaction before allocating session-scoped "
+                "sequence/version values"
+            )
+
+    @contextlib.contextmanager
+    def _session_write_lock(self, conn: Connection, session_id: str) -> Iterator[None]:
+        """Serialize same-session sequence/version allocators.
+
+        PostgreSQL uses the transaction-scoped advisory lock. SQLite uses a
+        process-wide per-session RLock around the whole allocator + insert
+        sequence. Every caller that performs ``SELECT MAX(...) + 1`` for
+        ``chat_messages.sequence_no`` or ``composition_states.version`` MUST
+        wrap that read and every dependent INSERT in this context.
+        """
+        key = (id(conn), session_id)
+        held = _SESSION_WRITE_LOCK_HELD.get()
+        token = _SESSION_WRITE_LOCK_HELD.set(held | {key})
+        dialect = self._engine.dialect.name
+        try:
+            if dialect == "sqlite":
+                with self._sqlite_lock_for_session(session_id):
+                    yield
+                return
+            if dialect == "postgresql":
+                self._acquire_session_advisory_lock(conn, session_id)
+                yield
+                return
+            raise NotImplementedError(f"_session_write_lock not implemented for dialect {dialect}")
+        finally:
+            _SESSION_WRITE_LOCK_HELD.reset(token)
 
     async def create_session(
         self,

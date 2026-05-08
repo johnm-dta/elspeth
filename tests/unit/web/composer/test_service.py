@@ -4922,3 +4922,156 @@ class TestComposeLoopForcedRepair:
         # is not the proof gate. Verify the source state is unchanged.
         assert result.state.source is not None
         assert result.state.source.options["schema"]["mode"] == "fixed"
+
+    @pytest.mark.asyncio
+    async def test_repair_gate_fires_on_first_turn_of_resumed_session(self) -> None:
+        """Resumed session with a pre-bound blob-backed source + blocking
+        diagnostic must trigger the repair gate on its first compose turn,
+        even though the LLM has not mutated state yet.
+
+        Regression for the ``state.version > initial_version`` guard issue:
+        on a resumed session, the source was bound on a prior turn, so the
+        first turn after resume has ``state.version == initial_version``.
+        With the version guard, the gate skipped — exactly the cross-turn
+        scenario it exists to catch (e.g.
+        ``csv_fixed_schema_omits_observed_columns`` blockers persisting
+        through session resume). The corrected predicate fires whenever
+        the proof step is applicable (source is blob-backed and bound).
+        """
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        # Resumed-session state: source is already bound to the blob with
+        # the blocking schema config. No state mutation occurred this turn —
+        # the LLM's first response on resume claims completion.
+        # ``path`` mirrors the blob's canonical storage_path because the csv
+        # source plugin requires it (set_source_from_blob populates it on
+        # the binding turn; we reproduce that here for the resumed state).
+        # ``on_success="out"`` matches the named output below so the graph
+        # validates (preventing patch_source_options from rejecting the
+        # repair due to a dangling connection unrelated to this regression).
+        resumed_state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="out",
+                options={
+                    "blob_ref": self.blob_id,
+                    "path": str(self.storage_path),
+                    "schema": {"mode": "fixed", "fields": ["order_id: str"]},
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="out",
+                    plugin="json",
+                    options={
+                        "path": "outputs/out.json",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=7,  # Resumed mid-session — version is already non-trivial.
+        )
+
+        # Turn 1: claim completion immediately (no tool_calls). The repair
+        # gate must fire here even though state.version was not advanced.
+        # Turn 2: apply the repair. Turn 3: claim completion again, gate
+        # finds no blocker, finalize cleanly.
+        turn1_done = _make_llm_response(content="Already configured.", tool_calls=None)
+        turn2_repair = _make_llm_response(content=None, tool_calls=self._repair_tool_call())
+        turn3_done = _make_llm_response(content="Repaired and ready.", tool_calls=None)
+
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1_done, turn2_repair, turn3_done]
+            result = await self.service.compose(
+                "Continue building",
+                [],
+                resumed_state,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        # The gate fired on turn 1 (no-mutation, version unchanged), forced
+        # the model into a repair turn, and the loop converged.
+        assert mock_llm.call_count == 3, f"expected 3 LLM calls, got {mock_llm.call_count}"
+        assert result.repair_turns_used == 1
+        # Turn 2 received the synthesised repair message before the model
+        # acted on it — verify the diagnostic landed in the LLM history.
+        turn2_messages = mock_llm.call_args_list[1].args[0]
+        repair_msgs = [
+            m
+            for m in turn2_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[composer-system]" in str(m.get("content", ""))
+            and "csv_fixed_schema_omits_observed_columns" in str(m.get("content", ""))
+        ]
+        assert len(repair_msgs) == 1, f"expected one synthesised repair message in turn-2 history, found: {turn2_messages}"
+        # Final state is repaired — the schema mode is now observed.
+        assert result.state.source is not None
+        assert result.state.source.options["schema"] == {"mode": "observed"}
+
+    @pytest.mark.asyncio
+    async def test_repair_gate_skipped_when_source_is_not_blob_backed(self) -> None:
+        """When the proof step is not applicable (no blob-backed source),
+        the gate skips even if the LLM claims completion.
+
+        This pins the converse of the resumed-session test: chat-only
+        turns and path-based-source pipelines must not pay the proof
+        step's cost when there is nothing to inspect.
+        """
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+        # Path-based source — no blob_ref, so compute_proof_diagnostics
+        # would short-circuit and the gate has nothing to do.
+        path_source_state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="rows",
+                options={"path": "/tmp/never-read.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="out",
+                    plugin="json",
+                    options={
+                        "path": "outputs/out.json",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=4,
+        )
+
+        turn1_done = _make_llm_response(content="All set.", tool_calls=None)
+
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1_done]
+            result = await self.service.compose(
+                "Anything else?",
+                [],
+                path_source_state,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        # Gate skipped — only one LLM call, no repair turns.
+        assert mock_llm.call_count == 1
+        assert result.repair_turns_used == 0

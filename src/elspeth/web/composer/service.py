@@ -909,6 +909,27 @@ _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 _MAX_REPAIR_TURNS: Final[int] = 2
 
 
+def _proof_repair_is_applicable(state: CompositionState) -> bool:
+    """Return True iff the proof step has any input it can inspect.
+
+    The forced-repair gate must fire whenever ``compute_proof_diagnostics``
+    might find blocking diagnostics. The proof step is a no-op for sources
+    that aren't blob-backed (no bytes to read), so the gate's predicate is
+    "source is present AND options carries a ``blob_ref``" — *not* "state
+    changed this turn", because a blocker can survive session resume into
+    a turn where the LLM does no mutations.
+
+    ``SourceSpec.options`` is internally typed as ``Mapping[str, Any]``
+    (Tier-1 dataclass invariant — no isinstance probe needed). ``blob_ref``
+    is an optional, well-known key set by the binding tools; its absence
+    is a documented part of the contract (path-based sources don't have
+    one), so containment checking is the appropriate primitive here.
+    """
+    if state.source is None:
+        return False
+    return "blob_ref" in state.source.options
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -1518,7 +1539,20 @@ class ComposerServiceImpl:
                 # repair message and continue. Capped at _MAX_REPAIR_TURNS so
                 # the loop can never spin indefinitely. NEVER catches plugin
                 # exceptions — only repairs configurations.
-                if state.version > initial_version and self._attempt_proof_repair(
+                #
+                # The gate fires whenever the proof step is applicable —
+                # i.e. there is a blob-backed source to inspect. The earlier
+                # ``state.version > initial_version`` guard skipped the gate
+                # on the first compose turn of a resumed session whose
+                # blob-backed source was bound on a prior turn (state already
+                # carries the source, no mutation this turn). That is exactly
+                # the cross-turn scenario the gate exists to catch (e.g.
+                # ``csv_fixed_schema_omits_observed_columns`` blockers
+                # surviving session resume). For chat-only turns where the
+                # source is absent or not blob-backed, ``_attempt_proof_repair``
+                # short-circuits cheaply via ``compute_proof_diagnostics``'s
+                # own early return.
+                if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
                     state=state,
                     llm_messages=llm_messages,
                     session_id=session_id,

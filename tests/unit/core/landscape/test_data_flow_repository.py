@@ -1400,3 +1400,106 @@ class TestValidateTokenRunOwnership:
         ref = TokenRef(token_id="nonexistent-token", run_id="run-1")
         with pytest.raises(AuditIntegrityError):
             repo._validate_token_run_ownership(ref)
+
+
+class TestValidateTokenRowOwnership:
+    """Tests for `_validate_token_row_ownership` direct invocation.
+
+    Audit U-CORE-1 (2026-05-06) found that this method is called from
+    `fork_token`, `coalesce_tokens`, and `expand_token` but is never
+    directly invoked in any unit test — those callers construct correct
+    inputs by definition (the row_id is sourced from internal state),
+    so the validation branch is never exercised against incorrect
+    inputs through the public API.
+
+    Direct testing of a private method is justified here because the
+    public surface cannot reach the cross-row failure mode through
+    normal use — the public callers always derive `row_id` from the
+    same token's internal state, making a mismatch structurally
+    impossible at the call site. The guard exists for the case where
+    a future caller (or refactor) constructs the row_id from a
+    different source. Without direct tests, a regression that breaks
+    the comparison would go undetected because the integration tests
+    cannot construct the bad input.
+
+    Per CLAUDE.md, this method is a Tier-1 audit-integrity guard:
+    cross-row lineage corruption produces a valid-looking audit trail
+    attributing the wrong source data to a terminal decision —
+    `explain()` would return a confidently-wrong answer about which
+    source row drove which outcome.
+    """
+
+    def test_matched_token_row_passes_silently(self) -> None:
+        """Token bound to row_id, called with the same row_id → no exception."""
+        _db, repo, _fac, row_id, tok = _make_repo_with_token()
+        repo._validate_token_row_ownership(token_id=tok, row_id=row_id)  # must not raise
+
+    def test_mismatched_row_id_crashes_with_lineage_message(self) -> None:
+        """Token bound to row-A, called with row-B → AuditIntegrityError."""
+        _db, repo, _fac, row_id, tok = _make_repo_with_token()
+        other_row = repo.create_row("run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
+        assert other_row.row_id != row_id  # documents the test premise
+
+        with pytest.raises(
+            AuditIntegrityError, match=r"Cross-row lineage corruption prevented: token .* belongs to row .*caller supplied row_id="
+        ):
+            repo._validate_token_row_ownership(token_id=tok, row_id=other_row.row_id)
+
+    def test_non_existent_token_id_crashes(self) -> None:
+        """A fictional token_id propagates `_resolve_token_ownership`'s Tier-1 crash.
+
+        The token-lookup runs before the row comparison, so non-existent
+        tokens fail with the resolver's "Token does not exist" message
+        — a structural Tier-1 invariant, not a row-mismatch outcome.
+        """
+        _db, repo, _fac = _make_repo()
+
+        with pytest.raises(AuditIntegrityError, match=r"does not exist in the tokens table\. This is Tier 1 data corruption"):
+            repo._validate_token_row_ownership(token_id="tok_does_not_exist", row_id="row-1")
+
+    def test_non_existent_row_id_crashes_as_lineage_mismatch(self) -> None:
+        """Token bound to row-A, called with fictional row_id → row-mismatch crash.
+
+        The method does not separately verify row_id exists in the rows
+        table; it only compares against the token's bound row_id.
+        A fictional row_id therefore surfaces through the lineage-mismatch
+        branch — auditors see "expected row-A, supplied row-X" rather
+        than a separate "row-X does not exist" message. This is correct
+        Tier-1 behaviour: the guard's contract is "the supplied row_id
+        is the one bound to the token", not "the supplied row_id is
+        valid in the rows table". Both forms of corruption are caught
+        by the same guard.
+        """
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+
+        with pytest.raises(AuditIntegrityError, match=r"Cross-row lineage corruption prevented"):
+            repo._validate_token_row_ownership(token_id=tok, row_id="row_does_not_exist")
+
+    def test_cross_run_token_row_combination_crashes(self) -> None:
+        """Token from run-A bound to row-A, called with a real row from run-B → crash.
+
+        Although `_validate_token_row_ownership` is not the cross-run
+        guard (`_validate_token_run_ownership` covers that surface),
+        the row-mismatch comparison still catches cross-run row mixing
+        as a side effect: row IDs are unique per run, so a row from
+        run-B will never equal a row from run-A. This documents the
+        compositional defence — even if a caller bypassed the
+        cross-run check, the row-ownership check would still catch
+        the corruption.
+        """
+        _db, repo, factory, row_a, tok_a = _make_repo_with_token(run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory.data_flow.register_node(
+            run_id="run-B",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-B",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        row_b = repo.create_row("run-B", "source-B", 0, {"name": "stranger"}, row_id="row-B-1")
+        assert row_b.row_id != row_a  # premise: rows from different runs never collide
+
+        with pytest.raises(AuditIntegrityError, match=r"Cross-row lineage corruption prevented"):
+            repo._validate_token_row_ownership(token_id=tok_a, row_id=row_b.row_id)

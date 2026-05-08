@@ -46,16 +46,34 @@ _TEST_IP = "93.184.216.34"
 # Sourced from BLOCKED_IP_RANGES + ALWAYS_BLOCKED_RANGES in
 # src/elspeth/core/security/web.py. Do NOT shrink this list without a
 # matching change there — the ranges and these test cases must move together.
+#
+# Falsifiability check (run manually after any change to either the
+# production blocklist or this matrix): remove a single range from
+# production and confirm exactly the matching parametrised case fails.
+# Production code at security/web.py:61 specifically calls
+# ::ffff:0:0/96 a "CRITICAL: bypass vector!" — the ipv4_mapped_ipv6 case
+# below is the falsifiable proof that the IPv6-side check fires before
+# any IPv4-mapping path could leak through. ::ffff:10.0.0.1 is chosen
+# because it is in ::ffff:0:0/96 but NOT in ::ffff:169.254.0.0/112
+# (which would short-circuit on the always-blocked tier first).
 _SSRF_BLOCKED_CASES: tuple[tuple[str, str, str], ...] = (
-    # ALWAYS_BLOCKED_RANGES (unconditional)
+    # ALWAYS_BLOCKED_RANGES (unconditional — no allowlist bypass)
     ("aws_metadata_v4", "169.254.169.254", "Always-blocked IP range"),
+    ("ipv4_mapped_metadata", "::ffff:169.254.169.254", "Always-blocked IP range"),
     ("ipv6_link_local", "fe80::1", "Always-blocked IP range"),
+    ("broadcast_v4", "255.255.255.255", "Always-blocked IP range"),
+    ("multicast_v4", "224.0.0.1", "Always-blocked IP range"),
+    ("multicast_v6", "ff02::1", "Always-blocked IP range"),
     # BLOCKED_IP_RANGES (default blocklist; bypassable only via allowed_ranges)
+    ("current_network_v4", "0.0.0.1", "Blocked IP range"),
     ("loopback_v4", "127.0.0.1", "Blocked IP range"),
     ("loopback_v6", "::1", "Blocked IP range"),
     ("rfc1918_class_a", "10.0.0.1", "Blocked IP range"),
     ("rfc1918_class_b", "172.16.0.1", "Blocked IP range"),
     ("rfc1918_class_c", "192.168.1.1", "Blocked IP range"),
+    ("cgnat_v4", "100.64.0.1", "Blocked IP range"),
+    ("ipv6_ula", "fc00::1", "Blocked IP range"),
+    ("ipv4_mapped_ipv6", "::ffff:10.0.0.1", "Blocked IP range"),
 )
 
 

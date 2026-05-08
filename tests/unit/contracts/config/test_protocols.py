@@ -328,9 +328,7 @@ class TestRealImplementations:
     def test_real_instance_does_not_satisfy_wrong_protocol(self, protocol: type, config_cls: Any) -> None:
         instance = config_cls.default()
         # Sanity: the matching protocol must accept the instance.
-        assert isinstance(instance, protocol), (
-            f"{config_cls.__name__}.default() failed identity check against {protocol.__name__}"
-        )
+        assert isinstance(instance, protocol), f"{config_cls.__name__}.default() failed identity check against {protocol.__name__}"
         # Every other protocol in ALL_PROTOCOLS must reject this instance.
         # Verified empirically: each runtime config has a distinct required-attribute
         # set under @runtime_checkable structural typing -- shared attribute names

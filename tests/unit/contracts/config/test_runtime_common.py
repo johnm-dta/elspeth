@@ -93,7 +93,14 @@ class TestRuntimeConfigImmutability:
         """Runtime configs use __slots__ for memory efficiency."""
         config_cls = get_config_class(config_name)
 
-        assert hasattr(config_cls, "__slots__"), f"{config_name} should have __slots__"
+        # __slots__ MUST be declared on the class itself, not inherited.
+        # `hasattr(cls, "__slots__")` is satisfied by an ancestor's slots,
+        # which doesn't constrain *this* class's memory layout. Using
+        # `__dict__` lookup ensures the declaration is local.
+        assert "__slots__" in config_cls.__dict__, (
+            f"{config_name} should declare __slots__ on the class itself "
+            f"(inherited __slots__ does not enforce this class's layout)"
+        )
 
 
 # =============================================================================

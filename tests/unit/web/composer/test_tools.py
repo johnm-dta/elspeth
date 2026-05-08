@@ -8013,8 +8013,7 @@ class TestUpdateBlobAtomicWrite:
 
 
 # ---------------------------------------------------------------------------
-# inspect_source — Step 2 of composer simple-pipeline-convergence (epic
-# elspeth-783c9dede8). Mirrors get_blob_content's lifecycle/integrity/decode
+# inspect_source mirrors get_blob_content's lifecycle/integrity/decode
 # guards, but returns SourceInspectionFacts as a structured dict rather than
 # raw bytes — so the LLM can reason about headers and types without seeing
 # row content.

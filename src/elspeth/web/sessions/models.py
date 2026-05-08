@@ -105,8 +105,7 @@ composition_states_table = Table(
     # Operational/audit metadata produced by the composer pipeline that
     # describes *how this state was reached* (distinct from ``metadata_``,
     # which carries the user-facing PipelineMetadata name/description).
-    # Currently only ``repair_turns_used`` (Step 4 of the
-    # simple-pipeline-convergence program) is surfaced; absence (NULL) is
+    # Currently only ``repair_turns_used`` is surfaced; absence (NULL) is
     # honest for revert/fork paths where no compose produced this version.
     Column("composer_meta", JSON, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),

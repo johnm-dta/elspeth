@@ -4416,8 +4416,7 @@ class TestEmptyStateFinalizePassthrough:
 
 
 # ---------------------------------------------------------------------------
-# Step 4 of the simple-pipeline-convergence program (epic elspeth-783c9dede8):
-# the forced-repair loop. When the assistant emits no tool_calls but
+# Forced-repair loop coverage. When the assistant emits no tool_calls but
 # preview_pipeline's proof_diagnostics still reports blocking entries, the
 # compose loop synthesises a repair message and continues. Hard cap of
 # _MAX_REPAIR_TURNS=2 forced repair turns. The repair NEVER catches plugin

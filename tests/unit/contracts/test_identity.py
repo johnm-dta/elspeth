@@ -1,5 +1,6 @@
 """Tests for identity contracts."""
 
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
@@ -23,8 +24,6 @@ class TestTokenInfo:
 
     def test_create_token_info(self) -> None:
         """Can create TokenInfo with required fields."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({"field": "value"}, contract)
 
@@ -42,8 +41,6 @@ class TestTokenInfo:
 
     def test_token_info_with_branch(self) -> None:
         """Can create TokenInfo with branch_name."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -58,8 +55,6 @@ class TestTokenInfo:
 
     def test_rejects_empty_row_id(self) -> None:
         """TokenInfo rejects empty row_id at construction time."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -68,8 +63,6 @@ class TestTokenInfo:
 
     def test_rejects_empty_token_id(self) -> None:
         """TokenInfo rejects empty token_id at construction time."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -78,8 +71,6 @@ class TestTokenInfo:
 
     def test_token_info_row_data_immutable(self) -> None:
         """TokenInfo.row_data (PipelineRow) is immutable for audit integrity."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({"field": "value"}, contract)
 
@@ -91,10 +82,6 @@ class TestTokenInfo:
 
     def test_token_info_is_frozen(self) -> None:
         """TokenInfo is immutable — field assignment raises FrozenInstanceError."""
-        from dataclasses import FrozenInstanceError
-
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -106,8 +93,6 @@ class TestTokenInfo:
 
     def test_with_updated_data_preserves_lineage(self) -> None:
         """with_updated_data() preserves all lineage fields."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         original_row = PipelineRow({"field": "original"}, contract)
         updated_row = PipelineRow({"field": "updated"}, contract)
@@ -177,12 +162,12 @@ class TestTokenInfoLineageFieldGuards:
         assert getattr(t, field) == "valid_value"
 
 
-class TestTokenInfoPipelineRowExtras:
-    """PipelineRow-specific assertions for TokenInfo.row_data.
+class TestTokenInfoExtraFields:
+    """Tests covering two specific extras on TokenInfo.row_data:
 
-    These cover behaviour beyond the basic TokenInfo construction/lineage tests:
-    contract accessibility through row_data, and to_dict() preservation of
-    non-contract fields (extras attached during pipeline execution).
+    - The schema contract is reachable via ``row_data.contract``.
+    - ``PipelineRow.to_dict()`` round-trips non-contract (extra) fields
+      attached during pipeline execution.
     """
 
     def test_row_data_contract_accessible(self) -> None:

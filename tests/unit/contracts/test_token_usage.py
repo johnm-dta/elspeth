@@ -1,5 +1,8 @@
 """Tests for TokenUsage frozen dataclass."""
 
+import json
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from elspeth.contracts.token_usage import TokenUsage
@@ -35,21 +38,15 @@ class TestTokenUsageFactories:
 
     def test_known_rejects_negative_prompt_tokens(self) -> None:
         """Negative token counts are physically impossible."""
-        import pytest
-
         with pytest.raises(ValueError, match="prompt_tokens must be >= 0"):
             TokenUsage.known(-1, 20)
 
     def test_known_rejects_negative_completion_tokens(self) -> None:
-        import pytest
-
         with pytest.raises(ValueError, match="completion_tokens must be >= 0"):
             TokenUsage.known(10, -5)
 
     def test_direct_construction_rejects_negative(self) -> None:
         """Direct construction also validates (not just factories)."""
-        import pytest
-
         with pytest.raises(ValueError, match="prompt_tokens must be >= 0"):
             TokenUsage(prompt_tokens=-100, completion_tokens=None)
 
@@ -64,14 +61,10 @@ class TestRequireIntValidation:
     """require_int guards reject bool (and wrong types) on int fields."""
 
     def test_rejects_bool_prompt_tokens(self) -> None:
-        import pytest
-
         with pytest.raises(TypeError, match="prompt_tokens must be int"):
             TokenUsage(prompt_tokens=True, completion_tokens=None)
 
     def test_rejects_bool_completion_tokens(self) -> None:
-        import pytest
-
         with pytest.raises(TypeError, match="completion_tokens must be int"):
             TokenUsage(prompt_tokens=None, completion_tokens=False)
 
@@ -230,10 +223,6 @@ class TestTokenUsageImmutability:
     """Tests for frozen dataclass invariants."""
 
     def test_frozen(self) -> None:
-        from dataclasses import FrozenInstanceError
-
-        import pytest
-
         usage = TokenUsage.known(10, 20)
         with pytest.raises(FrozenInstanceError):
             usage.prompt_tokens = 99  # type: ignore[misc]
@@ -283,8 +272,6 @@ class TestTokenUsageRoundTrip:
 
         This is the real persistence path: to_dict → json.dumps → json.loads → from_dict.
         """
-        import json
-
         original = TokenUsage.known(150, 42)
         serialized = json.dumps(original.to_dict())
         deserialized = json.loads(serialized)
@@ -293,8 +280,6 @@ class TestTokenUsageRoundTrip:
 
     def test_json_round_trip_unknown(self) -> None:
         """JSON round-trip for fully unknown usage (empty dict)."""
-        import json
-
         original = TokenUsage.unknown()
         serialized = json.dumps(original.to_dict())
         deserialized = json.loads(serialized)
@@ -303,8 +288,6 @@ class TestTokenUsageRoundTrip:
 
     def test_json_round_trip_partial(self) -> None:
         """JSON round-trip for partial usage (one field known, one unknown)."""
-        import json
-
         original = TokenUsage(prompt_tokens=10, completion_tokens=None)
         serialized = json.dumps(original.to_dict())
         deserialized = json.loads(serialized)
@@ -453,7 +436,5 @@ class TestTokenUsageReasoningTokens:
 
     def test_negative_cached_prompt_tokens_rejected_by_post_init(self) -> None:
         """Direct construction (Tier 1) refuses negative values."""
-        import pytest
-
         with pytest.raises(ValueError, match="cached_prompt_tokens must be >= 0"):
             TokenUsage(prompt_tokens=100, cached_prompt_tokens=-1)

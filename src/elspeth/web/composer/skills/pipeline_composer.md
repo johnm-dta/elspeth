@@ -855,6 +855,20 @@ When reporting validation errors or warnings:
 **Bad:** "Source has no explicit schema. Downstream field references may fail."
 **Good:** "The workflow doesn't specify what columns to expect in the input. This won't stop it from running, but adding the expected columns (like 'url' and 'title') makes things more reliable. Want me to add them?"
 
+### Reading Failed Tool Results
+
+When a tool result has `success: false`, the **first** entry in `validation.errors` (component `"rejected_mutation"`) is the precise reason the tool refused the change. The remaining entries describe the *unchanged* state and follow from the rejection — fixing the rejection usually resolves them all. Do not retry the same call shape with cosmetic variations: read the rejection message and adjust the offending field. The same text is mirrored in `data.error` for convenience.
+
+**Example (real session 58d7ede3 round 6 — what NOT to do).** A `set_pipeline` returned `success: false` with these validation errors:
+
+```
+[high] rejected_mutation: Output 'rows_out' is missing options. For csv file sinks, include an options object with path, schema, and collision_policy. Use this output object shape: {"sink_name": "rows_out", "plugin": "csv", "options": {"path": "outputs/rows_out.csv", "schema": {"mode": "observed"}, "collision_policy": "auto_increment"}, "on_write_failure": "discard"}
+[high] source: No source configured.
+[high] pipeline: No sinks configured.
+```
+
+The first entry is the action item: add `options` to the csv sink. The second and third are the natural consequence of the rejection (state was unchanged, so it still has no source/sinks). Re-issuing `set_pipeline` with only a schema-format tweak is the wrong response — it ignores `rejected_mutation` and re-triggers the same failure.
+
 ### Ask Only the Minimum Questions
 
 For each recognized workflow pattern (see Common Pipeline Patterns below), ask **only** the required inputs listed for that pattern. Do not ask about schema modes, quarantine policies, retry configuration, edge labels, or other advanced options unless the user brings them up.

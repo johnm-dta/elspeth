@@ -54,6 +54,7 @@ from elspeth.web.composer.state import (
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
+    ValidationEntry,
     ValidationSummary,
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
@@ -1685,14 +1686,53 @@ def _failure_result(
     state: CompositionState,
     error_msg: str,
 ) -> ToolResult:
-    """Build a ToolResult for a failed mutation."""
-    validation = state.validate()
+    """Build a ToolResult for a failed mutation.
+
+    The rejection reason (``error_msg``) is also prepended to
+    ``validation.errors`` as a synthetic ``ValidationEntry`` with
+    component ``"rejected_mutation"``. State-level errors from
+    ``state.validate()`` (e.g. "No source configured.") describe the
+    *unchanged* state and follow the rejection reason. This puts the
+    action-rejection signal ahead of the stale-state signal for any
+    consumer that reads ``validation.errors`` in array order — closing
+    the convergence gap surfaced by composer session 58d7ede3 where the
+    LLM repeated a near-identical ``set_pipeline`` because the array led
+    with "No source configured." instead of the real option-shape
+    error.
+    """
+    validation = _prepend_rejection_entry(state.validate(), error_msg)
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
         data={"error": error_msg},
+    )
+
+
+def _prepend_rejection_entry(
+    base: ValidationSummary,
+    error_msg: str,
+) -> ValidationSummary:
+    """Return a ValidationSummary with a leading rejected_mutation entry.
+
+    Preserves all non-error fields (warnings, suggestions,
+    edge_contracts, semantic_contracts) verbatim. ``is_valid`` is
+    forced to False because a rejection entry is by construction a
+    high-severity error.
+    """
+    rejection = ValidationEntry(
+        component="rejected_mutation",
+        message=error_msg,
+        severity="high",
+    )
+    return ValidationSummary(
+        is_valid=False,
+        errors=(rejection, *base.errors),
+        warnings=base.warnings,
+        suggestions=base.suggestions,
+        edge_contracts=base.edge_contracts,
+        semantic_contracts=base.semantic_contracts,
     )
 
 
@@ -1712,18 +1752,22 @@ def _credential_wiring_contract_failure(
     field_list = ", ".join(credential_fields)
     repair_sequence = ("list_secret_refs", "validate_secret_ref", "wire_secret_ref")
     repair_text = "list_secret_refs -> validate_secret_ref -> wire_secret_ref"
-    validation = state.validate()
+    error_msg = (
+        f"Credential field(s) contain literal value(s): {field_list}. "
+        "Literal credential values were not stored. "
+        f"Use {repair_text} to attach a deferred {{secret_ref: NAME}} marker."
+    )
+    # Symmetric with _failure_result: lead validation.errors with the
+    # rejection reason so LLMs reading the array in order see the
+    # actionable message before any stale-state errors.
+    validation = _prepend_rejection_entry(state.validate(), error_msg)
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
         data={
-            "error": (
-                f"Credential field(s) contain literal value(s): {field_list}. "
-                "Literal credential values were not stored. "
-                f"Use {repair_text} to attach a deferred {{secret_ref: NAME}} marker."
-            ),
+            "error": error_msg,
             "credential_fields": credential_fields,
             "components": (
                 {

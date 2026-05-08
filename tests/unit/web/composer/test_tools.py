@@ -31,6 +31,7 @@ from elspeth.web.composer.tools import (
     ToolResult,
     _apply_merge_patch,
     _compute_validation_delta,
+    _failure_result,
     _inject_prior_validation,
     _prevalidate_plugin_options,
     execute_tool,
@@ -207,6 +208,56 @@ class TestToolResult:
         d = result.to_dict()
         assert d["validation"]["warnings"] == []
         assert d["validation"]["suggestions"] == []
+
+
+class TestFailureResult:
+    """``_failure_result`` must lead validation.errors with the rejection reason.
+
+    The composer LLM converges via ``validation.errors`` ordering — see
+    composer session 58d7ede3 (2026-05-08) where the LLM read stale
+    state-snapshot errors first and burned a full round retrying the
+    same call shape with only a cosmetic change. Locking the leading
+    entry here makes that regression invisible to refactors.
+    """
+
+    def test_prepends_rejection_reason_to_errors(self) -> None:
+        state = _empty_state()  # has neither source nor sinks
+        result = _failure_result(state, "boom: missing path")
+
+        assert result.success is False
+        assert result.validation.is_valid is False
+        first = result.validation.errors[0]
+        assert first.component == "rejected_mutation"
+        assert first.message == "boom: missing path"
+        assert first.severity == "high"
+        # State-level errors still present, just no longer leading.
+        components = [e.component for e in result.validation.errors[1:]]
+        assert "source" in components
+        assert "pipeline" in components
+
+    def test_data_error_mirrors_leading_validation_message(self) -> None:
+        """data.error and validation.errors[0].message must match.
+
+        The two channels exist for backward compatibility with
+        consumers that read either field. They must stay in sync so a
+        consumer reading one cannot disagree with a consumer reading
+        the other.
+        """
+        state = _empty_state()
+        result = _failure_result(state, "rejection text")
+        assert result.data["error"] == result.validation.errors[0].message
+
+    def test_preserves_warnings_and_semantic_contracts(self) -> None:
+        """Non-error fields on the input ValidationSummary survive prepending."""
+        # state.validate() on an empty state yields no warnings/suggestions,
+        # so this test asserts the ValidationSummary fields are reachable
+        # and unchanged in shape after _failure_result wraps them.
+        state = _empty_state()
+        result = _failure_result(state, "x")
+        assert result.validation.warnings == ()
+        assert result.validation.suggestions == ()
+        assert result.validation.semantic_contracts == ()
+        assert result.validation.edge_contracts == ()
 
 
 class TestToolResultSemanticContracts:
@@ -5312,6 +5363,39 @@ class TestSetPipeline:
         assert '"schema": {"mode": "observed"}' in error
         assert '"collision_policy": "auto_increment"' in error
         assert '"on_write_failure": "discard"' in error
+
+    def test_set_pipeline_failure_leads_validation_with_rejection_reason(self) -> None:
+        """Regression for composer session 58d7ede3 round 6.
+
+        When ``set_pipeline`` rejects a mutation, ``validation.errors[0]``
+        must carry the actionable rejection reason (component
+        ``rejected_mutation``) ahead of any state-snapshot errors like
+        ``"No source configured."``. In the live session, the LLM read
+        the stale-state errors first and burned a full round retrying
+        with only a cosmetic change.
+        """
+        state = _empty_state()
+        catalog = self._catalog_with_json_sink()
+        args = _valid_pipeline_args()
+        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        del args["outputs"][0]["options"]
+        args["outputs"][0]["plugin"] = "json"
+
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+
+        assert result.success is False
+        first = result.validation.errors[0]
+        assert first.component == "rejected_mutation"
+        assert first.severity == "high"
+        assert "missing options" in first.message.lower()
+        # data.error mirrors the leading entry's message verbatim so the
+        # two channels stay in sync.
+        assert first.message == result.data["error"]
+        # Stale state-level errors remain in the array — they must not
+        # vanish, only be demoted from the leading slot.
+        components = [e.component for e in result.validation.errors[1:]]
+        assert "source" in components
+        assert "pipeline" in components
 
     def test_set_pipeline_accepts_two_json_sinks_with_explicit_file_options(self, tmp_path: Path) -> None:
         state = _empty_state()

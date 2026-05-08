@@ -494,14 +494,14 @@ allow_hits:
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
     exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=c4bf1dc85f5a1133
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=1fd205d15cdec572
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets
     engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during
     full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=6b87a12e8db864bf
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=fd103b0d6c58a62c
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk
     faults during post-replace divergence rollback expected; programmer bugs still
@@ -511,14 +511,14 @@ allow_hits:
     failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=c3d41af469725b39
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=8ca49fc9b52455e7
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation
     disk faults must not bury the primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original
     delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=c5cc7590743a1d99
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=79e74330fe91e1de
   owner: web-composer
   reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string.
     ValueError is the documented failure mode for malformed UUIDs and falls back to

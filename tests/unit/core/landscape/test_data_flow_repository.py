@@ -33,7 +33,7 @@ from elspeth.contracts.audit import (
     DISCARD_SINK_NAME,
     TokenRef,
 )
-from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.schema import SchemaConfig
@@ -1503,3 +1503,214 @@ class TestValidateTokenRowOwnership:
 
         with pytest.raises(AuditIntegrityError, match=r"Cross-row lineage corruption prevented"):
             repo._validate_token_row_ownership(token_id=tok_a, row_id=row_b.row_id)
+
+
+class TestAdr019DeferredInvariantSweep:
+    """Direct unit coverage for ADR-019 I1a/I1b run-end invariant enforcement.
+
+    Audit U-CORE-1 (2026-05-06) found that
+    `find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`,
+    and `sweep_deferred_invariants_or_crash` had **zero** unit tests.
+    Coverage existed only via integration tests in
+    `tests/integration/test_adr_019_*.py` that exercise the methods
+    through the deep orchestration stack.
+
+    The risk the audit flagged: a SQL regression in any of these queries
+    (wrong join, missing `run_id` filter, wrong `path` value comparison,
+    wrong outcome enum) would produce a silent false-negative —
+    orphaned parents pass the sweep, the run is marked "complete," and
+    a corrupt audit trail reaches storage. Integration tests cover the
+    sweep with real orchestrator-constructed orphan shapes; if a SQL
+    regression breaks for a shape integration tests don't construct,
+    the integration suite cannot catch it. Unit tests pin the SQL
+    semantics against direct probes.
+
+    Each test plants the orphan shape via the public factory API
+    (matching the integration-test idiom in
+    `_plant_orphan_fork_parent`/`_plant_orphan_batch_consumed`) so the
+    constructed state matches what the orchestrator actually produces.
+    The test surface stays tight and bypasses the orchestrator stack
+    that integration tests already cover.
+    """
+
+    @staticmethod
+    def _plant_orphan_fork_parent(
+        repo: DataFlowRepository,
+        *,
+        run_id: str,
+        row_id: str,
+        token_id: str,
+    ) -> None:
+        """Record an orphan FORK_PARENT outcome with no child witness."""
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.FORK_PARENT,
+            fork_group_id=f"fg_{token_id}",
+        )
+
+    @staticmethod
+    def _plant_orphan_batch_consumed(
+        repo: DataFlowRepository,
+        factory: RecorderFactory,
+        *,
+        run_id: str,
+        token_id: str,
+        batch_id: str,
+        complete_batch: bool = False,
+    ) -> None:
+        """Create a batch and record a BATCH_CONSUMED outcome on token_id.
+
+        If ``complete_batch`` is True, mark the batch COMPLETED so the
+        sweep treats it as fulfilled (non-orphan).
+        """
+        factory.execution.create_batch(
+            run_id=run_id,
+            aggregation_node_id="transform-1",
+            batch_id=batch_id,
+        )
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.BATCH_CONSUMED,
+            batch_id=batch_id,
+        )
+        if complete_batch:
+            factory.execution.complete_batch(
+                batch_id=batch_id,
+                status=BatchStatus.COMPLETED,
+            )
+
+    # -- find_orphaned_transient_parents ------------------------------
+
+    def test_find_orphaned_transient_parents_returns_orphan(self) -> None:
+        """A FORK_PARENT TRANSIENT outcome with no child witness is returned."""
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        self._plant_orphan_fork_parent(repo, run_id="run-1", row_id="row-1", token_id=tok)
+
+        orphans = repo.find_orphaned_transient_parents("run-1")
+
+        assert len(orphans) == 1
+        assert orphans[0].token_id == tok
+        assert orphans[0].path == TerminalPath.FORK_PARENT.value
+
+    def test_find_orphaned_transient_parents_excludes_parent_with_child_witness(self) -> None:
+        """A FORK_PARENT with a child token_outcome via token_parents is NOT orphan."""
+        _db, repo, _fac, row_id, tok = _make_repo_with_token()
+        # Use the public fork_token API: it inserts the FORK_PARENT outcome
+        # AND creates child tokens linked via token_parents_table.
+        children, _fg = repo.fork_token(
+            parent_ref=TokenRef(token_id=tok, run_id="run-1"),
+            row_id=row_id,
+            branches=["a"],
+        )
+        # Record a terminal outcome on the child so the EXISTS subquery finds it.
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=children[0].token_id, run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="sink-0",
+        )
+
+        orphans = repo.find_orphaned_transient_parents("run-1")
+
+        assert orphans == []
+
+    def test_find_orphaned_transient_parents_returns_empty_for_clean_run(self) -> None:
+        """Empty run with no token_outcomes returns []."""
+        _db, repo, _fac = _make_repo()
+
+        assert repo.find_orphaned_transient_parents("run-1") == []
+
+    def test_find_orphaned_transient_parents_isolates_runs(self) -> None:
+        """An orphan in run-A is invisible to a sweep on run-B."""
+        _db, repo, factory, _row_a, tok_a = _make_repo_with_token(run_id="run-A")
+        self._plant_orphan_fork_parent(repo, run_id="run-A", row_id="row-1", token_id=tok_a)
+        # Open run-B with no orphans.
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+
+        assert repo.find_orphaned_transient_parents("run-B") == []
+        assert len(repo.find_orphaned_transient_parents("run-A")) == 1
+
+    # -- find_orphaned_batch_consumptions -----------------------------
+
+    def test_find_orphaned_batch_consumptions_returns_incomplete_batch(self) -> None:
+        """BATCH_CONSUMED outcome on a batch that never reached COMPLETED is returned."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        self._plant_orphan_batch_consumed(repo, factory, run_id="run-1", token_id=tok, batch_id="batch-orphan")
+
+        orphans = repo.find_orphaned_batch_consumptions("run-1")
+
+        assert orphans == ["batch-orphan"]
+
+    def test_find_orphaned_batch_consumptions_excludes_completed_batch(self) -> None:
+        """A batch in COMPLETED state is NOT reported as orphan."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        self._plant_orphan_batch_consumed(
+            repo,
+            factory,
+            run_id="run-1",
+            token_id=tok,
+            batch_id="batch-fulfilled",
+            complete_batch=True,
+        )
+
+        assert repo.find_orphaned_batch_consumptions("run-1") == []
+
+    def test_find_orphaned_batch_consumptions_returns_empty_for_clean_run(self) -> None:
+        _db, repo, _fac = _make_repo()
+
+        assert repo.find_orphaned_batch_consumptions("run-1") == []
+
+    # -- sweep_deferred_invariants_or_crash ---------------------------
+
+    def test_sweep_no_orphans_returns_silently(self) -> None:
+        """A clean run produces no exception."""
+        _db, repo, _fac = _make_repo()
+
+        repo.sweep_deferred_invariants_or_crash("run-1")  # must not raise
+
+    def test_sweep_raises_i1a_on_orphan_fork_parent(self) -> None:
+        """Orphan FORK_PARENT triggers the I1a violation message."""
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        self._plant_orphan_fork_parent(repo, run_id="run-1", row_id="row-1", token_id=tok)
+
+        with pytest.raises(
+            AuditIntegrityError, match=r"ADR-019 I1a violation: 1 fork/expand parent token\(s\) have no child token_outcomes"
+        ):
+            repo.sweep_deferred_invariants_or_crash("run-1")
+
+    def test_sweep_raises_i1b_on_incomplete_batch(self) -> None:
+        """BATCH_CONSUMED with no COMPLETED batch triggers I1b violation."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        self._plant_orphan_batch_consumed(repo, factory, run_id="run-1", token_id=tok, batch_id="batch-orphan")
+
+        with pytest.raises(
+            AuditIntegrityError, match=r"ADR-019 I1b violation:.*BATCH_CONSUMED tokens but the batch never reached BatchStatus\.COMPLETED"
+        ):
+            repo.sweep_deferred_invariants_or_crash("run-1")
+
+    def test_sweep_checks_i1a_before_i1b(self) -> None:
+        """When both invariants are violated, I1a fires first (order documents the contract)."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        # Plant both an orphan FORK_PARENT (I1a) and an orphan BATCH_CONSUMED (I1b)
+        # on the SAME token by creating a sibling for the batch case.
+        self._plant_orphan_fork_parent(repo, run_id="run-1", row_id="row-1", token_id=tok)
+        sibling = repo.create_token("row-1", token_id="tok-2")
+        self._plant_orphan_batch_consumed(repo, factory, run_id="run-1", token_id=sibling.token_id, batch_id="batch-orphan")
+
+        # I1a is checked first, so we must see its message — not I1b's.
+        with pytest.raises(AuditIntegrityError, match=r"ADR-019 I1a violation"):
+            repo.sweep_deferred_invariants_or_crash("run-1")
+
+    def test_sweep_isolates_runs(self) -> None:
+        """Orphans in run-A do not crash a sweep on run-B."""
+        _db, repo, factory, _row_a, tok_a = _make_repo_with_token(run_id="run-A")
+        self._plant_orphan_fork_parent(repo, run_id="run-A", row_id="row-1", token_id=tok_a)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+
+        repo.sweep_deferred_invariants_or_crash("run-B")  # must not raise
+
+        # Sanity: run-A still crashes.
+        with pytest.raises(AuditIntegrityError, match=r"ADR-019 I1a violation"):
+            repo.sweep_deferred_invariants_or_crash("run-A")

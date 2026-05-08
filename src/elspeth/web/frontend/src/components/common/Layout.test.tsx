@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Layout } from "./Layout";
 
 const localStorageMock = (() => {
@@ -53,5 +54,35 @@ describe("Layout", () => {
     const layoutDiv = container.querySelector(".app-layout") as HTMLElement;
     const columns = layoutDiv.style.gridTemplateColumns;
     expect(columns).toContain("500px");
+  });
+
+  describe("Layout resize handle keyboard arrows", () => {
+    it("ArrowLeft decreases inspector width and ArrowRight increases it", async () => {
+      const user = userEvent.setup();
+      const setItem = vi.spyOn(localStorageMock, "setItem");
+
+      render(
+        <Layout
+          sidebar={<div>Sidebar</div>}
+          chat={<div>Chat</div>}
+          inspector={<div>Inspector</div>}
+        />,
+      );
+
+      const handle = screen.getByRole("separator", { name: /resize inspector/i });
+      handle.focus();
+
+      await user.keyboard("{ArrowRight}");
+      const widthAfterRight = Number(
+        setItem.mock.calls.findLast(([k]) => k === "elspeth_inspector_width")?.[1],
+      );
+
+      await user.keyboard("{ArrowLeft}");
+      const widthAfterLeft = Number(
+        setItem.mock.calls.findLast(([k]) => k === "elspeth_inspector_width")?.[1],
+      );
+
+      expect(widthAfterLeft).toBeLessThan(widthAfterRight);
+    });
   });
 });

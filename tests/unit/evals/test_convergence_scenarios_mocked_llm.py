@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -50,8 +50,6 @@ from evals.lib.composer_rgr_score import score
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.blobs.service import content_hash as _content_hash
-from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
@@ -123,32 +121,6 @@ def _real_catalog() -> Any:
     pm = PluginManager()
     pm.register_builtin_plugins()
     return CatalogServiceImpl(pm)
-
-
-def _mock_catalog_for_text() -> Any:
-    """Mock catalog for the url-text-smoke scenario.
-
-    The text source plugin is not in the real builtin catalog; we wire a
-    minimal mock that satisfies the prevalidation surface area used by
-    set_pipeline / set_source_from_blob for text/web_scrape/json.
-    """
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = [
-        PluginSummary(name="text", description="Text source", plugin_type="source", config_fields=[]),
-    ]
-    catalog.list_transforms.return_value = [
-        PluginSummary(name="web_scrape", description="Web scrape", plugin_type="transform", config_fields=[]),
-    ]
-    catalog.list_sinks.return_value = [
-        PluginSummary(name="json", description="JSON sink", plugin_type="sink", config_fields=[]),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="text",
-        plugin_type="source",
-        description="text source",
-        json_schema={"title": "Config", "properties": {}},
-    )
-    return catalog
 
 
 def _make_settings(data_dir: Path) -> WebSettings:
@@ -553,33 +525,166 @@ class TestNumericGateScenario:
 #
 # Trigger text_source_url_without_web_scrape on turn 1 by declaring a text
 # source whose blob content is a URL with no web_scrape downstream; turn 2
-# claims completion → repair fires; turn 3 upserts a web_scrape node; turn
-# 4 claims completion → GREEN.
+# claims completion → repair fires; turn 3 re-issues set_pipeline with a
+# web_scrape transform between source and sink; turn 4 claims completion →
+# GREEN.
 # --------------------------------------------------------------------------
 
 
 class TestUrlTextSmokeScenario:
-    """End-to-end mocked-LLM run for the url-text-smoke convergence scenario.
+    """End-to-end mocked-LLM run for the url-text-smoke convergence scenario."""
 
-    The text plugin is not in the builtin catalog, so this test cannot drive
-    the same set_pipeline prevalidation path as the other two scenarios
-    without registering a custom plugin. The compose loop's proof step
-    inspects the source blob directly (via inspect_blob_content) rather
-    than going through plugin schemas, so the proof-step coverage is
-    valuable; the constraint is that set_pipeline must accept the text
-    source. Skip for now and observe the gap rather than fake-pass — the
-    live RGR harness still drives this scenario against a real LLM.
-    """
-
-    @pytest.mark.skip(
-        reason="Text source plugin not in builtin catalog; requires custom plugin registration to drive set_pipeline prevalidation. See filigree-obs (filed alongside Fix 17) for the gap."
-    )
     @pytest.mark.asyncio
     async def test_url_text_smoke_converges_with_one_repair_turn(self, tmp_path: Path) -> None:
-        # Placeholder retained so a future contributor can wire this once
-        # the text source plugin is exposed via the catalog or via test-only
-        # plugin registration. The shape would mirror the csv-classifier
-        # test: turn 1 = text source + sink (no web_scrape) → turn 2 claim →
-        # repair fires text_source_url_without_web_scrape → turn 3 upserts
-        # web_scrape → turn 4 claim → GREEN.
-        pass
+        engine, session_id = _session_engine()
+        # Single-line text blob containing only a URL — exactly the shape
+        # the proof step's text_source_url_without_web_scrape blocker keys
+        # off. inspect_blob_content sets source_kind="text" and populates
+        # url_candidates from the blob bytes.
+        body = b"https://www.iana.org/help/example-domains\n"
+        blob_id = _seed_blob(
+            engine,
+            session_id,
+            body=body,
+            filename="urls.txt",
+            mime_type="text/plain",
+            storage_dir=tmp_path / "blobs" / session_id,
+        )
+
+        catalog = _real_catalog()
+        settings = _make_settings(tmp_path)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+
+        # Turn 1: blocking pipeline — text source whose blob content is a
+        # URL, but no web_scrape transform downstream. The URL string
+        # itself flows to the sink instead of being fetched.
+        turn1 = _llm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_set",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {
+                            "plugin": "text",
+                            "blob_id": blob_id,
+                            "on_success": "url_rows",
+                            "options": {
+                                "column": "url",
+                                "schema": {"mode": "fixed", "fields": ["url: str"]},
+                            },
+                            "on_validation_failure": "discard",
+                        },
+                        "nodes": [],
+                        "edges": [],
+                        "outputs": [
+                            {
+                                "sink_name": "url_rows",
+                                "plugin": "json",
+                                "options": {
+                                    "path": "outputs/urls.jsonl",
+                                    "format": "jsonl",
+                                    "schema": {"mode": "observed"},
+                                    "collision_policy": "auto_increment",
+                                },
+                                "on_write_failure": "discard",
+                            }
+                        ],
+                        "metadata": {"name": "url-text-smoke"},
+                    },
+                },
+            ],
+        )
+        # Turn 2: claim completion → proof gate fires text_source_url_without_web_scrape.
+        turn2 = _llm_response(content="All set.", tool_calls=None)
+        # Turn 3: repair — re-issue set_pipeline with web_scrape inserted
+        # between the source and the sink.
+        turn3 = _llm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_repair",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {
+                            "plugin": "text",
+                            "blob_id": blob_id,
+                            "on_success": "raw_urls",
+                            "options": {
+                                "column": "url",
+                                "schema": {"mode": "fixed", "fields": ["url: str"]},
+                            },
+                            "on_validation_failure": "discard",
+                        },
+                        "nodes": [
+                            {
+                                "id": "fetch",
+                                "node_type": "transform",
+                                "plugin": "web_scrape",
+                                "input": "raw_urls",
+                                "on_success": "fetched",
+                                "on_error": "discard",
+                                "options": {
+                                    "url_field": "url",
+                                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                                    "content_field": "content",
+                                    "fingerprint_field": "content_fingerprint",
+                                    "format": "text",
+                                    "text_separator": "\n",
+                                    "http": {
+                                        "abuse_contact": "test@example.com",
+                                        "scraping_reason": "convergence test",
+                                        "allowed_hosts": "public_only",
+                                    },
+                                },
+                            }
+                        ],
+                        "edges": [],
+                        "outputs": [
+                            {
+                                "sink_name": "fetched",
+                                "plugin": "json",
+                                "options": {
+                                    "path": "outputs/fetched.jsonl",
+                                    "format": "jsonl",
+                                    "schema": {"mode": "observed"},
+                                    "collision_policy": "auto_increment",
+                                },
+                                "on_write_failure": "discard",
+                            }
+                        ],
+                        "metadata": {"name": "url-text-smoke"},
+                    },
+                },
+            ],
+        )
+        # Turn 4: claim completion (clean — proof step no longer blocks).
+        turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        empty = _empty_state()
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4]
+            result = await service.compose(
+                "Fetch the URL and write a JSONL summary",
+                [],
+                empty,
+                session_id=session_id,
+                user_id="test-user",
+            )
+
+        # Convergence behaviour: exactly one forced repair turn.
+        assert mock_llm.call_count == 4, f"expected 4 LLM calls, got {mock_llm.call_count}"
+        assert result.repair_turns_used == 1, f"expected 1 repair turn, got {result.repair_turns_used}"
+
+        scenario = _load_scenario("url-text-smoke")
+        assistant_messages = [{"role": "assistant", "content": result.message or ""}]
+        state_dict = _state_dict_for_scoring(result)
+        verdict = score(scenario, assistant_messages, state_dict)
+
+        assert verdict["verdict"] == "GREEN", (
+            f"url-text-smoke did not score GREEN. red={verdict['red_reasons']} amber={verdict['amber_reasons']}"
+        )

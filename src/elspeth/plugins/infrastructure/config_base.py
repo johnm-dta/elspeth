@@ -82,12 +82,31 @@ def _format_validation_error_location(loc: tuple[Any, ...]) -> str:
     return ".".join(parts)
 
 
+_SCHEMA_REQUIRED_GUIDANCE = (
+    "Field required. "
+    "Use 'schema: {mode: observed}' to infer types from data, "
+    "or provide explicit field definitions with mode (fixed/flexible)."
+)
+
+
 def _format_validation_error_cause(exc: ValidationError) -> str:
-    """Build a class-name-free validation summary from structured Pydantic data."""
+    """Build a class-name-free validation summary from structured Pydantic data.
+
+    For the schema-required-on-DataPluginConfig case (the most common LLM-composer
+    first-attempt failure shape — cf. elspeth-861b0c58f5), enrich the bare
+    Pydantic ``"Field required"`` message with the available mode options so
+    the LLM can self-repair on the next turn rather than echo the unhelpful
+    message back at the operator. All other Pydantic errors pass through
+    unchanged so multi-field failures (e.g. missing schema AND missing path)
+    still report every issue.
+    """
     lines: list[str] = []
     for error in exc.errors():
-        location = _format_validation_error_location(tuple(error["loc"]))
+        loc = tuple(error["loc"])
+        location = _format_validation_error_location(loc)
         message = error["msg"]
+        if loc == ("schema",) and error.get("type") == "missing":
+            message = _SCHEMA_REQUIRED_GUIDANCE
         lines.append(f"{location}: {message}")
     return "\n".join(lines)
 

@@ -190,14 +190,24 @@ class TestCSVSourceConfigValidation:
             )
 
     def test_missing_schema_raises_error(self) -> None:
-        """Missing schema raises PluginConfigError."""
+        """Missing schema raises PluginConfigError with actionable mode guidance.
+
+        The error must enumerate the available modes (observed/fixed/flexible)
+        so the LLM-composer can self-repair on the next turn rather than echo
+        a bare ``"schema: Field required"`` back at the operator
+        (cf. elspeth-861b0c58f5).
+        """
         from elspeth.plugins.infrastructure.config_base import PluginConfigError
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        # DataPluginConfig requires schema - Pydantic enforces this natively
-        # Error message uses alias "schema" not field name "schema_config"
-        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
+        with pytest.raises(PluginConfigError) as exc_info:
             CSVSource({"path": "/tmp/test.csv", "on_validation_failure": QUARANTINE_SINK})
+        message = str(exc_info.value)
+        assert "schema" in message
+        assert "Field required" in message
+        assert "mode: observed" in message
+        assert "fixed" in message
+        assert "flexible" in message
 
     def test_missing_on_validation_failure_raises_error(self) -> None:
         """Missing on_validation_failure raises PluginConfigError."""

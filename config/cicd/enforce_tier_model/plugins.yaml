@@ -32,7 +32,9 @@ per_file_rules:
 - pattern: plugins/transforms/llm/*
   rules:
   - R5
-  reason: Type discrimination for LLM response validation and provider dispatch (includes Pydantic model_validator(mode="before") isinstance(data, dict) Tier-3 input checks on AzureOpenAIConfig and AzureBatchConfig)
+  reason: Type discrimination for LLM response validation and provider dispatch (includes
+    Pydantic model_validator(mode="before") isinstance(data, dict) Tier-3 input checks
+    on AzureOpenAIConfig and AzureBatchConfig)
   expires: null
   max_hits: 73
 - pattern: plugins/transforms/azure/*
@@ -42,7 +44,8 @@ per_file_rules:
   - R4
   - R6
   - R9
-  reason: Azure API responses are external data (Tier 3) - all defensive patterns legitimate
+  reason: Azure API responses are external data (Tier 3) - all defensive patterns
+    legitimate
   expires: null
 - pattern: plugins/transforms/azure/*
   rules:
@@ -55,42 +58,49 @@ per_file_rules:
   - R1
   - R5
   - R6
-  reason: Dataverse OData API responses are external data (Tier 3) — isinstance/type checks for response validation, error classification, and retry-after parsing
+  reason: Dataverse OData API responses are external data (Tier 3) — isinstance/type
+    checks for response validation, error classification, and retry-after parsing
   expires: null
 - pattern: plugins/infrastructure/clients/fingerprinting.py
   rules:
   - R1
   - R6
-  reason: HMAC header fingerprinting — env var access and try/except for fingerprint key availability check
+  reason: HMAC header fingerprinting — env var access and try/except for fingerprint
+    key availability check
   expires: null
 - pattern: plugins/infrastructure/clients/json_utils.py
   rules:
   - R5
-  reason: Tier 3 boundary — isinstance checks for recursive NaN/Infinity detection in parsed JSON
+  reason: Tier 3 boundary — isinstance checks for recursive NaN/Infinity detection
+    in parsed JSON
   expires: null
 - pattern: plugins/sinks/dataverse.py
   rules:
   - R4
   - R5
-  reason: R5 offensive guard for alternate key type; R4 broad except in telemetry emission (must not crash audit trail — same pattern as AuditedHTTPClient._record_and_emit)
+  reason: R5 offensive guard for alternate key type; R4 broad except in telemetry
+    emission (must not crash audit trail — same pattern as AuditedHTTPClient._record_and_emit)
   expires: null
   max_hits: 2
 - pattern: plugins/infrastructure/clients/llm.py
   rules:
   - R5
-  reason: Deep-freeze guards, programming error detection in telemetry, and Tier 3 content type validation
+  reason: Deep-freeze guards, programming error detection in telemetry, and Tier 3
+    content type validation
   expires: null
   max_hits: 5
 - pattern: plugins/infrastructure/clients/replayer.py
   rules:
   - R5
-  reason: Deep-freeze guards and Tier 1 deep_thaw type validation for recorded call data
+  reason: Deep-freeze guards and Tier 1 deep_thaw type validation for recorded call
+    data
   expires: null
   max_hits: 3
 - pattern: plugins/infrastructure/schema_factory.py
   rules:
   - R5
-  reason: Numpy floating type detection for schema inference and ndarray non-finite scanning
+  reason: Numpy floating type detection for schema inference and ndarray non-finite
+    scanning
   expires: null
   max_hits: 3
 - pattern: plugins/infrastructure/utils.py
@@ -138,18 +148,25 @@ per_file_rules:
 - pattern: plugins/transforms/type_coerce.py
   rules:
   - R1
-  reason: "Optional per-field coercion mapping — conversion_targets / target_types map only fields the operator explicitly requested coercion for. dict.get(field.name, field.field_type) with the original field type as default is identity semantics (unchanged fields pass through) and dict.get() on conversion_targets with explicit None check distinguishes configured vs. unconfigured fields — this IS the discriminator that controls whether type coercion runs. Neither .get() call is defensive bug-hiding."
+  reason: Optional per-field coercion mapping — conversion_targets / target_types
+    map only fields the operator explicitly requested coercion for. dict.get(field.name,
+    field.field_type) with the original field type as default is identity semantics
+    (unchanged fields pass through) and dict.get() on conversion_targets with explicit
+    None check distinguishes configured vs. unconfigured fields — this IS the discriminator
+    that controls whether type coercion runs. Neither .get() call is defensive bug-hiding.
   expires: null
   max_hits: 2
 allow_hits:
 - key: plugins/infrastructure/schema_factory.py:R6:_find_non_finite_value_path:fp=b5937945437c8045
   owner: bugfix
-  reason: TypeError from np.isfinite on non-numeric dtypes (e.g., string arrays) is expected — non-numeric arrays can't contain NaN
+  reason: TypeError from np.isfinite on non-numeric dtypes (e.g., string arrays) is
+    expected — non-numeric arrays can't contain NaN
   safety: Only catches TypeError from np.isfinite, lets all other exceptions propagate
   expires: '2026-07-02'
 - key: plugins/infrastructure/manager.py:R4:PluginManager:register:fp=0e88b71c015f8aa0
   owner: bugfix
-  reason: Rollback protection — catch any rollback failure so secondary exception doesn't bury original diagnostic
+  reason: Rollback protection — catch any rollback failure so secondary exception
+    doesn't bury original diagnostic
   safety: Logs rollback error then re-raises the original exception unchanged
   expires: null
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_execute_request:fp=89f5749a5c05003a
@@ -164,20 +181,24 @@ allow_hits:
   expires: '2026-07-02'
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_follow_redirects_safe:fp=fbc6b3aca998f23c
   owner: architecture
-  reason: httpx Client.get() method call — ephemeral client per redirect hop for TLS isolation
+  reason: httpx Client.get() method call — ephemeral client per redirect hop for TLS
+    isolation
   safety: This is the actual external HTTP call, not a defensive dict access
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_follow_redirects_safe:fp=10ab112db646388f
   owner: architecture
-  reason: HTTP redirect Location header — external system boundary, header may be absent
+  reason: HTTP redirect Location header — external system boundary, header may be
+    absent
   safety: Missing Location header breaks redirect loop naturally
 - key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=61d3dae5f7961222
   owner: architecture
-  reason: os.environ.get() for optional env var at trust boundary — ELSPETH_ALLOW_RAW_SECRETS is genuinely optional with empty-string default
+  reason: os.environ.get() for optional env var at trust boundary — ELSPETH_ALLOW_RAW_SECRETS
+    is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
 - key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=4f1ac56ede069b6c
   owner: feature
-  reason: Display header mapping - fields not in map keep original name (transform-added fields)
+  reason: Display header mapping - fields not in map keep original name (transform-added
+    fields)
   safety: Intentional fallback to original field name, not bug hiding
 - key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=0146cfe5e62af33f
   owner: feature
@@ -186,20 +207,25 @@ allow_hits:
 - key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=2c0175dc21d2253c
   owner: feature
   reason: Intentional fallback - display mapping may not contain all fields (transform-added)
-  safety: Falls back to normalized field name - correct behavior for fields not in source
+  safety: Falls back to normalized field name - correct behavior for fields not in
+    source
 - key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=dfe658cafe4cfb1e
   owner: feature
-  reason: Display header mapping - fields not in map keep original name (transform-added fields)
+  reason: Display header mapping - fields not in map keep original name (transform-added
+    fields)
   safety: Intentional fallback to original field name, not bug hiding
 - key: plugins/infrastructure/discovery.py:R9:_discover_in_file:fp=0acd1690c04355a2
   owner: architecture
-  reason: sys.modules.pop cleanup on import failure — module may not be registered yet
+  reason: sys.modules.pop cleanup on import failure — module may not be registered
+    yet
   safety: Legitimate cleanup pattern in error path
   expires: '2026-07-02'
 - key: plugins/transforms/field_mapper.py:R8:FieldMapperConfig:_reject_duplicate_targets:fp=aec0e4c40bbd8fce
   owner: bugfix
-  reason: setdefault used for grouping sources-by-target to detect duplicate target field names
-  safety: Grouping is deterministic; ValueError raised if duplicates found — prevents silent data loss
+  reason: setdefault used for grouping sources-by-target to detect duplicate target
+    field names
+  safety: Grouping is deterministic; ValueError raised if duplicates found — prevents
+    silent data loss
   expires: '2026-05-17'
 - key: plugins/sources/field_normalization.py:R8:check_normalization_collisions:fp=5d89837a5521627f
   owner: architecture
@@ -213,28 +239,46 @@ allow_hits:
   expires: '2026-07-02'
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4b8cc1b6067415ff
   owner: bugfix
-  reason: Thread pool may be shut down concurrently during submit(); RuntimeError is translated into deterministic per-row shutdown results so submission-order slots are still completed
-  safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with explicit shutdown_requested errors while unrelated exception types still propagate
+  reason: Thread pool may be shut down concurrently during submit(); RuntimeError
+    is translated into deterministic per-row shutdown results so submission-order
+    slots are still completed
+  safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
+    explicit shutdown_requested errors while unrelated exception types still propagate
   expires: '2026-05-17'
 - key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
-  reason: Nominal discriminated-union dispatch — retryable_error is PluginRetryableError | CapacityError and only CapacityError carries a status_code. isinstance narrows the union so the status_code field is only populated when it exists, rather than probing with getattr.
-  safety: Non-CapacityError branch omits status_code entirely (explicit None semantics); no silent coercion or fabrication
+  reason: Nominal discriminated-union dispatch — retryable_error is PluginRetryableError
+    | CapacityError and only CapacityError carries a status_code. isinstance narrows
+    the union so the status_code field is only populated when it exists, rather than
+    probing with getattr.
+  safety: Non-CapacityError branch omits status_code entirely (explicit None semantics);
+    no silent coercion or fabrication
   expires: null
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_single:fp=71e586ef9fbea49d
   owner: bugfix
-  reason: CapacityError is one arm of the retryable-error control flow — caught so the worker can release the semaphore, throttle, and retry within the capacity-retry budget. This is explicit retry orchestration, not silent swallowing.
-  safety: CapacityError is assigned to retryable_error and drives the retry loop; if the retry budget expires it is raised as a retry_timeout TransformResult via _build_retry_timeout_result, and if interrupted it surfaces via _build_interrupted_result. No path silently drops the error.
+  reason: CapacityError is one arm of the retryable-error control flow — caught so
+    the worker can release the semaphore, throttle, and retry within the capacity-retry
+    budget. This is explicit retry orchestration, not silent swallowing.
+  safety: CapacityError is assigned to retryable_error and drives the retry loop;
+    if the retry budget expires it is raised as a retry_timeout TransformResult via
+    _build_retry_timeout_result, and if interrupted it surfaces via _build_interrupted_result.
+    No path silently drops the error.
   expires: null
 - key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:accept_row:fp=e7a832f8c64e2c4e
   owner: bugfix
-  reason: Thread-pool submit can race with shutdown after the row has already been admitted to the FIFO buffer
-  safety: Catches RuntimeError only, removes any tracked submission still under the lock, and completes the waiter path with an explicit shutdown_requested TransformResult instead of stranding the ticket
+  reason: Thread-pool submit can race with shutdown after the row has already been
+    admitted to the FIFO buffer
+  safety: Catches RuntimeError only, removes any tracked submission still under the
+    lock, and completes the waiter path with an explicit shutdown_requested TransformResult
+    instead of stranding the ticket
   expires: '2026-07-02'
 - key: plugins/infrastructure/batching/mixin.py:R4:BatchTransformMixin:_process_and_complete:fp=44635c7d2b4b541c
   owner: architecture
-  reason: Worker threads must capture arbitrary plugin exceptions and relay them back to the orchestrator thread through ExceptionResult
-  safety: Every caught exception is wrapped with its traceback, stored on the ticket, and re-raised by the waiter path; nothing is downgraded into a success or silent row drop
+  reason: Worker threads must capture arbitrary plugin exceptions and relay them back
+    to the orchestrator thread through ExceptionResult
+  safety: Every caught exception is wrapped with its traceback, stored on the ticket,
+    and re-raised by the waiter path; nothing is downgraded into a success or silent
+    row drop
   expires: '2026-07-02'
 - key: plugins/infrastructure/batching/mixin.py:R9:BatchTransformMixin:_release_loop:fp=2f93bd40222e5b89
   owner: architecture
@@ -258,182 +302,265 @@ allow_hits:
   expires: '2026-07-02'
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_parse_response_body:fp=c10e1a372d3013e8
   owner: architecture
-  reason: HTTP response content-type header - external system boundary, header may be missing
+  reason: HTTP response content-type header - external system boundary, header may
+    be missing
   safety: Falls back to binary encoding if content-type absent
   expires: '2026-07-02'
 - key: plugins/infrastructure/clients/http.py:R4:AuditedHTTPClient:_emit_telemetry_after_audit:fp=91c1cd21a0368986
   owner: architecture
-  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps operational telemetry failures from corrupting the main HTTP call path once programmer bugs and Tier 1 errors have already been re-raised
-  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate before this handler; remaining exceptions are logged and the audited HTTP result is preserved
+  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
+    operational telemetry failures from corrupting the main HTTP call path once programmer
+    bugs and Tier 1 errors have already been re-raised
+  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate
+    before this handler; remaining exceptions are logged and the audited HTTP result
+    is preserved
   expires: '2026-06-07'
 - key: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=153b600f7b824428
   owner: architecture
-  reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes the payload
-  safety: Missing keys become None in TokenUsage.from_dict; no fabricated counts are introduced
+  reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total
+    token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes
+    the payload
+  safety: Missing keys become None in TokenUsage.from_dict; no fabricated counts are
+    introduced
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=54f676db05cacf08
   owner: architecture
-  reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes the payload
-  safety: Missing keys become None in TokenUsage.from_dict; no fabricated counts are introduced
+  reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total
+    token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes
+    the payload
+  safety: Missing keys become None in TokenUsage.from_dict; no fabricated counts are
+    introduced
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R1:_extract_usage_from_provider_response:fp=3ce6385129d45fcc
   owner: architecture
-  reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes the payload
-  safety: Missing keys become None in TokenUsage.from_dict; no fabricated counts are introduced
+  reason: Provider usage mappings are Tier 3 data and may omit prompt/completion/total
+    token fields; dict.get preserves honest absence before TokenUsage.from_dict normalizes
+    the payload
+  safety: Missing keys become None in TokenUsage.from_dict; no fabricated counts are
+    introduced
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R2:_extract_usage_from_provider_response:fp=92c580e9594a61bd
   owner: architecture
-  reason: Provider SDK usage objects vary by version and may omit prompt/completion/total token attributes; getattr preserves honest absence before TokenUsage.from_dict performs the single normalization step
-  safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts are introduced
+  reason: Provider SDK usage objects vary by version and may omit prompt/completion/total
+    token attributes; getattr preserves honest absence before TokenUsage.from_dict
+    performs the single normalization step
+  safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts
+    are introduced
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R2:_extract_usage_from_provider_response:fp=f8ac3c8b6b9c5f85
   owner: architecture
-  reason: Provider SDK usage objects vary by version and may omit prompt/completion/total token attributes; getattr preserves honest absence before TokenUsage.from_dict performs the single normalization step
-  safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts are introduced
+  reason: Provider SDK usage objects vary by version and may omit prompt/completion/total
+    token attributes; getattr preserves honest absence before TokenUsage.from_dict
+    performs the single normalization step
+  safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts
+    are introduced
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R2:_extract_usage_from_provider_response:fp=d741dbbe7cf1857f
   owner: architecture
-  reason: Provider SDK usage objects vary by version and may omit prompt/completion/total token attributes; getattr preserves honest absence before TokenUsage.from_dict performs the single normalization step
-  safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts are introduced
+  reason: Provider SDK usage objects vary by version and may omit prompt/completion/total
+    token attributes; getattr preserves honest absence before TokenUsage.from_dict
+    performs the single normalization step
+  safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts
+    are introduced
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=52b9845ad6995c97
   owner: architecture
-  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps operational telemetry failures from corrupting the audited LLM error path once programmer bugs and Tier 1 errors have already been re-raised
-  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate before this handler; remaining exceptions are logged and the audited LLM result is preserved
+  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
+    operational telemetry failures from corrupting the audited LLM error path once
+    programmer bugs and Tier 1 errors have already been re-raised
+  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate
+    before this handler; remaining exceptions are logged and the audited LLM result
+    is preserved
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=1d9927748b7579fb
   owner: architecture
-  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps operational telemetry failures from corrupting the audited LLM error path once programmer bugs and Tier 1 errors have already been re-raised
-  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate before this handler; remaining exceptions are logged and the audited LLM result is preserved
+  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
+    operational telemetry failures from corrupting the audited LLM error path once
+    programmer bugs and Tier 1 errors have already been re-raised
+  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate
+    before this handler; remaining exceptions are logged and the audited LLM result
+    is preserved
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=dbcb564d7f24962b
   owner: architecture
-  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps operational telemetry failures from corrupting the audited LLM error path once programmer bugs and Tier 1 errors have already been re-raised
-  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate before this handler; remaining exceptions are logged and the audited LLM result is preserved
+  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
+    operational telemetry failures from corrupting the audited LLM error path once
+    programmer bugs and Tier 1 errors have already been re-raised
+  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate
+    before this handler; remaining exceptions are logged and the audited LLM result
+    is preserved
   expires: null
 - key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=b5f64a7d87e28337
   owner: architecture
-  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps operational telemetry failures from corrupting the audited LLM success path once programmer bugs and Tier 1 errors have already been re-raised
-  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate before this handler; remaining exceptions are logged and the audited LLM result is preserved
+  reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
+    operational telemetry failures from corrupting the audited LLM success path once
+    programmer bugs and Tier 1 errors have already been re-raised
+  safety: TypeError, AttributeError, KeyError, NameError, and Tier 1 errors propagate
+    before this handler; remaining exceptions are logged and the audited LLM result
+    is preserved
   expires: null
 - key: plugins/sinks/azure_blob_sink.py:R5:AzureBlobSinkConfig:headers_mapping:fp=62d056151ce64838
   owner: refactor
-  reason: isinstance(dict) check for config field type discrimination — same pattern as SinkPathConfig.headers_mapping
-  safety: Config validated by Pydantic before this property runs; isinstance only distinguishes dict from str
+  reason: isinstance(dict) check for config field type discrimination — same pattern
+    as SinkPathConfig.headers_mapping
+  safety: Config validated by Pydantic before this property runs; isinstance only
+    distinguishes dict from str
   expires: null
 - key: plugins/transforms/web_scrape.py:R5:WebScrapeHTTPConfig:_validate_allowed_hosts:fp=40f40dfb44df3273
   owner: architecture
-  reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR strings — Tier 3 config boundary
-  safety: ValueError re-raised as Pydantic ValidationError; invalid config crashes at load time, not at runtime
+  reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR
+    strings — Tier 3 config boundary
+  safety: ValueError re-raised as Pydantic ValidationError; invalid config crashes
+    at load time, not at runtime
   expires: null
 - key: plugins/transforms/rag/query.py:R5:QueryBuilder:_build_field_only:fp=8690adb65aebc738
   owner: feature
-  reason: Offensive isinstance(str) guard on Tier 2 pipeline data — crashes immediately with TypeError if upstream plugin sends non-string value to query_field
-  safety: Raises TypeError (crash), does not suppress or coerce; message identifies the upstream plugin bug
+  reason: Offensive isinstance(str) guard on Tier 2 pipeline data — crashes immediately
+    with TypeError if upstream plugin sends non-string value to query_field
+  safety: Raises TypeError (crash), does not suppress or coerce; message identifies
+    the upstream plugin bug
   expires: null
 - key: plugins/transforms/rag/query.py:R5:QueryBuilder:_build_regex:fp=6fa9771f101ecc99
   owner: feature
-  reason: Offensive isinstance(str) guard on Tier 2 pipeline data — crashes immediately with TypeError if upstream plugin sends non-string value to query_field
-  safety: Raises TypeError (crash), does not suppress or coerce; message identifies the upstream plugin bug
+  reason: Offensive isinstance(str) guard on Tier 2 pipeline data — crashes immediately
+    with TypeError if upstream plugin sends non-string value to query_field
+  safety: Raises TypeError (crash), does not suppress or coerce; message identifies
+    the upstream plugin bug
   expires: null
 - key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=887390c301de47c9
   owner: architecture
-  reason: Provider config comes from a validated provider-specific model union; getattr is limited to the two mutually exclusive naming conventions (collection vs index) needed for readiness auditing
-  safety: Missing both attributes raises FrameworkBugError immediately; no fallback value is fabricated
+  reason: Provider config comes from a validated provider-specific model union; getattr
+    is limited to the two mutually exclusive naming conventions (collection vs index)
+    needed for readiness auditing
+  safety: Missing both attributes raises FrameworkBugError immediately; no fallback
+    value is fabricated
   expires: null
 - key: plugins/transforms/rag/transform.py:R5:RAGRetrievalTransform:_configured_collection_name:fp=f3428dc23e118267
   owner: architecture
-  reason: Provider config comes from a validated provider-specific model union; isinstance(value, str) confirms the selected readiness-audit identifier is a non-empty string before use
-  safety: Non-string or empty values do not pass; the helper raises FrameworkBugError rather than fabricating a collection/index name
+  reason: Provider config comes from a validated provider-specific model union; isinstance(value,
+    str) confirms the selected readiness-audit identifier is a non-empty string before
+    use
+  safety: Non-string or empty values do not pass; the helper raises FrameworkBugError
+    rather than fabricating a collection/index name
   expires: null
 - key: plugins/transforms/rag/config.py:R6:_get_providers:fp=3371a100de2c9052
   owner: feature
-  reason: Optional provider registration — ImportError means the provider's optional dependency (e.g. azure-search-documents) is not installed; provider is silently omitted from registry rather than crashing the import
-  safety: Unknown provider raises ValueError at config validation time with list of available providers; no silent data loss
+  reason: Optional provider registration — ImportError means the provider's optional
+    dependency (e.g. azure-search-documents) is not installed; provider is silently
+    omitted from registry rather than crashing the import
+  safety: Unknown provider raises ValueError at config validation time with list of
+    available providers; no silent data loss
   expires: null
 - key: plugins/transforms/rag/config.py:R6:_get_providers:fp=56767cfd4c9ab197
   owner: feature
-  reason: Optional ChromaDB provider registration — ImportError means chromadb is not installed ([rag] extra absent); provider is silently omitted from registry
-  safety: Unknown provider raises ValueError at config validation time with list of available providers; no silent data loss
+  reason: Optional ChromaDB provider registration — ImportError means chromadb is
+    not installed ([rag] extra absent); provider is silently omitted from registry
+  safety: Unknown provider raises ValueError at config validation time with list of
+    available providers; no silent data loss
   expires: null
 - key: plugins/infrastructure/clients/retrieval/chroma.py:R5:ChromaSearchProvider:_parse_and_build_chunks:fp=0501625b5c6d2fa4
   owner: bugfix
-  reason: Tier 3 boundary type check — ChromaDB SDK may return non-string documents from corrupt index; isinstance guards pipeline from non-string content
-  safety: Non-string documents are skipped (continue); only validated str content enters pipeline as Tier 2
+  reason: Tier 3 boundary type check — ChromaDB SDK may return non-string documents
+    from corrupt index; isinstance guards pipeline from non-string content
+  safety: Non-string documents are skipped (continue); only validated str content
+    enters pipeline as Tier 2
   expires: null
 - key: plugins/infrastructure/clients/retrieval/chroma.py:R5:ChromaSearchProvider:_parse_and_build_chunks:fp=34bff7cdd231006f
   owner: bugfix
-  reason: Tier 3 boundary — isinstance(distance, bool) guard before isinstance(distance, (int, float)) because Python's isinstance(True, int) is True
-  safety: Non-numeric distance crashes with RetrievalError (infrastructure corruption); does not suppress or coerce
+  reason: Tier 3 boundary — isinstance(distance, bool) guard before isinstance(distance,
+    (int, float)) because Python's isinstance(True, int) is True
+  safety: Non-numeric distance crashes with RetrievalError (infrastructure corruption);
+    does not suppress or coerce
   expires: null
 - key: plugins/infrastructure/clients/retrieval/chroma.py:R5:ChromaSearchProvider:_parse_and_build_chunks:fp=7b48bc51e1899ab3
   owner: bugfix
-  reason: Tier 3 boundary — isinstance(distance, (int, float)) validates ChromaDB distance values are numeric before arithmetic
-  safety: Non-numeric distance crashes with RetrievalError (infrastructure corruption); does not suppress or coerce
+  reason: Tier 3 boundary — isinstance(distance, (int, float)) validates ChromaDB
+    distance values are numeric before arithmetic
+  safety: Non-numeric distance crashes with RetrievalError (infrastructure corruption);
+    does not suppress or coerce
   expires: null
 - key: plugins/transforms/rag/config.py:R5:RAGRetrievalConfig:coerce_schema_config:fp=4a027df2f322fde0
   owner: feature
-  reason: Pydantic before-validator at config boundary — isinstance(dict) needed to distinguish raw dict (from YAML/direct construction) from already-parsed SchemaConfig; same pattern as config_base.py R5 exemption
-  safety: Non-dict values pass through unchanged; dict values validated by SchemaConfig.from_dict which raises on invalid input
+  reason: Pydantic before-validator at config boundary — isinstance(dict) needed to
+    distinguish raw dict (from YAML/direct construction) from already-parsed SchemaConfig;
+    same pattern as config_base.py R5 exemption
+  safety: Non-dict values pass through unchanged; dict values validated by SchemaConfig.from_dict
+    which raises on invalid input
   expires: null
 - key: plugins/transforms/rag/config.py:R1:RAGRetrievalConfig:validate_provider_config:fp=bb927661731d8cb8
   owner: feature
-  reason: Provider lookup — dict.get() with explicit None check and meaningful ValueError; this IS the guard that catches unknown providers at config load time rather than first-row execution
-  safety: None result raises ValueError immediately with list of available providers; no silent pass-through
+  reason: Provider lookup — dict.get() with explicit None check and meaningful ValueError;
+    this IS the guard that catches unknown providers at config load time rather than
+    first-row execution
+  safety: None result raises ValueError immediately with list of available providers;
+    no silent pass-through
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=ac3495bbb7ec9639
   owner: feature
-  reason: Azure AI Search API response parsing at Tier 3 boundary — @search.score is optional in malformed responses; absence recorded in skipped_items
+  reason: Azure AI Search API response parsing at Tier 3 boundary — @search.score
+    is optional in malformed responses; absence recorded in skipped_items
   safety: Missing score causes item to be skipped and recorded; no silent data loss
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=866a8f498d10e0fe
   owner: feature
-  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record; ID may be absent on malformed items
+  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record; ID may
+    be absent on malformed items
   safety: Captured in skipped_items for audit; no data corruption
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=83c83b73ebf0ae32
   owner: bugfix
-  reason: Tier 3 boundary type validation — isinstance(raw_score, bool) guards against Python bool-is-int before arithmetic
-  safety: Invalid score type causes item to be skipped and recorded in skipped_items as "invalid_score_type"
+  reason: Tier 3 boundary type validation — isinstance(raw_score, bool) guards against
+    Python bool-is-int before arithmetic
+  safety: Invalid score type causes item to be skipped and recorded in skipped_items
+    as "invalid_score_type"
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=cdec26776f3d3d1a
   owner: bugfix
-  reason: Tier 3 boundary type validation — rejects non-numeric score types (string, list, dict) before math.isfinite
+  reason: Tier 3 boundary type validation — rejects non-numeric score types (string,
+    list, dict) before math.isfinite
   safety: Invalid score type causes item to be skipped and recorded; no crash
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=d3ae8b449f567803
   owner: bugfix
-  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid score type
+  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid
+    score type
   safety: Captured in skipped_items for audit; no data corruption
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=1a56c5169fca221b
   owner: feature
   reason: Azure AI Search API Tier 3 — content field may be absent in malformed responses
-  safety: Missing content (None) causes item to be skipped and recorded in skipped_items as "missing_content"
+  safety: Missing content (None) causes item to be skipped and recorded in skipped_items
+    as "missing_content"
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=46bde1db12749de8
   owner: feature
-  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for missing content
+  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for missing
+    content
   safety: Captured in skipped_items for audit; no data corruption
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=3c62e2c3ff824fd7
   owner: feature
-  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for empty content
+  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for empty
+    content
   safety: Captured in skipped_items as "empty_content" for audit; no data corruption
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=8580abf2a8e29566
   owner: bugfix
-  reason: Tier 3 boundary type validation — rejects non-string content before passing to RetrievalChunk(content=str)
-  safety: Invalid content type causes item to be skipped and recorded in skipped_items as "invalid_content_type"
+  reason: Tier 3 boundary type validation — rejects non-string content before passing
+    to RetrievalChunk(content=str)
+  safety: Invalid content type causes item to be skipped and recorded in skipped_items
+    as "invalid_content_type"
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=423ca2aea34a9f56
   owner: bugfix
-  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid content type
+  reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid
+    content type
   safety: Captured in skipped_items for audit; no data corruption
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=8c1f201c7b5ddd49
   owner: feature
-  reason: Azure AI Search API Tier 3 — source ID lookup chain (id then @search.documentId); items without any ID are skipped
+  reason: Azure AI Search API Tier 3 — source ID lookup chain (id then @search.documentId);
+    items without any ID are skipped
   safety: No fabricated IDs; items without source_id skipped and recorded
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=f9be71eef8e59cb3
@@ -443,59 +570,101 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=20401d74976291b8
   owner: feature
-  reason: Azure AI Search API response metadata coercion at Tier 3 boundary — isinstance check converts non-primitive types to str for JSON serializability
-  safety: Non-serializable types coerced to str; RetrievalChunk validates metadata JSON-serializability at construction
+  reason: Azure AI Search API response metadata coercion at Tier 3 boundary — isinstance
+    check converts non-primitive types to str for JSON serializability
+  safety: Non-serializable types coerced to str; RetrievalChunk validates metadata
+    JSON-serializability at construction
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:check_readiness:fp=359a58efc9b7911a
   owner: feature
-  reason: httpx.get() method call for Azure Search $count endpoint — false positive from R1 rule matching .get( syntax
+  reason: httpx.get() method call for Azure Search $count endpoint — false positive
+    from R1 rule matching .get( syntax
   safety: This is the actual HTTP call, not a defensive dict access
   expires: null
 - key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=fcef4e9899cc8149
   owner: feature
-  reason: Per-row KeyError catch at Tier 2→external boundary — missing id/document field diverts the row via _divert_row() instead of aborting the batch
-  safety: Row diverted to failsink with descriptive reason; remaining valid rows written normally; no silent data loss
+  reason: Per-row KeyError catch at Tier 2→external boundary — missing id/document
+    field diverts the row via _divert_row() instead of aborting the batch
+  safety: Row diverted to failsink with descriptive reason; remaining valid rows written
+    normally; no silent data loss
   expires: null
 - key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=7cf4a40e96d811cf
   owner: feature
-  reason: Tier 2→external trust boundary — ChromaDB requires string IDs; isinstance(str) validates before write to avoid batch-aborting TypeError from SDK
-  safety: Non-string ID diverts the row via _divert_row() with descriptive reason; not silent suppression
+  reason: Tier 2→external trust boundary — ChromaDB requires string IDs; isinstance(str)
+    validates before write to avoid batch-aborting TypeError from SDK
+  safety: Non-string ID diverts the row via _divert_row() with descriptive reason;
+    not silent suppression
   expires: null
 - key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=8e37ec696bc77c40
   owner: feature
-  reason: Tier 2→external trust boundary — ChromaDB requires string documents; isinstance(str) validates before write
-  safety: Non-string document diverts the row via _divert_row() with descriptive reason; not silent suppression
+  reason: Tier 2→external trust boundary — ChromaDB requires string documents; isinstance(str)
+    validates before write
+  safety: Non-string document diverts the row via _divert_row() with descriptive reason;
+    not silent suppression
   expires: null
 - key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=bd736d2a9c36462a
   owner: feature
-  reason: Per-row KeyError catch for optional metadata fields — missing metadata field skipped (metadata is optional per-field)
-  safety: Missing metadata fields silently omitted from the per-row metadata dict; no data fabrication
+  reason: Per-row KeyError catch for optional metadata fields — missing metadata field
+    skipped (metadata is optional per-field)
+  safety: Missing metadata fields silently omitted from the per-row metadata dict;
+    no data fabrication
   expires: null
 - key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=cc01516a1d93bec0
   owner: feature
-  reason: Tier 2→external trust boundary — validates metadata value types before sending to ChromaDB; isinstance check filters rows with non-scalar metadata (dict, list, datetime) so they go to failsink instead of crashing the batch
-  safety: Invalid rows diverted via _divert_row() with per-field detail; valid rows written normally; no silent data loss
+  reason: Tier 2→external trust boundary — validates metadata value types before sending
+    to ChromaDB; isinstance check filters rows with non-scalar metadata (dict, list,
+    datetime) so they go to failsink instead of crashing the batch
+  safety: Invalid rows diverted via _divert_row() with per-field detail; valid rows
+    written normally; no silent data loss
   expires: null
 - key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=e2de75ee6893aab5
   owner: bugfix
-  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected rows instead of crashing the batch
-  safety: Non-finite float rows diverted via _divert_row() with per-field detail; valid rows written normally; no silent data loss
+  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
+    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
+    rows instead of crashing the batch
+  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
+    valid rows written normally; no silent data loss
   expires: null
 - key: plugins/infrastructure/discovery.py:R6:discover_plugins_in_directory:fp=17b3c58c5cf147b9
   owner: bugfix
-  reason: Optional extras (e.g. chromadb for [rag]) are external dependencies — ImportError is expected when not installed
-  safety: Only catches ImportError/ModuleNotFoundError; logs warning with file name and error; SyntaxError and other bugs still crash
+  reason: Optional extras (e.g. chromadb for [rag]) are external dependencies — ImportError
+    is expected when not installed
+  safety: Only catches ImportError/ModuleNotFoundError; logs warning with file name
+    and error; SyntaxError and other bugs still crash
   expires: null
 - key: plugins/infrastructure/preflight.py:R1:plugin_preflight_mode_enabled:fp=2019727813f38ff9
   owner: web-execution
-  reason: ContextVar.get() is not dict.get() — _PLUGIN_PREFLIGHT_MODE is a ContextVar[bool]; .get() returns the current context value, not a dict lookup
-  safety: Returns bool default (False); no silent None default; ContextVar.get() cannot return an absent key
+  reason: ContextVar.get() is not dict.get() — _PLUGIN_PREFLIGHT_MODE is a ContextVar[bool];
+    .get() returns the current context value, not a dict lookup
+  safety: Returns bool default (False); no silent None default; ContextVar.get() cannot
+    return an absent key
   expires: null
 - key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_complete_ticket:fp=9b67bbe4194832ff
   owner: web-execution
-  reason: >-
-    Completing a worker result can race with timeout eviction or shutdown of the batching buffer.
-  safety: >-
-    Only KeyError and ShutdownError are discarded; the row was already timed out or shutdown, so no success
-    is fabricated and no waiter is stranded.
+  reason: Completing a worker result can race with timeout eviction or shutdown of
+    the batching buffer.
+  safety: Only KeyError and ShutdownError are discarded; the row was already timed
+    out or shutdown, so no success is fabricated and no waiter is stranded.
+  expires: null
+- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=d62fb21952dcf3f2
+  owner: plugin-validation
+  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
+    field is documented but Pydantic does not guarantee its presence in every error
+    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
+    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
+    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
+  safety: Default None compares unequal to 'missing', so the enrichment branch is
+    skipped and the original Pydantic msg passes through unchanged. No silent coercion
+    of error data.
+  expires: null
+- key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
+  owner: plugin-validation
+  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
+    field is documented but Pydantic does not guarantee its presence in every error
+    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
+    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
+    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
+  safety: Default None compares unequal to 'missing', so the enrichment branch is
+    skipped and the original Pydantic msg passes through unchanged. No silent coercion
+    of error data.
   expires: null

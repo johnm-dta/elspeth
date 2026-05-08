@@ -74,6 +74,31 @@ Each posted turn writes `turn<N>.manifest.json` in addition to
 preserved and the turn manifest/metrics record `turn_status.status =
 "transport_error"`.
 
+Each turn also writes `msg.t<N>.raw.json`, capturing the model's pre-synthesis
+prose (the `raw_content` field exposed by `?include_raw_content=true`). When the
+empty-state synthesizer at `service.py:_finalize_no_tool_response` augments or
+replaces visible content, `msg.t<N>.resp.json.content` will not match the
+model's actual final text. `msg.t<N>.raw.json.raw_content` preserves what the
+model really said.
+
+Three synthesizer flags are written into `metrics.t<N>.json`:
+
+- `synthesizer_replaced` — the cohort-scoring signal. `true` when visible
+  content does not start with `raw_content`, i.e. the synthesizer hid the
+  model's prose behind a synthetic `[ELSPETH-SYSTEM]` blocker. Required for
+  distinguishing "model converged on useful output that the synthesizer hid"
+  from "model genuinely failed to converge" (cf. elspeth-861b0c58f5).
+- `synthesizer_augmented` — `true` when visible content starts with
+  `raw_content` and is strictly longer, i.e. the synthesizer appended an
+  operator-facing suffix to the model's prose. The model's prose is preserved
+  in the visible content; the suffix is operator-facing only. Useful for
+  distinguishing "model produced honest empty-state diagnostic + suffix" from
+  the replacement shape.
+- `synthesizer_intercepted` — coarse union (`replaced` OR `augmented`).
+  `true` whenever any synthesis activity occurred. Retained for backward
+  compatibility with diagnostic dumps; prefer the finer-grained flags above
+  for cohort scoring.
+
 ### Step 3: Decide whether to continue
 
 Two early-exit conditions:

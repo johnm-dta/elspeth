@@ -2232,9 +2232,17 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 >    public route responses and composer prompt history; do not copy
 >    spec wording that surfaces audit rows on the public surface.
 > 2. `chat_messages.writer_principal` includes `"session_fork"`. The
->    plan removes `"session_fork"` from the enumerated values; fork
->    copies preserve each source row's stored `writer_principal`
->    instead, and role-keyed fallback helpers are banned.
+>    plan's CHECK enum is the five-value form
+>    `('compose_loop', 'route_user_message', 'route_system_message',
+>    'admin_tool', 'session_fork')`, broadening the spec's earlier
+>    four-value enum. Task 14 separately bans fork-time DEFAULTING to
+>    `"session_fork"`: fork copies of source-session chat rows preserve
+>    each source row's stored `writer_principal`, and role-keyed
+>    fallback helpers are forbidden. `"session_fork"` remains a valid
+>    value because (a) the schema must accept it for any future writer
+>    that legitimately produces fork-only rows, and (b) the
+>    `composition_states.provenance` enum (a separate column) uses
+>    `"session_fork"` for the new seed state row created at fork time.
 > 3. `parent_assistant_id` is enforced by a composite same-session FK:
 >    `(parent_assistant_id, session_id) -> (chat_messages.id,
 >    chat_messages.session_id)`. Use the plan's exact composite-FK

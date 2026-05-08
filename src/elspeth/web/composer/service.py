@@ -1540,9 +1540,12 @@ class ComposerServiceImpl:
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
-                # Thread repair_turns_used through to the result so callers
-                # (and the audit trail / state.json composer_meta surface)
-                # can see whether the model was forced through repair turns.
+                # Thread repair_turns_used through to the result so the
+                # route handler can persist it onto the new
+                # ``composition_states.composer_meta`` row (and the API state
+                # response can surface ``composer_meta.repair_turns_used``)
+                # — see web/sessions/routes.py::_state_data_from_composer_state
+                # call sites in the compose / recompose paths.
                 return replace(result, repair_turns_used=repair_turns_used)
 
             await _emit_progress(

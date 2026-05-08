@@ -32,7 +32,7 @@
     "must_include_observed_columns_note": "These five columns are explicitly present in the prompt's CSV. A fixed schema that omits any of them combined with on_validation_failure=discard would drop every row. observed and flexible modes pass; fixed mode must list all five.",
     "must_have_outputs_min": 1,
     "max_repair_turns": 2,
-    "max_repair_turns_note": "First-pass success is target; one internal repair turn is allowed; never a user clarification turn. Field is populated by service.py once the repair loop ships in Step 4 of the convergence program.",
+    "max_repair_turns_note": "First-pass success is target; one internal repair turn is allowed; never a user clarification turn. Surfaced via composition_states.composer_meta.repair_turns_used (see web/sessions/models.py).",
     "must_not_contain_passivity": true
   }
 }

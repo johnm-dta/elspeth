@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -321,6 +321,7 @@ def _state_response(
         else None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
+        composer_meta=deep_thaw(state.composer_meta) if state.composer_meta is not None else None,
     )
 
 
@@ -841,6 +842,7 @@ async def _state_data_from_composer_state(
     preflight_exception_policy: _PreflightExceptionPolicy,
     initial_version: int | None,
     telemetry_source: _ComposerPreflightTelemetrySource,
+    composer_meta: Mapping[str, Any] | None = None,
 ) -> tuple[CompositionStateData, ValidationSummary]:
     try:
         authoring = state.validate()
@@ -918,6 +920,7 @@ async def _state_data_from_composer_state(
             metadata_=state_d["metadata"],
             is_valid=persisted_is_valid,
             validation_errors=persisted_errors,
+            composer_meta=composer_meta,
         ),
         authoring,
     )
@@ -1990,6 +1993,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="compose",
+                            composer_meta={"repair_turns_used": result.repair_turns_used},
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -2441,6 +2445,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="recompose",
+                            composer_meta={"repair_turns_used": result.repair_turns_used},
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -2935,7 +2940,9 @@ def create_session_router() -> APIRouter:
 
                 if rewritten:
                     source_dict["options"] = options
-                    # Save updated state with remapped source
+                    # Save updated state with remapped source. Preserve the
+                    # source state's composer_meta — fork inherits the
+                    # operational provenance of the parent compose.
                     state_data = CompositionStateData(
                         source=source_dict,
                         nodes=deep_thaw(copied_state.nodes),
@@ -2944,6 +2951,7 @@ def create_session_router() -> APIRouter:
                         metadata_=deep_thaw(copied_state.metadata_),
                         is_valid=copied_state.is_valid,
                         validation_errors=list(copied_state.validation_errors) if copied_state.validation_errors else None,
+                        composer_meta=deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None,
                     )
                     copied_state = await service.save_composition_state(
                         new_session.id,

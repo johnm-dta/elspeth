@@ -29,8 +29,14 @@ In addition to the legacy criteria (`must_be_valid`,
 - `must_handle_field_as_numeric` — a `type_coerce` node converting the
   field to int/float, or a source schema declaring the numeric type.
 - `max_repair_turns` — `state.composer_meta.repair_turns_used` must be
-  at most this value. Field is populated by `service.py` once Step 4 of
-  the program ships; until then the criterion ambers explicitly.
+  at most this value. Plumbed end-to-end:
+  `service.py::ComposerServiceImpl._compose_loop` threads
+  `repair_turns_used` onto `ComposerResult`, which `web/sessions/routes.py`
+  persists into the `composition_states.composer_meta` JSON column. The
+  `GET /api/sessions/{id}/state` response surfaces it under
+  `composer_meta.repair_turns_used`. The criterion still ambers when the
+  field is absent (e.g. for revert/fork-derived states that did not run a
+  compose to produce them).
 
 ## Running
 

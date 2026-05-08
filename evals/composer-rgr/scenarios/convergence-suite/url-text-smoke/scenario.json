@@ -30,7 +30,7 @@
     "must_have_node_chain_in_order_note": "URL handling without web_scrape means the model treated the URL as a filesystem path or as inline content. Either is a convergence failure.",
     "must_have_outputs_min": 1,
     "max_repair_turns": 2,
-    "max_repair_turns_note": "First-pass success or one internal repair; no user clarification turns. Populated by service.py once Step 4 ships.",
+    "max_repair_turns_note": "First-pass success or one internal repair; no user clarification turns. Surfaced via composition_states.composer_meta.repair_turns_used (see web/sessions/models.py).",
     "must_not_contain_passivity": true
   }
 }

@@ -410,6 +410,7 @@ class TestVfDestinationAdvisory:
         assert result.data is not None
         assert "nonexistent" in result.data["note"]
         assert "output" in result.data["note"].lower()
+        assert "discard" in result.data["note"]
 
     def test_set_source_discard_vf_no_note(self) -> None:
         """'discard' is a built-in value — no advisory needed."""
@@ -1659,6 +1660,19 @@ class TestToolDefinitions:
         for defn in get_tool_definitions():
             self._assert_no_enum_on_validation_failure(defn.get("parameters", {}), defn["name"])
 
+    def test_on_validation_failure_descriptions_match_runtime_contract(self) -> None:
+        """Tool docs must not advertise a non-existent built-in quarantine sink."""
+        descriptions: list[tuple[str, str]] = []
+        for defn in get_tool_definitions():
+            self._collect_on_validation_failure_descriptions(defn.get("parameters", {}), defn["name"], descriptions)
+
+        assert descriptions, "expected at least one on_validation_failure schema description"
+        for tool_name, description in descriptions:
+            lowered = description.lower()
+            assert "built-in quarantine" not in lowered, tool_name
+            assert "discard" in description, tool_name
+            assert "Any other value, including 'quarantine', must match a configured output/sink name." in description, tool_name
+
     def test_upsert_node_trigger_schema_documents_end_of_source_only_shape(self) -> None:
         """Aggregation trigger schema must expose the end-of-source-only shape."""
         upsert_node = next(defn for defn in get_tool_definitions() if defn["name"] == "upsert_node")
@@ -1714,6 +1728,25 @@ class TestToolDefinitions:
         elif isinstance(schema, list):
             for item in schema:
                 self._assert_no_enum_on_validation_failure(item, tool_name)
+
+    def _collect_on_validation_failure_descriptions(
+        self,
+        schema: object,
+        tool_name: str,
+        descriptions: list[tuple[str, str]],
+    ) -> None:
+        """Collect on_validation_failure descriptions from nested tool schemas."""
+        if isinstance(schema, dict):
+            for key, value in schema.items():
+                if key == "on_validation_failure" and isinstance(value, dict):
+                    description = value.get("description")
+                    assert isinstance(description, str), f"Tool {tool_name!r} on_validation_failure lacks description"
+                    descriptions.append((tool_name, description))
+                elif isinstance(value, (dict, list)):
+                    self._collect_on_validation_failure_descriptions(value, tool_name, descriptions)
+        elif isinstance(schema, list):
+            for item in schema:
+                self._collect_on_validation_failure_descriptions(item, tool_name, descriptions)
 
     def _assert_arrays_have_items(self, schema: object, tool_name: str, path: tuple[str, ...]) -> None:
         """Recursively walk a JSON schema and assert all arrays declare items."""
@@ -2714,6 +2747,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.updated_state.source is not None
         assert result.updated_state.source.plugin == "csv"
+        assert result.updated_state.source.on_validation_failure == "discard"
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
@@ -2926,6 +2960,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.data is not None
         assert "nonexistent" in result.data["note"]
+        assert "discard" in result.data["note"]
 
     def test_create_blob_cleans_file_on_db_failure(self, tmp_path: Path) -> None:
         """DB failure during create_blob must delete the orphaned storage file."""
@@ -5241,6 +5276,20 @@ class TestSetPipeline:
         assert result.validation is not None
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
+
+    def test_set_pipeline_source_defaults_validation_failures_to_discard(self) -> None:
+        """Omitting on_validation_failure must not synthesize an absent quarantine sink."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        del args["source"]["on_validation_failure"]
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.updated_state.source is not None
+        assert result.updated_state.source.on_validation_failure == "discard"
+        assert result.data is None
 
     def test_set_pipeline_missing_json_output_options_returns_exact_repair_hint(self) -> None:
         state = _empty_state()

@@ -76,6 +76,8 @@ A connection has **two endpoints**, and the same string value must appear on bot
 
 Gate route target `"discard"` is a virtual terminal destination, not a published connection. Use it only when that branch should stop with an audited `gate_discarded` outcome; do not create a node or sink named `discard`.
 
+For source row validation failures, use `on_validation_failure: "discard"` unless you have already configured a dedicated output/sink for failed rows. Quarantine is a conventional output name, not a built-in sink; `on_validation_failure: "quarantine"` is valid only when an output/sink named `quarantine` exists in the same pipeline.
+
 The `edges` array in `set_pipeline` carries metadata (id, label) about each connection but does **not** define the wiring. Wiring is exclusively via the `on_success` / `input` / `sink_name` strings above. If you write `edges: [{from_node: "source", to_node: "fetch"}]` but no `on_success` produces a connection named `"fetch"` and no `input: "fetch"` exists on a real node, the wiring is broken regardless of what `edges` says.
 
 #### Worked example — source → transform → transform → sink
@@ -1045,7 +1047,7 @@ For non-standard MIME types, pass the `plugin` parameter explicitly.
   "options": {
     "schema": {"mode": "observed"}
   },
-  "on_validation_failure": "quarantine"
+  "on_validation_failure": "discard"
 }
 ```
 
@@ -1106,7 +1108,7 @@ The very first tool call for a URL-input pipeline must be `create_blob` with the
 **Examples:**
 - User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:
   1. `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")`
-  2. `set_source_from_blob({blob_id, on_success: "url_rows", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
+  2. `set_source_from_blob({blob_id, on_success: "url_rows", on_validation_failure: "discard", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
   3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "url_rows", on_success: "scraped_content", options: {schema: {mode: "fixed", fields: ["url: str"]}, url_field: "url", content_field: "content", fingerprint_field: "content_fingerprint", format: "text", text_separator: "\n", http: {abuse_contact: "compliance@example.com", scraping_reason: "Download a public URL and process its content", allowed_hosts: "public_only"}}})`
   ⚠ Skipping step 3 means the pipeline emits the URL string itself, not the URL's content. Downstream transforms like `line_explode` or `llm` will see the URL text instead of what was at the URL, and the validator will reject the pipeline. See Pattern 1 (`URL → Scrape → Extract → JSON`) and Pattern 1b (`URL → Download → Split into Lines → JSON`) under "Common Pipeline Patterns" for full chains.
 - User provides JSON data → `create_blob(filename="data.json", mime_type="application/json", content='[{"id": 1, "name": "test"}]')` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`

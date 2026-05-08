@@ -419,12 +419,12 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=557570ade7c5fe66
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=9fafaa3575935776
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=9b5174a43d7f3b2e
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=d5296c65a34a8668
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
     rollback expected; programmer bugs still propagate
@@ -432,7 +432,7 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=460c23d550fc07ed
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=c8ff14170539c285
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
     primary DB exception

@@ -66,6 +66,8 @@ In YAML write `routes: {"true": high, "false": normal}` — never `routes: {true
 
 Every pipeline needs: **one source**, **one or more sinks**, and **connections between them**. Orphan nodes cause validation errors.
 
+For source row validation failures, use `on_validation_failure: "discard"` unless you have already configured a dedicated output/sink for failed rows. Quarantine is a conventional output name, not a built-in sink; `on_validation_failure: "quarantine"` is valid only when an output/sink named `quarantine` exists in the same pipeline.
+
 ### Node Types
 
 | Type | Required fields | Key behaviour |

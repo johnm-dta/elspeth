@@ -64,6 +64,11 @@ _AUTHORING_VALIDATION_COUNTER = metrics.get_meter(__name__).create_counter(
 _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
+_DEFAULT_SOURCE_VALIDATION_FAILURE: Final[str] = "discard"
+_SOURCE_VALIDATION_FAILURE_DESCRIPTION: Final[str] = (
+    "How to handle source validation failures. Use 'discard' to drop invalid rows without routing. "
+    "Any other value, including 'quarantine', must match a configured output/sink name."
+)
 
 
 class _SemanticEdgeContractPayload(TypedDict):
@@ -633,8 +638,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "options": {"type": "object", "description": "Plugin-specific config."},
                     "on_validation_failure": {
                         "type": "string",
-                        "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                        "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                     },
                 },
                 "required": ["plugin", "on_success", "options", "on_validation_failure"],
@@ -961,8 +965,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                             },
                             "on_validation_failure": {
                                 "type": "string",
-                                "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                                "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                             },
                             "inline_blob": {
                                 "type": "object",
@@ -1334,9 +1337,8 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     },
                     "on_validation_failure": {
                         "type": "string",
-                        "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                        "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
-                        "default": "quarantine",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                        "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
                     },
                     "options": {
                         "type": "object",
@@ -1710,7 +1712,8 @@ def _vf_destination_note(
         return {
             "note": (
                 f"on_validation_failure='{on_vf}' does not match any configured output. "
-                f"Add an output named '{on_vf}' before running the pipeline. "
+                "Use 'discard' to drop invalid rows without routing, or "
+                f"add an output named '{on_vf}' before running the pipeline. "
                 f"Current outputs: {current}."
             ),
         }
@@ -2192,7 +2195,7 @@ def validate_composer_file_sink_collision_policy(
 def _prevalidate_source(
     plugin_name: str,
     options: Mapping[str, Any],
-    on_validation_failure: str = "quarantine",
+    on_validation_failure: str = _DEFAULT_SOURCE_VALIDATION_FAILURE,
 ) -> str | None:
     """Pre-validate source options, injecting on_validation_failure and filtering web-only keys."""
     filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
@@ -2251,7 +2254,7 @@ def _execute_set_source(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    on_vf = args.get("on_validation_failure", "quarantine")
+    on_vf = args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     prevalidation_error = _prevalidate_source(plugin, options, on_vf)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
@@ -2588,7 +2591,7 @@ def _execute_set_source_from_blob(
             expected="an object",
             actual_type=type(caller_options).__name__,
         )
-    on_vf = arguments.get("on_validation_failure", "quarantine")
+    on_vf = arguments.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     resolved = _resolve_source_blob(
         blob_id=arguments["blob_id"],
         explicit_plugin=arguments.get("plugin"),
@@ -3675,6 +3678,7 @@ def _execute_set_pipeline(
     resolved_source_blob: _ResolvedSourceBlob | None = None
     source_blob_id = src_args.get("blob_id")
     inline_blob = src_args.get("inline_blob")
+    src_on_vf = src_args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     if source_blob_id is not None and inline_blob is not None:
         return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
     if source_blob_id is not None:
@@ -3688,7 +3692,7 @@ def _execute_set_pipeline(
             blob_id=source_blob_id,
             explicit_plugin=src_plugin,
             caller_options=src_options,
-            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            on_validation_failure=src_on_vf,
             state=state,
             catalog=catalog,
             session_engine=session_engine,
@@ -3741,7 +3745,6 @@ def _execute_set_pipeline(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    src_on_vf = src_args.get("on_validation_failure", "quarantine")
     src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
     if src_prevalidation is not None:
         return _failure_result(state, src_prevalidation)
@@ -3838,7 +3841,7 @@ def _execute_set_pipeline(
             plugin=src_plugin,
             on_success=src_args["on_success"],
             options=src_options,
-            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            on_validation_failure=src_on_vf,
         )
 
         node_specs = []

@@ -73,13 +73,17 @@ describe("Layout", () => {
       handle.focus();
 
       await user.keyboard("{ArrowRight}");
-      const widthAfterRight = Number(
-        setItem.mock.calls.findLast(([k]) => k === "elspeth_inspector_width")?.[1],
+      const widthCalls = setItem.mock.calls.filter(
+        ([k]: [string, string]) => k === "elspeth_inspector_width"
       );
+      const widthAfterRight = Number(widthCalls[widthCalls.length - 1]?.[1]);
 
       await user.keyboard("{ArrowLeft}");
+      const widthAfterLeftCalls = setItem.mock.calls.filter(
+        ([k]: [string, string]) => k === "elspeth_inspector_width"
+      );
       const widthAfterLeft = Number(
-        setItem.mock.calls.findLast(([k]) => k === "elspeth_inspector_width")?.[1],
+        widthAfterLeftCalls[widthAfterLeftCalls.length - 1]?.[1],
       );
 
       expect(widthAfterLeft).toBeLessThan(widthAfterRight);

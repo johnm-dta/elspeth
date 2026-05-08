@@ -21,7 +21,7 @@ import os
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final, NoReturn, TypedDict, cast
 
@@ -74,6 +74,7 @@ from elspeth.web.composer.tools import (
     ADVISOR_TRIGGER_VALUES,
     RuntimePreflight,
     ToolResult,
+    compute_proof_diagnostics,
     execute_tool,
     get_tool_definitions,
     is_cacheable_discovery_tool,
@@ -900,6 +901,14 @@ _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 # module docstring for the contract details.
 
 
+# Step 4 of the simple-pipeline-convergence program: hard cap on
+# proof-step-driven repair turns. When the assistant claims completion but
+# preview_pipeline's proof_diagnostics still has blocking entries, the loop
+# may inject a synthetic repair message and continue for at most this many
+# additional iterations. After the cap, the original termination path runs.
+_MAX_REPAIR_TURNS: Final[int] = 2
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -1051,6 +1060,76 @@ class ComposerServiceImpl:
         if failed_checks:
             return f"I cannot mark this pipeline complete yet because runtime preflight failed: {failed_checks[0].detail}."
         return "I cannot mark this pipeline complete yet because runtime preflight failed."
+
+    def _attempt_proof_repair(
+        self,
+        *,
+        state: CompositionState,
+        llm_messages: list[dict[str, Any]],
+        session_id: str | None,
+        repair_turns_used: int,
+    ) -> bool:
+        """Step 4: pre-finalize proof gate.
+
+        When the assistant emits no tool_calls (claiming completion), check
+        ``preview_pipeline``'s ``proof_diagnostics`` for blocking entries.
+        If any are found AND the repair-turn budget has not been exhausted,
+        synthesize a user-attributed message describing each diagnostic plus
+        its ``suggested_repair`` and append it to ``llm_messages``. The
+        outer compose loop then continues for one more iteration so the
+        model can apply the suggested fix.
+
+        Returns True when a repair message was injected (the loop should
+        ``continue`` and skip finalization). Returns False when there are
+        no blocking diagnostics OR the repair budget is exhausted.
+
+        Boundary contract: this helper NEVER catches plugin exceptions.
+        It only repairs *configurations* via composer-tool calls. Plugin
+        bugs (transform.process raising) propagate to the operator per the
+        Plugin Ownership policy in CLAUDE.md.
+
+        The synthesised message is appended verbatim into chat history. It
+        contains operator-supplied column names and the diagnostic-message
+        text (which may name CSV paths the operator wrote). No secrets are
+        carried — proof_diagnostics never reads source bytes through any
+        path that retains decoded content; only inspect_blob_content's
+        bounded-summary facts are surfaced.
+        """
+        if repair_turns_used >= _MAX_REPAIR_TURNS:
+            return False
+
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self._session_engine,
+            session_id=session_id,
+        )
+        blocking = [d for d in diagnostics if d.get("severity") == "blocking"]
+        if not blocking:
+            return False
+
+        # Cap at 3 blocking entries in the synthesised message to keep the
+        # context window manageable. The model can call preview_pipeline to
+        # see the full list.
+        rendered = []
+        for i, d in enumerate(blocking[:3], start=1):
+            repair = d.get("suggested_repair") or "(no specific suggestion)"
+            rendered.append(f"{i}. [{d.get('code', 'unknown')}] {d.get('message', '')}\n   Suggested repair: {repair}")
+
+        next_turn = repair_turns_used + 1
+        budget_note = (
+            f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}. "
+            "Apply the suggested repair via the appropriate composer tool, then call "
+            "preview_pipeline to verify the diagnostics are cleared before finalising again."
+        )
+
+        message = (
+            "[composer-system] Pre-finalisation proof step found blocking "
+            "diagnostic(s) — the pipeline cannot run as currently configured. "
+            "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note
+        )
+
+        llm_messages.append({"role": "user", "content": message})
+        return True
 
     async def _finalize_no_tool_response(
         self,
@@ -1403,6 +1482,13 @@ class ComposerServiceImpl:
         # toggle is disabled the counter is never read.
         advisor_calls_used = 0
 
+        # Step 4 of the simple-pipeline-convergence program: forced-repair
+        # counter. When the assistant emits no tool_calls but the proof step
+        # found blocking diagnostics, the loop synthesises a repair message
+        # and continues for at most _MAX_REPAIR_TURNS additional iterations.
+        # NEVER catches plugin exceptions — only configuration diagnostics.
+        repair_turns_used = 0
+
         while True:
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -1417,6 +1503,20 @@ class ComposerServiceImpl:
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
+                # Step 4 forced-repair gate: when the model claims completion
+                # but the proof step still has blocking diagnostics, inject a
+                # repair message and continue. Capped at _MAX_REPAIR_TURNS so
+                # the loop can never spin indefinitely. NEVER catches plugin
+                # exceptions — only repairs configurations.
+                if state.version > initial_version and self._attempt_proof_repair(
+                    state=state,
+                    llm_messages=llm_messages,
+                    session_id=session_id,
+                    repair_turns_used=repair_turns_used,
+                ):
+                    repair_turns_used += 1
+                    continue
+
                 await _emit_progress(
                     progress,
                     ComposerProgressEvent(
@@ -1427,7 +1527,7 @@ class ComposerServiceImpl:
                         reason="composer_complete",
                     ),
                 )
-                return await self._finalize_no_tool_response(
+                result = await self._finalize_no_tool_response(
                     content=assistant_message.content or "",
                     state=state,
                     initial_version=initial_version,
@@ -1440,6 +1540,10 @@ class ComposerServiceImpl:
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
+                # Thread repair_turns_used through to the result so callers
+                # (and the audit trail / state.json composer_meta surface)
+                # can see whether the model was forced through repair turns.
+                return replace(result, repair_turns_used=repair_turns_used)
 
             await _emit_progress(
                 progress,

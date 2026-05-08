@@ -4733,7 +4733,7 @@ _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
 )
 
 
-def _compute_proof_diagnostics(
+def compute_proof_diagnostics(
     state: CompositionState,
     *,
     session_engine: Engine | None = None,
@@ -4925,7 +4925,7 @@ def _execute_preview_pipeline(
     authoring_payload = _authoring_validation_payload(state, validation)
     runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
 
-    proof_diagnostics = _compute_proof_diagnostics(
+    proof_diagnostics = compute_proof_diagnostics(
         state,
         session_engine=session_engine,
         session_id=session_id,

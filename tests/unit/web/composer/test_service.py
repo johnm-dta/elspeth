@@ -4413,3 +4413,206 @@ class TestEmptyStateFinalizePassthrough:
 
         assert result.message == "All good."
         assert result.raw_assistant_content is None  # no replacement happened
+
+
+# ---------------------------------------------------------------------------
+# Step 4 of the simple-pipeline-convergence program (epic elspeth-783c9dede8):
+# the forced-repair loop. When the assistant emits no tool_calls but
+# preview_pipeline's proof_diagnostics still reports blocking entries, the
+# compose loop synthesises a repair message and continues. Hard cap of
+# _MAX_REPAIR_TURNS=2 forced repair turns. The repair NEVER catches plugin
+# exceptions — it only feeds the model proof diagnostics on configurations.
+# ---------------------------------------------------------------------------
+
+
+class TestAttemptProofRepair:
+    """Direct exercise of ComposerServiceImpl._attempt_proof_repair."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        catalog = _mock_catalog()
+        settings = _make_settings(data_dir=tmp_path)
+        engine, session_id = _session_engine_with_session()
+        self.engine = engine
+        self.session_id = session_id
+
+        # Seed a CSV blob whose observed columns are {order_id, customer, price}
+        self.blob_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        self.storage_path = storage_dir / f"{self.blob_id}_orders.csv"
+        body = b"order_id,customer,price\nO-1,Alice,49.95\n"
+        self.storage_path.write_bytes(body)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.blob_id,
+                    session_id=session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(self.storage_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        self.service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+
+    def _state_with_blocking_csv(self):
+        """Build a state whose preview emits csv_fixed_schema_omits_observed_columns."""
+        from elspeth.web.composer.tools import execute_tool as exec_tool
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # Wire the source via set_source_from_blob (canonical path).
+        result = exec_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.blob_id,
+                "on_success": "rows",
+                "on_validation_failure": "discard",
+                "options": {"schema": {"mode": "fixed", "fields": ["order_id: str"]}},
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        result = exec_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    def _state_without_blob(self):
+        """A path-based source has nothing for proof_diagnostics to inspect."""
+        from elspeth.web.composer.tools import execute_tool as exec_tool
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = exec_tool(
+            "set_pipeline",
+            {
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "rows",
+                    "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [
+                    {
+                        "sink_name": "out",
+                        "plugin": "csv",
+                        "options": {"path": "/data/out.csv", "schema": {"mode": "observed"}},
+                        "on_write_failure": "discard",
+                    }
+                ],
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    def test_returns_false_when_no_blocking_diagnostics(self) -> None:
+        state = self._state_without_blob()
+        messages: list[dict[str, Any]] = []
+        attempted = self.service._attempt_proof_repair(
+            state=state,
+            llm_messages=messages,
+            session_id=self.session_id,
+            repair_turns_used=0,
+        )
+        assert attempted is False
+        assert messages == []
+
+    def test_returns_false_when_budget_exhausted(self) -> None:
+        from elspeth.web.composer.service import _MAX_REPAIR_TURNS
+
+        state = self._state_with_blocking_csv()
+        messages: list[dict[str, Any]] = []
+        attempted = self.service._attempt_proof_repair(
+            state=state,
+            llm_messages=messages,
+            session_id=self.session_id,
+            repair_turns_used=_MAX_REPAIR_TURNS,
+        )
+        assert attempted is False
+        assert messages == []
+
+    def test_appends_repair_message_when_blocking(self) -> None:
+        state = self._state_with_blocking_csv()
+        messages: list[dict[str, Any]] = []
+        attempted = self.service._attempt_proof_repair(
+            state=state,
+            llm_messages=messages,
+            session_id=self.session_id,
+            repair_turns_used=0,
+        )
+        assert attempted is True
+        assert len(messages) == 1
+        msg = messages[0]
+        assert msg["role"] == "user"
+        assert "csv_fixed_schema_omits_observed_columns" in msg["content"]
+        assert "Suggested repair" in msg["content"]
+        assert "preview_pipeline" in msg["content"]
+        # Budget note acknowledges the cap
+        assert "forced repair turn 1 of 2" in msg["content"]
+
+    def test_second_repair_message_increments_turn_counter_in_text(self) -> None:
+        state = self._state_with_blocking_csv()
+        messages: list[dict[str, Any]] = []
+        # Simulate one already-used repair turn
+        attempted = self.service._attempt_proof_repair(
+            state=state,
+            llm_messages=messages,
+            session_id=self.session_id,
+            repair_turns_used=1,
+        )
+        assert attempted is True
+        assert "forced repair turn 2 of 2" in messages[0]["content"]
+
+    def test_repair_does_not_catch_plugin_exceptions(self) -> None:
+        """Plugin exceptions must propagate — the repair gate only handles configs.
+
+        Patch compute_proof_diagnostics to raise a synthetic 'plugin bug';
+        _attempt_proof_repair must not swallow it.
+        """
+        from elspeth.web.composer import service as svc_module
+
+        with (
+            patch.object(svc_module, "compute_proof_diagnostics", side_effect=RuntimeError("simulated plugin crash")),
+            pytest.raises(RuntimeError, match="simulated plugin crash"),
+        ):
+            self.service._attempt_proof_repair(
+                state=self._state_with_blocking_csv(),
+                llm_messages=[],
+                session_id=self.session_id,
+                repair_turns_used=0,
+            )

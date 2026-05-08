@@ -56,6 +56,13 @@ class ComposerResult:
     # returned text-only).
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
     llm_calls: tuple[ComposerLLMCall, ...] = ()
+    # Number of forced repair turns the proof step injected into this compose
+    # invocation (Step 4 of the simple-pipeline-convergence program). Capped
+    # at 2 by the loop. 0 means first-pass success; 1 or 2 means the model
+    # was given proof_diagnostics back as a synthesized message and asked to
+    # iterate. Surfaced in state.json under composer_meta.repair_turns_used
+    # for the convergence-suite eval scorer.
+    repair_turns_used: int = 0
 
     def __post_init__(self) -> None:
         # Bidirectional iff enforcement of the field-pairing invariant

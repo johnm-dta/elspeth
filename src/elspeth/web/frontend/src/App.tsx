@@ -182,7 +182,7 @@ function App() {
 
         {/* Backend unavailable banner */}
         {backendAvailable === false && (
-          <div role="alert" className="alert-banner">
+          <div role="status" className="alert-banner">
             <span>
               <strong>Backend unavailable</strong> — Cannot connect to the
               ELSPETH server. Check that the backend is running.
@@ -200,7 +200,7 @@ function App() {
 
         {/* Composer unavailable banner (backend is up but LLM not configured) */}
         {backendAvailable && systemStatus && !systemStatus.composer_available && (
-          <div role="alert" className="alert-banner">
+          <div role="status" className="alert-banner">
             <span>
               Service unavailable:{" "}
               {systemStatus.composer_reason ??

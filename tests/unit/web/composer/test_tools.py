@@ -3133,6 +3133,10 @@ class TestDeleteBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -3196,6 +3200,10 @@ class TestDeleteBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -7589,6 +7597,10 @@ class TestUpdateBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -7642,6 +7654,10 @@ class TestUpdateBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -7883,6 +7899,10 @@ class TestUpdateBlobAtomicWrite:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )

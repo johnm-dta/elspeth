@@ -141,6 +141,26 @@ class InlineAllocViolation:
     snippet: str
 
 
+@dataclass(frozen=True)
+class LockDisciplineNegativeTest:
+    """Allowlist entry for an intentional lock-required-helper call outside ``_session_write_lock``.
+
+    Plan §94 explicitly requires the static guard to support ``negative
+    test`` exemptions: each helper has a precondition assertion
+    (``_assert_session_write_lock_held``), and verifying that assertion
+    fires REQUIRES calling the helper without the lock. The three keying
+    fields ``(path, enclosing_symbol, helper_name)`` must match the
+    scanner's :class:`LockDisciplineViolation` exactly. ``purpose`` is
+    informational and shows up in the violation report when a new site
+    fails the gate.
+    """
+
+    path: str
+    enclosing_symbol: str
+    helper_name: str
+    purpose: str
+
+
 # ---------------------------------------------------------------------------
 # AST utilities
 # ---------------------------------------------------------------------------
@@ -426,16 +446,25 @@ def check_lock_discipline(
     roots: Sequence[Path],
     *,
     path_anchor: Path | None = None,
+    allowlist: Sequence[LockDisciplineNegativeTest] = (),
 ) -> list[LockDisciplineViolation]:
     """Check that every call to a lock-required helper is inside ``_session_write_lock``.
 
     Conditional-dormant: if ``_session_write_lock`` is not defined anywhere
     under ``roots``, returns ``[]``. As soon as the helpers land (Task 9),
     every caller that drifts off the lock is flagged.
+
+    Plan §94 carve-out: callers explicitly listed in ``allowlist`` are
+    exempt. The exemption mechanism exists because each helper has a
+    precondition assertion that REQUIRES a negative test calling the
+    helper outside the lock. The default empty tuple keeps strict
+    semantics for callers that do not need exemptions.
     """
 
     if not _codebase_defines_symbol(_SESSION_WRITE_LOCK_NAME, roots):
         return []
+
+    allowed_keys = {(entry.path, entry.enclosing_symbol, entry.helper_name) for entry in allowlist}
 
     findings: list[LockDisciplineViolation] = []
     for root, py_file in _iter_python_files(roots):
@@ -464,12 +493,15 @@ def check_lock_discipline(
             inside_lock = any(_with_block_calls_session_write_lock(w) for w in _enclosing_with_blocks(node))
             if inside_lock:
                 continue
+            enclosing_symbol = _qualified_symbol(node)
+            if (rel, enclosing_symbol, helper_name) in allowed_keys:
+                continue
             line = getattr(node, "lineno", 0)
             findings.append(
                 LockDisciplineViolation(
                     path=rel,
                     line=line,
-                    enclosing_symbol=_qualified_symbol(node),
+                    enclosing_symbol=enclosing_symbol,
                     helper_name=helper_name,
                     snippet=_line_snippet(source_lines, line),
                 )
@@ -628,41 +660,123 @@ def check_inline_state_version_allocation(
 
 _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
     # ------ src/elspeth/web/sessions/service.py ------
-    ReviewedWriter(
-        path="src/elspeth/web/sessions/service.py",
-        enclosing_symbol="SessionServiceImpl.add_message._sync",
-        table="chat_messages",
-        operation="sqlalchemy_insert_call",
-        purpose="current add_message writer (line 383); Task 14 migrates to _insert_chat_message",
-    ),
+    # NOTE: ``SessionServiceImpl.add_message._sync`` no longer contains an
+    # inline ``insert(chat_messages_table)``. Task 14's rewrite (plan §3174-
+    # 3268) routes the writer through ``_insert_chat_message`` under
+    # ``_session_write_lock`` after a ``_reserve_sequence_range`` allocation.
+    # The corresponding ``ReviewedWriter`` entry that previously sat here has
+    # been removed because keeping a stale entry for a writer that no longer
+    # exists violates the "do not leave stale promises" rule (Task 10
+    # handover pitfall §5).
     ReviewedWriter(
         path="src/elspeth/web/sessions/service.py",
         enclosing_symbol="SessionServiceImpl.save_composition_state._try_insert_state",
         table="composition_states",
         operation="sqlalchemy_insert_call",
-        purpose="current save_composition_state retry inner writer (line 485); Task 14 migrates to _insert_composition_state under _session_write_lock",
+        purpose=(
+            "save_composition_state retry inner writer; Task 10 lock-retrofits "
+            "in place (NOT helper-routed) per plan §2128-2133 — uniform "
+            "helper-routing would either lose the retry semantics (race risk) "
+            "or grow per-site escape hatches. The SELECT-MAX + INSERT region "
+            "is wrapped in ``_session_write_lock`` so the existing inline "
+            "allocation runs under the same per-session write discipline as "
+            "``_insert_composition_state``. Retry loop kept as "
+            "belt-and-suspenders; provably unreachable post-lock — slated for "
+            "removal in OQ-3-followup once shaken out in staging"
+        ),
     ),
     ReviewedWriter(
         path="src/elspeth/web/sessions/service.py",
         enclosing_symbol="SessionServiceImpl.set_active_state._try_insert_revert",
         table="composition_states",
         operation="sqlalchemy_insert_call",
-        purpose="current set_active_state retry inner writer (line 923); Task 14 migrates to _insert_composition_state under _session_write_lock",
+        purpose=(
+            "set_active_state retry inner writer; Task 10 lock-retrofits in "
+            "place (NOT helper-routed) per plan §2128-2133 — same shape and "
+            "rationale as save_composition_state above. Retry loop kept as "
+            "belt-and-suspenders; provably unreachable post-lock — slated for "
+            "removal in OQ-3-followup once shaken out in staging"
+        ),
     ),
     ReviewedWriter(
         path="src/elspeth/web/sessions/service.py",
         enclosing_symbol="SessionServiceImpl.fork_session._sync",
         table="chat_messages",
         operation="sqlalchemy_insert_call",
-        purpose="fork_session copies source-session chat rows (line 1299); Task 14 routes via helper and preserves stored writer_principal",
+        purpose=(
+            "fork_session batch-copies source-session chat rows. Task 14 (§14.6) "
+            "did NOT route this through ``_insert_chat_message`` — that would mean "
+            "N single-row inserts instead of one batch ``conn.execute(insert(...), "
+            "rows)`` and is materially slower for large source histories. Instead, "
+            "the batch is now wrapped in ``_session_write_lock(new_session_id)`` "
+            "with the chat ``sequence_no`` reserved via ``_reserve_sequence_range`` "
+            "for ``len(msg_records_data)`` rows in one allocation; the same lock "
+            "context covers the composition-state copy. ``writer_principal`` is "
+            "preserved verbatim from the source row (no role-keyed fabrication); "
+            "synthetic system + new edited-user rows use ``writer_principal="
+            "session_fork``. Tool rows have ``parent_assistant_id`` rewritten to "
+            "the copied assistant id; rows whose source parent is excluded from "
+            "the slice raise the precise RuntimeError before the FK can fire."
+        ),
     ),
     ReviewedWriter(
         path="src/elspeth/web/sessions/service.py",
-        enclosing_symbol="SessionServiceImpl.fork_session._sync",
+        enclosing_symbol="SessionServiceImpl._insert_chat_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Task 9 chat-row writer (plan §1850-2110): the canonical chat_messages "
+            "writer. Task 14's call-site sweep routed every prior production writer "
+            "through this helper (``add_message`` rewrite at plan §3174-3268; the "
+            "``fork_session`` batch path retains a direct ``insert(chat_messages_"
+            "table)`` for batch performance under the same lock + sequence_no "
+            "discipline — see the entry above). Caller is required to be inside "
+            "_session_write_lock (asserted via _assert_session_write_lock_held) and "
+            "to have already obtained sequence_no from _reserve_sequence_range; the "
+            "negative precondition test is allowlisted in "
+            "_LOCK_DISCIPLINE_NEGATIVE_TESTS."
+        ),
+    ),
+    ReviewedWriter(
+        path="src/elspeth/web/sessions/service.py",
+        enclosing_symbol="SessionServiceImpl._insert_composition_state",
+        table="composition_states",
+        operation="raw_string_module",
+        purpose=(
+            "Task 10 helper docstring (plan §2112-2751) references the target "
+            "table by name in the PRECONDITION/B1/B3 prose; not an actual "
+            "write site"
+        ),
+    ),
+    ReviewedWriter(
+        path="src/elspeth/web/sessions/service.py",
+        enclosing_symbol="SessionServiceImpl._insert_composition_state",
         table="composition_states",
         operation="sqlalchemy_insert_call",
-        purpose="fork_session copies source-session composition_state row (line 1281); Task 14 routes via helper",
+        purpose=(
+            "Task 10 composition-state writer (plan §2112-2751): the canonical "
+            "composition_states writer for fork-session and (in Phase 3) "
+            "compose-loop use. B1 contract — the helper allocates ``version`` "
+            "internally via ``SELECT COALESCE(MAX(version),0)+1 WHERE "
+            "session_id=:sid`` under the held ``_session_write_lock`` "
+            "(asserted via ``_assert_session_write_lock_held``). The "
+            "SELECT-MAX-then-INSERT atomicity closes the "
+            "fabricated-Tier-1-violation race at the contract boundary "
+            "rather than at individual call sites. Sites 403/834 do NOT "
+            "route through this helper — see plan §2128-2133 for the "
+            "asymmetric-mechanism rationale. Negative precondition test "
+            "allowlisted in _LOCK_DISCIPLINE_NEGATIVE_TESTS"
+        ),
     ),
+    # NOTE: fork_session._sync no longer contains an inline composition_states
+    # insert. Task 10 refactored that site to call ``_insert_composition_state``
+    # under ``_session_write_lock``. The helper carries its own allowlist entry
+    # above ("SessionServiceImpl._insert_composition_state"). The corresponding
+    # entry that previously sat here has been removed because keeping a stale
+    # ``ReviewedWriter`` for a writer that no longer exists violates the
+    # "do not leave stale promises" rule in the Task 10 handover (pitfall §5)
+    # and the test-file's "Do not delete reviewed allowlist entries without
+    # removing the corresponding writer in the same commit" symmetry.
     # ------ tests/unit/web/sessions/test_models.py — schema test direct rows (7 sites) ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_models.py",
@@ -736,6 +850,18 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         operation="raw_string_in_execute",
         purpose="standalone eval-harness SQLite fixture (line 186) seeds an oversized assistant row to drive the 300-char truncation assertion",
     ),
+    ReviewedWriter(
+        path="tests/unit/evals/lib/test_decode_tools.py",
+        enclosing_symbol="test_decode_tool_sequence_orders_same_timestamp_rows_by_sequence_no",
+        table="chat_messages",
+        operation="raw_string_in_executemany",
+        purpose=(
+            "§14.7 / plan §3884 regression: standalone SQLite fixture seeds rows "
+            "with same created_at + intentionally non-chronological sequence_no "
+            "via raw executemany so the decoder's ORDER BY sequence_no can be "
+            "verified independently of the rev-4 service-layer writer path"
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_routes.py — OperationalError canaries ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_routes.py",
@@ -743,6 +869,18 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         table="chat_messages",
         operation="raw_string_in_OperationalError",
         purpose="OperationalError canary (line 1889): SQL string is the OperationalError statement param, not an executed query",
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_routes.py",
+        enclosing_symbol="TestMessageRoutes.test_send_message_tool_invocation_persistence_failure_does_not_mask_success.flaky_add_message",
+        table="chat_messages",
+        operation="raw_string_in_OperationalError",
+        purpose=(
+            "Task 14 fail-soft regression (plan §3357-3363): symmetric to the "
+            "LLM-call-audit canary above. The OperationalError's statement string "
+            "carries 'INSERT INTO chat_messages' to make the simulated failure "
+            "look like a real DB write error; not an executed query"
+        ),
     ),
     ReviewedWriter(
         path="tests/unit/web/sessions/test_routes.py",
@@ -764,6 +902,43 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         table="composition_states",
         operation="raw_string_in_OperationalError",
         purpose="OperationalError canary (line 5590): tests runtime-preflight save-failure flag",
+    ),
+)
+
+
+# Lock-discipline negative-test allowlist (plan §94)
+#
+# Each lock-required helper (``_reserve_sequence_range``,
+# ``_insert_chat_message``, ``_insert_composition_state``) has a
+# precondition assertion ``_assert_session_write_lock_held`` that fires
+# RuntimeError when invoked outside ``_session_write_lock``. Verifying
+# that assertion REQUIRES a test that calls the helper without the
+# lock — so by construction the static lock-discipline check would
+# flag the test. Plan §94 explicitly authorises an allowlist exemption
+# for these specific test sites; this tuple is that exemption surface.
+#
+# Add a new entry only when adding a corresponding
+# ``test_<helper>_requires_session_write_lock`` test that exercises the
+# precondition. Removing a helper means removing its negative test AND
+# its allowlist entry in the same commit.
+_LOCK_DISCIPLINE_NEGATIVE_TESTS: tuple[LockDisciplineNegativeTest, ...] = (
+    LockDisciplineNegativeTest(
+        path="tests/unit/web/sessions/test_persist_compose_turn.py",
+        enclosing_symbol="test_reserve_sequence_range_requires_session_write_lock",
+        helper_name="_reserve_sequence_range",
+        purpose="negative-precondition test (plan §1623): verifies _assert_session_write_lock_held raises when the lock is not held",
+    ),
+    LockDisciplineNegativeTest(
+        path="tests/unit/web/sessions/test_persist_compose_turn.py",
+        enclosing_symbol="test_insert_chat_message_requires_session_write_lock",
+        helper_name="_insert_chat_message",
+        purpose="negative-precondition test (plan §1924): verifies _assert_session_write_lock_held raises when the lock is not held",
+    ),
+    LockDisciplineNegativeTest(
+        path="tests/unit/web/sessions/test_persist_compose_turn.py",
+        enclosing_symbol="test_insert_composition_state_requires_session_write_lock",
+        helper_name="_insert_composition_state",
+        purpose="negative-precondition test (plan §2471): verifies _assert_session_write_lock_held raises when the lock is not held",
     ),
 )
 
@@ -904,6 +1079,7 @@ def test_static_direct_writers_match_reviewed_allowlist() -> None:
     lock = check_lock_discipline(
         [repo_root / "src", repo_root / "tests"],
         path_anchor=repo_root,
+        allowlist=_LOCK_DISCIPLINE_NEGATIVE_TESTS,
     )
     helper_assert = check_helper_lock_assertions(
         [repo_root / "src", repo_root / "tests"],
@@ -1026,6 +1202,150 @@ def test_static_helper_lock_guard_rejects_unlocked_allocator(tmp_path: Path) -> 
     locked = [v for v in findings if v.enclosing_symbol.endswith("use_helper_locked")]
     assert unlocked, f"lock-discipline checker failed to detect helper call outside _session_write_lock; findings={findings}"
     assert not locked, f"lock-discipline checker over-triggered on properly-locked call site; locked-findings={locked}"
+
+
+def test_lock_discipline_allowlist_exempts_negative_precondition_test(tmp_path: Path) -> None:
+    """Plan §94: negative-precondition tests must be exempt from the lock-discipline check.
+
+    Synthesises a test file with two helper calls outside any lock:
+    one in an allowlisted ``test_<helper>_requires_session_write_lock``
+    function, and one in an unrelated function. Asserts the allowlist
+    suppresses ONLY the matching site, not the unrelated one. Without
+    the allowlist, both calls must be flagged (no false negatives).
+    """
+
+    synthetic_src = tmp_path / "src"
+    synthetic_src.mkdir()
+    (synthetic_src / "synthetic_module.py").write_text(
+        textwrap.dedent("""\
+        from contextlib import contextmanager
+
+
+        @contextmanager
+        def _session_write_lock(conn, sid):
+            yield
+
+
+        def _reserve_sequence_range(conn, sid, *, count):
+            return 1
+
+
+        def _assert_session_write_lock_held(conn, *, caller):
+            pass
+    """)
+    )
+    synthetic_tests = tmp_path / "tests"
+    synthetic_tests.mkdir()
+    (synthetic_tests / "test_synthetic_helpers.py").write_text(
+        textwrap.dedent("""\
+        from synthetic_module import _reserve_sequence_range
+
+
+        def test_reserve_sequence_range_requires_session_write_lock(service):
+            # Negative-precondition test: deliberately calls helper outside lock.
+            _reserve_sequence_range(service, "s_no_lock", count=1)
+
+
+        def test_unrelated_thing(service):
+            # Not a precondition test; must NOT be exempted.
+            _reserve_sequence_range(service, "s_other", count=1)
+    """)
+    )
+
+    allowlist = (
+        LockDisciplineNegativeTest(
+            path="tests/test_synthetic_helpers.py",
+            enclosing_symbol="test_reserve_sequence_range_requires_session_write_lock",
+            helper_name="_reserve_sequence_range",
+            purpose="synthetic regression test for the allowlist mechanism",
+        ),
+    )
+
+    strict_findings = check_lock_discipline([synthetic_src, synthetic_tests], path_anchor=tmp_path)
+    strict_symbols = {v.enclosing_symbol for v in strict_findings}
+    assert "test_reserve_sequence_range_requires_session_write_lock" in strict_symbols, (
+        f"scanner failed to flag the negative-precondition call site without the allowlist; strict_findings={strict_findings}"
+    )
+    assert "test_unrelated_thing" in strict_symbols, (
+        f"scanner failed to flag the unrelated call site without the allowlist; strict_findings={strict_findings}"
+    )
+
+    permissive_findings = check_lock_discipline([synthetic_src, synthetic_tests], path_anchor=tmp_path, allowlist=allowlist)
+    permissive_symbols = {v.enclosing_symbol for v in permissive_findings}
+    assert "test_reserve_sequence_range_requires_session_write_lock" not in permissive_symbols, (
+        f"allowlist failed to suppress the matching negative-precondition site; permissive_findings={permissive_findings}"
+    )
+    assert "test_unrelated_thing" in permissive_symbols, (
+        f"allowlist over-suppressed an unrelated site (key mismatch should fail closed); permissive_findings={permissive_findings}"
+    )
+
+
+def test_lock_discipline_allowlist_key_match_is_exact(tmp_path: Path) -> None:
+    """Allowlist matching must be exact on (path, enclosing_symbol, helper_name).
+
+    A near-miss on any of the three keys must NOT suppress the violation.
+    This guards against accidental over-broad suppression — e.g., an
+    allowlist entry for ``_reserve_sequence_range`` in one file leaking
+    to a same-name function in another file.
+    """
+
+    synthetic_src = tmp_path / "src"
+    synthetic_src.mkdir()
+    (synthetic_src / "synthetic_module.py").write_text(
+        textwrap.dedent("""\
+        from contextlib import contextmanager
+
+
+        @contextmanager
+        def _session_write_lock(conn, sid):
+            yield
+
+
+        def _reserve_sequence_range(conn, sid, *, count):
+            return 1
+
+
+        def _assert_session_write_lock_held(conn, *, caller):
+            pass
+    """)
+    )
+    synthetic_tests = tmp_path / "tests"
+    synthetic_tests.mkdir()
+    (synthetic_tests / "test_other_file.py").write_text(
+        textwrap.dedent("""\
+        from synthetic_module import _reserve_sequence_range
+
+
+        def test_reserve_sequence_range_requires_session_write_lock(service):
+            _reserve_sequence_range(service, "s", count=1)
+    """)
+    )
+
+    # Allowlist entry references a DIFFERENT path — same symbol/helper.
+    mismatched_path = (
+        LockDisciplineNegativeTest(
+            path="tests/some_other_path.py",
+            enclosing_symbol="test_reserve_sequence_range_requires_session_write_lock",
+            helper_name="_reserve_sequence_range",
+            purpose="path-mismatch regression",
+        ),
+    )
+    findings = check_lock_discipline([synthetic_src, synthetic_tests], path_anchor=tmp_path, allowlist=mismatched_path)
+    matching = [v for v in findings if v.enclosing_symbol == "test_reserve_sequence_range_requires_session_write_lock"]
+    assert matching, f"allowlist with mismatched path must NOT suppress; findings={findings}"
+
+    # Allowlist entry references a DIFFERENT helper — same path/symbol.
+    mismatched_helper = (
+        LockDisciplineNegativeTest(
+            path="tests/test_other_file.py",
+            enclosing_symbol="test_reserve_sequence_range_requires_session_write_lock",
+            helper_name="_insert_chat_message",
+            purpose="helper-mismatch regression",
+        ),
+    )
+    findings = check_lock_discipline([synthetic_src, synthetic_tests], path_anchor=tmp_path, allowlist=mismatched_helper)
+    matching = [v for v in findings if v.enclosing_symbol == "test_reserve_sequence_range_requires_session_write_lock"]
+    assert matching, f"allowlist with mismatched helper_name must NOT suppress; findings={findings}"
 
 
 # ---------------------------------------------------------------------------

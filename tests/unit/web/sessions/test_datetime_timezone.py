@@ -78,7 +78,7 @@ class TestDatetimeTimezoneRoundTrip:
     async def test_message_created_at_preserves_timezone(self, service) -> None:
         """created_at on a chat message must be timezone-aware after retrieval."""
         session = await service.create_session("alice", "Msg TZ Test", "local")
-        await service.add_message(session.id, "user", "hello")
+        await service.add_message(session.id, "user", "hello", writer_principal="route_user_message")
 
         messages = await service.get_messages(session.id)
         assert len(messages) >= 1

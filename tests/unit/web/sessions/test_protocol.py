@@ -69,6 +69,7 @@ class TestChatMessageRecord:
             content="Hello",
             tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "search", "arguments": '{"q":"test"}'}}],
             created_at=datetime.now(UTC),
+            writer_principal="compose_loop",
         )
         with pytest.raises(TypeError):
             record.tool_calls[0]["new_key"] = "value"  # type: ignore[index]
@@ -81,6 +82,7 @@ class TestChatMessageRecord:
             content="Hello",
             tool_calls=None,
             created_at=datetime.now(UTC),
+            writer_principal="route_user_message",
         )
         assert record.tool_calls is None
 
@@ -92,6 +94,54 @@ class TestChatMessageRecord:
                 role="root",  # type: ignore[arg-type]
                 content="Hello",
                 tool_calls=None,
+                created_at=datetime.now(UTC),
+                writer_principal="compose_loop",
+            )
+
+    def test_audit_role_is_accepted(self) -> None:
+        """Rev-4: ``audit`` is a valid internal-only role for breadcrumb rows
+        that have no real assistant parent."""
+        record = ChatMessageRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            role="audit",
+            content='{"_kind":"llm_call_audit","status":"ok"}',
+            tool_calls=None,
+            created_at=datetime.now(UTC),
+            writer_principal="compose_loop",
+        )
+        assert record.role == "audit"
+
+    def test_tool_call_linkage_fields_are_exposed(self) -> None:
+        """Rev-4: ``tool_call_id`` and ``parent_assistant_id`` are scalar
+        linkage fields on the record. They must be accessible without
+        requiring a freeze guard (CLAUDE.md "Scalar-Only Fields Need No
+        Guard")."""
+        parent_id = uuid4()
+        record = ChatMessageRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            role="tool",
+            content='{"ok":true}',
+            tool_calls=None,
+            created_at=datetime.now(UTC),
+            writer_principal="compose_loop",
+            tool_call_id="call_abc",
+            parent_assistant_id=parent_id,
+        )
+        assert record.tool_call_id == "call_abc"
+        assert record.parent_assistant_id == parent_id
+
+    def test_writer_principal_is_required(self) -> None:
+        """Rev-4 breaking change: ``writer_principal`` has no default; it
+        must be supplied at construction time so that fork-copy and
+        ``get_messages`` hydration cannot silently fabricate provenance."""
+        with pytest.raises(TypeError, match="writer_principal"):
+            ChatMessageRecord(  # type: ignore[call-arg]
+                id=uuid4(),
+                session_id=uuid4(),
+                role="user",
+                content="hi",
                 created_at=datetime.now(UTC),
             )
 

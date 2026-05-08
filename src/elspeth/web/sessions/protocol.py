@@ -21,7 +21,13 @@ from uuid import UUID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
-ChatMessageRole = Literal["user", "assistant", "system", "tool"]
+ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
+# ``audit`` is an internal-only role for breadcrumb rows that have no real
+# OpenAI tool-response or assistant parent (LLM-call audit envelopes,
+# pre-flight redaction failures, etc.). They MUST be filtered out of any
+# user-facing chat response and any composer prompt-history rebuild —
+# enforced at ``_is_composer_audit_tool_message`` /
+# ``_composer_conversation_messages`` and the public messages route.
 # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
 # `completed_with_failures` and `empty` join the previous three so an
 # operator scanning `/api/runs/{rid}` can distinguish "ran cleanly" from
@@ -124,13 +130,19 @@ class ChatMessageRecord:
     role: ChatMessageRole
     content: str
     created_at: datetime
+    writer_principal: str
     raw_content: str | None = None
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     composition_state_id: UUID | None = None
+    tool_call_id: str | None = None
+    parent_assistant_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.role not in CHAT_MESSAGE_ROLE_VALUES:
             raise AuditIntegrityError(f"Tier 1: chat_messages.role is {self.role!r}, expected one of {sorted(CHAT_MESSAGE_ROLE_VALUES)}")
+        # writer_principal / tool_call_id / parent_assistant_id are scalar
+        # fields and need no freeze guard (CLAUDE.md "Scalar-Only Fields
+        # Need No Guard"). Only ``tool_calls`` carries mutable contents.
         if self.tool_calls is not None:
             freeze_fields(self, "tool_calls")
 
@@ -352,9 +364,13 @@ class SessionServiceProtocol(Protocol):
         session_id: UUID,
         role: ChatMessageRole,
         content: str,
+        *,
+        writer_principal: str,
         tool_calls: Sequence[Mapping[str, Any]] | None = None,
         composition_state_id: UUID | None = None,
         raw_content: str | None = None,
+        tool_call_id: str | None = None,
+        parent_assistant_id: UUID | None = None,
     ) -> ChatMessageRecord: ...
 
     async def get_messages(

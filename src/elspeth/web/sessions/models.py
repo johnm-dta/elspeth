@@ -66,21 +66,86 @@ chat_messages_table = Table(
     Column("content", Text, nullable=False),
     Column("raw_content", Text, nullable=True),
     Column("tool_calls", JSON, nullable=True),
+    Column("tool_call_id", String, nullable=True),
+    Column("sequence_no", Integer, nullable=False),
+    Column("writer_principal", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Composite FK forces same-session ownership: a message in session B
     # cannot reference a composition state owned by session A. When
     # composition_state_id is NULL, standard SQL partial-null semantics
     # skip FK enforcement, which is the intended behavior.
     Column("composition_state_id", String, nullable=True),
+    Column("parent_assistant_id", String, nullable=True),
     ForeignKeyConstraint(
         ["composition_state_id", "session_id"],
         ["composition_states.id", "composition_states.session_id"],
         name="fk_chat_messages_composition_state_session",
     ),
+    # Composite same-session FK on parent_assistant_id closes the
+    # cross-session lineage hole: a tool row in session B cannot
+    # reference an assistant row in session A. ON DELETE CASCADE
+    # removes child tool rows when the assistant is deleted, preventing
+    # orphan tool rows from accumulating in the audit DB. The schema
+    # cannot mechanically enforce that the referenced row has
+    # role='assistant'; Task 9's _assert_parent_assistant_message guard
+    # adds that check at the helper-call boundary.
+    ForeignKeyConstraint(
+        ["parent_assistant_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_chat_messages_parent_assistant_session",
+        ondelete="CASCADE",
+    ),
+    UniqueConstraint(
+        "id",
+        "session_id",
+        name="uq_chat_messages_id_session",
+    ),
     CheckConstraint(
-        "role IN ('user', 'assistant', 'system', 'tool')",
+        "role IN ('user', 'assistant', 'system', 'tool', 'audit')",
         name="ck_chat_messages_role",
     ),
+    CheckConstraint(
+        "(role = 'tool') = (tool_call_id IS NOT NULL)",
+        name="ck_chat_messages_tool_call_id_role",
+    ),
+    CheckConstraint(
+        "(role = 'tool') = (parent_assistant_id IS NOT NULL)",
+        name="ck_chat_messages_parent_role",
+    ),
+    CheckConstraint(
+        "writer_principal IN ('compose_loop', 'route_user_message', 'route_system_message', 'admin_tool', 'session_fork')",
+        name="ck_chat_messages_writer_principal",
+    ),
+    Index(
+        "ix_chat_messages_session_sequence",
+        "session_id",
+        "sequence_no",
+        unique=True,
+    ),
+    Index(
+        "ix_chat_messages_session_tool_call_id",
+        "session_id",
+        "tool_call_id",
+    ),
+)
+
+# Partial unique index: tool_call_id must be unique within
+# (session_id, role='tool') scope. Two tool rows in the same session
+# cannot share a provider tool_call_id (would conflate distinct LLM
+# tool calls), but the same tool_call_id may legally appear in two
+# different sessions, and non-tool rows (NULL tool_call_id) must not
+# collide on NULL with each other. The same predicate is supplied to
+# both ``sqlite_where`` (SQLite 3.8.0+) and ``postgresql_where``
+# (PostgreSQL >= 9.5) so the index is equivalent across dialects.
+# Mirrors the project pattern at ``uq_runs_one_active_per_session``
+# below.
+Index(
+    "uq_chat_messages_tool_call_id",
+    chat_messages_table.c.session_id,
+    chat_messages_table.c.tool_call_id,
+    unique=True,
+    sqlite_where=chat_messages_table.c.role == "tool",
+    postgresql_where=chat_messages_table.c.role == "tool",
 )
 
 composition_states_table = Table(
@@ -109,12 +174,31 @@ composition_states_table = Table(
         ForeignKey("composition_states.id"),
         nullable=True,
     ),
+    # ``provenance`` records WHY this state row was written. The CHECK
+    # below is a closed enum — extending it requires design review and
+    # a corresponding spec §4.1.2 amendment, not a silent value
+    # addition. Schedule 1A treats this as a DB-only audit column: it
+    # is NOT surfaced on ``CompositionStateRecord`` /
+    # ``CompositionStateResponse``. Read-side hydration is deferred to
+    # Schedule 1B+ per plan §1053-1061.
+    Column("provenance", String, nullable=False),
     UniqueConstraint("session_id", "version", name="uq_composition_state_version"),
     # Composite uniqueness target for composite FKs on chat_messages /
     # runs. The primary key already makes `id` unique on its own; this
     # constraint exists solely so SQL engines (including Postgres) will
     # accept (id, session_id) as an FK reference.
     UniqueConstraint("id", "session_id", name="uq_composition_state_id_session"),
+    # Closed enum: every value corresponds to a documented writer path
+    # in spec §4.1.2 (as amended by the Phase 1 plan supersession
+    # marker — ``session_fork`` is the cross-session fork-copy value,
+    # and ``session_seed`` is broadened to mean "any state row written
+    # outside the compose loop's tool-call path"). Adding a value here
+    # without amending the spec creates an untraceable writer category
+    # in the audit DB.
+    CheckConstraint(
+        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork')",
+        name="ck_composition_states_provenance",
+    ),
 )
 
 runs_table = Table(
@@ -280,3 +364,62 @@ user_secrets_table = Table(
     UniqueConstraint("name", "user_id", "auth_provider_type", name="uq_user_secret_name_user_provider"),
 )
 Index("ix_user_secrets_user_provider", user_secrets_table.c.user_id, user_secrets_table.c.auth_provider_type)
+
+# ``audit_access_log`` — INERT IN PHASE 1A.
+#
+# This table records who viewed audit-grade message data (the eventual
+# ``include_tool_rows=true`` route surface). 1A lands the table SCHEMA
+# ONLY: no route writes it, no service method writes it, no fixture
+# writes it. Phase 1A is the destructive session-DB schema reset
+# boundary, so deferring this table to a later phase would force a
+# second staging DB recreation for a table whose ownership, FK shape,
+# and writer_principal enum are already known.
+#
+# DO NOT ADD A WRITER WITHOUT THE PRIVACY GATE. The table holds
+# privacy-sensitive request context (``requesting_principal``,
+# ``request_path``, ``query_args``, ``ip_address``). Before any later
+# schedule adds a writer, that schedule MUST:
+#
+# 1. Define and test an allowlist for ``query_args`` keys. The writer
+#    must never store request headers, request bodies, secrets,
+#    provider tokens, or arbitrary exception strings. The allowlist
+#    is a closed set, with every accepted key justified.
+# 2. Choose an explicit IP retention policy. ``ip_address`` is
+#    nullable for service-to-service calls and for retention
+#    truncation. The policy must be stated in writing
+#    (literal storage, /24 truncation, or keyed hash) and pinned by
+#    test before the writer ships.
+# 3. Prove via integration test that no out-of-allowlist payload can
+#    reach the writer call site, even via misconfigured routes or
+#    unhandled exception paths.
+#
+# CLOSED-LIST WRITER PRINCIPAL ENUM. The two values
+# ``('audit_grade_view', 'admin_tool')`` are the entire universe of
+# permitted writers. Adding a third value here is a governance
+# action, not a coding action: it requires (a) a design review of
+# the new writer's privacy posture, (b) a destructive session-DB
+# recreation per ``project_db_migration_policy`` (no Alembic in this
+# project), and (c) a corresponding spec amendment. The friction is
+# the design — do not extend silently.
+audit_access_log_table = Table(
+    "audit_access_log",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("timestamp", DateTime(timezone=True), nullable=False),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("requesting_principal", String, nullable=False),
+    Column("request_path", String, nullable=False),
+    Column("query_args", JSON, nullable=False),
+    Column("ip_address", String, nullable=True),
+    Column("writer_principal", String, nullable=False),
+    CheckConstraint(
+        "writer_principal IN ('audit_grade_view', 'admin_tool')",
+        name="ck_audit_access_log_writer_principal",
+    ),
+    Index("ix_audit_access_log_session_timestamp", "session_id", "timestamp"),
+)

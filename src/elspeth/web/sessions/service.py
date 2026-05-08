@@ -14,7 +14,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
@@ -36,6 +36,7 @@ from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
+    ChatMessageRole,
     CompositionStateData,
     CompositionStateRecord,
     IllegalRunTransitionError,
@@ -118,6 +119,61 @@ def _assert_state_in_session(
             f"{state_session_id!r}, not {expected_session_id!r} — cross-session "
             f"reference is a contract violation"
         )
+
+
+def _assert_parent_assistant_message(
+    conn: Connection,
+    *,
+    parent_assistant_id: str,
+    session_id: str,
+    caller: str,
+) -> None:
+    """Offensive guard for tool rows.
+
+    The composite FK on ``(parent_assistant_id, session_id)`` proves
+    same-session existence at the DB layer, but SQL CHECK constraints
+    cannot portably inspect the referenced row's ``role`` column.
+    Service writers must therefore reject tool rows whose parent id
+    exists in the same session but does not belong to an assistant
+    message — otherwise a tool row could legally point at a user or
+    system message and the audit trail would record a false parent
+    relationship.
+
+    Raises ``RuntimeError`` because a wrong-role parent reference is a
+    bug in caller code, not invalid user input. The exception type
+    mirrors ``_assert_state_in_session`` above and is load-bearing:
+    it routes to a 500 in the route layer, not a 4xx for the user.
+    """
+    role = conn.execute(
+        select(chat_messages_table.c.role).where(
+            chat_messages_table.c.id == parent_assistant_id,
+            chat_messages_table.c.session_id == session_id,
+        )
+    ).scalar_one_or_none()
+    if role != "assistant":
+        raise RuntimeError(
+            f"{caller}: parent_assistant_id={parent_assistant_id!r} must reference "
+            f"an assistant message in session={session_id!r}; got role={role!r}"
+        )
+
+
+def _enveloped_state_column(value: Any) -> Any:
+    """Return the JSON envelope stored by composition_states JSON columns.
+
+    Existing ``save_composition_state`` and ``fork_session`` each carried a
+    local ``_enveloped`` helper. ``_insert_composition_state`` is module/class
+    scope, so the envelope rule must be extracted before the helper can
+    call it. Do not duplicate the helper back into individual methods.
+
+    The envelope shape ``{"_version": 1, "data": <raw>}`` is the on-disk
+    format for ``composition_states``' JSON columns; the ``_version``
+    field is reserved for schema evolution. ``deep_thaw()`` handles
+    ``MappingProxyType``/``frozenset``/tuple unwrap from ``freeze_fields()``.
+    """
+    raw = deep_thaw(value)
+    if raw is None:
+        return None
+    return {"_version": 1, "data": raw}
 
 
 def _current_adr019_counter_subsets_hold(
@@ -334,6 +390,253 @@ class SessionServiceImpl:
         finally:
             _SESSION_WRITE_LOCK_HELD.reset(token)
 
+    def _reserve_sequence_range(self, conn: Connection, session_id: str, *, count: int) -> int:
+        """Reserve ``count`` consecutive sequence numbers for ``session_id``.
+
+        PRECONDITION: caller MUST be inside
+        ``with self._session_write_lock(conn, session_id):`` in the same
+        transaction. That context acquires the PostgreSQL advisory lock or
+        the SQLite process-local session lock, making the unilateral
+        ``SELECT MAX + 1`` allocation race-free under concurrent writers.
+
+        Inside the same transaction, performs:
+            SELECT COALESCE(MAX(sequence_no), 0) FROM chat_messages WHERE session_id = ?
+        and returns max+1. The caller writes rows at max+1, max+2, ... max+count.
+
+        The session write lock prevents same-session allocator collisions
+        on both PostgreSQL and SQLite. Do not call this helper outside
+        the context, even in tests.
+
+        Note: gaps in sequence_no are permitted (transaction rollback after
+        reservation leaves the next caller's MAX+1 higher than the first
+        successful row's sequence_no). Sequence_no is an ordering key, not a count.
+
+        *Design seam acknowledgement (synthesised review A-F9 / M11).*
+        The three-helper protocol (``_acquire_session_advisory_lock`` →
+        ``_reserve_sequence_range`` → ``_insert_chat_message``) requires
+        callers to invoke them in order. Schedule 1A has the current
+        add-message path and ``fork_session`` copy path; Schedule 1B adds
+        ``persist_compose_turn``. Every caller must enter
+        ``_session_write_lock`` before reserving a sequence range. If a
+        later phase adds another invocation site, consider consolidating
+        into a single ``_write_chat_messages_atomic(conn, session_id, rows)``
+        entry point that hides the protocol. Until that third site appears,
+        the consolidation is not justified.
+        """
+        self._assert_session_write_lock_held(
+            conn,
+            session_id,
+            caller="_reserve_sequence_range",
+        )
+        if count < 1:
+            raise ValueError(f"count must be >= 1, got {count}")
+        # SQLAlchemy 2.x ``select(func.max(...))`` is the project-standard
+        # idiom (see existing ``save_composition_state`` at
+        # ``service.py:398``); using it here keeps the pattern uniform
+        # and gives mypy a typed ``int | None`` instead of the ``Any``
+        # that ``text(...)`` plus ``.first()`` produces. Closes
+        # synthesised review finding P-L-1 / L15.
+        current_max = conn.execute(
+            select(func.coalesce(func.max(chat_messages_table.c.sequence_no), 0)).where(chat_messages_table.c.session_id == session_id)
+        ).scalar_one()
+        return int(current_max) + 1
+
+    def _insert_chat_message(
+        self,
+        conn: Connection,
+        /,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        raw_content: str | None,
+        tool_calls: Any,
+        sequence_no: int,
+        writer_principal: str,
+        composition_state_id: str | None,
+        tool_call_id: str | None,
+        parent_assistant_id: str | None,
+        created_at: datetime,
+    ) -> str:
+        """Single-row insert into ``chat_messages`` with the supplied fields.
+
+        PRECONDITIONS (mechanically enforced — see body):
+
+        1. Caller MUST be inside ``self._session_write_lock(conn, session_id)``
+           in the same transaction. The session write lock is what makes
+           the ``_reserve_sequence_range`` allocation safe against
+           same-session concurrent writers; a writer that bypasses the
+           lock could persist a sequence_no that another transaction is
+           about to allocate.
+        2. Caller MUST have already obtained ``sequence_no`` from
+           ``_reserve_sequence_range``. This helper does NOT allocate
+           sequence numbers — it persists what the caller supplies.
+
+        ``created_at`` is supplied by the caller so multi-row inserts
+        in the same transaction (``persist_compose_turn``) and
+        same-transaction ``sessions.updated_at`` writes
+        (``add_message``) can share a single timestamp. Generating a
+        new ``datetime.now(UTC)`` inside this helper would produce
+        per-row drift visible in the audit trail.
+
+        ``raw_content`` is the audit-attribution column for assistant
+        messages whose visible ``content`` was rewritten by runtime
+        preflight redaction. It MUST be persisted as supplied —
+        silently discarding it would regress the pre-rev-4
+        ``add_message`` behaviour and create audit-data loss (per
+        CLAUDE.md, silent wrong results are worse than a crash).
+
+        If ``role == "tool"``, this helper additionally verifies that
+        ``parent_assistant_id`` references an assistant row in the
+        same session. The DB FK on
+        ``(parent_assistant_id, session_id)`` proves same-session
+        existence; SQL cannot portably enforce that the referenced
+        row's role is ``assistant``. The guard at the service-writer
+        boundary closes that gap.
+
+        Returns the newly-allocated UUID-shaped message id (so the
+        caller can persist downstream references — e.g.
+        ``tool_call_id`` parents — without a follow-up SELECT).
+        """
+        self._assert_session_write_lock_held(
+            conn,
+            session_id,
+            caller="_insert_chat_message",
+        )
+        if role == "tool":
+            if parent_assistant_id is None:
+                raise RuntimeError(f"_insert_chat_message: tool row requires parent_assistant_id (session={session_id!r})")
+            _assert_parent_assistant_message(
+                conn,
+                parent_assistant_id=parent_assistant_id,
+                session_id=session_id,
+                caller="_insert_chat_message",
+            )
+        msg_id = str(uuid.uuid4())
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=msg_id,
+                session_id=session_id,
+                role=role,
+                content=content,
+                raw_content=raw_content,
+                tool_calls=tool_calls,
+                sequence_no=sequence_no,
+                writer_principal=writer_principal,
+                composition_state_id=composition_state_id,
+                tool_call_id=tool_call_id,
+                parent_assistant_id=parent_assistant_id,
+                created_at=created_at,
+            )
+        )
+        return msg_id
+
+    def _insert_composition_state(
+        self,
+        conn: Connection,
+        *,
+        session_id: str,
+        state: CompositionStateData,
+        derived_from_state_id: str | None,
+        provenance: str,
+        created_at: datetime | None = None,
+        state_id: str | None = None,
+    ) -> str:
+        """Single-row insert into composition_states with per-session
+        version allocation under _session_write_lock.
+
+        PRECONDITION: caller MUST be inside
+        ``with self._session_write_lock(conn, session_id):`` in the same
+        transaction. The context is what makes the
+        ``SELECT COALESCE(MAX(version), 0) + 1 FROM composition_states
+        WHERE session_id = :sid`` allocation race-free under concurrent
+        writers — without it, two callers could both observe MAX = N,
+        both pick N+1, and the loser's INSERT would hit
+        ``uq_composition_state_version``. The locked-path
+        ``IntegrityError`` handler classifies that as a Tier-1
+        audit-integrity violation, fabricating a Tier-1 alert from a
+        benign contention loss. **Under ELSPETH's auditability standard
+        fabricated Tier-1 violations are evidence-tampering-class harm:
+        the audit trail asserts a violation that did not occur.** The
+        session write lock makes the SELECT-MAX-then-INSERT sequence
+        atomic against every other writer for this ``session_id`` on
+        both PostgreSQL and SQLite, so the fabrication path is
+        structurally unreachable. Closes B1/B3 from the Phase 1
+        plan-review synthesis. Also mirrors the precondition contract on
+        ``_reserve_sequence_range``.
+
+        Version allocation is per-session: the COALESCE query filters by
+        ``session_id`` because ``uq_composition_state_version`` is a
+        per-session constraint (see Task 1's CREATE TABLE). A global MAX
+        would silently break the per-session monotonic-version contract
+        every read path assumes.
+
+        This helper does NOT contain a retry loop. The lock + atomic
+        SELECT-INSERT makes one a defensive-programming anti-pattern.
+
+        Writes the real per-column schema (source/nodes/edges/outputs/
+        metadata_/is_valid/validation_errors/derived_from_state_id),
+        using the shared ``_enveloped_state_column(...)`` and
+        ``deep_thaw(...)`` patterns the existing inline inserts use today.
+
+        The ``provenance`` argument must satisfy the
+        ``ck_composition_states_provenance`` CHECK constraint added in
+        Task 3; passing an unknown value raises ``IntegrityError``.
+
+        The ``created_at`` argument is optional. When ``None`` (the
+        default), the helper stamps ``datetime.now(UTC)`` at insert
+        time. Callers that need cross-table timestamp consistency within
+        a single transaction (e.g. ``fork_session`` pre-computes ``now``
+        at the top of its sync block and reuses it across the
+        ``sessions``, ``composition_states``, and ``chat_messages``
+        inserts so all rows share one wall-clock instant) MUST pass an
+        explicit ``created_at``. Earlier B1 framing (helper hardcoding
+        ``now()`` silently changed fork timestamp semantics) is preserved.
+
+        The optional ``state_id`` exists for ``fork_session``, which
+        already precomputes ``copied_state_id_str`` and uses that same
+        id for chat-row ``composition_state_id`` FKs and returned
+        records. Other callers leave it ``None`` and let the helper
+        allocate a fresh UUID.
+        """
+        self._assert_session_write_lock_held(
+            conn,
+            session_id,
+            caller="_insert_composition_state",
+        )
+        # B1: allocate version under _session_write_lock. The
+        # SELECT-MAX-then-INSERT sequence is atomic against every other
+        # writer for this session because the caller is required to be
+        # inside ``_session_write_lock(conn, session_id)`` for the full
+        # transaction (see PRECONDITION above). The COALESCE pins the
+        # first state to version 1; the WHERE clause makes the
+        # allocation per-session, matching ``uq_composition_state_version``'s
+        # scope.
+        next_version = conn.execute(
+            select(func.coalesce(func.max(composition_states_table.c.version), 0) + 1).where(
+                composition_states_table.c.session_id == session_id
+            )
+        ).scalar_one()
+        allocated_state_id = state_id or str(uuid.uuid4())
+        conn.execute(
+            insert(composition_states_table).values(
+                id=allocated_state_id,
+                session_id=session_id,
+                version=int(next_version),
+                source=_enveloped_state_column(state.source),
+                nodes=_enveloped_state_column(state.nodes),
+                edges=_enveloped_state_column(state.edges),
+                outputs=_enveloped_state_column(state.outputs),
+                metadata_=_enveloped_state_column(state.metadata_),
+                is_valid=state.is_valid,
+                validation_errors=deep_thaw(state.validation_errors),
+                derived_from_state_id=derived_from_state_id,
+                provenance=provenance,
+                created_at=created_at if created_at is not None else datetime.now(UTC),
+            )
+        )
+        return allocated_state_id
+
     async def create_session(
         self,
         user_id: str,
@@ -504,17 +807,46 @@ class SessionServiceImpl:
     async def add_message(
         self,
         session_id: UUID,
-        role: Literal["user", "assistant", "system", "tool"],
+        role: ChatMessageRole,
         content: str,
+        *,
+        writer_principal: str,
         tool_calls: Sequence[Mapping[str, Any]] | None = None,
         composition_state_id: UUID | None = None,
         raw_content: str | None = None,
+        tool_call_id: str | None = None,
+        parent_assistant_id: UUID | None = None,
     ) -> ChatMessageRecord:
-        """Add a chat message and update the session's updated_at."""
-        msg_id = uuid.uuid4()
+        """Add a chat message and update the session's ``updated_at``.
+
+        BREAKING CHANGE in rev 4: ``writer_principal`` is now a required
+        keyword-only argument (must be one of the values listed in the
+        ``ck_chat_messages_writer_principal`` CHECK constraint). All
+        callers were updated atomically with this signature change per
+        the no-legacy single-cut policy.
+
+        Preserved behaviours from pre-rev-4:
+        - ``_assert_state_in_session`` cross-session guard fires when
+          ``composition_state_id`` is not None.
+        - ``sessions_table.updated_at`` is bumped to ``now``.
+        - ``raw_content`` is persisted verbatim when supplied.
+        - Returns ``ChatMessageRecord``, not just an id string.
+
+        New in rev 4:
+        - ``sequence_no`` is allocated under ``_session_write_lock``
+          (PostgreSQL advisory lock or SQLite per-session process lock),
+          replacing the implicit "last write wins" ordering.
+        - ``tool_call_id`` and ``parent_assistant_id`` MUST be set when
+          ``role='tool'`` and MUST be ``None`` otherwise; the
+          ``ck_chat_messages_tool_call_id_role`` and
+          ``ck_chat_messages_parent_role`` CHECK constraints enforce
+          this at write time.
+        """
         now = self._now()
         sid = str(session_id)
         csid = str(composition_state_id) if composition_state_id else None
+        pid = str(parent_assistant_id) if parent_assistant_id else None
+        msg_id_holder: dict[str, str] = {}
 
         def _sync() -> None:
             with self._engine.begin() as conn:
@@ -525,24 +857,34 @@ class SessionServiceImpl:
                         expected_session_id=sid,
                         caller="add_message",
                     )
-                conn.execute(
-                    insert(chat_messages_table).values(
-                        id=str(msg_id),
+                with self._session_write_lock(conn, sid):
+                    seq = self._reserve_sequence_range(conn, sid, count=1)
+                    msg_id_holder["id"] = self._insert_chat_message(
+                        conn,
                         session_id=sid,
                         role=role,
                         content=content,
                         raw_content=raw_content,
-                        tool_calls=tool_calls,
-                        created_at=now,
+                        # ``deep_thaw`` matches the persist_compose_turn
+                        # site: SQLAlchemy JSON serialisation handles raw
+                        # dicts/lists, but tool_calls may be a
+                        # ``MappingProxyType`` / ``tuple`` after frozen-
+                        # dataclass round-trips, which the JSON encoder
+                        # rejects.
+                        tool_calls=deep_thaw(tool_calls) if tool_calls else None,
+                        sequence_no=seq,
+                        writer_principal=writer_principal,
                         composition_state_id=csid,
+                        tool_call_id=tool_call_id,
+                        parent_assistant_id=pid,
+                        created_at=now,
                     )
-                )
                 conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
 
         await self._run_sync(_sync)
 
         return ChatMessageRecord(
-            id=msg_id,
+            id=UUID(msg_id_holder["id"]),
             session_id=session_id,
             role=role,
             content=content,
@@ -550,6 +892,9 @@ class SessionServiceImpl:
             tool_calls=tool_calls,
             created_at=now,
             composition_state_id=composition_state_id,
+            writer_principal=writer_principal,
+            tool_call_id=tool_call_id,
+            parent_assistant_id=parent_assistant_id,
         )
 
     async def get_messages(
@@ -558,14 +903,23 @@ class SessionServiceImpl:
         limit: int | None = 100,
         offset: int = 0,
     ) -> list[ChatMessageRecord]:
-        """Get messages for a session, ordered by created_at ascending."""
+        """Get messages for a session, ordered by ``sequence_no`` ascending.
+
+        Rev-4 (B2): the canonical ordering key is ``sequence_no``, allocated
+        under the per-session advisory/process write lock. ``created_at`` is
+        informational; on fast SQLite paths multiple rows in one
+        ``persist_compose_turn`` share a single timestamp, so ordering by
+        ``created_at`` produced arbitrary intra-turn ordering. The
+        per-session unique index ``ix_chat_messages_session_sequence``
+        makes the new key total within a session.
+        """
 
         def _sync() -> Any:
             with self._engine.begin() as conn:
                 return conn.execute(
                     select(chat_messages_table)
                     .where(chat_messages_table.c.session_id == str(session_id))
-                    .order_by(chat_messages_table.c.created_at)
+                    .order_by(chat_messages_table.c.sequence_no)
                     .limit(limit)
                     .offset(offset)
                 ).fetchall()
@@ -582,6 +936,9 @@ class SessionServiceImpl:
                 tool_calls=row.tool_calls,
                 created_at=self._ensure_utc(row.created_at),
                 composition_state_id=UUID(row.composition_state_id) if row.composition_state_id else None,
+                writer_principal=row.writer_principal,
+                tool_call_id=row.tool_call_id,
+                parent_assistant_id=UUID(row.parent_assistant_id) if row.parent_assistant_id else None,
             )
             for row in rows
         ]
@@ -599,50 +956,66 @@ class SessionServiceImpl:
         now = self._now()
         sid = str(session_id)
 
-        # Seam contract A: wrap JSON columns with _version envelope
-        # for schema evolution. deep_thaw() handles MappingProxyType→dict
-        # and tuple→list from freeze_fields().
-        def _enveloped(val: Any) -> Any:
-            raw = deep_thaw(val)
-            if raw is None:
-                return None
-            return {"_version": 1, "data": raw}
-
         def _sync() -> int:
-            # Retry loop handles concurrent version increment (TOCTOU).
-            # The UniqueConstraint on (session_id, version) is the real guard.
+            # B3 belt-and-suspenders — unreachable post-lock; remove in
+            # OQ-3-followup. With ``_session_write_lock`` held inside
+            # ``_try_insert_state``, the SELECT-MAX-then-INSERT sequence is
+            # serialised against every other writer for this session_id on
+            # both PostgreSQL (advisory lock) and SQLite (process-wide
+            # per-session RLock). The retry loop's ``IntegrityError`` arm is
+            # therefore provably unreachable in normal operation; keeping it
+            # as belt-and-suspenders bounds the blast radius if a future
+            # refactor accidentally drops the lock acquisition. Slated for
+            # removal once the new lock discipline has shaken out in staging.
             for _attempt in range(3):
                 try:
                     return _try_insert_state()
                 except IntegrityError:
-                    # The only constraint on this insert is uq_composition_state_version
-                    # (PK is UUID4, FK is pre-validated). Retry with next version number.
                     continue
             raise RuntimeError(f"Failed to allocate version for session {sid} after 3 attempts")
 
         def _try_insert_state() -> int:
             with self._engine.begin() as conn:
-                result = conn.execute(
-                    select(func.max(composition_states_table.c.version)).where(composition_states_table.c.session_id == sid)
-                ).scalar()
-                version = (result or 0) + 1
+                # B3 (Phase 1 plan-review synthesis): wrap SELECT-MAX +
+                # INSERT in the per-session write lock as the FIRST
+                # operation inside the transaction. Without this, this
+                # writer races against ``_insert_composition_state`` (and
+                # any future helper-routed writer) for the same session_id.
+                # The handler that fires on ``uq_composition_state_version``
+                # increments a Tier-1 audit-integrity counter; under
+                # ELSPETH's auditability standard, fabricating a Tier-1
+                # alert from a benign contention loss is evidence-tampering-
+                # class harm. The lock makes the SELECT-MAX-then-INSERT
+                # sequence atomic against every other writer on both
+                # PostgreSQL (advisory lock) and SQLite (per-session
+                # RLock). Plan §2128-2133 explicitly chose lock-retrofit-
+                # in-place over helper-routing here because consolidating
+                # this site through ``_insert_composition_state`` would
+                # either lose the retry semantics or grow per-site escape
+                # hatches in the helper signature.
+                with self._session_write_lock(conn, sid):
+                    result = conn.execute(
+                        select(func.max(composition_states_table.c.version)).where(composition_states_table.c.session_id == sid)
+                    ).scalar()
+                    version = (result or 0) + 1
 
-                conn.execute(
-                    insert(composition_states_table).values(
-                        id=str(state_id),
-                        session_id=sid,
-                        version=version,
-                        source=_enveloped(state.source),
-                        nodes=_enveloped(state.nodes),
-                        edges=_enveloped(state.edges),
-                        outputs=_enveloped(state.outputs),
-                        metadata_=_enveloped(state.metadata_),
-                        is_valid=state.is_valid,
-                        validation_errors=deep_thaw(state.validation_errors),
-                        derived_from_state_id=None,
-                        created_at=now,
+                    conn.execute(
+                        insert(composition_states_table).values(
+                            id=str(state_id),
+                            session_id=sid,
+                            version=version,
+                            source=_enveloped_state_column(state.source),
+                            nodes=_enveloped_state_column(state.nodes),
+                            edges=_enveloped_state_column(state.edges),
+                            outputs=_enveloped_state_column(state.outputs),
+                            metadata_=_enveloped_state_column(state.metadata_),
+                            is_valid=state.is_valid,
+                            validation_errors=deep_thaw(state.validation_errors),
+                            derived_from_state_id=None,
+                            provenance="session_seed",
+                            created_at=now,
+                        )
                     )
-                )
                 return version
 
         version = await self._run_sync(_sync)
@@ -1014,74 +1387,89 @@ class SessionServiceImpl:
         now = self._now()
 
         def _sync() -> tuple[Any, int]:
-            # Retry loop handles concurrent version increment (TOCTOU).
-            # The UniqueConstraint on (session_id, version) is the real guard.
+            # B3 belt-and-suspenders — unreachable post-lock; remove in
+            # OQ-3-followup. With ``_session_write_lock`` held inside
+            # ``_try_insert_revert``, the SELECT-MAX-then-INSERT sequence is
+            # serialised against every other writer for this session_id. The
+            # retry loop's ``IntegrityError`` arm is therefore provably
+            # unreachable in normal operation; same rationale as
+            # ``save_composition_state._sync`` above.
             for _attempt in range(3):
                 try:
                     return _try_insert_revert()
                 except IntegrityError:
-                    # The only constraint on this insert is uq_composition_state_version
-                    # (PK is UUID4, FK is pre-validated). Retry with next version number.
                     continue
             raise RuntimeError(f"Failed to allocate version for session {sid} after 3 attempts")
 
         def _try_insert_revert() -> tuple[Any, int]:
             with self._engine.begin() as conn:
-                prior_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == str(state_id))).fetchone()
+                # B3 (Phase 1 plan-review synthesis): wrap prior-row SELECT
+                # + SELECT-MAX + INSERT in the per-session write lock as
+                # the FIRST operation inside the transaction. Same shape
+                # and rationale as ``save_composition_state._try_insert_state``;
+                # plan §2128-2133 chose lock-retrofit-in-place over
+                # helper-routing here so the per-site retry semantics are
+                # preserved without growing escape hatches in
+                # ``_insert_composition_state``.
+                with self._session_write_lock(conn, sid):
+                    prior_row = conn.execute(
+                        select(composition_states_table).where(composition_states_table.c.id == str(state_id))
+                    ).fetchone()
 
-                # NOTE: Both branches below raise ValueError (not RuntimeError),
-                # and the HTTP handler at routes.py maps ValueError to 404. This
-                # is INTENTIONAL and distinct from _assert_state_in_session
-                # (module-level) which raises RuntimeError on cross-session
-                # references:
-                #
-                #   * _assert_state_in_session guards internal callers that
-                #     supply BOTH session_id and state_id from the same scope
-                #     (e.g. add_message, create_run). A mismatch there is a
-                #     caller-code contract violation — RuntimeError/500 is
-                #     the correct signal because no legitimate user input
-                #     can produce it.
-                #
-                #   * set_active_state receives state_id from the HTTP body
-                #     while session_id comes from the authenticated URL path.
-                #     A state owned by another user's session is
-                #     indistinguishable from "does not exist" to this user —
-                #     surfacing a RuntimeError/500 would leak the existence
-                #     of that other session's states. Collapsing both cases
-                #     to ValueError -> 404 is the correct information-hiding
-                #     boundary for user-supplied identifiers.
-                #
-                # If you find yourself tempted to consolidate these checks,
-                # reconsider: the exception type is load-bearing because it
-                # encodes WHO is wrong (caller code vs. user) and the HTTP
-                # status depends on it.
-                if prior_row is None:
-                    raise ValueError(f"State not found: {state_id}")
-                if prior_row.session_id != sid:
-                    raise ValueError(f"State {state_id} does not belong to session {session_id}")
+                    # NOTE: Both branches below raise ValueError (not RuntimeError),
+                    # and the HTTP handler at routes.py maps ValueError to 404. This
+                    # is INTENTIONAL and distinct from _assert_state_in_session
+                    # (module-level) which raises RuntimeError on cross-session
+                    # references:
+                    #
+                    #   * _assert_state_in_session guards internal callers that
+                    #     supply BOTH session_id and state_id from the same scope
+                    #     (e.g. add_message, create_run). A mismatch there is a
+                    #     caller-code contract violation — RuntimeError/500 is
+                    #     the correct signal because no legitimate user input
+                    #     can produce it.
+                    #
+                    #   * set_active_state receives state_id from the HTTP body
+                    #     while session_id comes from the authenticated URL path.
+                    #     A state owned by another user's session is
+                    #     indistinguishable from "does not exist" to this user —
+                    #     surfacing a RuntimeError/500 would leak the existence
+                    #     of that other session's states. Collapsing both cases
+                    #     to ValueError -> 404 is the correct information-hiding
+                    #     boundary for user-supplied identifiers.
+                    #
+                    # If you find yourself tempted to consolidate these checks,
+                    # reconsider: the exception type is load-bearing because it
+                    # encodes WHO is wrong (caller code vs. user) and the HTTP
+                    # status depends on it.
+                    if prior_row is None:
+                        raise ValueError(f"State not found: {state_id}")
+                    if prior_row.session_id != sid:
+                        raise ValueError(f"State {state_id} does not belong to session {session_id}")
 
-                max_version = conn.execute(
-                    select(func.max(composition_states_table.c.version)).where(composition_states_table.c.session_id == sid)
-                ).scalar()
-                new_version = (max_version or 0) + 1
+                    max_version = conn.execute(
+                        select(func.max(composition_states_table.c.version)).where(composition_states_table.c.session_id == sid)
+                    ).scalar()
+                    new_version = (max_version or 0) + 1
 
-                conn.execute(
-                    insert(composition_states_table).values(
-                        id=str(new_state_id),
-                        session_id=sid,
-                        version=new_version,
-                        # prior_row.* values are already enveloped — copy as-is
-                        source=prior_row.source,
-                        nodes=prior_row.nodes,
-                        edges=prior_row.edges,
-                        outputs=prior_row.outputs,
-                        metadata_=prior_row.metadata_,
-                        is_valid=prior_row.is_valid,
-                        validation_errors=prior_row.validation_errors,
-                        derived_from_state_id=str(state_id),
-                        created_at=now,
+                    conn.execute(
+                        insert(composition_states_table).values(
+                            id=str(new_state_id),
+                            session_id=sid,
+                            version=new_version,
+                            # prior_row.* values are already enveloped — copy as-is
+                            source=prior_row.source,
+                            nodes=prior_row.nodes,
+                            edges=prior_row.edges,
+                            outputs=prior_row.outputs,
+                            metadata_=prior_row.metadata_,
+                            is_valid=prior_row.is_valid,
+                            validation_errors=prior_row.validation_errors,
+                            derived_from_state_id=str(state_id),
+                            provenance="session_seed",
+                            created_at=now,
+                        )
                     )
-                )
                 return prior_row, new_version
 
         prior_row, new_version = await self._run_sync(_sync)
@@ -1344,26 +1732,68 @@ class SessionServiceImpl:
         copied_state_id = uuid.uuid4() if source_state_record is not None else None
         copied_state_id_str = str(copied_state_id) if copied_state_id else None
 
+        # §14.6: build a source-id → copied-id map for in-slice assistant rows
+        # BEFORE building msg_records_data so tool rows in the slice can rewrite
+        # their ``parent_assistant_id`` to the copied assistant's new id.
+        # Copying the source ``parent_assistant_id`` verbatim would point at
+        # the SOURCE session's assistant; the copied tool row lives in a NEW
+        # session and the FK ``(parent_assistant_id, session_id)`` would fail.
+        source_to_copied_assistant_id: dict[str, str] = {}
+        for msg in messages_to_copy:
+            if msg.role == "assistant":
+                source_to_copied_assistant_id[str(msg.id)] = str(uuid.uuid4())
+
         # Prepare all message rows upfront — preserve original created_at
         # so get_messages() ordering is deterministic.  Stamping all rows
         # with `now` would make them indistinguishable by timestamp and
         # produce non-deterministic ordering on subsequent reads.
         msg_records_data: list[dict[str, Any]] = []
         for msg in messages_to_copy:
+            if msg.role == "assistant":
+                copied_msg_id = source_to_copied_assistant_id[str(msg.id)]
+            else:
+                copied_msg_id = str(uuid.uuid4())
+
+            copied_parent_assistant_id: str | None = None
+            if msg.role == "tool":
+                # CHECK constraint biconditional: tool rows must carry both
+                # ``tool_call_id`` and ``parent_assistant_id``. The source row
+                # already had them (Task 1's biconditional applies there too);
+                # an absent value here means the source row predates the
+                # cutover — that's a Tier-1 audit anomaly, crash with a named
+                # error rather than letting the FK fire generically.
+                if msg.parent_assistant_id is None:
+                    raise RuntimeError(f"fork_session: tool message id={msg.id} has no parent assistant")
+                copied_parent_assistant_id = source_to_copied_assistant_id.get(str(msg.parent_assistant_id))
+                if copied_parent_assistant_id is None:
+                    # Slice ``[:fork_idx]`` excluded the assistant message
+                    # this tool row depends on. Detect it pre-batch with a
+                    # named error per the offensive-programming policy.
+                    raise RuntimeError(f"fork slice excludes parent assistant of tool message id={msg.id}")
+
             msg_records_data.append(
                 {
-                    "id": str(uuid.uuid4()),
+                    "id": copied_msg_id,
                     "session_id": new_session_id_str,
                     "role": msg.role,
                     "content": msg.content,
                     # raw_content preserves audit provenance for intercepted assistant turns
                     "raw_content": msg.raw_content,
                     "tool_calls": deep_thaw(msg.tool_calls) if msg.tool_calls else None,
+                    "tool_call_id": msg.tool_call_id,
+                    "parent_assistant_id": copied_parent_assistant_id,
+                    # Preserve the source row's stored writer; deriving from
+                    # role would fabricate provenance for any source row whose
+                    # writer differs from the role-keyed default (admin tool,
+                    # future re-classifications, etc.).
+                    "writer_principal": msg.writer_principal,
                     "created_at": msg.created_at,
                     "composition_state_id": None,  # Don't reference source session states
                 }
             )
-        # System message — no raw_content (synthetic, not from the LLM)
+        # System message — no raw_content (synthetic, not from the LLM).
+        # writer_principal="session_fork" because this row is unambiguously
+        # authored by the fork operation, not by any route handler.
         system_msg_id = str(uuid.uuid4())
         msg_records_data.append(
             {
@@ -1373,14 +1803,18 @@ class SessionServiceImpl:
                 "content": "Conversation forked from an earlier point.",
                 "raw_content": None,
                 "tool_calls": None,
+                "tool_call_id": None,
+                "parent_assistant_id": None,
+                "writer_principal": "session_fork",
                 "created_at": now,
                 "composition_state_id": None,
             }
         )
         # New edited user message — provenance points to COPIED state, not source.
-        # Offset by 1 microsecond so get_messages() ordering is deterministic
-        # (system note before user turn).  Without this, SQLite/Postgres can
-        # return the two rows in either order since they share created_at.
+        # created_at = now is correct here: ordering is enforced by sequence_no
+        # (allocated under the new-session write lock inside _sync), not by
+        # created_at. The microsecond offset that earlier guarded against
+        # SQLite same-microsecond ordering ambiguity is no longer needed.
         # raw_content is None: this is a new user-authored message, not an LLM turn.
         new_user_msg_id = str(uuid.uuid4())
         msg_records_data.append(
@@ -1391,16 +1825,13 @@ class SessionServiceImpl:
                 "content": new_message_content,
                 "raw_content": None,
                 "tool_calls": None,
-                "created_at": now + timedelta(microseconds=1),
+                "tool_call_id": None,
+                "parent_assistant_id": None,
+                "writer_principal": "session_fork",
+                "created_at": now,
                 "composition_state_id": copied_state_id_str,
             }
         )
-
-        def _enveloped(val: Any) -> Any:
-            raw = deep_thaw(val)
-            if raw is None:
-                return None
-            return {"_version": 1, "data": raw}
 
         def _sync() -> int | None:
             """Single atomic transaction for the entire fork."""
@@ -1419,30 +1850,53 @@ class SessionServiceImpl:
                     )
                 )
 
-                # 2. Copy composition state (before messages, so FK is valid)
+                # 2. Copy composition state + reserve chat sequence range +
+                # batch-insert chat rows. All under one ``_session_write_lock``
+                # context so state-version and chat-sequence allocation share
+                # the same SQLite/PostgreSQL serialization boundary. The new
+                # session id was minted seconds ago and no other writer can
+                # know it yet, so the lock is technically uncontended; we
+                # acquire it because the helpers' precondition contract
+                # requires it.
                 state_version: int | None = None
-                if source_state_record is not None and copied_state_id_str is not None:
-                    state_version = 1
-                    conn.execute(
-                        insert(composition_states_table).values(
-                            id=copied_state_id_str,
+                with self._session_write_lock(conn, new_session_id_str):
+                    if source_state_record is not None and copied_state_id_str is not None:
+                        self._insert_composition_state(
+                            conn,
                             session_id=new_session_id_str,
-                            version=1,
-                            source=_enveloped(source_state_record.source),
-                            nodes=_enveloped(source_state_record.nodes),
-                            edges=_enveloped(source_state_record.edges),
-                            outputs=_enveloped(source_state_record.outputs),
-                            metadata_=_enveloped(source_state_record.metadata_),
-                            is_valid=source_state_record.is_valid,
-                            validation_errors=deep_thaw(source_state_record.validation_errors),
+                            # B1: no ``version=`` kwarg. The helper allocates
+                            # ``COALESCE(MAX(version), 0) + 1`` under the held
+                            # lock. For a freshly minted session this is always
+                            # 1, but the contract is per-session monotonicity,
+                            # not "always 1" — so the literal ``state_version =
+                            # 1`` below is correct because of the freshness
+                            # invariant, not because the helper is hard-coded.
+                            state=CompositionStateData(
+                                source=source_state_record.source,
+                                nodes=source_state_record.nodes,
+                                edges=source_state_record.edges,
+                                outputs=source_state_record.outputs,
+                                metadata_=source_state_record.metadata_,
+                                is_valid=source_state_record.is_valid,
+                                validation_errors=source_state_record.validation_errors,
+                            ),
                             derived_from_state_id=None,
-                            created_at=now,
+                            provenance="session_fork",
+                            created_at=now,  # cross-table timestamp consistency
+                            state_id=copied_state_id_str,
                         )
-                    )
+                        state_version = 1
 
-                # 3. Insert all messages in batch
-                if msg_records_data:
-                    conn.execute(insert(chat_messages_table), msg_records_data)
+                    # 3. Reserve the chat sequence range and assign sequence_no
+                    # to every row in list order before the batch insert.
+                    # ``msg_records_data`` already encodes the intended chat
+                    # ordering — copied messages first (in source order), then
+                    # the system fork notice, then the new user message.
+                    if msg_records_data:
+                        base_seq = self._reserve_sequence_range(conn, new_session_id_str, count=len(msg_records_data))
+                        for sequence_offset, record in enumerate(msg_records_data):
+                            record["sequence_no"] = base_seq + sequence_offset
+                        conn.execute(insert(chat_messages_table), msg_records_data)
 
                 return state_version
 
@@ -1460,6 +1914,11 @@ class SessionServiceImpl:
             forked_from_message_id=fork_message_id,
         )
 
+        # §14.6 backstop: copied ``role="audit"`` rows live in the DB for
+        # audit fidelity, but the fork response payload is the user-facing
+        # ``new_messages`` list and must exclude them. Filter at the
+        # response boundary; the underlying batch insert above still
+        # persisted them.
         new_messages = [
             ChatMessageRecord(
                 id=UUID(d["id"]),
@@ -1470,8 +1929,12 @@ class SessionServiceImpl:
                 tool_calls=d["tool_calls"],
                 created_at=d["created_at"],
                 composition_state_id=UUID(d["composition_state_id"]) if d["composition_state_id"] else None,
+                writer_principal=d["writer_principal"],
+                tool_call_id=d["tool_call_id"],
+                parent_assistant_id=UUID(d["parent_assistant_id"]) if d["parent_assistant_id"] else None,
             )
             for d in msg_records_data
+            if d["role"] != "audit"
         ]
 
         copied_state: CompositionStateRecord | None = None

@@ -128,6 +128,9 @@ class TestCompositionStateUniqueConstraint:
                     session_id=session_id,
                     version=1,
                     is_valid=False,
+                    # Plan §2294: schema-test direct insert must supply
+                    # provenance after Task 3's NOT NULL/CHECK addition.
+                    provenance="session_seed",
                     created_at=datetime.now(UTC),
                 )
             )
@@ -139,6 +142,12 @@ class TestCompositionStateUniqueConstraint:
                         session_id=session_id,
                         version=1,
                         is_valid=False,
+                        # Plan §2294: provenance required even on the
+                        # expected-to-fail row, so the failure exercises
+                        # ``uq_composition_state_version`` (the actual
+                        # subject under test) rather than the provenance
+                        # NOT NULL constraint.
+                        provenance="session_seed",
                         created_at=datetime.now(UTC),
                     )
                 )
@@ -172,6 +181,8 @@ class TestSessionForeignKeys:
                     session_id=session_id,
                     role="user",
                     content="Hello",
+                    sequence_no=1,
+                    writer_principal="route_user_message",
                     created_at=datetime.now(UTC),
                 )
             )
@@ -190,6 +201,8 @@ class TestSessionForeignKeys:
                         session_id="nonexistent-session",
                         role="user",
                         content="Orphan message",
+                        sequence_no=1,
+                        writer_principal="route_user_message",
                         created_at=datetime.now(UTC),
                     )
                 )
@@ -217,6 +230,8 @@ class TestCheckConstraints:
                         session_id=session_id,
                         role="invalid_role",
                         content="Hello",
+                        sequence_no=1,
+                        writer_principal="route_user_message",
                         created_at=datetime.now(UTC),
                     )
                 )
@@ -240,6 +255,10 @@ class TestCheckConstraints:
                     session_id=session_id,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: schema-test direct insert; provenance
+                    # required for the FK-target row that subsequent
+                    # runs_table inserts depend on.
+                    provenance="session_seed",
                     created_at=datetime.now(UTC),
                 )
             )
@@ -276,6 +295,10 @@ class TestCheckConstraints:
                     session_id=session_id,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: schema-test direct insert; provenance
+                    # required for the FK-target row that subsequent
+                    # runs_table inserts depend on.
+                    provenance="session_seed",
                     created_at=datetime.now(UTC),
                 )
             )

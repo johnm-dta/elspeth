@@ -60,6 +60,7 @@ from elspeth.web.sessions.converters import state_from_record as _state_from_rec
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
+    ChatMessageRole,
     CompositionStateData,
     CompositionStateRecord,
     InvalidForkTargetError,
@@ -603,7 +604,18 @@ def _composer_history_content(message: ChatMessageRecord) -> str:
 
 
 def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
-    """Return true when a persisted chat row is an audit-only composer tool row."""
+    """Return true when a persisted chat row is an audit-only composer row.
+
+    Rev-4: ``role="audit"`` rows are unconditionally audit-only — they exist
+    precisely because there is no parent assistant to carry a real
+    ``role="tool"`` row. The legacy ``role="tool"`` audit-envelope path is
+    preserved for the dispatch trail of in-loop tool calls produced by the
+    compose loop; those rows are excluded from prompt history because
+    replaying them without the assistant's tool-call request would create
+    orphan OpenAI tool messages.
+    """
+    if message.role == "audit":
+        return True
     if message.role != "tool":
         return False
     if message.tool_calls is None:
@@ -620,8 +632,13 @@ def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
 
 
 def _is_composer_llm_audit_tool_message(message: ChatMessageRecord) -> bool:
-    """Return true only for persisted composer LLM-call audit sidecars."""
-    if message.role != "tool" or message.tool_calls is None:
+    """Return true only for persisted composer LLM-call audit sidecars.
+
+    Rev-4: LLM-call audit rows are persisted with ``role="audit"`` (they
+    have no real OpenAI tool-call identity, so they cannot be ``role="tool"``
+    after the parent-CHECK biconditional landed in Task 1).
+    """
+    if message.role != "audit" or message.tool_calls is None:
         return False
     return any("_kind" in tool_call and tool_call["_kind"] == "llm_call_audit" for tool_call in message.tool_calls)
 
@@ -715,10 +732,20 @@ async def _persist_tool_invocations(
     session_id: UUID,
     tool_invocations: tuple[ComposerToolInvocation, ...],
     composition_state_id: UUID | None,
+    *,
+    parent_assistant_id: UUID | None = None,
 ) -> None:
-    """Persist per-tool-call audit records as ``role=tool`` chat messages.
+    """Persist per-tool-call audit records, splitting role by parent presence.
 
-    Each :class:`ComposerToolInvocation` lands as one ``role=tool`` row whose
+    Rev-4: when ``parent_assistant_id`` is supplied (success-path callers
+    after the assistant row was persisted), the row uses ``role="tool"``
+    with the OpenAI-shaped tool-call linkage. When the caller has no
+    assistant row (failure / convergence / preflight paths), the row uses
+    ``role="audit"`` — an internal-only role for audit breadcrumbs that
+    cannot satisfy the ``ck_chat_messages_parent_role`` /
+    ``ck_chat_messages_tool_call_id_role`` biconditional CHECKs.
+
+    Each :class:`ComposerToolInvocation` still lands as one chat row whose
     ``tool_calls`` JSON column carries the audit envelope under a ``_kind``
     discriminator (see :func:`elspeth.web.composer.audit.audit_envelope`).
 
@@ -762,13 +789,17 @@ async def _persist_tool_invocations(
                     "error_message": invocation.error_message,
                 }
             )
+        role: ChatMessageRole = "tool" if parent_assistant_id is not None else "audit"
         try:
             await service.add_message(
                 session_id,
-                "tool",
+                role,
                 content,
                 tool_calls=[audit_envelope(invocation)],
                 composition_state_id=composition_state_id,
+                writer_principal="compose_loop",
+                tool_call_id=invocation.tool_call_id if role == "tool" else None,
+                parent_assistant_id=parent_assistant_id if role == "tool" else None,
             )
         except SQLAlchemyError as save_err:
             slog.error(
@@ -816,10 +847,11 @@ async def _persist_llm_calls(
         try:
             await service.add_message(
                 session_id,
-                "tool",
+                "audit",
                 content,
                 tool_calls=[llm_call_audit_envelope(call)],
                 composition_state_id=composition_state_id,
+                writer_principal="compose_loop",
             )
         except SQLAlchemyError as save_err:
             slog.error(
@@ -1666,6 +1698,7 @@ def create_session_router() -> APIRouter:
                 "user",
                 body.content,
                 composition_state_id=pre_send_state_id,
+                writer_principal="route_user_message",
             )
             progress_registry = _get_composer_progress_registry(request)
             progress_sink = _composer_progress_sink(
@@ -2052,6 +2085,7 @@ def create_session_router() -> APIRouter:
                     result.message,
                     composition_state_id=post_compose_state_id,
                     raw_content=result.raw_assistant_content,
+                    writer_principal="compose_loop",
                 )
                 # 6b. Persist per-tool-call audit trail. Each ComposerToolInvocation
                 # lands as one role=tool chat message linked to the post-compose
@@ -2063,6 +2097,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         result.tool_invocations,
                         post_compose_state_id,
+                        parent_assistant_id=assistant_msg.id,
                     )
                 if result.llm_calls:
                     await _persist_llm_calls(
@@ -2499,6 +2534,7 @@ def create_session_router() -> APIRouter:
                     result.message,
                     composition_state_id=post_compose_state_id,
                     raw_content=result.raw_assistant_content,
+                    writer_principal="compose_loop",
                 )
                 # Per-tool-call audit trail (recompose path; symmetric with send_message).
                 if result.tool_invocations:
@@ -2507,6 +2543,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         result.tool_invocations,
                         post_compose_state_id,
+                        parent_assistant_id=assistant_msg.id,
                     )
                 if result.llm_calls:
                     await _persist_llm_calls(
@@ -2729,6 +2766,7 @@ def create_session_router() -> APIRouter:
             session.id,
             role="system",
             content=f"Pipeline reverted to version {original_state.version}.",
+            writer_principal="route_system_message",
         )
 
         return _state_response(new_state)
@@ -2967,6 +3005,9 @@ def create_session_router() -> APIRouter:
                         tool_calls=user_msg.tool_calls,
                         created_at=user_msg.created_at,
                         composition_state_id=copied_state.id,
+                        writer_principal=user_msg.writer_principal,
+                        tool_call_id=user_msg.tool_call_id,
+                        parent_assistant_id=user_msg.parent_assistant_id,
                     )
         except BlobQuotaExceededError:
             # Build the HTTPException up-front so cleanup failures can be

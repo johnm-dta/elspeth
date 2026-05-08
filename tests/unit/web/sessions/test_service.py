@@ -95,7 +95,7 @@ class TestSessionCRUD:
         s1 = await service.create_session("alice", "First", "local")
         await service.create_session("alice", "Second", "local")
         # Add a message to s1 to update its updated_at
-        await service.add_message(s1.id, "user", "hello")
+        await service.add_message(s1.id, "user", "hello", writer_principal="route_user_message")
 
         sessions = await service.list_sessions("alice", "local")
         # s1 should be first (most recently updated)
@@ -104,7 +104,7 @@ class TestSessionCRUD:
     @pytest.mark.asyncio
     async def test_archive_session(self, service) -> None:
         session = await service.create_session("alice", "To Archive", "local")
-        await service.add_message(session.id, "user", "hello")
+        await service.add_message(session.id, "user", "hello", writer_principal="route_user_message")
         await service.archive_session(session.id)
 
         with pytest.raises(ValueError):
@@ -187,8 +187,8 @@ class TestMessagePersistence:
     @pytest.mark.asyncio
     async def test_add_and_get_messages(self, service) -> None:
         session = await service.create_session("alice", "Chat", "local")
-        msg1 = await service.add_message(session.id, "user", "Hello")
-        await service.add_message(session.id, "assistant", "Hi there")
+        msg1 = await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "Hi there", writer_principal="compose_loop")
 
         assert isinstance(msg1, ChatMessageRecord)
         assert msg1.role == "user"
@@ -202,9 +202,9 @@ class TestMessagePersistence:
     @pytest.mark.asyncio
     async def test_messages_ordered_by_created_at_asc(self, service) -> None:
         session = await service.create_session("alice", "Chat", "local")
-        await service.add_message(session.id, "user", "First")
-        await service.add_message(session.id, "assistant", "Second")
-        await service.add_message(session.id, "user", "Third")
+        await service.add_message(session.id, "user", "First", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "Second", writer_principal="compose_loop")
+        await service.add_message(session.id, "user", "Third", writer_principal="route_user_message")
 
         messages = await service.get_messages(session.id)
         assert [m.content for m in messages] == ["First", "Second", "Third"]
@@ -227,6 +227,7 @@ class TestMessagePersistence:
             "assistant",
             "Setting source",
             tool_calls=tool_calls_data,
+            writer_principal="compose_loop",
         )
         assert msg.tool_calls is not None
 
@@ -234,7 +235,7 @@ class TestMessagePersistence:
     async def test_add_message_updates_session_updated_at(self, service) -> None:
         session = await service.create_session("alice", "Chat", "local")
         original_updated = session.updated_at.replace(tzinfo=None)
-        await service.add_message(session.id, "user", "hello")
+        await service.add_message(session.id, "user", "hello", writer_principal="route_user_message")
         refreshed = await service.get_session(session.id)
         # SQLite strips timezone info; compare naive datetimes (both are UTC)
         refreshed_updated = refreshed.updated_at.replace(tzinfo=None)
@@ -1338,7 +1339,7 @@ class TestPagination:
     async def test_get_messages_limit(self, service) -> None:
         session = await service.create_session("alice", "Chat", "local")
         for i in range(5):
-            await service.add_message(session.id, "user", f"Message {i}")
+            await service.add_message(session.id, "user", f"Message {i}", writer_principal="route_user_message")
         messages = await service.get_messages(session.id, limit=3)
         assert len(messages) == 3
         assert messages[0].content == "Message 0"
@@ -1347,7 +1348,7 @@ class TestPagination:
     async def test_get_messages_offset(self, service) -> None:
         session = await service.create_session("alice", "Chat", "local")
         for i in range(5):
-            await service.add_message(session.id, "user", f"Message {i}")
+            await service.add_message(session.id, "user", f"Message {i}", writer_principal="route_user_message")
         messages = await service.get_messages(session.id, limit=2, offset=3)
         assert len(messages) == 2
         assert messages[0].content == "Message 3"

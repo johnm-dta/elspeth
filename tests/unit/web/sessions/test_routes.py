@@ -19,6 +19,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_audit import (
+    ComposerToolInvocation,
+    ComposerToolStatus,
+)
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
@@ -139,9 +143,10 @@ def _llm_call_audit_tool_calls(call: ComposerLLMCall | None = None) -> list[dict
 
 
 def _llm_call_audit_rows(messages: Sequence[ChatMessageRecord]) -> list[tuple[ChatMessageRecord, Mapping[str, Any]]]:
+    """Rev-4: LLM-call audit sidecars are stored with ``role="audit"``."""
     rows: list[tuple[ChatMessageRecord, Mapping[str, Any]]] = []
     for message in messages:
-        if message.role != "tool" or message.tool_calls is None:
+        if message.role != "audit" or message.tool_calls is None:
             continue
         first_tool_call = message.tool_calls[0]
         if first_tool_call.get("_kind") == "llm_call_audit":
@@ -258,9 +263,13 @@ class _ProgressRouteSessionService:
         session_id: uuid.UUID,
         role: ChatMessageRole,
         content: str,
+        *,
+        writer_principal: str,
         tool_calls=None,
         composition_state_id: uuid.UUID | None = None,
         raw_content: str | None = None,
+        tool_call_id: str | None = None,
+        parent_assistant_id: uuid.UUID | None = None,
     ) -> ChatMessageRecord:
         if session_id != self.session.id:
             raise ValueError("Session not found")
@@ -273,6 +282,9 @@ class _ProgressRouteSessionService:
             tool_calls=tool_calls,
             created_at=datetime.now(UTC),
             composition_state_id=composition_state_id,
+            writer_principal=writer_principal,
+            tool_call_id=tool_call_id,
+            parent_assistant_id=parent_assistant_id,
         )
         self.messages.append(message)
         return message
@@ -1721,6 +1733,7 @@ class TestMessageRoutes:
                         },
                     }
                 ],
+                writer_principal="compose_loop",
             )
         )
         loop.close()
@@ -1750,21 +1763,28 @@ class TestMessageRoutes:
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
+            # Rev-4: audit-only breadcrumb rows (no real assistant parent)
+            # are persisted with ``role="audit"`` so the
+            # ``ck_chat_messages_parent_role`` biconditional is satisfied.
+            # Pre-rev-4 stored these as ``role="tool"`` with no parent.
             loop.run_until_complete(
                 service.add_message(
                     session_id,
-                    "tool",
+                    "audit",
                     '{"success": true}',
                     tool_calls=_audit_tool_calls("call-1"),
+                    writer_principal="compose_loop",
                 )
             )
-            loop.run_until_complete(service.add_message(session_id, "assistant", "I updated the pipeline."))
+            loop.run_until_complete(
+                service.add_message(session_id, "assistant", "I updated the pipeline.", writer_principal="compose_loop")
+            )
             persisted = loop.run_until_complete(service.get_messages(session_id, limit=None))
         finally:
             loop.close()
 
-        assert [message.role for message in persisted] == ["user", "tool", "assistant"]
+        assert [message.role for message in persisted] == ["user", "audit", "assistant"]
 
         msgs_resp = client.get(f"/api/sessions/{session_id}/messages")
         assert msgs_resp.status_code == 200
@@ -1827,19 +1847,24 @@ class TestMessageRoutes:
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
+            # Rev-4: dispatch-trail audit envelopes (no real assistant
+            # parent) and LLM-call audit sidecars are persisted with
+            # ``role="audit"`` (the parent-CHECK biconditional rejects
+            # ``role="tool"`` here).
             loop.run_until_complete(
                 service.add_message(
                     session_id,
-                    "tool",
+                    "audit",
                     '{"success": true}',
                     tool_calls=_audit_tool_calls("call-tool"),
+                    writer_principal="compose_loop",
                 )
             )
             loop.run_until_complete(
                 service.add_message(
                     session_id,
-                    "tool",
+                    "audit",
                     '{"_kind": "llm_call_audit", "total_tokens": 21, "provider_cost": 0.0037}',
                     tool_calls=_llm_call_audit_tool_calls(
                         _llm_call(
@@ -1848,9 +1873,10 @@ class TestMessageRoutes:
                             provider_cost_source="response_usage.cost",
                         )
                     ),
+                    writer_principal="compose_loop",
                 )
             )
-            loop.run_until_complete(service.add_message(session_id, "assistant", "Done."))
+            loop.run_until_complete(service.add_message(session_id, "assistant", "Done.", writer_principal="compose_loop"))
         finally:
             loop.close()
 
@@ -1861,7 +1887,10 @@ class TestMessageRoutes:
         audit_resp = client.get(f"/api/sessions/{session_id}/messages?include_llm_audit=true")
         assert audit_resp.status_code == 200
         messages = audit_resp.json()
-        assert [message["role"] for message in messages] == ["user", "tool", "assistant"]
+        # Rev-4: the LLM-call audit sidecar surfaces as ``role="audit"``
+        # in the response (it was previously surfaced as ``role="tool"``
+        # because that's how it was persisted).
+        assert [message["role"] for message in messages] == ["user", "audit", "assistant"]
         tool_calls = messages[1]["tool_calls"]
         assert tool_calls[0]["_kind"] == "llm_call_audit"
         assert tool_calls[0]["call"]["provider_cost"] == 0.0037
@@ -1885,7 +1914,72 @@ class TestMessageRoutes:
         async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
             role = args[1]
             tool_calls = kwargs.get("tool_calls")
-            if role == "tool" and tool_calls and tool_calls[0].get("_kind") == "llm_call_audit":
+            # Rev-4: LLM-call audit sidecars are now persisted with role="audit"
+            # (no real OpenAI tool-call identity, so the parent-CHECK
+            # biconditional rejects role="tool" here). The trigger pivots to
+            # the new storage shape so this regression remains specific to
+            # the LLM-call-audit insert path.
+            if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "llm_call_audit":
+                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
+            return await original_add_message(*args, **kwargs)
+
+        service.add_message = flaky_add_message  # type: ignore[method-assign]
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+        send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
+
+        assert send_resp.status_code == 200
+        assert send_resp.json()["message"]["content"] == "Assistant still saved."
+
+    def test_send_message_tool_invocation_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
+        """Symmetric to the LLM-call audit fail-soft test (plan §14.6 / §3357).
+
+        ``_persist_tool_invocations`` writes ``role="tool"`` audit breadcrumbs
+        on the success path (after the assistant message has already been
+        persisted, with ``parent_assistant_id``). An ``OperationalError``
+        from that sidecar write MUST NOT mask the primary composer outcome —
+        the user-facing message still returns 200 and the structured log
+        carries only the exception class.
+        """
+        app, service = _make_app(tmp_path)
+        invocation = ComposerToolInvocation(
+            tool_call_id="call_test_001",
+            tool_name="preview_pipeline",
+            arguments_canonical="{}",
+            arguments_hash="0" * 64,
+            result_canonical='{"ok":true}',
+            result_hash="1" * 64,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=0,
+            version_after=0,
+            started_at=datetime(2026, 5, 9, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 9, tzinfo=UTC),
+            latency_ms=1,
+            actor="composer-web:user-test",
+        )
+        composer = AsyncMock()
+        composer.compose = AsyncMock(
+            return_value=ComposerResult(
+                message="Assistant still saved.",
+                state=_EMPTY_STATE,
+                tool_invocations=(invocation,),
+            )
+        )
+        app.state.composer_service = composer
+        client = TestClient(app, raise_server_exceptions=False)
+
+        original_add_message = service.add_message
+
+        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
+            role = args[1]
+            tool_calls = kwargs.get("tool_calls")
+            # Trigger only on the parented tool-invocation audit breadcrumb
+            # (role="tool" with audit envelope). Assistant/user/system writes
+            # must succeed so the primary outcome is observable.
+            if role == "tool" and tool_calls and tool_calls[0].get("_kind") == "audit":
                 raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
             return await original_add_message(*args, **kwargs)
 
@@ -2159,7 +2253,9 @@ class TestLiteLLMErrorRedaction:
 
         # recompose precondition: last message must be user turn.
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2180,7 +2276,9 @@ class TestLiteLLMErrorRedaction:
         session_id = resp.json()["id"]
 
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2227,7 +2325,9 @@ class TestRecomposeConvergencePartialState:
         # response. This is the precondition for recompose — the last
         # message must be a user turn.
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build a CSV pipeline"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a CSV pipeline", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2261,7 +2361,9 @@ class TestRecomposeConvergencePartialState:
         session_id = resp.json()["id"]
 
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build something"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build something", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2375,7 +2477,7 @@ class TestRecomposeConvergencePartialState:
 
         loop = asyncio.new_event_loop()
         loop.run_until_complete(
-            service.add_message(uuid.UUID(session_id), "user", "Load my CSV"),
+            service.add_message(uuid.UUID(session_id), "user", "Load my CSV", writer_principal="route_user_message"),
         )
         loop.close()
 
@@ -2458,7 +2560,7 @@ class TestRecomposeConvergencePartialState:
 
         loop = asyncio.new_event_loop()
         loop.run_until_complete(
-            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"),
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message"),
         )
         loop.close()
 
@@ -2534,7 +2636,7 @@ class TestRecomposeConvergencePartialState:
 
         loop = asyncio.new_event_loop()
         loop.run_until_complete(
-            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"),
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message"),
         )
         loop.close()
 
@@ -2678,7 +2780,7 @@ class TestRecomposeConvergencePartialState:
         # Recompose precondition: last persisted message must be a user turn.
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
         finally:
             loop.close()
 
@@ -3503,7 +3605,7 @@ class TestComposerProgressRoutes:
         app, service = _make_progress_route_app(tmp_path)
         composer = _ProgressAwareComposer("Retry reply")
         app.state.composer_service = composer
-        user_msg = await service.add_message(service.session.id, "user", "Exploit HTML into JSON")
+        user_msg = await service.add_message(service.session.id, "user", "Exploit HTML into JSON", writer_principal="route_user_message")
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(f"/api/sessions/{service.session.id}/recompose")
@@ -3752,7 +3854,7 @@ class TestComposerCancellationLifecycle:
         forget the other.
         """
         app, service = _make_progress_route_app(tmp_path)
-        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry", writer_principal="route_user_message")
 
         class _CancellingComposer:
             async def compose(self, *args, **kwargs) -> None:
@@ -3773,7 +3875,7 @@ class TestComposerCancellationLifecycle:
     @pytest.mark.asyncio
     async def test_recompose_persists_cancelled_llm_call_audit_sidecar(self, tmp_path) -> None:
         app, service = _make_progress_route_app(tmp_path)
-        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry", writer_principal="route_user_message")
         llm_call = _llm_call(
             status=ComposerLLMCallStatus.CANCELLED,
             model_returned=None,
@@ -3820,7 +3922,7 @@ class TestComposerCancellationLifecycle:
         monkeypatch.setattr(routes_module, "_COMPOSER_REQUEST_TERMINAL_COUNTER", FakeCounter())
 
         app, service = _make_progress_route_app(tmp_path)
-        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry", writer_principal="route_user_message")
 
         class _CancellingComposer:
             async def compose(self, *args, **kwargs) -> None:
@@ -3914,7 +4016,7 @@ class TestPaginationRoutes:
         # Add messages directly via service to avoid composer dependency
         session = await service.get_session(uuid.UUID(session_id))
         for i in range(5):
-            await service.add_message(session.id, "user", f"Msg {i}")
+            await service.add_message(session.id, "user", f"Msg {i}", writer_principal="route_user_message")
 
         resp = client.get(f"/api/sessions/{session_id}/messages?limit=2")
         assert resp.status_code == 200
@@ -4056,7 +4158,9 @@ class TestComposePluginCrashResponse:
         # Recompose requires a pre-existing trailing user message (see
         # TestRecomposeConvergencePartialState for the template).
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build something"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build something", writer_principal="route_user_message")
+        )
         loop.close()
 
         response = client.post(f"/api/sessions/{session_id}/recompose")
@@ -4865,7 +4969,7 @@ def test_recompose_success_persists_runtime_invalid_state(tmp_path) -> None:
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -4948,7 +5052,7 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5162,7 +5266,7 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     # Recompose precondition: last persisted message must be a user turn.
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5466,7 +5570,7 @@ def test_recompose_cached_runtime_preflight_no_partial_state_records_telemetry(t
     # Recompose precondition: last persisted message must be a user turn.
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5688,6 +5792,7 @@ def test_intercepted_assistant_history_is_annotated_without_raw_content() -> Non
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])
@@ -5715,6 +5820,7 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
         content="Build a CSV pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="route_user_message",
     )
     tool_audit_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5723,6 +5829,7 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
         content='{"success": true}',
         tool_calls=_audit_tool_calls("call-1"),
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
     assistant_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5731,6 +5838,7 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
         content="I updated the pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([user_message, tool_audit_message, assistant_message])
@@ -5752,6 +5860,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="Build a CSV pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="route_user_message",
     )
     llm_audit_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5760,6 +5869,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="llm audit sidecar",
         tool_calls=_llm_call_audit_tool_calls(_llm_call(provider_request_id="chatcmpl-history")),
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
     unknown_audit_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5768,6 +5878,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="future audit sidecar",
         tool_calls=[{"_kind": "future_audit", "payload": {"id": "future"}}],
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
     assistant_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5776,6 +5887,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="I updated the pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([user_message, llm_audit_message, unknown_audit_message, assistant_message])
@@ -5797,13 +5909,14 @@ def test_send_message_annotates_intercepted_assistant_history_for_llm(tmp_path) 
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
         loop.run_until_complete(
             service.add_message(
                 session_id,
                 "assistant",
                 "I cannot mark this pipeline complete yet because runtime preflight failed: bad config.",
                 raw_content="The pipeline is complete and valid.",
+                writer_principal="compose_loop",
             )
         )
     finally:
@@ -5830,14 +5943,18 @@ def test_send_message_does_not_replay_audit_tool_rows_to_composer(tmp_path) -> N
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
-        loop.run_until_complete(service.add_message(session_id, "assistant", "I started."))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
+        loop.run_until_complete(service.add_message(session_id, "assistant", "I started.", writer_principal="compose_loop"))
+        # Rev-4: dispatch-trail audit envelopes without a real assistant
+        # parent are persisted with ``role="audit"`` so the parent-CHECK
+        # biconditional is satisfied. Pre-rev-4 used ``role="tool"``.
         loop.run_until_complete(
             service.add_message(
                 session_id,
-                "tool",
+                "audit",
                 '{"success": true}',
                 tool_calls=_audit_tool_calls("call-1"),
+                writer_principal="compose_loop",
             )
         )
     finally:
@@ -5849,6 +5966,7 @@ def test_send_message_does_not_replay_audit_tool_rows_to_composer(tmp_path) -> N
     history = composer.compose.call_args.args[1]
     assert [entry["role"] for entry in history] == ["user", "assistant"]
     assert all(entry["role"] != "tool" for entry in history)
+    assert all(entry["role"] != "audit" for entry in history)
 
 
 def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path) -> None:
@@ -5862,13 +5980,15 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
+        # Rev-4 audit-only breadcrumb (no assistant parent).
         loop.run_until_complete(
             service.add_message(
                 session_id,
-                "tool",
+                "audit",
                 '{"success": true}',
                 tool_calls=_audit_tool_calls("call-1"),
+                writer_principal="compose_loop",
             )
         )
     finally:

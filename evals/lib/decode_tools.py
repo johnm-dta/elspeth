@@ -57,7 +57,7 @@ def decode_tool_sequence(db_path: str, session_id: str) -> list[DecodedRow]:
             SELECT created_at, role, content, tool_calls
             FROM chat_messages
             WHERE session_id = ?
-            ORDER BY created_at, id
+            ORDER BY sequence_no
             """,
             (session_id,),
         ).fetchall()

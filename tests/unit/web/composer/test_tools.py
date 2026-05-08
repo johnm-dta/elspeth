@@ -2144,6 +2144,7 @@ class TestToolRegistry:
             "explain_validation_error",
             "get_plugin_assistance",
             "list_models",
+            "list_recipes",
             "get_pipeline_state",
             "preview_pipeline",
             "diff_pipeline",

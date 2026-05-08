@@ -36,6 +36,11 @@ from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import _guard_blob_row_literals, _source_references_blob, content_hash, sanitize_filename
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
+from elspeth.web.composer.recipes import (
+    RecipeValidationError,
+    apply_recipe,
+    list_recipes,
+)
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
@@ -1434,6 +1439,42 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["blob_id"],
+            },
+        },
+        {
+            "name": "list_recipes",
+            "description": (
+                "List the registered pipeline recipes — deterministic scaffolds for common simple "
+                "intents. Each recipe declares its required slots; apply_pipeline_recipe then "
+                "instantiates the recipe with operator-supplied slot values. Recipes accelerate "
+                "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
+                "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "apply_pipeline_recipe",
+            "description": (
+                "Apply a registered pipeline recipe with operator-supplied slot values and replace "
+                "the current pipeline state with the resulting configuration. Slots are validated "
+                "against the recipe's declared schema before scaffolding — invalid slots are "
+                "rejected with a repair hint. Call list_recipes to discover available recipes and "
+                "their slot schemas. The resulting state is identical to a hand-authored "
+                "set_pipeline call; the model can refine via patch_*_options afterwards."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipe_name": {
+                        "type": "string",
+                        "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
+                    },
+                    "slots": {
+                        "type": "object",
+                        "description": "Operator-supplied slot values; must match the recipe's slot schema",
+                    },
+                },
+                "required": ["recipe_name", "slots"],
             },
         },
         {
@@ -3587,6 +3628,64 @@ def _execute_inspect_source(
     return _discovery_result(state, facts_to_dict(facts))
 
 
+def _execute_list_recipes(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return discovery metadata for every registered pipeline recipe."""
+    return _discovery_result(state, {"recipes": list_recipes()})
+
+
+def _execute_apply_pipeline_recipe(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
+
+    Recipes are deterministic scaffolds (Step 5 of the simple-pipeline-
+    convergence program). Slot validation runs before scaffolding so a
+    URL string passed where a blob_id is required is rejected at the
+    recipe boundary with an explicit repair hint, not silently accepted
+    into a config that will fail at runtime.
+    """
+    recipe_name = arguments.get("recipe_name")
+    raw_slots = arguments.get("slots")
+    if not isinstance(recipe_name, str) or not recipe_name:
+        return _failure_result(
+            state,
+            "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
+        )
+    if not isinstance(raw_slots, Mapping):
+        return _failure_result(
+            state,
+            "apply_pipeline_recipe requires 'slots' as a JSON object whose keys match the recipe's declared slot names.",
+        )
+
+    try:
+        pipeline_args = apply_recipe(recipe_name, dict(raw_slots))
+    except RecipeValidationError as exc:
+        return _failure_result(state, str(exc))
+
+    # Delegate to the existing set_pipeline executor — recipes produce the
+    # exact arguments shape set_pipeline accepts, so validation and state
+    # mutation flow through the canonical mutation path.
+    return _execute_set_pipeline(
+        pipeline_args,
+        state,
+        catalog,
+        data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+
+
 # Blob tool handler type — extended signature with session context
 BlobToolHandler = Callable[..., ToolResult]
 
@@ -5016,6 +5115,7 @@ _DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "explain_validation_error": _execute_explain_validation_error,
     "get_plugin_assistance": _execute_get_plugin_assistance,
     "list_models": _execute_list_models,
+    "list_recipes": _execute_list_recipes,
     "get_pipeline_state": _execute_get_pipeline_state,
     "preview_pipeline": _execute_preview_pipeline,
     "diff_pipeline": _execute_diff_pipeline,
@@ -5061,6 +5161,7 @@ _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
     "create_blob": _execute_create_blob,
     "update_blob": _execute_update_blob,
     "delete_blob": _execute_delete_blob,
+    "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
 }
 
 # Secret tools use an extended handler signature with secret_service + user_id kwargs

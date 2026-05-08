@@ -152,9 +152,7 @@ class TestBaselineAmberSignals:
 
 class TestNodeChainInOrder:
     def _state_chain(self, plugins: list[str]) -> dict[str, Any]:
-        return _state_valid(
-            nodes=[{"id": f"n{i}", "node_type": "transform", "plugin": p} for i, p in enumerate(plugins)]
-        )
+        return _state_valid(nodes=[{"id": f"n{i}", "node_type": "transform", "plugin": p} for i, p in enumerate(plugins)])
 
     def test_green_when_chain_in_order(self) -> None:
         result = score(
@@ -234,9 +232,7 @@ class TestObservedColumns:
         result = score(
             scenario=_scenario(green={"must_include_observed_columns": ["amount", "name"]}),
             messages=[_msg("assistant", "ok")],
-            state=self._state_with_schema(
-                {"mode": "fixed", "fields": ["amount: int", "name: str"]}
-            ),
+            state=self._state_with_schema({"mode": "fixed", "fields": ["amount: int", "name: str"]}),
         )
         assert result["verdict"] == "GREEN"
 

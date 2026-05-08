@@ -590,6 +590,17 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_handle_get_blob_metadata:arguments"
   - "src/elspeth/web/composer/tools.py:_execute_set_source_from_blob:arguments"
   - "src/elspeth/web/composer/tools.py:_execute_inspect_source:arguments"
+  - "src/elspeth/web/composer/tools.py:_execute_apply_pipeline_recipe:arguments"
+  - "src/elspeth/web/composer/tools.py:_execute_list_recipes:arguments"
+  # Recipe slot validation — operator-supplied slot dicts (Tier-3) and the
+  # set_pipeline-shaped args dict each recipe builds. Both shapes are
+  # documented contracts but inherently dynamic key spaces; capturing them
+  # in a TypedDict per recipe would duplicate the SlotSpec table.
+  - "src/elspeth/web/composer/recipes.py:validate_slots:return"
+  - "src/elspeth/web/composer/recipes.py:_build_classify_recipe:return"
+  - "src/elspeth/web/composer/recipes.py:_build_threshold_recipe:return"
+  - "src/elspeth/web/composer/recipes.py:list_recipes:return (list)"
+  - "src/elspeth/web/composer/recipes.py:apply_recipe:return"
   # Source inspection — operator-supplied JSON sample objects (Tier-3) and
   # the JSON-safe dict returned to the LLM tool channel.
   - "src/elspeth/web/composer/source_inspection.py:_facts_from_objects:objects (list)"

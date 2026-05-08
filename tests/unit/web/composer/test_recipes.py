@@ -1,0 +1,298 @@
+"""Unit tests for ``src/elspeth/web/composer/recipes.py``.
+
+Covers:
+
+  * Slot validation: required vs optional slots, type coercion, error
+    messaging that points the model toward the correct repair.
+  * Specifically the URL-as-blob_id failure mode (recipe slot rejects a
+    URL string with a hint to call create_blob first).
+  * The two registered recipes (classify-rows-llm-jsonl,
+    split-by-numeric-threshold) — generated set_pipeline args are
+    structurally valid and reflect the supplied slots.
+  * Registry surface (list_recipes, get_recipe).
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+
+from elspeth.web.composer.recipes import (
+    RecipeValidationError,
+    apply_recipe,
+    get_recipe,
+    list_recipes,
+)
+
+# --------------------------------------------------------------------------
+# Registry surface
+# --------------------------------------------------------------------------
+
+
+class TestRecipeRegistry:
+    def test_two_recipes_registered(self) -> None:
+        names = {r["name"] for r in list_recipes()}
+        assert names == {"classify-rows-llm-jsonl", "split-by-numeric-threshold"}
+
+    def test_get_recipe_by_name(self) -> None:
+        spec = get_recipe("classify-rows-llm-jsonl")
+        assert spec is not None
+        assert spec.name == "classify-rows-llm-jsonl"
+
+    def test_get_recipe_unknown_returns_none(self) -> None:
+        assert get_recipe("nonexistent") is None
+
+    def test_list_recipes_includes_slot_metadata(self) -> None:
+        for entry in list_recipes():
+            assert "slots" in entry
+            for _slot_name, slot_meta in entry["slots"].items():
+                assert "type" in slot_meta
+                assert "required" in slot_meta
+                assert "description" in slot_meta
+
+
+# --------------------------------------------------------------------------
+# Slot validation: type coercion + error messages
+# --------------------------------------------------------------------------
+
+
+class TestBlobIdSlotValidation:
+    """The recipe boundary must reject URL-as-blob_id with a clear repair hint."""
+
+    def test_valid_uuid_passes(self) -> None:
+        bid = str(uuid4())
+        result = apply_recipe(
+            "classify-rows-llm-jsonl",
+            {
+                "source_blob_id": bid,
+                "classifier_template": "Classify: {{ row['text'] }}",
+                "model": "anthropic/claude-3.5-sonnet",
+            },
+        )
+        assert result["source"]["options"]["blob_id"] == bid
+
+    def test_url_string_rejected_with_create_blob_hint(self) -> None:
+        with pytest.raises(RecipeValidationError) as exc_info:
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {
+                    "source_blob_id": "https://example.com/data.csv",
+                    "classifier_template": "Classify: {{ row['text'] }}",
+                    "model": "anthropic/claude-3.5-sonnet",
+                },
+            )
+        msg = str(exc_info.value)
+        assert "valid UUID" in msg
+        assert "create_blob" in msg
+        assert "mime_type='text/plain'" in msg
+
+    def test_path_string_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="valid UUID"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {
+                    "source_blob_id": "/tmp/data.csv",
+                    "classifier_template": "Classify: {{ row['text'] }}",
+                    "model": "model",
+                },
+            )
+
+    def test_int_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="UUID string"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {
+                    "source_blob_id": 42,
+                    "classifier_template": "Classify: {{ row['text'] }}",
+                    "model": "model",
+                },
+            )
+
+
+class TestNumericSlotValidation:
+    def test_int_threshold_coerced_to_float(self) -> None:
+        result = apply_recipe(
+            "split-by-numeric-threshold",
+            {
+                "source_blob_id": str(uuid4()),
+                "field": "price",
+                "threshold": 100,
+            },
+        )
+        # threshold is float in the gate condition
+        gate_node = next(n for n in result["nodes"] if n["node_type"] == "gate")
+        assert "100.0" in gate_node["condition"]
+
+    def test_string_threshold_coerced_to_float(self) -> None:
+        result = apply_recipe(
+            "split-by-numeric-threshold",
+            {
+                "source_blob_id": str(uuid4()),
+                "field": "price",
+                "threshold": "99.95",
+            },
+        )
+        gate_node = next(n for n in result["nodes"] if n["node_type"] == "gate")
+        assert "99.95" in gate_node["condition"]
+
+    def test_bool_rejected(self) -> None:
+        """bool is a subclass of int in Python — reject explicitly."""
+        with pytest.raises(RecipeValidationError, match="bool"):
+            apply_recipe(
+                "split-by-numeric-threshold",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "field": "price",
+                    "threshold": True,
+                },
+            )
+
+    def test_unparseable_string_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="could not coerce"):
+            apply_recipe(
+                "split-by-numeric-threshold",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "field": "price",
+                    "threshold": "not-a-number",
+                },
+            )
+
+
+class TestRequiredOptionalSlots:
+    def test_missing_required_slot_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="missing required slot 'classifier_template'"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "model": "model",
+                },
+            )
+
+    def test_optional_slot_uses_default(self) -> None:
+        result = apply_recipe(
+            "classify-rows-llm-jsonl",
+            {
+                "source_blob_id": str(uuid4()),
+                "classifier_template": "tmpl",
+                "model": "m",
+            },
+        )
+        # provider defaults to 'openrouter'
+        llm_node = next(n for n in result["nodes"] if n["plugin"] == "llm")
+        assert llm_node["options"]["provider"] == "openrouter"
+        # label_field defaults to 'classification'
+        assert llm_node["options"]["response_field"] == "classification"
+
+    def test_unknown_slot_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="does not accept slot"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "classifier_template": "tmpl",
+                    "model": "m",
+                    "fictitious_slot": "x",
+                },
+            )
+
+
+# --------------------------------------------------------------------------
+# Recipe outputs — structural shape
+# --------------------------------------------------------------------------
+
+
+class TestClassifyRecipe:
+    def _apply(self, **slots):
+        defaults = {
+            "source_blob_id": str(uuid4()),
+            "classifier_template": "Classify {{ row['subject'] }}",
+            "model": "anthropic/claude-3.5-sonnet",
+        }
+        defaults.update(slots)
+        return apply_recipe("classify-rows-llm-jsonl", defaults)
+
+    def test_source_uses_blob_id_with_observed_schema(self) -> None:
+        result = self._apply()
+        src = result["source"]
+        assert src["plugin"] == "csv"
+        assert "blob_id" in src["options"]
+        assert src["options"]["schema"] == {"mode": "observed"}
+        # discard default per the precursor commit
+        assert src["on_validation_failure"] == "discard"
+
+    def test_llm_node_wires_template_and_response_field(self) -> None:
+        result = self._apply(label_field="urgency")
+        llm = next(n for n in result["nodes"] if n["plugin"] == "llm")
+        assert llm["options"]["template"] == "Classify {{ row['subject'] }}"
+        assert llm["options"]["response_field"] == "urgency"
+
+    def test_output_is_jsonl(self) -> None:
+        result = self._apply(output_path="outputs/tickets.jsonl")
+        out = result["outputs"][0]
+        assert out["plugin"] == "json"
+        assert out["options"]["format"] == "jsonl"
+        assert out["options"]["path"] == "outputs/tickets.jsonl"
+        assert out["options"]["collision_policy"] == "auto_increment"
+
+    def test_metadata_describes_recipe(self) -> None:
+        result = self._apply()
+        assert result["metadata"]["name"] == "classify-rows-llm-jsonl"
+
+
+class TestThresholdRecipe:
+    def _apply(self, **slots):
+        defaults = {
+            "source_blob_id": str(uuid4()),
+            "field": "price",
+            "threshold": 100.0,
+        }
+        defaults.update(slots)
+        return apply_recipe("split-by-numeric-threshold", defaults)
+
+    def test_type_coerce_node_targets_correct_field(self) -> None:
+        result = self._apply(field="amount")
+        coerce = next(n for n in result["nodes"] if n["plugin"] == "type_coerce")
+        assert coerce["options"]["conversions"] == [{"field": "amount", "to": "float"}]
+
+    def test_gate_condition_uses_field_and_threshold(self) -> None:
+        result = self._apply(field="score", threshold=0.75)
+        gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
+        assert gate["condition"] == "row['score'] >= 0.75"
+        assert gate["routes"] == {"true": "above", "false": "below"}
+
+    def test_two_jsonl_outputs(self) -> None:
+        result = self._apply(
+            above_output_path="outputs/hi.jsonl",
+            below_output_path="outputs/lo.jsonl",
+        )
+        outputs = {o["sink_name"]: o for o in result["outputs"]}
+        assert set(outputs) == {"above", "below"}
+        assert outputs["above"]["options"]["path"] == "outputs/hi.jsonl"
+        assert outputs["below"]["options"]["path"] == "outputs/lo.jsonl"
+
+    def test_chain_order(self) -> None:
+        """Pipeline must run type_coerce BEFORE the gate."""
+        result = self._apply()
+        ids = [n["id"] for n in result["nodes"]]
+        assert ids.index("coerce_numeric") < ids.index("threshold_gate")
+
+
+# --------------------------------------------------------------------------
+# Unknown recipe + edge cases
+# --------------------------------------------------------------------------
+
+
+class TestUnknownRecipe:
+    def test_apply_unknown_raises(self) -> None:
+        with pytest.raises(RecipeValidationError, match="not registered"):
+            apply_recipe("imaginary-recipe", {})
+
+    def test_error_lists_available_recipes(self) -> None:
+        with pytest.raises(RecipeValidationError) as exc_info:
+            apply_recipe("imaginary-recipe", {})
+        msg = str(exc_info.value)
+        assert "classify-rows-llm-jsonl" in msg
+        assert "split-by-numeric-threshold" in msg

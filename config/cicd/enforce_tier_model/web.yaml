@@ -419,12 +419,12 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=0fd2fa2794d3013c
+- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=c4bf1dc85f5a1133
   owner: web-composer
   reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets engine validation catch it later
   safety: Returns None (no pre-validation result); plugin name still validated during full pipeline instantiation
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=6561cb8bd6f4acea
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=6b87a12e8db864bf
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
     rollback expected; programmer bugs still propagate
@@ -432,13 +432,13 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=7033d832de4cbea7
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=c3d41af469725b39
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
     primary DB exception
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=20006fd6b31e15a9
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=c89e7e44b7cd35e7
   owner: web-composer
   reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure
     mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content).
@@ -553,6 +553,67 @@ allow_hits:
   reason: Tier-3 trust boundary — checking that a value is a string before scanning it for URL candidates. Non-string
     values skipped from URL extraction.
   safety: Non-string values silently skipped; URL candidates list is best-effort.
+  expires: null
+# Recipe slot validation — Step 5 of the simple-pipeline-convergence program.
+# Operator-supplied slot values (Tier-3) are validated and coerced at the
+# recipe boundary before scaffolding. Each isinstance check below routes to
+# either a coercion or an explicit RecipeValidationError with a repair hint
+# (e.g., "use create_blob first" for a URL passed where a blob_id is required).
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=32c9c09b65e93750
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a blob_id slot value is a string before UUID parsing. Operator may
+    supply any JSON type; non-string values are rejected with a repair hint pointing to create_blob.
+  safety: Non-string values raise RecipeValidationError with repair guidance; never silently coerced.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=1f3fc1b884d7ce0d
+  owner: web-composer
+  reason: Tier-3 trust boundary — checking that a str slot value is actually a string before passing through.
+  safety: Non-string values raise RecipeValidationError; never silently coerced.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=8fbf3c725ae23060
+  owner: web-composer
+  reason: Tier-3 trust boundary — explicit bool check before numeric coercion. bool is a subclass of int in Python,
+    so without this guard True/False would silently coerce to 1.0/0.0 (a fabrication risk).
+  safety: bool values raise RecipeValidationError telling operator to use 0.0/1.0 explicitly.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=0800af07981333d6
+  owner: web-composer
+  reason: Tier-3 trust boundary — int/float check for numeric-slot pass-through. Both are valid numeric
+    representations and are coerced to float for downstream gate comparisons.
+  safety: Other types fall through to the str-coercion branch or to the type-mismatch error.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=387c3863dfd6f36f
+  owner: web-composer
+  reason: Tier-3 trust boundary — string check before float coercion. Operator may supply numeric thresholds as
+    strings ("99.95"); we coerce explicitly at the boundary.
+  safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=fd44531342b35fa4
+  owner: web-composer
+  reason: Tier-3 trust boundary — bool check for the int slot type (same fabrication-risk reason as the float branch).
+  safety: bool values raise RecipeValidationError; never coerced.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=619a904934360b80
+  owner: web-composer
+  reason: Tier-3 trust boundary — int check for int-slot pass-through.
+  safety: Non-int values fall through to the str-coercion branch or the type-mismatch error.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=eaf2c8f9f049a556
+  owner: web-composer
+  reason: Tier-3 trust boundary — string check before int coercion. Same pattern as the float branch.
+  safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
+  expires: null
+- key: web/composer/recipes.py:R1:get_recipe:fp=f01a230b3a75d48c
+  owner: web-composer
+  reason: Tier-3 trust boundary — `_RECIPES.get(name)` for membership probe on a recipe-name lookup. Returns None
+    when the name is not registered; caller (apply_recipe) raises an explicit error with the registered names.
+  safety: None return is the documented "unknown recipe" signal; caller produces a helpful error message.
+  expires: null
+- key: web/composer/recipes.py:R1:apply_recipe:fp=fa88d94e82804c1f
+  owner: web-composer
+  reason: Tier-3 trust boundary — `_RECIPES.get(name)` membership probe in apply_recipe. Same pattern as get_recipe;
+    None triggers the explicit RecipeValidationError path with available-recipes guidance.
+  safety: None return raises RecipeValidationError listing available recipe names — never silently fabricates.
   expires: null
 - key: web/execution/validation.py:R5:validate_pipeline:fp=eccc733dc0a2259d
   owner: web-execution

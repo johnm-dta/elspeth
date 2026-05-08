@@ -180,14 +180,31 @@ def _assert_no_mutation_empty_state_blocker(
     tool_name: str,
     expected_detail: str,
 ) -> None:
+    """Assert the no-mutation empty-state augmentation contract (post elspeth-861b0c58f5).
+
+    The new shape (vs. the old synthetic-replacement behavior):
+    - The model's prose is preserved verbatim at the start of result.message
+      (raw_assistant_content carries the same prose unaugmented).
+    - A system-attributed suffix is appended carrying the concrete blocker.
+    - The runtime_preflight ValidationResult records the state_exists=false
+      check and the blocker detail for audit-trail attribution.
+    """
     assert result.runtime_preflight is not None
     assert result.runtime_preflight.is_valid is False
     assert [check.name for check in result.runtime_preflight.checks] == ["state_exists"]
     assert result.raw_assistant_content is not None
-    assert "No composition-state mutation completed successfully" in result.message
-    assert "state_exists=false" in result.message
-    assert f"Blocking result: {tool_name}" in result.message
+    # Model's prose preserved verbatim at the start; system suffix appended.
+    assert result.message.startswith(result.raw_assistant_content)
+    # System suffix carries the operator-facing meta-narration.
+    assert "[ELSPETH-SYSTEM]" in result.message
+    assert "still empty" in result.message
+    # Blocker detail surfaced both in suffix (for the user) and in the
+    # runtime_preflight ValidationResult (for audit-trail attribution).
+    assert tool_name in result.message
     assert expected_detail in result.message
+    blocker_detail = result.runtime_preflight.checks[0].detail
+    assert tool_name in blocker_detail
+    assert expected_detail in blocker_detail
 
 
 def _session_engine_with_session() -> tuple[Any, str]:
@@ -300,11 +317,15 @@ class TestComposerTextOnlyResponse:
         assert result.runtime_preflight is not None
         assert result.runtime_preflight.is_valid is False
         assert [check.name for check in result.runtime_preflight.checks] == ["state_exists"]
-        assert "No composition-state mutation completed successfully" in result.message
-        assert "state_exists=false" in result.message
+        # New contract (post elspeth-861b0c58f5): model prose preserved
+        # verbatim, system suffix appended carrying the concrete blocker.
+        assert result.message.startswith(model_prose)
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "still empty" in result.message
         assert "the model ended the turn without calling any build/edit tool" in result.message
-        assert "set_pipeline" in result.message
-        assert "set_source_from_blob" in result.message
+        # Audit-trail attribution: blocker recorded in the runtime_preflight
+        # ValidationResult (so structured downstream consumers can route on it).
+        assert "state_exists=false" in result.runtime_preflight.checks[0].detail
 
     @pytest.mark.asyncio
     async def test_failed_mutation_then_empty_state_reply_names_blocking_tool_error(self) -> None:
@@ -338,8 +359,11 @@ class TestComposerTextOnlyResponse:
         assert result.raw_assistant_content == final_prose
         assert result.runtime_preflight is not None
         assert result.runtime_preflight.is_valid is False
-        assert "No composition-state mutation completed successfully" in result.message
-        assert "Blocking result: set_pipeline failed before mutation" in result.message
+        # New contract: model prose preserved + system suffix with blocker.
+        assert result.message.startswith(final_prose)
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "still empty" in result.message
+        assert "set_pipeline failed before mutation" in result.message
         assert "MissingRequiredPaths" in result.message
         assert "source.plugin" in result.message
 
@@ -375,9 +399,12 @@ class TestComposerTextOnlyResponse:
         assert result.raw_assistant_content == final_prose
         assert result.runtime_preflight is not None
         assert result.runtime_preflight.is_valid is False
-        assert "No composition-state mutation completed successfully" in result.message
-        assert "state_exists=false" in result.message
+        # New contract: model prose preserved + system suffix with blocker.
+        assert result.message.startswith(final_prose)
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "still empty" in result.message
         assert "create_blob succeeded without mutating CompositionState" in result.message
+        assert "state_exists=false" in result.runtime_preflight.checks[0].detail
         assert mock_llm.call_count == 2
 
 
@@ -4226,6 +4253,123 @@ class TestEmptyStateFinalizePassthrough:
         assert "[ELSPETH-SYSTEM]" in msg
         assert msg.startswith("[ELSPETH-SYSTEM]") or msg.lstrip().startswith("[ELSPETH-SYSTEM]")
 
+    def test_compose_empty_state_message_with_blocker_includes_cause(self) -> None:
+        """When a concrete blocker is supplied (no-mutation empty-state augmentation),
+        the suffix surfaces it so the operator sees the precise cause without
+        having to consult the audit DB. This is defense-in-depth: the model's
+        prose usually mentions the blocker, but not always.
+        """
+        from elspeth.web.composer.service import _compose_empty_state_message
+
+        content = "I tried to build but the source binding failed."
+        blocker = "set_pipeline returned success=false: schema: Field required"
+        msg = _compose_empty_state_message(content, blocker=blocker)
+        # Model prose preserved verbatim at start.
+        assert msg.startswith(content)
+        # System suffix attribution + cause both present.
+        assert "[ELSPETH-SYSTEM]" in msg
+        assert "Cause:" in msg
+        assert blocker in msg
+
+    def test_compose_empty_state_message_without_blocker_uses_generic_suffix(self) -> None:
+        """The preflight-invalid empty-state augmentation does not have a
+        single concrete blocker — runtime_result already carries multi-error
+        data — so it passes ``blocker=None`` and gets the generic suffix.
+        The ``Cause:`` field is omitted to avoid implying a cause that
+        isn't there.
+        """
+        from elspeth.web.composer.service import _compose_empty_state_message
+
+        msg = _compose_empty_state_message("I tried.", blocker=None)
+        assert "[ELSPETH-SYSTEM]" in msg
+        assert "Cause:" not in msg
+
+    def test_enforce_augmentation_prefix_invariant_accepts_prefixed_message(self) -> None:
+        """The contract holds when the augmented message has content as a strict prefix.
+
+        Empty content is also accepted because ``"".startswith("")`` is trivially True
+        and the empty-state augmentation builder degenerates to suffix-only output
+        for empty inputs.
+        """
+        from elspeth.web.composer.service import _enforce_augmentation_prefix_invariant
+
+        _enforce_augmentation_prefix_invariant(branch="test", content="model prose", augmented="model prose [ELSPETH-SYSTEM] suffix")
+        _enforce_augmentation_prefix_invariant(branch="test", content="model prose", augmented="model prose")
+        _enforce_augmentation_prefix_invariant(branch="test", content="", augmented="any suffix")
+
+    def test_enforce_augmentation_prefix_invariant_raises_on_violation(self) -> None:
+        """A producer that violates the prefix invariant raises AuditIntegrityError
+        rather than committing a corrupt audit row that the consumer-side
+        discriminator at routes._composer_history_content would silently misroute
+        as replacement (LLM gets [INTERCEPTED] prefixed onto its own prose).
+        """
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.web.composer.service import _enforce_augmentation_prefix_invariant
+
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            _enforce_augmentation_prefix_invariant(
+                branch="no_mutation_empty_state_augmentation",
+                content="model prose",
+                augmented="[ELSPETH-SYSTEM] something else",
+            )
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "no_mutation_empty_state_augmentation" in message
+        assert "augmentation" in message
+        assert "discriminator" in message
+
+    def test_enforce_replacement_non_prefix_invariant_accepts_unrelated_content(self) -> None:
+        """Replacement is structurally distinct from augmentation: the synthetic
+        message must NOT have the model's prose as a prefix. The contract holds
+        when the two strings share no prefix relationship.
+        """
+        from elspeth.web.composer.service import _enforce_replacement_non_prefix_invariant
+
+        _enforce_replacement_non_prefix_invariant(
+            branch="preflight_invalid_non_empty_state_replacement",
+            content="The pipeline is complete and valid.",
+            replacement="[ELSPETH-SYSTEM] preflight failed: schema: Field required",
+        )
+
+    def test_enforce_replacement_non_prefix_invariant_raises_on_empty_content(self) -> None:
+        """The most common ambiguous shape: empty content + non-empty replacement.
+        Every non-empty string startswith "", so the consumer-side discriminator
+        would misclassify the row as empty-prose augmentation and emit "" to LLM
+        history, hiding the [INTERCEPTED] annotation. Crash producer-side rather
+        than commit the ambiguous audit row.
+        """
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.web.composer.service import _enforce_replacement_non_prefix_invariant
+
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            _enforce_replacement_non_prefix_invariant(
+                branch="preflight_invalid_non_empty_state_replacement",
+                content="",
+                replacement="[ELSPETH-SYSTEM] preflight failed: schema: Field required",
+            )
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "preflight_invalid_non_empty_state_replacement" in message
+        assert "replacement" in message
+        assert "elspeth-7ae1732ab2" in message
+
+    def test_enforce_replacement_non_prefix_invariant_raises_on_accidental_prefix(self) -> None:
+        """A replacement that accidentally startswith content (e.g., the
+        synthesizer template was edited to surface the model's prose at the
+        start) would silently misroute through the consumer's augmentation
+        branch. Crash on the contradiction.
+        """
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.web.composer.service import _enforce_replacement_non_prefix_invariant
+
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            _enforce_replacement_non_prefix_invariant(
+                branch="preflight_invalid_non_empty_state_replacement",
+                content="Done.",
+                replacement="Done. But preflight failed: schema: Field required",
+            )
+        assert "Tier 1" in str(exc_info.value)
+
     # ── End-to-end through _finalize_no_tool_response ────────────────────
 
     @pytest.mark.asyncio
@@ -4386,6 +4530,97 @@ class TestEmptyStateFinalizePassthrough:
         assert "[ELSPETH-SYSTEM]" not in result.message
         # raw_assistant_content preserved (matches synthesizer semantics).
         assert result.raw_assistant_content == "The pipeline is complete and valid."
+
+    @pytest.mark.asyncio
+    async def test_empty_content_replacement_crashes_via_producer_invariant(self) -> None:
+        """End-to-end coverage for the producer-side replacement non-prefix
+        invariant. Reproduces the scenario flagged in PR review by
+        code-reviewer F1 and comment-analyzer C-2:
+
+        Multi-turn flow where state is non-empty (populated by prior tool
+        calls), runtime preflight is invalid, and the model emits empty
+        assistant content on the finalize turn. Without the producer-side
+        guard, the replacement branch would emit
+        ``ComposerResult(message=<synthetic>, raw_assistant_content="")``,
+        which the consumer-side discriminator at
+        ``routes._composer_history_content`` would silently misclassify as
+        empty-prose augmentation (every non-empty string startswith ""),
+        suppressing the ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX``
+        annotation from LLM history. The model would not learn its
+        completion claim was overruled and could re-claim completion next
+        turn.
+
+        The producer-side ``_enforce_replacement_non_prefix_invariant``
+        crashes with ``AuditIntegrityError`` to prevent the corrupt audit
+        row from being committed. The field-level decoupling that would
+        permit this shape is tracked at ``elspeth-7ae1732ab2``.
+        """
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        # Non-empty state (model mutated state in earlier turns of the
+        # compose loop), so the empty-state augmentation path is skipped
+        # and the replacement branch fires.
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="t1",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="discard",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        bumped_state = replace(state, version=state.version + 1)
+        invalid_preflight = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="t1",
+                    component_type="transform",
+                    message="Forbidden name: 'end_of_source'",
+                    suggestion="Omit trigger for end-of-source-only aggregation.",
+                )
+            ],
+        )
+
+        with (
+            patch.object(service, "_runtime_preflight", return_value=invalid_preflight),
+            pytest.raises(AuditIntegrityError) as exc_info,
+        ):
+            await service._finalize_no_tool_response(
+                content="",  # LLM emitted empty assistant text — the trigger
+                state=bumped_state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "preflight_invalid_non_empty_state_replacement" in message
+        assert "replacement" in message
+        # The error names the consumer-side site that would have misrouted
+        # the row, so an SRE hitting this has the breadcrumb to fix it.
+        assert "routes._composer_history_content" in message
+        # The error names the architectural-debt issue that tracks the
+        # field-level paydown, so an SRE knows where to look for the
+        # long-term fix.
+        assert "elspeth-7ae1732ab2" in message
 
     @pytest.mark.asyncio
     async def test_empty_state_valid_preflight_preserves_message_verbatim(self) -> None:

@@ -337,13 +337,18 @@ class TestJSONSourceConfigValidation:
             )
 
     def test_missing_schema_raises_error(self) -> None:
-        """Missing schema raises PluginConfigError."""
+        """Missing schema raises PluginConfigError with actionable mode guidance."""
         from elspeth.plugins.infrastructure.config_base import PluginConfigError
         from elspeth.plugins.sources.json_source import JSONSource
 
-        # Error message uses alias "schema" not field name "schema_config"
-        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
+        with pytest.raises(PluginConfigError) as exc_info:
             JSONSource({"path": "/tmp/test.json", "on_validation_failure": QUARANTINE_SINK})
+        message = str(exc_info.value)
+        assert "schema" in message
+        assert "Field required" in message
+        assert "mode: observed" in message
+        assert "fixed" in message
+        assert "flexible" in message
 
     def test_missing_on_validation_failure_raises_error(self) -> None:
         """Missing on_validation_failure raises PluginConfigError."""

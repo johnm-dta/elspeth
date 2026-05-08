@@ -174,7 +174,11 @@ async def test_text_only_success_records_llm_call_metadata() -> None:
     with patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, return_value=llm_response) as mock_acomp:
         result = await service.compose("Build a CSV pipeline", [], state)
 
-    assert "No composition-state mutation completed successfully" in result.message
+    # New contract (post elspeth-861b0c58f5): model prose preserved verbatim,
+    # system suffix appended; the synthetic [ELSPETH-SYSTEM] marker is the
+    # operator-facing signal, not a wholesale replacement of the model's text.
+    assert result.message.startswith("Done.")
+    assert "[ELSPETH-SYSTEM]" in result.message
     assert result.raw_assistant_content == "Done."
     assert len(result.llm_calls) == 1
     call = result.llm_calls[0]

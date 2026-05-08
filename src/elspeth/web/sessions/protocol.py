@@ -120,9 +120,23 @@ class ChatMessageRecord:
     tool_calls uses the stored LiteLLM array format and may contain nested
     mutable lists/dicts -- requires freeze guard when not None.
 
-    raw_content stores the original LLM text when the visible content was
-    replaced by runtime preflight interception. It is persisted for audit
-    provenance and must NOT be returned in ChatMessageResponse.
+    raw_content stores the model's pre-synthesis prose when the visible
+    content was augmented (operator-facing suffix appended) or replaced
+    (false-completion-claim path) by ``_finalize_no_tool_response``. It
+    is persisted for audit provenance and is returned in
+    ChatMessageResponse only when the caller opts in via
+    ``?include_raw_content=true``; otherwise the response field is
+    ``null`` (the field is always present in the response shape).
+
+    Producer contract: when raw_content is set on an augmentation row,
+    ``content`` MUST start with raw_content; on a replacement row,
+    content MUST NOT start with raw_content. Mechanically enforced at
+    producer construction by
+    ``web.composer.service._enforce_augmentation_prefix_invariant`` and
+    ``_enforce_replacement_non_prefix_invariant``. Consumers (notably
+    ``routes._composer_history_content``) rely on the contract to
+    classify the row structurally without a field-level discriminator;
+    the field-level decoupling is tracked at ``elspeth-7ae1732ab2``.
     """
 
     id: UUID

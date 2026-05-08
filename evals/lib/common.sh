@@ -355,6 +355,11 @@ evals_post_message() {
 evals_get_state()       { _evals_http_get "$ELSPETH_EVAL_BASE_URL/api/sessions/$1/state" "$2"; }
 evals_get_progress()    { _evals_http_get "$ELSPETH_EVAL_BASE_URL/api/sessions/$1/composer-progress" "$2"; }
 evals_get_messages()    { _evals_http_get "$ELSPETH_EVAL_BASE_URL/api/sessions/$1/messages" "$2"; }
+# Diagnostic-only variant — returns each assistant message's pre-synthesis raw_content
+# (the model's actual prose when the empty-state synthesizer at service.py:_finalize_no_tool_response
+# replaced the visible content). Required for diagnosing convergence failures
+# where the synthesized blocker hides what the model actually produced.
+evals_get_messages_with_raw() { _evals_http_get "$ELSPETH_EVAL_BASE_URL/api/sessions/$1/messages?include_raw_content=true" "$2"; }
 evals_get_yaml()        { _evals_http_get "$ELSPETH_EVAL_BASE_URL/api/sessions/$1/state/yaml" "$2"; }
 
 evals_validate() {

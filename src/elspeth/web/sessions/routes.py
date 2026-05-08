@@ -187,13 +187,20 @@ def _session_response(session: SessionRecord) -> SessionResponse:
     )
 
 
-def _message_response(msg: ChatMessageRecord) -> ChatMessageResponse:
-    """Convert a ChatMessageRecord to a ChatMessageResponse."""
+def _message_response(msg: ChatMessageRecord, *, include_raw_content: bool = False) -> ChatMessageResponse:
+    """Convert a ChatMessageRecord to a ChatMessageResponse.
+
+    ``include_raw_content`` opt-in surfaces the model's pre-synthesis prose
+    for assistant turns intercepted by the empty-state synthesizer. Default
+    False keeps the conversation channel free of audit-only data; eval
+    tooling sets True via the ``?include_raw_content=true`` query param.
+    """
     return ChatMessageResponse(
         id=str(msg.id),
         session_id=str(msg.session_id),
         role=msg.role,
         content=msg.content,
+        raw_content=msg.raw_content if include_raw_content else None,
         tool_calls=deep_thaw(msg.tool_calls) if msg.tool_calls is not None else None,
         created_at=msg.created_at,
         composition_state_id=str(msg.composition_state_id) if msg.composition_state_id else None,
@@ -598,8 +605,53 @@ def _record_composer_authoring_validation_telemetry(
 
 
 def _composer_history_content(message: ChatMessageRecord) -> str:
-    """Return the content sent back to the composer LLM for a stored message."""
+    """Return the content sent back to the composer LLM for a stored message.
+
+    Two assistant-augmentation shapes exist (see service._finalize_no_tool_response):
+
+    1. **Augmentation** — empty-state passes the model's prose through and
+       appends a system-attributed suffix. ``content`` starts with
+       ``raw_content``. The LLM should see its own prose unmodified on
+       subsequent turns; the suffix is operator-facing only.
+
+    2. **Replacement** — false-completion-claim path replaces the model's
+       prose with a synthetic preflight-failed message. ``content`` is
+       unrelated to ``raw_content``. The LLM must be told its completion
+       claim was overruled (via ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX``)
+       so it does not re-claim completion.
+
+    Discriminator is structural (``content.startswith(raw_content)``) so
+    the policy survives suffix-string evolution without code changes.
+    Equality (``content == raw_content``) is augmentation with an empty
+    suffix and returns ``raw_content`` unchanged. Empty ``raw_content``
+    (the no-mutation and preflight-invalid empty-state augmentation
+    branches in ``service._finalize_no_tool_response``) is augmentation
+    by the structural rule: the model produced no prose and the
+    operator-facing suffix replaces nothing — so the LLM sees an empty
+    prior turn and the operator-facing suffix stays out of the prompt
+    history.
+
+    The structural rule's correctness depends on the producer never
+    emitting a replacement-shape message that startswith
+    ``raw_content``. This is mechanically enforced at construction
+    time by symmetric producer-side guards in
+    ``service._finalize_no_tool_response`` —
+    ``_enforce_augmentation_prefix_invariant`` (augmentation MUST
+    startswith) and ``_enforce_replacement_non_prefix_invariant``
+    (replacement MUST NOT startswith). Together they guarantee that
+    every audit row reaching this discriminator is structurally
+    classifiable. The field-level overloading that makes the
+    discriminator necessary at all is tracked as architectural debt at
+    ``elspeth-7ae1732ab2`` (introduce a producer-side discriminator
+    field on the record).
+    """
     if message.role == "assistant" and message.raw_content is not None:
+        if message.content.startswith(message.raw_content):
+            # Augmentation (incl. equality and empty raw_content): emit
+            # unmodified model prose. The operator-facing suffix stays
+            # out of LLM history.
+            return message.raw_content
+        # Replacement: emit synthetic content with interception prefix.
         return _INTERCEPTED_ASSISTANT_HISTORY_PREFIX + message.content
     return message.content
 
@@ -657,10 +709,22 @@ def _composer_conversation_or_llm_audit_messages(messages: Sequence[ChatMessageR
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
     """Convert persisted session messages to LLM chat history.
 
-    `raw_content` is attribution/audit data and must not be sent back to the
-    model. When an assistant message has raw_content, its visible content is a
-    synthetic runtime-preflight replacement; annotate that visible content so
-    the next LLM turn understands why its apparent prior answer changed.
+    ``raw_content`` is attribution/audit data and feeds the LLM-context
+    decision in ``_composer_history_content``. Two assistant-augmentation
+    shapes flow through here (see
+    ``service._finalize_no_tool_response`` and
+    ``_composer_history_content`` for the policy):
+
+    1. **Augmentation** — empty-state branches pass the model's prose
+       through and append an operator-facing suffix. The LLM sees its
+       own prose unmodified on subsequent turns; the suffix stays out
+       of the prompt.
+    2. **Replacement** — false-completion-claim path replaces the
+       model's prose with a synthetic preflight-failed message. The LLM
+       receives the synthetic content prefixed with
+       ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX`` so it understands why
+       its apparent prior answer changed and does not re-claim
+       completion.
 
     Composer tool-call audit rows are persisted as ``role="tool"`` messages so
     the session record retains the dispatch trail. They are not prior LLM
@@ -2615,8 +2679,17 @@ def create_session_router() -> APIRouter:
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
         include_llm_audit: bool = Query(False),
+        include_raw_content: bool = Query(False),
     ) -> list[ChatMessageResponse]:
-        """Get conversation history for a session."""
+        """Get conversation history for a session.
+
+        ``include_raw_content`` opts in to the assistant message's
+        pre-synthesis prose (the model's actual final text when the
+        empty-state synthesizer replaced the visible content). Default
+        omits it — the SPA conversation channel does not need audit data.
+        Eval/diagnosis tooling enables it to verify whether the model
+        converged on useful output that the synthesizer hid.
+        """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
         # Fetch before slicing so hidden audit rows cannot skew normal-chat
@@ -2629,7 +2702,7 @@ def create_session_router() -> APIRouter:
             _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
         )
         paged_messages = conversation_messages[offset : offset + limit]
-        return [_message_response(m) for m in paged_messages]
+        return [_message_response(m, include_raw_content=include_raw_content) for m in paged_messages]
 
     @router.get(
         "/{session_id}/runs",

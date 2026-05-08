@@ -8208,3 +8208,409 @@ class TestInspectSourceTool:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+
+
+# ---------------------------------------------------------------------------
+# preview_pipeline proof step — Step 3 of composer convergence (epic
+# elspeth-783c9dede8). proof_diagnostics surfaces blocking issues that depend
+# on observed input shape: fixed CSV schema omitting observed columns,
+# text source containing a URL with no web_scrape downstream, missing or
+# unreadable blob storage. is_valid is forced to False when any proof
+# diagnostic is blocking, even if authoring/runtime checks pass.
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewProofStep:
+    """preview_pipeline must surface input-shape diagnostics when session context is supplied."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        self.engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(self.engine)
+
+        self.session_id = str(uuid4())
+        self.csv_blob_id = str(uuid4())
+        self.url_blob_id = str(uuid4())
+        now = datetime.now(UTC)
+
+        # CSV blob with three observed columns
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True)
+        self.csv_storage_path = storage_dir / f"{self.csv_blob_id}_orders.csv"
+        csv_content = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        self.csv_storage_path.write_bytes(csv_content)
+
+        # Text blob with a single URL
+        self.url_storage_path = storage_dir / f"{self.url_blob_id}_url.txt"
+        url_content = b"https://example.com/data.json\n"
+        self.url_storage_path.write_bytes(url_content)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=self.session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.csv_blob_id,
+                    session_id=self.session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                    storage_path=str(self.csv_storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.url_blob_id,
+                    session_id=self.session_id,
+                    filename="url.txt",
+                    mime_type="text/plain",
+                    size_bytes=len(url_content),
+                    content_hash=_content_hash(url_content),
+                    storage_path=str(self.url_storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+    def _state_with_csv_source(
+        self,
+        *,
+        schema_mode: str = "fixed",
+        fields: tuple[str, ...] = (),
+        on_validation_failure: str = "discard",
+    ):
+        """Build a state with a CSV blob source via the composer tool API."""
+        schema: dict[str, object] = {"mode": schema_mode}
+        if fields:
+            schema["fields"] = list(fields)
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # Wire source via set_source_from_blob — this is the canonical way to
+        # produce a state with source.options.blob_ref set.
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.csv_blob_id,
+                "on_success": "rows",
+                "on_validation_failure": on_validation_failure,
+                "options": {"schema": schema},
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    def _state_with_text_url_source(self, *, with_web_scrape: bool):
+        """Build a state with a text URL blob source, optionally with web_scrape."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.url_blob_id,
+                "on_success": "url_rows" if with_web_scrape else "content",
+                "on_validation_failure": "discard",
+                "options": {
+                    "column": "url",
+                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                },
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        if with_web_scrape:
+            result = execute_tool(
+                "upsert_node",
+                {
+                    "id": "fetch",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "url_rows",
+                    "on_success": "content",
+                    "on_error": "discard",
+                    "options": {
+                        "url_field": "url",
+                        "schema": {"mode": "fixed", "fields": ["url: str"]},
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "format": "text",
+                        "text_separator": "\n",
+                        "http": {
+                            "abuse_contact": "test@example.com",
+                            "scraping_reason": "test",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                state,
+                catalog,
+            )
+            assert result.success, result.data
+            state = result.updated_state
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    # -- Empty / no-op cases ------------------------------------------------
+
+    def test_proof_empty_when_no_blob_source(self) -> None:
+        """Path-based source has no blob to inspect — diagnostics empty."""
+        # Build a state via set_pipeline using a path-based source (no blob_ref)
+        args = _valid_pipeline_args()
+        args["source"]["on_validation_failure"] = "discard"
+        result = execute_tool("set_pipeline", args, _empty_state(), _mock_catalog())
+        assert result.success, result.data
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            result.updated_state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        assert result.data["proof_diagnostics"] == ()
+
+    def test_proof_empty_when_no_session_context(self) -> None:
+        """Blob source with no session_engine — proof step degrades to empty."""
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool("preview_pipeline", {}, state, _mock_catalog())
+        assert result.success is True
+        assert result.data["proof_diagnostics"] == ()
+
+    # -- csv_fixed_schema_omits_observed_columns ----------------------------
+
+    def test_fixed_csv_omits_columns_with_discard_blocks(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "csv_fixed_schema_omits_observed_columns" in codes
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert blocking, "expected a blocking diagnostic for omitted observed columns"
+        # is_valid is forced False by the blocking proof diagnostic.
+        assert result.data["is_valid"] is False
+
+    def test_fixed_csv_with_all_columns_does_not_block(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str", "customer: str", "price: float"),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_flexible_csv_does_not_block(self) -> None:
+        """Flexible mode accepts extra columns by design."""
+        state = self._state_with_csv_source(schema_mode="flexible", fields=("order_id: str",))
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_fixed_csv_with_routed_failures_does_not_block(self) -> None:
+        """on_validation_failure routes to a sink → not silent discard, not blocking."""
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="quarantine_sink",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    # -- text_source_url_without_web_scrape ---------------------------------
+
+    def test_text_url_without_web_scrape_blocks(self) -> None:
+        state = self._state_with_text_url_source(with_web_scrape=False)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "text_source_url_without_web_scrape" in codes
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert blocking
+        assert result.data["is_valid"] is False
+
+    def test_text_url_with_web_scrape_does_not_block(self) -> None:
+        state = self._state_with_text_url_source(with_web_scrape=True)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "text_source_url_without_web_scrape" not in codes
+
+    # -- inspection warnings surfaced as info -------------------------------
+
+    def test_inspection_warnings_surfaced_as_info(self) -> None:
+        """The text source's web_scrape warning is mirrored in proof_diagnostics as info."""
+        state = self._state_with_text_url_source(with_web_scrape=True)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        info = [d for d in diagnostics if d["severity"] == "info"]
+        # web_scrape warning from inspection should be mirrored — as info, not blocking
+        assert any(d["code"] == "source_inspection_warning" for d in info)
+
+    # -- missing/unreadable blob --------------------------------------------
+
+    def test_missing_storage_file_blocks(self) -> None:
+        self.csv_storage_path.unlink()
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "source_inspection_failed" in codes
+        assert result.data["is_valid"] is False
+
+    def test_blocking_proof_overrides_authoring_validation(self) -> None:
+        """Authoring may be valid but blocking proof_diagnostics still flips is_valid."""
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        # Stage 1 might be valid, but proof step blocks → is_valid False.
+        assert result.data["is_valid"] is False
+        # The state-level validation still reflects authoring shape, only
+        # the summary-level is_valid is forced. authoring_validation is
+        # deep-frozen to MappingProxyType by ToolResult.__post_init__.
+        from collections.abc import Mapping as _Mapping
+
+        assert isinstance(result.data["authoring_validation"], _Mapping)

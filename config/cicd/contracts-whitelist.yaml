@@ -594,6 +594,11 @@ allowed_dict_patterns:
   # the JSON-safe dict returned to the LLM tool channel.
   - "src/elspeth/web/composer/source_inspection.py:_facts_from_objects:objects (list)"
   - "src/elspeth/web/composer/source_inspection.py:facts_to_dict:return"
+  # proof_diagnostics — JSON-safe dicts returned to the LLM tool channel.
+  # Each entry has {code, severity, message, suggested_repair, evidence_locator}
+  # and is consumed by Step 4's repair loop (service.py) and the convergence
+  # eval harness (evals/lib/composer_rgr_score.py).
+  - "src/elspeth/web/composer/tools.py:_compute_proof_diagnostics:return (list)"
   # Blob sync helpers — return dicts for tool response payloads
   - "src/elspeth/web/composer/tools.py:_sync_list_blobs:return (list)"
   # Secret tool handlers — same pattern as above, LLM-provided arguments

@@ -37,7 +37,11 @@ from elspeth.web.blobs.service import _guard_blob_row_literals, _source_referenc
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import redact_source_storage_path
-from elspeth.web.composer.source_inspection import facts_to_dict, inspect_blob_content
+from elspeth.web.composer.source_inspection import (
+    derive_extra_column_risk,
+    facts_to_dict,
+    inspect_blob_content,
+)
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
@@ -4720,6 +4724,180 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
     }
 
 
+_BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "csv_fixed_schema_omits_observed_columns",
+        "text_source_url_without_web_scrape",
+        "source_inspection_failed",
+    }
+)
+
+
+def _compute_proof_diagnostics(
+    state: CompositionState,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Step 3 of the composer simple-pipeline-convergence program.
+
+    Promotes ``preview_pipeline`` from a "state validates" check into a
+    "state is plausibly runnable against observed input" proof. Returns a
+    machine-readable list of diagnostics — each entry has::
+
+        {
+            "code": "csv_fixed_schema_omits_observed_columns",
+            "severity": "blocking" | "warning" | "info",
+            "message": "human-readable description",
+            "suggested_repair": "tool/options the LLM should call",
+            "evidence_locator": {"source": "...", "node_id": "...", ...},
+        }
+
+    Diagnostics surfaced (this round):
+
+      * ``csv_fixed_schema_omits_observed_columns`` — fixed CSV schema +
+        on_validation_failure=discard + at least one observed column
+        absent from declared fields. The combination silently discards
+        every row, which is the #1 historical convergence-failure mode.
+      * ``text_source_url_without_web_scrape`` — text source whose blob
+        content is a single URL but no web_scrape node downstream. The
+        URL string itself reaches sinks instead of the URL's content.
+      * ``source_inspection_warnings`` — every warning surfaced by
+        ``inspect_blob_content`` is mirrored here at ``info`` severity
+        so the model sees them in the same array as blocking issues.
+
+    Bounded I/O: at most one blob read per call, bounded by
+    ``inspect_blob_content``'s 8 KiB / 100 row caps.
+
+    No-op (returns an empty list) if the source is not blob-backed or
+    if session context is absent.
+    """
+    diagnostics: list[dict[str, Any]] = []
+
+    source = state.source
+    if source is None:
+        return diagnostics
+
+    # Only blob-backed sources are inspectable from preview_pipeline; for
+    # path-based sources we have no bytes to peek at.
+    options = source.options or {}
+    blob_id = options.get("blob_ref") if isinstance(options, Mapping) else None
+    if blob_id is None or session_engine is None or session_id is None:
+        return diagnostics
+
+    blob = _sync_get_blob(session_engine, str(blob_id), session_id)
+    if blob is None or blob.get("status") != "ready":
+        return diagnostics
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        diagnostics.append(
+            {
+                "code": "source_inspection_failed",
+                "severity": "blocking",
+                "message": (f"Source blob '{blob_id}' storage file is missing — pipeline cannot run until the blob is re-uploaded."),
+                "suggested_repair": "create_blob with the original content and re-wire via set_source_from_blob",
+                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
+            }
+        )
+        return diagnostics
+
+    try:
+        content = storage_path.read_bytes()
+    except OSError as exc:
+        diagnostics.append(
+            {
+                "code": "source_inspection_failed",
+                "severity": "blocking",
+                "message": f"Source blob '{blob_id}' is unreadable: {exc.strerror or exc!s}",
+                "suggested_repair": "Re-upload the blob via create_blob and re-wire via set_source_from_blob",
+                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
+            }
+        )
+        return diagnostics
+
+    facts = inspect_blob_content(
+        content=content,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        content_hash=blob.get("content_hash"),
+    )
+
+    # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
+    if facts.source_kind in {"csv", "json", "jsonl"}:
+        schema = options.get("schema") if isinstance(options, Mapping) else None
+        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+            declared = schema.get("fields") or ()
+            if isinstance(declared, (list, tuple)):
+                missing = derive_extra_column_risk(facts, tuple(declared))
+                if missing and source.on_validation_failure == "discard":
+                    diagnostics.append(
+                        {
+                            "code": "csv_fixed_schema_omits_observed_columns",
+                            "severity": "blocking",
+                            "message": (
+                                f"Source schema is mode=fixed but omits observed columns "
+                                f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
+                                "Combined with on_validation_failure='discard', every row will be "
+                                "dropped because each contains an undeclared column."
+                            ),
+                            "suggested_repair": (
+                                "patch_source_options with schema.mode='flexible' to accept extra "
+                                "columns, OR add the missing columns to schema.fields, OR set "
+                                "on_validation_failure to a configured output for inspection."
+                            ),
+                            "evidence_locator": {
+                                "source": "blob",
+                                "blob_id": str(blob_id),
+                                "missing_columns": list(missing),
+                                "observed_columns": list(facts.observed_headers or ()),
+                            },
+                        }
+                    )
+
+    # 2. Text source containing a single URL but no web_scrape downstream.
+    if facts.source_kind == "text" and facts.url_candidates:
+        node_plugins = {(n.plugin or "").lower() for n in state.nodes}
+        if "web_scrape" not in node_plugins:
+            diagnostics.append(
+                {
+                    "code": "text_source_url_without_web_scrape",
+                    "severity": "blocking",
+                    "message": (
+                        f"Source blob contains URL(s) {list(facts.url_candidates)} but no "
+                        "web_scrape transform is wired downstream. The URL string itself will "
+                        "flow to sinks, not the URL's content."
+                    ),
+                    "suggested_repair": (
+                        "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
+                        "input: <source on_success>, options: {url_field: '<column>'}}) and route "
+                        "the source on_success to it."
+                    ),
+                    "evidence_locator": {
+                        "source": "blob",
+                        "blob_id": str(blob_id),
+                        "url_candidates": list(facts.url_candidates),
+                    },
+                }
+            )
+
+    # 3. Surface inspection warnings as info-severity diagnostics so the model
+    #    sees them in the same array as blocking issues. These are *advisory*
+    #    only — the model can ignore them if the operator's intent justifies.
+    for warning in facts.warnings:
+        diagnostics.append(
+            {
+                "code": "source_inspection_warning",
+                "severity": "info",
+                "message": warning,
+                "suggested_repair": None,
+                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
+            }
+        )
+
+    return diagnostics
+
+
 def _execute_preview_pipeline(
     args: dict[str, Any],
     state: CompositionState,
@@ -4727,12 +4905,17 @@ def _execute_preview_pipeline(
     data_dir: str | None = None,
     *,
     runtime_preflight: RuntimePreflight | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
 ) -> ToolResult:
     """Preview pipeline configuration — dry-run validation with source summary.
 
-    V1: Returns validation result + source/node/output summary without
-    executing. Full data-flow preview (actually running the source and
-    returning sample rows) is a future enhancement.
+    Returns ``authoring_validation`` (Stage 1), ``runtime_preflight``
+    (Stage 2 from the caller-supplied callback), and ``proof_diagnostics``
+    (Stage 3 — operator-input-aware proof from Step 3 of the composer
+    simple-pipeline-convergence program). The presence of any
+    blocking ``proof_diagnostics`` entry means ``is_valid=False`` even
+    when authoring + runtime checks pass.
     """
     validation = state.validate()
     _AUTHORING_VALIDATION_COUNTER.add(
@@ -4742,8 +4925,21 @@ def _execute_preview_pipeline(
     authoring_payload = _authoring_validation_payload(state, validation)
     runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
 
+    proof_diagnostics = _compute_proof_diagnostics(
+        state,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+    has_blocking_proof = any(d["severity"] == "blocking" for d in proof_diagnostics)
+
+    is_valid = validation.is_valid
+    if runtime_result is not None:
+        is_valid = is_valid and runtime_result.is_valid
+    if has_blocking_proof:
+        is_valid = False
+
     summary: dict[str, Any] = {
-        "is_valid": validation.is_valid if runtime_result is None else validation.is_valid and runtime_result.is_valid,
+        "is_valid": is_valid,
         "errors": authoring_payload["errors"],
         "warnings": authoring_payload["warnings"],
         "suggestions": authoring_payload["suggestions"],
@@ -4752,6 +4948,7 @@ def _execute_preview_pipeline(
         "graph_repair_suggestions": authoring_payload["graph_repair_suggestions"],
         "authoring_validation": authoring_payload,
         "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
+        "proof_diagnostics": proof_diagnostics,
         "source": None,
         "node_count": len(state.nodes),
         "output_count": len(state.outputs),
@@ -4967,6 +5164,8 @@ def execute_tool(
             so execute_tool() stays synchronous.
     """
     # preview_pipeline has an extended signature with runtime_preflight kwarg
+    # plus session context (session_engine, session_id) so the proof step
+    # can inspect blob-backed sources.
     if tool_name == "preview_pipeline":
         return _execute_preview_pipeline(
             arguments,
@@ -4974,6 +5173,8 @@ def execute_tool(
             catalog,
             data_dir,
             runtime_preflight=runtime_preflight,
+            session_engine=session_engine,
+            session_id=session_id,
         )
 
     # diff_pipeline has an extended signature with baseline kwarg

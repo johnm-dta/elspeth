@@ -35,7 +35,7 @@ from uuid import UUID
 
 from elspeth.contracts.freeze import freeze_fields
 
-SlotType = Literal["blob_id", "str", "float", "int"]
+SlotType = Literal["blob_id", "str", "float", "int", "str_list"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +128,20 @@ def _coerce_slot(name: str, spec: SlotSpec, raw: Any) -> Any:
                 raise RecipeValidationError(f"slot '{name}' must be an integer; could not coerce {raw!r}") from exc
         raise RecipeValidationError(f"slot '{name}' must be an integer (got type {type(raw).__name__})")
 
+    if spec.slot_type == "str_list":
+        # Operator-supplied list of strings. Accept only a list/tuple of
+        # str entries — no string-splitting, because a single comma-separated
+        # value would be ambiguous (is "a,b" one field or two?). The slot
+        # caller is the LLM agent, which can construct lists natively.
+        if not isinstance(raw, (list, tuple)):
+            raise RecipeValidationError(f"slot '{name}' must be a JSON array of strings (got type {type(raw).__name__})")
+        items: list[str] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, str):
+                raise RecipeValidationError(f"slot '{name}'[{index}] must be a string (got type {type(item).__name__})")
+            items.append(item)
+        return items
+
     raise RecipeValidationError(f"recipe slot type {spec.slot_type!r} is not implemented")
 
 
@@ -176,6 +190,14 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         description="LLM model identifier (e.g., 'anthropic/claude-3.5-sonnet'); use list_models to discover",
     ),
+    "api_key_secret": SlotSpec(
+        slot_type="str",
+        description=(
+            "Name of an inventory secret to wire into the LLM 'api_key' option as "
+            "a deferred {secret_ref} marker. Discover names via list_secret_refs; "
+            "verify with validate_secret_ref. Literal credential strings are rejected."
+        ),
+    ),
     "provider": SlotSpec(
         slot_type="str",
         required=False,
@@ -187,6 +209,19 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
         required=False,
         default="classification",
         description="Row field name where the LLM response is written",
+    ),
+    "required_input_fields": SlotSpec(
+        slot_type="str_list",
+        required=False,
+        default=(),
+        description=(
+            "Row field names the classifier_template depends on. The LLMConfig "
+            "validator demands an explicit list when the template references "
+            "row.* — pass the field names you reference in classifier_template, "
+            "or accept the recipe default (empty list) which is the "
+            "documented opt-out ('accept runtime risk') and refine later via "
+            "patch_node_options."
+        ),
     ),
     "output_path": SlotSpec(
         slot_type="str",
@@ -207,6 +242,24 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     # ``options`` would skip resolution and leave the source unbound — the
     # proof step (``compute_proof_diagnostics`` reads ``options["blob_ref"]``)
     # would then silently report no diagnostics.
+    #
+    # ``api_key`` is wired as a ``{secret_ref: NAME}`` deferred marker.
+    # ``_credential_wiring_contract_failure`` rejects literal strings, and
+    # ``_prevalidate_plugin_options`` strips the marker before Pydantic sees
+    # the config and filters out the resulting "field required" error for
+    # the wired field. Operators must register the secret via the secret
+    # service (list_secret_refs / validate_secret_ref) before applying the
+    # recipe; ``apply_pipeline_recipe`` returns a credential-wiring repair
+    # error if the name is unknown at runtime.
+    #
+    # ``required_input_fields`` defaults to an empty list — the LLMConfig
+    # ``_validate_required_input_fields_declared`` model_validator treats
+    # ``[]`` as the documented "explicit opt-out (accept runtime risk)"
+    # path. The recipe surfaces this as an optional slot so an operator
+    # who knows the template's field references can declare them up front;
+    # otherwise the safe default flows through and the operator can refine
+    # via ``patch_node_options`` after recipe application.
+    required_input_fields = list(slots["required_input_fields"])
     return {
         "source": {
             "plugin": "csv",
@@ -228,8 +281,11 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "options": {
                     "provider": slots["provider"],
                     "model": slots["model"],
+                    "api_key": {"secret_ref": slots["api_key_secret"]},
                     "template": slots["classifier_template"],
                     "response_field": slots["label_field"],
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": required_input_fields,
                 },
             }
         ],
@@ -317,6 +373,12 @@ def _build_threshold_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "on_success": "numeric_rows",
                 "on_error": "discard",
                 "options": {
+                    # type_coerce extends DataPluginConfig, which makes
+                    # ``schema`` a required field. Recipes use observed
+                    # mode so any input columns flow through; the operator
+                    # can refine to a fixed schema via patch_node_options
+                    # once inspect_source has surfaced the actual headers.
+                    "schema": {"mode": "observed"},
                     "conversions": [{"field": field, "to": "float"}],
                 },
             },

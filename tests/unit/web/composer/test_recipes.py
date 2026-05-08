@@ -68,6 +68,7 @@ class TestBlobIdSlotValidation:
                 "source_blob_id": bid,
                 "classifier_template": "Classify: {{ row['text'] }}",
                 "model": "anthropic/claude-3.5-sonnet",
+                "api_key_secret": "OPENROUTER_API_KEY",
             },
         )
         # blob_id is the top-level set_pipeline source argument (sibling of
@@ -86,6 +87,7 @@ class TestBlobIdSlotValidation:
                     "source_blob_id": "https://example.com/data.csv",
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",
+                    "api_key_secret": "OPENROUTER_API_KEY",
                 },
             )
         msg = str(exc_info.value)
@@ -101,6 +103,7 @@ class TestBlobIdSlotValidation:
                     "source_blob_id": "/tmp/data.csv",
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "model",
+                    "api_key_secret": "OPENROUTER_API_KEY",
                 },
             )
 
@@ -112,6 +115,7 @@ class TestBlobIdSlotValidation:
                     "source_blob_id": 42,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "model",
+                    "api_key_secret": "OPENROUTER_API_KEY",
                 },
             )
 
@@ -184,6 +188,7 @@ class TestRequiredOptionalSlots:
                 "source_blob_id": str(uuid4()),
                 "classifier_template": "tmpl",
                 "model": "m",
+                "api_key_secret": "OPENROUTER_API_KEY",
             },
         )
         # provider defaults to 'openrouter'
@@ -191,6 +196,20 @@ class TestRequiredOptionalSlots:
         assert llm_node["options"]["provider"] == "openrouter"
         # label_field defaults to 'classification'
         assert llm_node["options"]["response_field"] == "classification"
+
+    def test_missing_required_api_key_secret_rejected(self) -> None:
+        """api_key_secret is required — operator must explicitly choose a
+        secret reference name (no sensible recipe-level default exists for
+        a deployment-specific secret)."""
+        with pytest.raises(RecipeValidationError, match="missing required slot 'api_key_secret'"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "classifier_template": "tmpl",
+                    "model": "m",
+                },
+            )
 
     def test_unknown_slot_rejected(self) -> None:
         with pytest.raises(RecipeValidationError, match="does not accept slot"):
@@ -200,6 +219,7 @@ class TestRequiredOptionalSlots:
                     "source_blob_id": str(uuid4()),
                     "classifier_template": "tmpl",
                     "model": "m",
+                    "api_key_secret": "OPENROUTER_API_KEY",
                     "fictitious_slot": "x",
                 },
             )
@@ -216,6 +236,7 @@ class TestClassifyRecipe:
             "source_blob_id": str(uuid4()),
             "classifier_template": "Classify {{ row['subject'] }}",
             "model": "anthropic/claude-3.5-sonnet",
+            "api_key_secret": "OPENROUTER_API_KEY",
         }
         defaults.update(slots)
         return apply_recipe("classify-rows-llm-jsonl", defaults)
@@ -408,6 +429,7 @@ class TestRecipeIntegrationWithSetPipeline:
                 "source_blob_id": bid,
                 "classifier_template": "tmpl",
                 "model": "model",
+                "api_key_secret": "OPENROUTER_API_KEY",
             },
         )
         # Top-level — set_pipeline consumes this in src_args.get('blob_id').

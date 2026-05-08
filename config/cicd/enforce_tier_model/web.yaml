@@ -603,6 +603,22 @@ allow_hits:
   reason: Tier-3 trust boundary — string check before int coercion. Same pattern as the float branch.
   safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
   expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=be30a8e022576252
+  owner: web-composer
+  reason: Tier-3 trust boundary — list/tuple check for str_list slot type before iteration. Operator-supplied
+    JSON arrays arrive at this boundary with no static type guarantee; rejecting non-iterables with a
+    RecipeValidationError preserves the explicit-failure-mode contract for the apply_pipeline_recipe entrypoint.
+  safety: Non-iterable values raise RecipeValidationError naming the slot and observed type — never silently
+    coerces or fabricates a list.
+  expires: null
+- key: web/composer/recipes.py:R5:_coerce_slot:fp=f611b51374d3f4ea
+  owner: web-composer
+  reason: Tier-3 trust boundary — per-element string check inside str_list slot iteration. Same fabrication
+    risk reasoning as the str/blob_id branches; rejecting non-string elements before they pass through to
+    LLM/transform options preserves the recipe's explicit-failure-mode contract.
+  safety: Non-string elements raise RecipeValidationError with the offending index in the message — never
+    silently coerces or fabricates a string element.
+  expires: null
 - key: web/composer/recipes.py:R1:get_recipe:fp=fa88d94e82804c1f
   owner: web-composer
   reason: Tier-3 trust boundary — `_RECIPES.get(name)` for membership probe on a recipe-name lookup. Returns None

@@ -43,7 +43,6 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any, Final, Literal
 from uuid import UUID
 
@@ -506,10 +505,3 @@ def derive_extra_column_risk(
     declared_lower = {f.split(":", 1)[0].strip().lower() for f in declared_fields}
     missing = tuple(h for h in facts.observed_headers if h.lower() not in declared_lower)
     return missing
-
-
-# Re-export the immutable identity used by callers that want to project the
-# read-only dict view without re-copying.
-def freeze_facts_identity(redacted_identity: Mapping[str, str]) -> Mapping[str, str]:
-    """Return an immutable view of the identity mapping for caching."""
-    return MappingProxyType(dict(redacted_identity))

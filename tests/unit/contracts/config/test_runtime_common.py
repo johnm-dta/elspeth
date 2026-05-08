@@ -98,8 +98,7 @@ class TestRuntimeConfigImmutability:
         # which doesn't constrain *this* class's memory layout. Using
         # `__dict__` lookup ensures the declaration is local.
         assert "__slots__" in config_cls.__dict__, (
-            f"{config_name} should declare __slots__ on the class itself "
-            f"(inherited __slots__ does not enforce this class's layout)"
+            f"{config_name} should declare __slots__ on the class itself (inherited __slots__ does not enforce this class's layout)"
         )
 
 

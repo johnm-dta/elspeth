@@ -27,8 +27,7 @@ class TestFieldMappings:
         # FIELD_MAPPINGS keys; an addition to this INNER dict is caught
         # by NO other test. Do not delete in tautology sweeps.
         assert len(FIELD_MAPPINGS["RetrySettings"]) == 2, (
-            "FIELD_MAPPINGS['RetrySettings'] inner-dict size drifted; an "
-            "entry was added or removed and no cross-validation test caught it"
+            "FIELD_MAPPINGS['RetrySettings'] inner-dict size drifted; an entry was added or removed and no cross-validation test caught it"
         )
 
     def test_retry_settings_initial_delay_mapped(self) -> None:

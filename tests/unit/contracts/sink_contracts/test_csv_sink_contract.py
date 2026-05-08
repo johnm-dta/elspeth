@@ -26,7 +26,7 @@ from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context, make_field, make_row
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
-from .test_sink_protocol import SinkContractTestBase, SinkDeterminismContractTestBase
+from .test_sink_protocol import SinkDeterminismContractTestBase
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
@@ -57,8 +57,19 @@ class _PartiallyFailingFile:
         return getattr(self._wrapped, name)
 
 
-class TestCSVSinkContract(SinkContractTestBase):
-    """Contract tests for CSVSink."""
+class TestCSVSinkContract(SinkDeterminismContractTestBase):
+    """Contract + determinism tests for CSVSink.
+
+    SinkDeterminismContractTestBase is a strict superset of SinkContractTestBase
+    (it inherits the full ~20-method protocol suite and adds determinism
+    checks). A previous version of this module split the protocol coverage
+    across two classes — TestCSVSinkContract (3-field schema, plain contract
+    base) and TestCSVSinkDeterminism (2-field schema, determinism base) — but
+    the protocol assertions are schema-agnostic, so the two classes ran the
+    full inherited suite twice with no genuine coverage difference. The
+    classes were collapsed; the 3-field schema (int/str/float) is retained
+    because it exercises more type diversity than the 2-field variant did.
+    """
 
     @pytest.fixture
     def sink_factory(self, tmp_path: Path) -> Callable[[], SinkProtocol]:
@@ -85,36 +96,6 @@ class TestCSVSinkContract(SinkContractTestBase):
             {"id": 1, "name": "Alice", "score": 95.5},
             {"id": 2, "name": "Bob", "score": 87.0},
             {"id": 3, "name": "Charlie", "score": 91.2},
-        ]
-
-
-class TestCSVSinkDeterminism(SinkDeterminismContractTestBase):
-    """Determinism contract tests for CSVSink."""
-
-    @pytest.fixture
-    def sink_factory(self, tmp_path: Path) -> Callable[[], SinkProtocol]:
-        """Create a factory for CSVSink instances."""
-        counter = [0]
-
-        def factory() -> SinkProtocol:
-            counter[0] += 1
-            return inject_write_failure(
-                CSVSink(
-                    {
-                        "path": str(tmp_path / f"output_{counter[0]}.csv"),
-                        "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                    }
-                )
-            )
-
-        return factory
-
-    @pytest.fixture
-    def sample_rows(self) -> list[dict[str, Any]]:
-        """Provide sample rows to write."""
-        return [
-            {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"},
         ]
 
 

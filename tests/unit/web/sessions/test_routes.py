@@ -1916,13 +1916,14 @@ class TestMessageRoutes:
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
             loop.run_until_complete(
                 service.add_message(
                     session_id,
                     "assistant",
                     synthetic,
                     raw_content=actual_prose,
+                    writer_principal="compose_loop",
                 )
             )
         finally:
@@ -5899,6 +5900,7 @@ def test_augmented_assistant_history_returns_unmodified_model_prose() -> None:
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])
@@ -5933,6 +5935,7 @@ def test_augmented_assistant_history_handles_content_equal_to_raw_content() -> N
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])
@@ -5986,6 +5989,7 @@ def test_augmented_assistant_history_treats_empty_raw_content_as_augmentation() 
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])

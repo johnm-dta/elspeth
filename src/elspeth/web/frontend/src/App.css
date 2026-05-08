@@ -1381,6 +1381,7 @@ summary:focus-visible {
   --color-status-completed:  #0d8a88;
   --color-status-failed:     #c93b38;
   --color-status-cancelled:  #b86830;
+  --color-status-empty:      #4d6a73;
 
   /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */
   --color-scrollbar-track:       var(--color-bg);

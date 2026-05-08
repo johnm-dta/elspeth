@@ -220,10 +220,9 @@ def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_recor
             raise RuntimeError(f"Completed run {current.run_id} has no landscape_run_id — Tier 1 anomaly (audit trail incomplete)")
         if current.accounting is None:
             raise RuntimeError(f"Completed run {current.run_id} has no accounting — Tier 1 anomaly (audit trail incomplete)")
-        completed_status = cast(Literal["completed", "completed_with_failures", "empty"], current.status)
         try:
             payload: CompletedData | FailedData | CancelledData = CompletedData(
-                status=completed_status,
+                status=current.status,
                 accounting=current.accounting,
                 landscape_run_id=current.landscape_run_id,
             )

@@ -46,6 +46,10 @@ export function ChatInput({
   // Track current text in a ref to avoid stale closures during async operations
   const textRef = useRef(text);
   textRef.current = text;
+  // Track current setText in a ref to avoid re-registering the prefill listener
+  // when setText identity changes (in controlled mode) on each render
+  const setTextRef = useRef(setText);
+  setTextRef.current = setText;
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const uploadBlob = useBlobStore((s) => s.uploadBlob);
 
@@ -56,19 +60,19 @@ export function ChatInput({
     function handlePrefill(e: Event) {
       const detail = (e as CustomEvent<string>).detail;
       if (typeof detail !== "string") return;
-      setText(detail);
+      setTextRef.current(detail);
       // Defer focus + caret placement to after React re-renders the controlled value.
       queueMicrotask(() => {
-        if (inputRef.current) {
-          inputRef.current.focus();
-          const len = detail.length;
-          inputRef.current.setSelectionRange(len, len);
-        }
+        const ta = inputRef.current;
+        if (!ta) return;
+        ta.focus();
+        const len = detail.length;
+        ta.setSelectionRange(len, len);
       });
     }
     window.addEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
     return () => window.removeEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
-  }, [setText, inputRef]);
+  }, []);
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();

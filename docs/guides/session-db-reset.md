@@ -2,6 +2,53 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. The session database is separate from the Landscape audit database; resetting the session database must not touch Landscape, payload storage, blobs, or Filigree tracker data.
 
+## Deployment Scope (Schedule 1A)
+
+Schedule 1A's per-session write discipline (`_session_write_lock`,
+`_reserve_sequence_range`, `_insert_chat_message`,
+`_insert_composition_state`) is proven against **SQLite single-worker
+deployments only**. The proof rests on:
+
+- SQLite `_session_write_lock` is implemented as a process-wide
+  per-session `threading.RLock` (`_sqlite_lock_for_session`). It
+  serialises same-session writers within one process; it does NOT
+  cross process boundaries.
+- The deployed staging service (`elspeth-web.service`) runs single-worker:
+  no `--workers` flag, `WEB_CONCURRENCY` unset or `1`, and the startup
+  multi-worker guard in `src/elspeth/web/app.py` enforces this.
+- The PostgreSQL branch of `_session_write_lock` uses
+  `pg_advisory_xact_lock(...)` and is correct in principle, but is NOT
+  exercised by the Schedule 1A test surface and is NOT claimed here.
+
+**What 1A does NOT prove:**
+
+- Multi-worker SQLite deployments (the per-session RLock cannot
+  serialise across processes).
+- PostgreSQL schema correctness against a live Postgres instance
+  (`tests/unit/web/sessions/` runs against in-memory and file-backed
+  SQLite only; the model definitions are dialect-agnostic but the
+  migration path, CHECK-constraint translations, and partial-index
+  semantics are not exercised against `pg_*`).
+- Cross-process advisory-lock concurrency under real load.
+
+**Where the gaps land:** Schedule 1C is the explicit home for
+PostgreSQL DDL parity, advisory-lock concurrency proofs, and the
+multi-worker deployment path. Operators planning to deploy
+Schedule 1A on anything other than single-worker SQLite must wait
+for Schedule 1C — the schema cutover is internally consistent on
+Postgres in principle, but the proof obligation has not been
+discharged on this branch.
+
+The Phase 1A merge gate is therefore SQLite-only:
+
+```bash
+.venv/bin/python -m pytest tests/unit/web/ tests/integration/web/
+```
+
+A passing run of that command demonstrates SQLite-current
+deployability. It does not demonstrate PostgreSQL deployability or
+multi-worker safety.
+
 ## Stop/Go Gates
 
 Before any staging reset, verify that the current Landscape schema and Landscape write/read code do not reference web-session identifiers:

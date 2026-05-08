@@ -464,7 +464,7 @@ export function InspectorPanel() {
               };
 
               const colors: Record<string, string> = {
-                unchecked: "var(--color-warning)",
+                unchecked: "var(--color-text-muted)",
                 valid: "var(--color-success)",
                 warning: "var(--color-warning)",
                 invalid: "var(--color-error)",

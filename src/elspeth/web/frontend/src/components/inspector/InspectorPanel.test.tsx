@@ -295,6 +295,58 @@ describe("Version selector and catalog", () => {
   });
 });
 
+describe("InspectorPanel — validation dot colour", () => {
+  it("renders unchecked state in muted text colour, not warning orange", () => {
+    // Arrange: a session with a non-empty composition but no validation result
+    useSessionStore.setState({
+      activeSessionId: "s1",
+      compositionState: {
+        version: 1,
+        source: { id: "src", type: "csv_file", options: {} },
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: { name: null, description: null },
+      } as any,
+    });
+    useExecutionStore.setState({ validationResult: null });
+
+    render(<InspectorPanel />);
+
+    const dot = screen.getByLabelText("Not validated");
+    expect(dot.getAttribute("style")).toContain("var(--color-text-muted)");
+    expect(dot.getAttribute("style")).not.toContain("var(--color-warning)");
+  });
+
+  it("renders warning state in warning colour", () => {
+    useSessionStore.setState({
+      activeSessionId: "s1",
+      compositionState: {
+        version: 1,
+        source: { id: "src", type: "csv_file", options: {} },
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: { name: null, description: null },
+      } as any,
+    });
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        summary: "Passed with warnings",
+        checks: [],
+        errors: [],
+        warnings: [{ component_id: "src", component_type: "source", message: "x", suggestion: null }],
+      } as any,
+    });
+
+    render(<InspectorPanel />);
+
+    const dot = screen.getByLabelText("Validation passed with warnings");
+    expect(dot.getAttribute("style")).toContain("var(--color-warning)");
+  });
+});
+
 describe("InspectorPanel execution feedback", () => {
   beforeEach(async () => {
     const { executePipeline, fetchRuns } = await import("@/api/client");

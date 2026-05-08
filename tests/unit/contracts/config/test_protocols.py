@@ -300,26 +300,6 @@ class TestRealImplementations:
         instance = config_cls.default()
         assert isinstance(instance, protocol)
 
-    def test_retry_default_satisfies_retry_protocol(self) -> None:
-        config = RuntimeRetryConfig.default()
-        assert isinstance(config, RuntimeRetryProtocol)
-
-    def test_rate_limit_default_satisfies_rate_limit_protocol(self) -> None:
-        config = RuntimeRateLimitConfig.default()
-        assert isinstance(config, RuntimeRateLimitProtocol)
-
-    def test_concurrency_default_satisfies_concurrency_protocol(self) -> None:
-        config = RuntimeConcurrencyConfig.default()
-        assert isinstance(config, RuntimeConcurrencyProtocol)
-
-    def test_checkpoint_default_satisfies_checkpoint_protocol(self) -> None:
-        config = RuntimeCheckpointConfig.default()
-        assert isinstance(config, RuntimeCheckpointProtocol)
-
-    def test_telemetry_default_satisfies_telemetry_protocol(self) -> None:
-        config = RuntimeTelemetryConfig.default()
-        assert isinstance(config, RuntimeTelemetryProtocol)
-
     def test_retry_no_retry_satisfies_protocol(self) -> None:
         config = RuntimeRetryConfig.no_retry()
         assert isinstance(config, RuntimeRetryProtocol)
@@ -411,26 +391,6 @@ class TestProtocolCompleteness:
         assert actual == expected_props, (
             f"{protocol.__name__} properties mismatch.\nMissing: {expected_props - actual}\nExtra: {actual - expected_props}"
         )
-
-    def test_retry_protocol_has_5_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeRetryProtocol)
-        assert len(props) == 5
-
-    def test_rate_limit_protocol_has_3_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeRateLimitProtocol)
-        assert len(props) == 3
-
-    def test_concurrency_protocol_has_1_property(self) -> None:
-        props = _get_protocol_property_names(RuntimeConcurrencyProtocol)
-        assert len(props) == 1
-
-    def test_checkpoint_protocol_has_3_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeCheckpointProtocol)
-        assert len(props) == 3
-
-    def test_telemetry_protocol_has_6_properties(self) -> None:
-        props = _get_protocol_property_names(RuntimeTelemetryProtocol)
-        assert len(props) == 6
 
     @pytest.mark.parametrize(
         "protocol",

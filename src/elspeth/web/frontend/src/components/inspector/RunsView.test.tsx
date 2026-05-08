@@ -377,3 +377,33 @@ describe("RunsView Inspect button a11y", () => {
     expect(document.getElementById(expandedControlsId!)).not.toBeNull();
   });
 });
+
+describe("RunsView cancelling badge", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: null });
+  });
+
+  it("uses cancelled badge class when cancel_requested on a running run", () => {
+    useExecutionStore.setState({
+      runs: [
+        makeRun({
+          status: "running",
+          cancel_requested: true,
+          error: null,
+        }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    // Get all status badge elements (excluding the duration label which also contains "cancelling")
+    const badges = screen.getAllByText(/cancelling/i);
+    // The first one is the badge; the second one is the duration span
+    const badge = badges[0].closest("[class*='status-badge']");
+    expect(badge).not.toBeNull();
+    expect(badge).toHaveClass("status-badge-cancelled");
+  });
+});

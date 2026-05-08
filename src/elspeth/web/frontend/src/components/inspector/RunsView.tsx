@@ -259,7 +259,13 @@ export function RunsView() {
                 }}
               >
                 {/* Status badge: uses CSS class from App.css */}
-                <span className={STATUS_BADGE_CLASSES[run.status]}>
+                <span
+                  className={
+                    run.cancel_requested && run.status === "running"
+                      ? STATUS_BADGE_CLASSES.cancelled
+                      : STATUS_BADGE_CLASSES[run.status]
+                  }
+                >
                   {displayStatus}
                 </span>
                 <span

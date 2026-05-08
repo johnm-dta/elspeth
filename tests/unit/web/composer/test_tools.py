@@ -8211,9 +8211,8 @@ class TestInspectSourceTool:
 
 
 # ---------------------------------------------------------------------------
-# preview_pipeline proof step — Step 3 of composer convergence (epic
-# elspeth-783c9dede8). proof_diagnostics surfaces blocking issues that depend
-# on observed input shape: fixed CSV schema omitting observed columns,
+# preview_pipeline proof step. proof_diagnostics surfaces blocking issues that
+# depend on observed input shape: fixed CSV schema omitting observed columns,
 # text source containing a URL with no web_scrape downstream, missing or
 # unreadable blob storage. is_valid is forced to False when any proof
 # diagnostic is blocking, even if authoring/runtime checks pass.

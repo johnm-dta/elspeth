@@ -584,10 +584,9 @@ export function InspectorPanel() {
         />
       )}
 
-      {/* Tab content area with ARIA live region */}
+      {/* Tab content area */}
       <div
         role="tabpanel"
-        aria-live="polite"
         id={`inspector-tabpanel-${activeTab}`}
         aria-labelledby={`inspector-tab-${activeTab}`}
         className="inspector-tab-content"

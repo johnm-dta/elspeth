@@ -404,3 +404,28 @@ describe("InspectorPanel execution feedback", () => {
     );
   });
 });
+
+describe("InspectorPanel aria-live scope", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: "s1",
+      compositionState: makeState(),
+      stateVersions: [],
+      isLoadingVersions: false,
+    });
+    useExecutionStore.setState({
+      validationResult: null,
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+  });
+
+  it("does not place aria-live on the tab panel container", () => {
+    render(<InspectorPanel />);
+
+    const tabPanel = screen.getByRole("tabpanel");
+    expect(tabPanel.getAttribute("aria-live")).toBeNull();
+  });
+});

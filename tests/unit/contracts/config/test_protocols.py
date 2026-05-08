@@ -243,7 +243,14 @@ class TestRuntimeCheckable:
         ],
     )
     def test_protocol_is_runtime_checkable(self, protocol: type) -> None:
-        assert getattr(protocol, "__protocol_attrs__", None) is not None or hasattr(protocol, "_is_runtime_protocol")
+        # A non-@runtime_checkable Protocol raises TypeError when used with
+        # isinstance(). Probe the live behaviour rather than introspecting
+        # CPython-private attributes (which differ across versions and may
+        # OR-fall-back into a false pass).
+        try:
+            isinstance(object(), protocol)
+        except TypeError as exc:  # pragma: no cover - failure path
+            pytest.fail(f"{protocol.__name__} is not runtime_checkable: {exc}")
 
     @pytest.mark.parametrize(
         "protocol",
@@ -320,14 +327,24 @@ class TestRealImplementations:
     @pytest.mark.parametrize("protocol,config_cls", PROTOCOL_CONFIG_PAIRS)
     def test_real_instance_does_not_satisfy_wrong_protocol(self, protocol: type, config_cls: Any) -> None:
         instance = config_cls.default()
-        # Pick a protocol that is NOT the matching one
+        # Sanity: the matching protocol must accept the instance.
+        assert isinstance(instance, protocol), (
+            f"{config_cls.__name__}.default() failed identity check against {protocol.__name__}"
+        )
+        # Every other protocol in ALL_PROTOCOLS must reject this instance.
+        # Verified empirically: each runtime config has a distinct required-attribute
+        # set under @runtime_checkable structural typing -- shared attribute names
+        # like `enabled` do not cause cross-protocol false matches because the other
+        # protocols always require additional attributes the instance does not expose.
+        # If a future protocol shrinks to a strict subset of another, this test will
+        # surface the structural collision rather than silently pass.
         wrong_protocols = [p for p in ALL_PROTOCOLS if p is not protocol]
-        for _wrong in wrong_protocols:
-            # Not all mismatches will fail (e.g. both checkpoint and rate_limit have 'enabled'),
-            # but at least one wrong protocol should fail for each config.
-            pass
-        # Verify at least the identity protocol matches
-        assert isinstance(instance, protocol)
+        for wrong_protocol in wrong_protocols:
+            assert not isinstance(instance, wrong_protocol), (
+                f"{config_cls.__name__}.default() unexpectedly satisfies "
+                f"{wrong_protocol.__name__}; structural typing collision -- "
+                f"required-attribute sets are no longer disjoint"
+            )
 
 
 class TestStructuralTyping:

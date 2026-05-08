@@ -41,6 +41,7 @@ import csv
 import io
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
@@ -101,6 +102,7 @@ def inspect_blob_content(
     """
     inspected = content[:_MAX_BYTES]
     byte_range = (0, len(inspected))
+    truncated = len(content) > _MAX_BYTES
 
     redacted_identity: dict[str, str] = {
         "filename": filename,
@@ -120,7 +122,7 @@ def inspect_blob_content(
     if kind == "jsonl":
         return _inspect_jsonl(inspected, redacted_identity, byte_range)
     if kind == "json":
-        return _inspect_json(inspected, redacted_identity, byte_range)
+        return _inspect_json(inspected, redacted_identity, byte_range, truncated=truncated)
     if kind == "text":
         return _inspect_text(inspected, redacted_identity, byte_range)
 
@@ -159,6 +161,19 @@ def _detect_kind(filename: str, mime_type: str, sample: bytes) -> SourceKind:
 def _safe_decode(content: bytes) -> str:
     """Decode bytes as utf-8 with replacement; never raises."""
     return content.decode("utf-8", errors="replace")
+
+
+def _count_replacement_chars(decoded: str) -> int:
+    """Count Unicode replacement characters introduced by errors='replace'.
+
+    A nonzero count means the source bytes contained sub-sequences that did
+    not decode cleanly as UTF-8. Per Tier-3 contract, that is observable
+    evidence about the blob — the proof step surfaces it as a warning so
+    the operator/LLM can decide whether to declare a different encoding or
+    treat the file as binary, rather than letting the replacement characters
+    flow silently into row content downstream.
+    """
+    return decoded.count("�")
 
 
 def _infer_scalar_type(value: str) -> InferredType:
@@ -205,6 +220,7 @@ def _inspect_csv(
     byte_range: tuple[int, int],
 ) -> SourceInspectionFacts:
     text = _safe_decode(sample)
+    decode_replacements = _count_replacement_chars(text)
     reader = csv.reader(io.StringIO(text))
     rows: list[list[str]] = []
     try:
@@ -240,14 +256,45 @@ def _inspect_csv(
     data_rows = rows[1:]
     warnings: list[str] = []
 
+    if decode_replacements:
+        # `errors="replace"` swapped malformed bytes for U+FFFD. Surface the
+        # count so the operator/LLM sees the blob is not clean UTF-8 rather
+        # than letting `�` flow silently into the inferred row content.
+        warnings.append(
+            f"binary_or_non_utf8_content: {decode_replacements} replacement char(s) introduced while decoding sample bytes — declare encoding explicitly or treat as binary"
+        )
+
     if not all(headers):
         warnings.append("csv has empty header cells; consider field_mapping")
+
+    # CSV duplicate headers: pandas / csv.DictReader collapse duplicates
+    # silently (last-write-wins), which fabricates a single column from
+    # multiple source columns. Surface the duplicates as a warning so the
+    # operator can rename or use field_mapping; do not fabricate a
+    # disambiguated key here.
+    if len(set(headers)) < len(headers):
+        counts = Counter(headers)
+        dupes = sorted(name for name, count in counts.items() if count > 1)
+        warnings.append(
+            f"csv_duplicate_headers: header(s) {dupes} appear multiple times — downstream consumers may collapse them; rename or use field_mapping"
+        )
 
     # If the first row looks like data (every cell parseable as int/float/bool),
     # the file probably has no headers.
     headerless = all(_infer_scalar_type(cell) in {"int", "float", "bool"} for cell in rows[0] if cell.strip())
     if headerless and rows[0]:
         warnings.append("first row looks like data, not headers — consider explicit columns or field_mapping")
+
+    # CSV jagged rows: a row whose cell count differs from the header count
+    # silently fabricates `""` for missing trailing cells (or drops trailing
+    # cells when there are too many). The shape mismatch is operator-
+    # observable evidence; surface a single aggregate warning rather than
+    # one per row.
+    jagged_count = sum(1 for row in data_rows if len(row) != len(headers))
+    if jagged_count:
+        warnings.append(
+            f"csv_jagged_rows: {jagged_count} row(s) have a cell count that does not match the {len(headers)}-column header — missing cells default to '' and extra cells are dropped"
+        )
 
     types_per_column: dict[str, list[InferredType]] = {h: [] for h in headers}
     for row in data_rows:
@@ -286,6 +333,11 @@ def _inspect_jsonl(
     text = _safe_decode(sample)
     objects: list[dict[str, Any]] = []
     warnings: list[str] = []
+    decode_replacements = _count_replacement_chars(text)
+    if decode_replacements:
+        warnings.append(
+            f"binary_or_non_utf8_content: {decode_replacements} replacement char(s) introduced while decoding sample bytes — declare encoding explicitly or treat as binary"
+        )
     parse_failures = 0
     for i, raw_line in enumerate(text.splitlines()):
         if i >= _MAX_ROWS:
@@ -318,16 +370,30 @@ def _inspect_json(
     sample: bytes,
     redacted_identity: dict[str, str],
     byte_range: tuple[int, int],
+    *,
+    truncated: bool,
 ) -> SourceInspectionFacts:
     text = _safe_decode(sample)
     warnings: list[str] = []
+    decode_replacements = _count_replacement_chars(text)
+    if decode_replacements:
+        warnings.append(
+            f"binary_or_non_utf8_content: {decode_replacements} replacement char(s) introduced while decoding sample bytes — declare encoding explicitly or treat as binary"
+        )
     objects: list[dict[str, Any]] = []
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError as exc:
-        # Sample may be truncated in the middle of an object; that's the
-        # normal case for an 8 KiB peek into a 50 MiB file. Record and move on.
-        warnings.append(f"json parse error (sample may be truncated): {exc.msg}")
+        # Two distinct cases: (a) the sample was truncated mid-document at
+        # the 8 KiB peek boundary on a larger file — incomplete sample is
+        # the expected failure mode; (b) the document is complete but
+        # malformed — there is nothing more to read and the parse failure
+        # is real. Conflating them in the message hides the second case
+        # from the operator/LLM.
+        if truncated:
+            warnings.append(f"json parse error (sample truncated at {_MAX_BYTES} bytes; full document may be larger): {exc.msg}")
+        else:
+            warnings.append(f"json parse error (full content sampled, document is malformed): {exc.msg}")
         loaded = None
 
     if isinstance(loaded, list):
@@ -344,7 +410,16 @@ def _inspect_json(
                 warnings.append("json appears to be a wrapped object — set data_key on the source plugin")
                 break
         if not objects:
-            # Single object — still useful as a row of one.
+            # No list-of-dicts value found. Treating the wrapper as a single
+            # row preserves the "always return facts" contract, but the
+            # operator/LLM must see this disambiguation — otherwise a
+            # ``{"results": []}`` empty wrapper or a ``{"data": "scalar"}``
+            # blob silently presents as "one row with these top-level keys"
+            # without flagging that the wrapped-object detection was probed
+            # and rejected.
+            warnings.append(
+                "json_top_level_dict_treated_as_single_row: top-level object had no list-of-dicts value to detect as a wrapped row collection — inspecting the object as a single row of facts; verify the source structure if a row collection was expected"
+            )
             objects.append(loaded)
 
     return _facts_from_objects(

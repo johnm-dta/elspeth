@@ -446,7 +446,7 @@ allow_hits:
     the _sync_get_blob lookup). Identity surfacing degrades gracefully; integrity guards (status=ready, hash match)
     remain authoritative.
   expires: null
-- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=4481488a6612d9dd
+- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=02dcba287d1b3ce7
   owner: web-composer
   reason: Tier-3 trust boundary — JSONL line-by-line parsing of operator-supplied blob content. JSONDecodeError on a
     single line is the documented Tier-3 failure mode; the line is counted as a parse failure and surfaced via the
@@ -454,57 +454,57 @@ allow_hits:
   safety: parse_failures counter accumulates and is reported in warnings; no row is fabricated and the partial sample
     that did parse is still surfaced.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_jsonl:fp=584dac58e9097bed
+- key: web/composer/source_inspection.py:R5:_inspect_jsonl:fp=c6f41432cbaf78af
   owner: web-composer
   reason: Tier-3 trust boundary — checking that a parsed JSONL line is a dict (object). External JSONL is zero-trust
     and may contain top-level non-objects (arrays, scalars). isinstance is the correct Tier-3 coercion gate.
   safety: Non-dict values are rejected as parse failures; the partial sample that was dict-shaped still surfaces.
   expires: null
-- key: web/composer/source_inspection.py:R6:_inspect_json:fp=9cb5aa56bae472ec
+- key: web/composer/source_inspection.py:R6:_inspect_json:fp=2d530f250d4c7266
   owner: web-composer
   reason: Tier-3 trust boundary — full JSON document parsing of operator-supplied blob content. JSONDecodeError is
     expected when the 8 KiB peek truncates mid-object on a large file. Surfaced via warning.
   safety: loaded=None on parse failure; inspection returns 0 sampled rows with the truncation warning, so caller
     cannot confuse "no rows" with "successfully parsed empty array".
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=4a3ac5c3c8beb746
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=f017758d8e2160b1
   owner: web-composer
   reason: Tier-3 trust boundary — discriminating between JSON array, wrapped object, and single object shapes. Each
     branch routes to the correct extraction; without isinstance, the boundary cannot be enforced.
   safety: Each branch handles its shape explicitly; unexpected shapes (e.g., scalar at top level) fall through to
     the "single object" branch which still produces a faithful one-row inspection.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=8528fbb4ee984f0d
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=dd094eb33f16cc79
   owner: web-composer
   reason: Tier-3 trust boundary — checking that an array element is a dict before treating it as a row. JSON arrays
     can contain mixed types per RFC 8259; non-dict elements are skipped, not coerced.
   safety: Non-dict array elements silently skipped from row sample; matches Tier-3 quarantine semantics.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=7c41796e2ccae624
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=0cc810474bf90776
   owner: web-composer
   reason: 'Tier-3 trust boundary — checking that a wrapped object''s value is a list (data_key shape detection). The
     wrapped-object pattern is `{"results": [...]}` and the value-must-be-a-list check is the heuristic for it.'
   safety: If the wrapped value is not a list, the heuristic falls through to the next value or to the "single
     object" branch; no row is fabricated.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=b617fda735dc872a
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=b950006dea2a8e4c
   owner: web-composer
   reason: Tier-3 trust boundary — same wrapped-object value-is-list check (sibling check on data_key path).
   safety: Same as the prior entry; the heuristic only fires when both the value is a list AND its first element is
     a dict.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=2493e80cddd4a237
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=cd1ca795d54bfce7
   owner: web-composer
   reason: Tier-3 trust boundary — checking that a wrapped-list element is a dict before treating it as a row.
   safety: Non-dict elements within the wrapped list are skipped; matches Tier-3 quarantine semantics.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=f29eb93b56382965
+- key: web/composer/source_inspection.py:R5:_inspect_json:fp=69d61f954d1b400a
   owner: web-composer
   reason: Tier-3 trust boundary — final isinstance check confirms the picked element is dict-shaped before adding it
     to the sampled-objects list.
   safety: Non-dict elements skipped; no fabrication.
   expires: null
-- key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=f71373d6f6932e7d
+- key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=bae7c85c095a2ddc
   owner: web-composer
   reason: 'Tier-3 trust boundary — `objects: list[dict[str, Any]]` is the natural shape of parsed JSON sample rows
     and serves as the input contract to the type-inference helper. A TypedDict cannot describe arbitrary external
@@ -512,12 +512,12 @@ allow_hits:
   safety: All access is via isinstance dispatch (allowlisted as R5 Tier-3) so there is no key-error path; keys
     absent from a particular row record as "null" rather than crashing or coercing.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=fcb62d0617af0b05
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=49c1fdeaa9a232d0
   owner: web-composer
   reason: Tier-3 trust boundary — checking that a sampled row entry is a dict before iterating its keys.
   safety: Non-dict entries silently skipped from row sample; matches Tier-3 quarantine semantics.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=62342e08e475977a
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=6bca32144439a076
   owner: web-composer
   reason: Tier-3 trust boundary — checking that an observed value is a bool before promoting bool. Required because
     bool is a subclass of int in Python; without the bool isinstance check first, every bool would be misclassified
@@ -525,30 +525,30 @@ allow_hits:
   safety: bool check is ordered before int check; mismatched values fall through to the str branch which is the
     type-conservative answer per the merge ladder.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=cd344088e4051c3b
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=0dea7337cc179dbd
   owner: web-composer
   reason: Tier-3 trust boundary — int isinstance check during type inference of operator-supplied JSON values.
   safety: Mis-typed values fall through to the str branch.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=fd50d7f4b4c4ce65
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=df6e4a3440e67e6f
   owner: web-composer
   reason: Tier-3 trust boundary — float isinstance check during type inference of operator-supplied JSON values.
   safety: Mis-typed values fall through to the str branch.
   expires: null
-- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=4e6d1f3c2dc9b6ec
+- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=085dc55ef33d506f
   owner: web-composer
   reason: Tier-3 trust boundary — `obj.get(h)` for membership probing on operator-supplied JSON. Returns None for
     absent fields (not a fabricated default — None is "absence" per the manifesto), then the next isinstance check
     routes the value or falls through.
   safety: None values caught explicitly by the isinstance(v, list/dict) gate; no fabrication, no coercion.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=0f57f5a69355feb9
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=44a662ccdd0e79e8
   owner: web-composer
   reason: Tier-3 trust boundary — checking whether a probed JSON value is a list or dict (nested structure). Used to
     emit the json_explode warning so the operator knows the field will need exploding before downstream consumption.
   safety: Only used to surface a warning; no row is dropped or coerced.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=58bd393b1da901ab
+- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=4d5d902b2a8e9445
   owner: web-composer
   reason: Tier-3 trust boundary — checking that a value is a string before scanning it for URL candidates. Non-string
     values skipped from URL extraction.

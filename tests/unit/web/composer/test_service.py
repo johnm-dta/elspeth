@@ -4617,6 +4617,47 @@ class TestAttemptProofRepair:
                 repair_turns_used=0,
             )
 
+    def test_repair_message_caps_at_three_blockers(self) -> None:
+        """When 4+ blocking diagnostics fire, the repair message renders only
+        the first three to keep the LLM's context window manageable. The
+        cap is documented in the synthesizer; this test pins it so future
+        edits cannot relax the bound silently.
+
+        The test patches ``compute_proof_diagnostics`` to return a
+        deterministic 5-item list of blocking entries — the synthesiser is
+        the unit under test, and the diagnostic source is irrelevant.
+        """
+        from elspeth.web.composer import service as svc_module
+
+        fake_blockers = [
+            {
+                "severity": "blocking",
+                "code": f"fake_blocker_{i}",
+                "message": f"fake message {i}",
+                "suggested_repair": f"fake repair {i}",
+                "evidence_locator": {"path": f"$.blocker[{i}]"},
+            }
+            for i in range(5)
+        ]
+        messages: list[dict[str, Any]] = []
+        with patch.object(svc_module, "compute_proof_diagnostics", return_value=fake_blockers):
+            attempted = self.service._attempt_proof_repair(
+                state=self._state_without_blob(),
+                llm_messages=messages,
+                session_id=self.session_id,
+                repair_turns_used=0,
+            )
+        assert attempted is True
+        assert len(messages) == 1
+        body = messages[0]["content"]
+        # First three blockers rendered.
+        assert "fake_blocker_0" in body
+        assert "fake_blocker_1" in body
+        assert "fake_blocker_2" in body
+        # Fourth and fifth blockers omitted from the synthesised message.
+        assert "fake_blocker_3" not in body
+        assert "fake_blocker_4" not in body
+
 
 # ---------------------------------------------------------------------------
 # End-to-end forced-repair loop coverage. Drives the real ``_compose_loop``

@@ -150,6 +150,40 @@ class TestCsvInspection:
         f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
         assert f.sample_row_count <= 100
 
+    def test_duplicate_headers_emits_warning(self) -> None:
+        """Duplicate CSV headers silently collapse downstream — surface the
+        duplication so the operator can rename or use field_mapping."""
+        body = b"id,name,name,city\n1,Alice,Smith,NYC\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        msgs = [w for w in f.warnings if "csv_duplicate_headers" in w]
+        assert msgs, f.warnings
+        # Duplicate name surfaced; the warning lists the offending header.
+        assert any("'name'" in w for w in msgs), msgs
+
+    def test_jagged_rows_emits_warning(self) -> None:
+        """Rows with cell counts that don't match the header length must
+        surface — the inspector silently fabricates ''/drops cells, which
+        is operator-observable evidence."""
+        body = b"a,b,c\n1,2\n3,4,5,6\n7,8,9\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        msgs = [w for w in f.warnings if "csv_jagged_rows" in w]
+        assert msgs, f.warnings
+        # Two rows are jagged (one short, one long); the third is clean.
+        assert any("2 row" in w for w in msgs), msgs
+
+    def test_clean_csv_no_jagged_warning(self) -> None:
+        body = b"a,b,c\n1,2,3\n4,5,6\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert not any("csv_jagged_rows" in w for w in f.warnings), f.warnings
+
+    def test_replacement_chars_in_csv_emit_warning(self) -> None:
+        """Non-UTF-8 bytes get replaced with U+FFFD on decode; surface the
+        count so the operator/LLM can declare encoding or treat as binary."""
+        # Latin-1 'é' (0xE9) is invalid UTF-8 outside multi-byte sequences.
+        body = b"name,city\nM\xe9lanie,Paris\nBob,NYC\n"
+        f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
+        assert any("binary_or_non_utf8_content" in w for w in f.warnings), f.warnings
+
 
 # --------------------------------------------------------------------------
 # JSON / JSONL inspection
@@ -189,6 +223,40 @@ class TestJsonInspection:
         body = json.dumps([{"id": 1, "tags": ["a", "b"]}]).encode()
         f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
         assert any("nested structures" in w for w in f.warnings)
+
+    def test_top_level_dict_without_list_value_emits_disambiguation_warning(self) -> None:
+        """Wrapped-object detection probed and rejected — operator must see
+        that the inspector treated the object as a single row rather than
+        finding a wrapped row collection."""
+        body = json.dumps({"name": "Alice", "city": "NYC"}).encode()
+        f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
+        assert any("json_top_level_dict_treated_as_single_row" in w for w in f.warnings), f.warnings
+        # Behaviour preserved: still treats as single row of one.
+        assert f.sample_row_count == 1
+
+    def test_full_content_parse_failure_does_not_claim_truncation(self) -> None:
+        """When the blob is small enough to fit in the sample window,
+        a parse failure means the document is genuinely malformed — the
+        warning must not falsely suggest the sample was truncated."""
+        body = b'{"name": "incomplete'  # malformed but small
+        assert len(body) < 8 * 1024  # well within the sample window
+        f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
+        msgs = [w for w in f.warnings if "json parse error" in w]
+        assert msgs, f.warnings
+        # Must NOT claim "truncated" when the sample held the whole body.
+        assert not any("truncated" in w for w in msgs), msgs
+        assert any("malformed" in w for w in msgs), msgs
+
+    def test_truncated_sample_parse_failure_says_truncated(self) -> None:
+        """A blob exceeding the sample window with a parse failure inside
+        the truncated peek should surface the truncation context."""
+        # 9 KiB of unbalanced array — the 8 KiB peek will mid-document.
+        body = ("[" + ("1," * 5000) + '"end"').encode("utf-8")
+        assert len(body) > 8 * 1024
+        f = inspect_blob_content(content=body, filename="x.json", mime_type="application/json")
+        msgs = [w for w in f.warnings if "json parse error" in w]
+        assert msgs, f.warnings
+        assert any("truncated" in w for w in msgs), msgs
 
 
 # --------------------------------------------------------------------------

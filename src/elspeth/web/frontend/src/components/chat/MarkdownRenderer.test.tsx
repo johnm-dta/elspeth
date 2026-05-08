@@ -58,9 +58,9 @@ describe("MarkdownRenderer", () => {
 describe("MarkdownRenderer fenced code blocks", () => {
   it("renders YAML fenced blocks with Prism token spans", () => {
     const md = "```yaml\nsource:\n  type: csv_file\n```";
-    render(<MarkdownRenderer content={md} />);
+    const { container } = render(<MarkdownRenderer content={md} />);
     // Prism produces token spans inside the pre element
-    const pre = document.querySelector("pre.code-block");
+    const pre = container.querySelector("pre.code-block");
     expect(pre).not.toBeNull();
     expect(pre!.querySelector("span")).not.toBeNull();
   });
@@ -71,6 +71,7 @@ describe("MarkdownRenderer fenced code blocks", () => {
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText },
       configurable: true,
+      writable: true,
     });
 
     const md = "```yaml\nfoo: bar\n```";

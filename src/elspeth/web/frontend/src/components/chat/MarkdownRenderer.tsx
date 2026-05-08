@@ -66,6 +66,9 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
  * them as diagrams, renders all other fenced blocks with Prism syntax
  * highlighting and a copy-to-clipboard button, and passes inline code
  * through as-is.
+ *
+ * Pure router — no hooks. Hooks live in FencedCodeBlock so that inline-code
+ * and mermaid renders do not subscribe to theme context or allocate state.
  */
 function CodeBlock({
   className,
@@ -74,6 +77,45 @@ function CodeBlock({
 }: ComponentPropsWithoutRef<"code">) {
   const language = className?.replace("language-", "") ?? "";
   const code = String(children).replace(/\n$/, "");
+
+  // Inline code (no language, rendered inside a <p>)
+  if (!className) {
+    return <code className="inline-code" {...props}>{children}</code>;
+  }
+
+  // Mermaid diagrams get special treatment
+  if (language === "mermaid") {
+    return <MermaidDiagram chart={code} />;
+  }
+
+  // All other fenced blocks: delegate to FencedCodeBlock which owns the hooks
+  return (
+    <FencedCodeBlock
+      code={code}
+      language={language}
+      className={className}
+      {...props}
+    />
+  );
+}
+
+interface FencedCodeBlockProps extends ComponentPropsWithoutRef<"code"> {
+  code: string;
+  language: string;
+  className: string;
+}
+
+/**
+ * Renders a fenced code block with Prism syntax highlighting and a
+ * copy-to-clipboard button. Owns all hooks so that CodeBlock (the router)
+ * stays hook-free and inline-code / mermaid renders stay lightweight.
+ */
+function FencedCodeBlock({
+  code,
+  language,
+  className,
+  ...props
+}: FencedCodeBlockProps) {
   const { resolvedTheme } = useTheme();
   const [copied, setCopied] = useState(false);
 
@@ -87,17 +129,6 @@ function CodeBlock({
     }
   }, [code]);
 
-  // Inline code (no language, rendered inside a <p>)
-  if (!className) {
-    return <code className="inline-code" {...props}>{children}</code>;
-  }
-
-  // Mermaid diagrams get special treatment
-  if (language === "mermaid") {
-    return <MermaidDiagram chart={code} />;
-  }
-
-  // All other fenced blocks: Prism syntax highlighting + copy button
   const prismTheme =
     resolvedTheme === "dark" ? prismThemes.vsDark : prismThemes.vsLight;
 

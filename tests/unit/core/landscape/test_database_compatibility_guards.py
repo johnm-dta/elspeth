@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -580,6 +581,84 @@ class TestSchemaCompatibilityGuards:
         with pytest.raises(SchemaCompatibilityError, match="encrypted or passphrase is incorrect"):
             instance._validate_schema()
 
+        instance.close()
+
+
+def _composite_fk_id(entry: tuple[str, tuple[str, ...], str, tuple[str, ...]]) -> str:
+    table, cols, ref_table, ref_cols = entry
+    return f"{table}.{'+'.join(cols)}__to__{ref_table}.{'+'.join(ref_cols)}"
+
+
+class TestRequiredCompositeForeignKeysExhaustive:
+    """Each declared composite-FK contract must individually trigger
+    ``SchemaCompatibilityError`` when missing from the database.
+
+    Audit U-CORE-1 (2026-05-06) found that of the 14 entries in
+    ``_REQUIRED_COMPOSITE_FOREIGN_KEYS``, **zero** were exercised: the only
+    existing test monkeypatched the tuple to ``()`` to test an unrelated
+    shape error. A production database silently missing any one of these
+    composite FKs would pass schema validation and admit cross-run audit
+    contamination — e.g. a ``token_outcomes`` row referencing a
+    ``token_id`` from run A but recorded under run B, undetectable via
+    the audit trail. This is the canonical failure mode of attributability
+    in a Tier-1 trust system.
+
+    The parametrize binds at collection time, so each declared entry
+    becomes its own selectable test case (``-k`` filterable by table
+    name). Adding a new entry to the production tuple automatically
+    surfaces a new test case; conversely, removing an entry removes its
+    coverage signal — the test surface tracks the production contract
+    one-for-one.
+    """
+
+    @pytest.mark.parametrize(
+        "fk_entry",
+        database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS,
+        ids=_composite_fk_id,
+    )
+    def test_missing_composite_fk_entry_rejected(
+        self,
+        fk_entry: tuple[str, tuple[str, ...], str, tuple[str, ...]],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        table_name, constrained_columns, referenced_table, referenced_columns = fk_entry
+
+        # Each table needs a column declaration covering its role in the FK.
+        # Self-referential FKs (e.g. batches.retry_of_batch_id → batches.batch_id)
+        # collapse into a single CREATE TABLE with the union of columns.
+        columns_per_table: dict[str, set[str]] = {}
+        columns_per_table.setdefault(table_name, set()).update(constrained_columns)
+        columns_per_table.setdefault(referenced_table, set()).update(referenced_columns)
+
+        db_path = tmp_path / "missing_composite_fk.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            for tbl, cols in columns_per_table.items():
+                cols_sql = ", ".join(f"{col} TEXT" for col in sorted(cols))
+                conn.exec_driver_sql(f"CREATE TABLE {tbl} ({cols_sql})")
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        # Restrict expected_tables to just the two we declared so missing-table
+        # checks don't fire and obscure the FK signal. Suppress every other
+        # required-element tuple so this test only asserts the composite-FK path.
+        monkeypatch.setattr(
+            database_module,
+            "metadata",
+            SimpleNamespace(tables={tbl: object() for tbl in columns_per_table}),
+        )
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", (fk_entry,))
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        expected_fk_str = f"{table_name}({', '.join(constrained_columns)}) → {referenced_table}({', '.join(referenced_columns)})"
+
+        with pytest.raises(SchemaCompatibilityError, match=re.escape(expected_fk_str)):
+            instance._validate_schema()
         instance.close()
 
 

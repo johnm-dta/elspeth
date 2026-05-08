@@ -22,7 +22,14 @@ from elspeth.contracts.config.alignment import (
 
 class TestFieldMappings:
     def test_retry_settings_has_two_mappings(self) -> None:
-        assert len(FIELD_MAPPINGS["RetrySettings"]) == 2
+        # KEEP — unique drift detection. Verified 2026-05-08:
+        # test_top_level_keys_are_expected_set only checks the OUTER
+        # FIELD_MAPPINGS keys; an addition to this INNER dict is caught
+        # by NO other test. Do not delete in tautology sweeps.
+        assert len(FIELD_MAPPINGS["RetrySettings"]) == 2, (
+            "FIELD_MAPPINGS['RetrySettings'] inner-dict size drifted; an "
+            "entry was added or removed and no cross-validation test caught it"
+        )
 
     def test_retry_settings_initial_delay_mapped(self) -> None:
         assert FIELD_MAPPINGS["RetrySettings"]["initial_delay_seconds"] == "base_delay"
@@ -31,7 +38,14 @@ class TestFieldMappings:
         assert FIELD_MAPPINGS["RetrySettings"]["max_delay_seconds"] == "max_delay"
 
     def test_telemetry_settings_has_one_mapping(self) -> None:
-        assert len(FIELD_MAPPINGS["TelemetrySettings"]) == 1
+        # KEEP — unique drift detection. Same rationale as
+        # test_retry_settings_has_two_mappings: surviving cross-validation
+        # tests check OUTER keys only, so additions to this INNER dict
+        # would otherwise be silent.
+        assert len(FIELD_MAPPINGS["TelemetrySettings"]) == 1, (
+            "FIELD_MAPPINGS['TelemetrySettings'] inner-dict size drifted; "
+            "an entry was added or removed and no cross-validation test caught it"
+        )
 
     def test_telemetry_settings_exporters_mapped(self) -> None:
         assert FIELD_MAPPINGS["TelemetrySettings"]["exporters"] == "exporter_configs"
@@ -72,7 +86,16 @@ class TestSettingsToRuntime:
             assert SETTINGS_TO_RUNTIME[key] == value
 
     def test_has_exactly_five_entries(self) -> None:
-        assert len(SETTINGS_TO_RUNTIME) == 5
+        # KEEP — unique drift detection. Verified 2026-05-08:
+        # test_contains_all_expected_entries (line 70) is a SUBSET check
+        # (asserts each expected pair is present); it cannot detect
+        # ADDITIONS to SETTINGS_TO_RUNTIME. This count test is the only
+        # gate against an unintended new entry.
+        assert len(SETTINGS_TO_RUNTIME) == 5, (
+            "SETTINGS_TO_RUNTIME size drifted; an entry was added or removed "
+            "and the subset-check test_contains_all_expected_entries did not "
+            "catch it (it only verifies expected entries are present)"
+        )
 
     @pytest.mark.parametrize(
         "settings_cls,runtime_cls",

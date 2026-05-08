@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import App from "./App";
 import * as api from "./api/client";
-import type { SystemStatus } from "./types/index";
+import type { SystemStatus, UserProfile } from "./types/index";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
 // App renders many heavy children (Layout, SessionSidebar, ChatPanel, …).
@@ -48,7 +48,13 @@ vi.mock("./hooks/useAuth", () => ({
   useAuth: () => ({
     isAuthenticated: true,
     isLoading: false,
-    user: { username: "test-operator" },
+    user: {
+      user_id: "test-001",
+      username: "test-operator",
+      display_name: null,
+      email: null,
+      groups: [],
+    } satisfies UserProfile,
     loginError: null,
     login: vi.fn(),
     loginWithToken: vi.fn(),
@@ -77,7 +83,7 @@ vi.mock("./api/client", () => ({
 
 describe("App banner roles", () => {
   beforeEach(() => {
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
     // Restore the default (backend up, composer available) after any
     // per-test override.
     vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({

@@ -70,7 +70,13 @@ class TestBlobIdSlotValidation:
                 "model": "anthropic/claude-3.5-sonnet",
             },
         )
-        assert result["source"]["options"]["blob_id"] == bid
+        # blob_id is the top-level set_pipeline source argument (sibling of
+        # options), NOT a key within options. set_pipeline forwards it to
+        # _resolve_source_blob, which materialises options["path"] and the
+        # canonical options["blob_ref"]. Putting blob_id inside options
+        # bypasses resolution and leaves the source unbound.
+        assert result["source"]["blob_id"] == bid
+        assert "blob_id" not in result["source"]["options"]
 
     def test_url_string_rejected_with_create_blob_hint(self) -> None:
         with pytest.raises(RecipeValidationError) as exc_info:
@@ -218,7 +224,10 @@ class TestClassifyRecipe:
         result = self._apply()
         src = result["source"]
         assert src["plugin"] == "csv"
-        assert "blob_id" in src["options"]
+        # blob_id is the top-level set_pipeline source argument (sibling of
+        # options); set_pipeline forwards it to _resolve_source_blob.
+        assert "blob_id" in src
+        assert "blob_id" not in src["options"]
         assert src["options"]["schema"] == {"mode": "observed"}
         # discard default per the precursor commit
         assert src["on_validation_failure"] == "discard"
@@ -296,3 +305,184 @@ class TestUnknownRecipe:
         msg = str(exc_info.value)
         assert "classify-rows-llm-jsonl" in msg
         assert "split-by-numeric-threshold" in msg
+
+
+# --------------------------------------------------------------------------
+# End-to-end: recipe args must flow through set_pipeline so the source is
+# blob-bound (options["blob_ref"] populated). compute_proof_diagnostics
+# reads options["blob_ref"]; if recipes write blob_id in the wrong location
+# it silently bypasses _resolve_source_blob and proof_diagnostics returns
+# empty. This is the regression Fix 4 addresses.
+# --------------------------------------------------------------------------
+
+
+class TestRecipeIntegrationWithSetPipeline:
+    """Apply a recipe through ``execute_tool('apply_pipeline_recipe', ...)``
+    and confirm the resulting source carries the canonical ``blob_ref``
+    key — without it, the proof step silently sees no source.
+    """
+
+    @pytest.fixture
+    def _seeded_blob(self, tmp_path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(engine)
+        session_id = str(uuid4())
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        blob_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        storage_path = storage_dir / f"{blob_id}_orders.csv"
+        body = b"order_id,customer,price\nO-1,Alice,49.95\n"
+        storage_path.write_bytes(body)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=blob_id,
+                    session_id=session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+        return engine, session_id, blob_id
+
+    def _catalog(self):
+        # Use the real PluginManager so set_pipeline's prevalidation can
+        # see authentic schemas for csv/llm/type_coerce/json. Mocking
+        # list_*/get_schema would force us to fabricate schemas — the
+        # real catalog is cheap (builtin registration only) and avoids
+        # masking schema mismatches.
+        from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.web.catalog.service import CatalogServiceImpl
+
+        pm = PluginManager()
+        pm.register_builtin_plugins()
+        return CatalogServiceImpl(pm)
+
+    def test_classify_recipe_blob_id_at_top_level(self) -> None:
+        """Recipe places blob_id at source top-level so set_pipeline's
+        ``src_args.get('blob_id')`` finds it and invokes _resolve_source_blob.
+
+        Regression test: previously blob_id was nested in source.options,
+        which silently bypassed resolution and left the source with
+        ``options['blob_id']`` (an unknown key) instead of the canonical
+        ``options['blob_ref']``. compute_proof_diagnostics reads blob_ref,
+        so the proof step silently saw zero source-bound diagnostics.
+        """
+        bid = str(uuid4())
+        result = apply_recipe(
+            "classify-rows-llm-jsonl",
+            {
+                "source_blob_id": bid,
+                "classifier_template": "tmpl",
+                "model": "model",
+            },
+        )
+        # Top-level — set_pipeline consumes this in src_args.get('blob_id').
+        assert result["source"]["blob_id"] == bid
+        # Must NOT be in options; if it were, set_pipeline would not see
+        # it and _resolve_source_blob would not be invoked.
+        assert "blob_id" not in result["source"]["options"]
+
+    def test_threshold_recipe_blob_id_at_top_level(self) -> None:
+        bid = str(uuid4())
+        result = apply_recipe(
+            "split-by-numeric-threshold",
+            {
+                "source_blob_id": bid,
+                "field": "price",
+                "threshold": 50.0,
+            },
+        )
+        assert result["source"]["blob_id"] == bid
+        assert "blob_id" not in result["source"]["options"]
+
+    def test_threshold_source_resolves_to_blob_ref_via_resolve_source_blob(self, _seeded_blob, tmp_path) -> None:
+        """End-to-end on the source segment only (the bug surface):
+        feeding the recipe's ``source.blob_id`` + ``source.options`` into
+        ``_resolve_source_blob`` (the function set_pipeline invokes for
+        blob-bound sources) yields ``options['blob_ref']`` and the
+        canonical storage path. compute_proof_diagnostics reads blob_ref,
+        so this is the load-bearing invariant.
+
+        This narrows scope to the bug surface (key mismatch). The full
+        recipe DAG has separate, pre-existing prevalidation gaps for the
+        llm/type_coerce transforms (unrelated to Fix 4) which would
+        otherwise reject set_pipeline; testing the source segment in
+        isolation avoids coupling Fix 4 to those.
+        """
+        from elspeth.web.composer.state import CompositionState, PipelineMetadata
+        from elspeth.web.composer.tools import _resolve_source_blob
+
+        engine, session_id, blob_id = _seeded_blob
+        empty = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        # Build the recipe args, then exercise _resolve_source_blob with
+        # the exact shape set_pipeline would feed it.
+        args = apply_recipe(
+            "split-by-numeric-threshold",
+            {"source_blob_id": blob_id, "field": "price", "threshold": 50.0},
+        )
+        src_args = args["source"]
+
+        resolved = _resolve_source_blob(
+            blob_id=src_args["blob_id"],
+            explicit_plugin=src_args["plugin"],
+            caller_options=src_args["options"],
+            on_validation_failure=src_args["on_validation_failure"],
+            state=empty,
+            catalog=self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        # _resolve_source_blob returns a _ResolvedSourceBlob on success,
+        # or a ToolResult on failure — type-discriminate.
+        from elspeth.web.composer.tools import _ResolvedSourceBlob
+
+        assert isinstance(resolved, _ResolvedSourceBlob), getattr(resolved, "data", resolved)
+        # Canonical key set by _resolve_source_blob.
+        assert resolved.options["blob_ref"] == blob_id
+        # Storage path should resolve to the seeded file.
+        assert "path" in resolved.options
+        # The recipe's caller_options pass through (schema preserved).
+        assert resolved.options["schema"] == {"mode": "observed"}

@@ -189,12 +189,20 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
 
 def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     """Build set_pipeline args for the classify-rows-llm-jsonl recipe."""
+    # ``blob_id`` is a TOP-LEVEL key of ``source`` (sibling of ``options``),
+    # NOT a member of ``options``. ``_execute_set_pipeline`` reads it via
+    # ``src_args.get("blob_id")`` and feeds it to ``_resolve_source_blob``,
+    # which authoritatively materialises ``options["path"]`` and the
+    # canonical ``options["blob_ref"]``. Putting ``blob_id`` inside
+    # ``options`` would skip resolution and leave the source unbound — the
+    # proof step (``compute_proof_diagnostics`` reads ``options["blob_ref"]``)
+    # would then silently report no diagnostics.
     return {
         "source": {
             "plugin": "csv",
+            "blob_id": slots["source_blob_id"],
             "on_success": "rows",
             "options": {
-                "blob_id": slots["source_blob_id"],
                 "schema": {"mode": "observed"},
             },
             "on_validation_failure": "discard",
@@ -283,9 +291,9 @@ def _build_threshold_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "source": {
             "plugin": "csv",
+            "blob_id": slots["source_blob_id"],
             "on_success": "rows",
             "options": {
-                "blob_id": slots["source_blob_id"],
                 "schema": {"mode": "observed"},
             },
             "on_validation_failure": "discard",

@@ -52,6 +52,11 @@ If any tool you intend to call still shows a placeholder signature in a deferred
 - "I tried X but it failed, here's the error" is **not a valid stopping point.** The user wanted a working pipeline; an error message is not a working pipeline. Read the error, decide the next mutation, and call the tool. Only stop after at least 3 distinct corrective mutations (across one or more turns) have failed to converge — and even then, your final reply must name what you tried, not just what broke.
 - "Validation reports a missing field" is **a tool-call trigger, not a reply trigger.** Either patch the producing node's schema or relax the consumer's `required_input_fields`, then re-preview. Do not surrender the turn at the first red preview.
 - "I planned a pipeline with X → Y → Z" without having actually called `set_pipeline` / `upsert_node` / `set_source` is **never** a valid reply. Plans are not pipelines. The user asked for a workflow; build it before describing it.
+- **Silent shape downgrade is forbidden.** If the user described a structural pattern (fork-and-merge, multi-stage cascade, custom batch trigger, parallel enrichment, side-by-side outputs joined into one row, etc.) and you cannot build that exact shape, you have **two valid replies and no others**:
+  1. Build the exact requested shape — even if it requires more nodes or an unfamiliar combination, the canonical recipes (#10 fork/coalesce, #6 content moderation, etc.) cover most patterns. Read the Shape Catalog and Recipe Catalog before concluding the shape is unbuildable.
+  2. Refuse explicitly with a named gap: "I cannot build that exact shape because *<specific reason>*. The closest I can produce is *<simpler shape>*, which omits *<the requested-but-dropped behaviour>*. Do you want me to build the simpler shape, or do you want to revise the request?" — and **stop**, do not build the simpler shape unilaterally. The user gets to choose; you do not get to choose for them.
+
+  **Building a simpler shape and reporting "Done — I built your workflow" is a Tier-1 audit-integrity failure.** It puts a wrong-shape pipeline into the audit trail dressed as a satisfied request. Even if the assistant text mentions the simplification ("internally this is just X → Y → Z"), burying that disclosure in narrative does not satisfy the requirement — the user has to actively notice your simplification rather than be asked about it. **If your output shape has fewer nodes, fewer outputs, fewer parallel paths, or fewer routing decisions than the user's description, you have downgraded.** Either build the full shape or refuse with a named gap.
 - Do not say you set up, tried, attempted, or prepared a build unless at least one mutation tool returned `success: true` in this turn. If `composer_progress.state_exists` is `false` or the state is empty, call the source/blob setup tool (`set_pipeline` with `source.blob_id` or `source.inline_blob`, `set_source_from_blob`, or `set_source` plus `set_output`) or ask for the specific missing file/configuration.
 - The user authorised every tool combination this skill teaches when they made the request. You do not need permission to call `create_blob`, `set_source_from_blob`, `web_scrape`, `line_explode`, `patch_node_options`, `preview_pipeline`, etc. **Asking permission is a stalling pattern; it is forbidden.** See the anti-permission rule under "Tool Failure Recovery" for the explicit phrase list.
 
@@ -61,7 +66,11 @@ This rule overrides any default LLM tendency to "summarise progress so far" befo
 
 ### Convergence Guardrails — Source-aware Authoring
 
-Six rules that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
+Eight rules (numbered 0-7) that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
+
+0. **CSV/JSON/text source ALWAYS requires a `schema` block.** No exceptions — not even when binding via `blob_id`, not even when the user described the columns in prose, not even when `inspect_source` already revealed them. The `set_pipeline` validator rejects sources with no schema field and the rejection is one of the easier ones to miss when constructing a complex multi-node pipeline atomically. **Mental checklist for every `source` block in `set_pipeline`:** `plugin`, `on_success`, `on_validation_failure`, `options.path` *or* `blob_id`, **`options.schema`**. If you skip schema you will hit `Invalid options for source 'csv': schema: Field required` and waste a turn. The lowest-friction default is `schema: {mode: "observed"}` — use it whenever you do not specifically need fixed/flexible. (See rule 2 for when to choose mode fixed vs flexible.)
+
+   **The same applies to non-source nodes.** Many transform/sink plugins have their own required `schema` block plus plugin-specific required fields (`keyword_filter` requires `fields` + `blocked_patterns`; `field_mapper` requires `mappings`; `value_transform` requires `operations`; `database` sink requires `url` + `table`; etc.). For complex pipelines that compose 4+ different plugins atomically in one `set_pipeline` call, the highest-yielding pre-call action is **`get_plugin_schema(<kind>, <plugin>)` for every plugin whose option shape you have not seen in this session**. Skipping discovery and constructing an atomic 16-node `set_pipeline` from memory is the single most common cause of multi-round budget exhaustion on cascade-shaped pipelines: each pre-flight rejection consumes a turn, and the rejections often surface one plugin-config issue at a time, so a 16-node pipeline with three unknown plugins can exhaust the entire compose budget on plugin-config corrections alone. **Discover first, build atomically second.**
 
 1. **Inspect source facts before declaring a fixed schema.** When the operator has already attached a blob (or `set_source_from_blob` has been called), use `inspect_source(blob_id)` to discover the observed headers, sample row count, and inferred scalar types. Do not guess column names. Do not fabricate a schema from the user's prose — the blob is the truth, the prose is the wish.
 
@@ -80,6 +89,8 @@ Six rules that cover the historical convergence-failure modes. Apply them on eve
 5. **Default `on_validation_failure: "discard"` for source validation.** Quarantine is a conventional output name, not a built-in sink. `on_validation_failure: "quarantine"` is valid only when an output named `quarantine` exists in the same pipeline. For ordinary intent, use `discard`.
 
 6. **Do not ask the user technical implementation questions for ordinary simple intent.** If the operator says "classify these tickets" or "split these orders by price," the answer is to inspect, decide, and build — not to ask "do you want me to use OpenRouter or Azure?" or "what columns does your CSV have?" Ask only when the ambiguity is genuinely product-level ("which business category should count as high priority?"). Pick conservative defaults for technical questions (OpenRouter + a current Anthropic model is a reasonable default) and proceed; the proof step will surface any blocking misjudgement.
+
+7. **Multi-path shapes (fork / split / coalesce / parallel paths) trigger an up-front output-shape question — this is product-level ambiguity, not a technical detail.** As soon as the user's description introduces fork, split, parallel paths, side-by-side enrichment, "process two ways", or any pattern that produces more than one branch of data, **before authoring `set_pipeline`** ask: "Should this save as one merged output, separate files per branch, or both?" — unless the user's prose unambiguously names the answer (e.g. "save the merged output as JSONL" → one merged sink; "write each path to its own CSV" → per-branch sinks). Output-shape is the most-frequently-mistaken decision for fork/coalesce shapes; defaulting silently is a shape downgrade. If you build the wrong output shape, even a `is_valid: true` pipeline misrepresents what the user asked for. See Recipe #10 for the canonical question wording and the three answer shapes.
 
 **Recipe-first heuristic.** If operator intent maps to one of these shapes, prefer `apply_pipeline_recipe` — it produces the same state as a hand-authored `set_pipeline`, but with slot validation that rejects the URL-as-blob_id and bool-as-numeric-threshold failure modes at the boundary:
 
@@ -102,6 +113,7 @@ These are the canonical tool sequences for the most common novice phrasings. Rec
 | "Summarise each line of this URL/file" | URL → web_scrape → line_explode → llm | `create_blob` → `set_source_from_blob` → `upsert_node` (web_scrape) → `upsert_node` (line_explode) → `upsert_node` (llm) → `set_output` |
 | "Filter rows mentioning [keyword]" | keyword_filter routing | `set_pipeline` with `keyword_filter` transform routing to two outputs |
 | "Compute aggregates over rows" | batch_stats / batch_distribution_profile | `set_pipeline` with the appropriate `batch_*` plugin and a trigger config |
+| "Process the same row two ways and combine", "side by side under separate keys", "duplicate then merge", "fan out then rejoin", "run two enrichments and join the results" | fork gate → 2 parallel paths → coalesce | `set_pipeline` with a `gate` carrying `fork_to: ["path_a", "path_b"]` plus a `coalesce` node consuming both branches (Recipe #10) |
 
 For each pattern: after the structural setup, run `preview_pipeline`. If `proof_diagnostics` returns blocking entries, apply the suggested repair (which is in `proof_diagnostics[].suggested_repair`) and re-preview. The forced-repair loop in the server caps clarification-style stalling at two turns; do not stall.
 
@@ -119,6 +131,8 @@ A connection has **two endpoints**, and the same string value must appear on bot
 | Consumer (sink) | `outputs[].sink_name: "<name>"` | `"sink_name": "lines_out"` |
 
 `node.input` is **NOT** the upstream node's `id`. `node.input` is the connection-name string that some upstream `on_success` (or `routes` value, or `on_error`) **publishes**. The runtime resolves wiring by matching strings, not by graph topology in `edges`.
+
+**A `routes` value is a connection-name string just like `on_success`** — it can be matched by either a downstream `node.input` *or* a sink's `sink_name`. **Gate branches route to sink names directly.** Do **not** insert a `passthrough` (or any other identity-shaped) transform between a gate branch and a sink "to bridge them" — there is nothing to bridge. A `passthrough` node is only correct when you genuinely need a participating-in-propagation node to declare a `schema` the source did not (Concept 5 — see "Schema Vocabulary"). Inserting one to forward gate output to a sink adds an audit hop, doubles wiring decisions, and reflects a misread of the connection model.
 
 Gate route target `"discard"` is a virtual terminal destination, not a published connection. Use it only when that branch should stop with an audited `gate_discarded` outcome; do not create a node or sink named `discard`.
 
@@ -296,7 +310,7 @@ Fix — insert a fork gate and patch the consumers:
       "on_success": null,
       "on_error": null,
       "condition": "True",
-      "routes": {},
+      "routes": {"all": "fork"},
       "fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"],
       "options": {}
     },
@@ -327,6 +341,32 @@ A gate route value may be `"discard"`:
 ```
 
 That branch is terminal and audited as `gate_discarded`; it does not require a sink named `discard`, does not publish a connection, and cannot be consumed downstream.
+
+#### Gate routes target sink names directly — worked example
+
+A two-branch threshold gate where each branch goes to its own file. **No intermediate transform.** Each route value is the same string as a `sink_name`:
+
+```json
+{
+  "source": {"plugin": "csv", "options": {"...": "..."}, "on_success": "rows_in"},
+  "nodes": [
+    {
+      "id": "amount_threshold",
+      "node_type": "gate",
+      "input": "rows_in",
+      "condition": "row['amount'] > 1000",
+      "routes": {"true": "high_value_rows", "false": "normal_rows"},
+      "options": {}
+    }
+  ],
+  "outputs": [
+    {"sink_name": "high_value_rows", "plugin": "csv", "options": {"path": "outputs/high.csv"}},
+    {"sink_name": "normal_rows", "plugin": "csv", "options": {"path": "outputs/normal.csv"}}
+  ]
+}
+```
+
+This is the canonical shape for "split rows by predicate into two files." Two nodes total: the source and the gate. **Adding a `passthrough` per branch is incorrect** — it does not satisfy any contract the simpler shape doesn't, costs extra wiring decisions, and adds an audit hop the operator did not ask for. If a reviewer's mental model demands a node between the gate and the sink, that mental model is wrong; the runtime delivers the gate's row directly to the sink whose name matches the route value.
 
 ---
 
@@ -381,7 +421,7 @@ When `preview_pipeline` returns an unsatisfied `edge_contract`, **name the conce
 3. **Build** — use `set_pipeline` for a complete pipeline, or individual tools for edits
 4. **Validate** — every tool returns validation state; fix all errors before responding
 5. **Preview** — call `preview_pipeline` to confirm the pipeline is correct
-6. **Summarise** — explain what was built and why
+6. **Summarise** — explain what was built and why; **and disclose every data-loss path explicitly** (see "Build Summary Discipline" — name each `on_error` / `on_validation_failure` / `on_write_failure` setting and state in plain English what happens to a failing row, especially when the value is `discard`)
 
 ## Building a Pipeline
 
@@ -509,6 +549,30 @@ When you report completion, name which state the pipeline has reached. There are
 Two failure modes to avoid:
 - Claiming "fully verified" when `edge_contracts: []` — that is *structurally runnable*, not *contract-proven*.
 - Refusing to export a *structurally runnable* workflow because no plugin declared field contracts. Structurally runnable is a valid state to present; just be honest that runtime carries the final check.
+
+#### Build Summary Discipline — Disclose Error/Failure Routing Explicitly
+
+When you summarise the built pipeline to the user, **error and failure routing are not implementation details — they are operational facts the user needs to understand**. Each of these has two distinct semantics, and the user almost always assumes the wrong one unless told:
+
+| Setting | Value `discard` means | Value `<sink_name>` means |
+|---------|------------------------|---------------------------|
+| `on_error` (transform) | Row is dropped from the pipeline. The audit trail records *what* failed and *why*, but **no human-readable artifact is written** — the only forensic path is the audit DB. | Failed row is preserved AND written to the named sink. The user can `cat` the file, reprocess, or inspect with normal tools. |
+| `on_validation_failure` (source) | Source row failed validation; row is dropped, audit-only. Often surprising in CSV-with-typos pipelines: the row exists in the source file but **does not appear in any output**. | Failed row is sent to the named output; the user gets a quarantine file they can review. Requires a configured output of that name. |
+| `on_write_failure` (sink) | Sink-write failure → row dropped, audit-only. For external sinks (database, dataverse, azure_blob) this means `discard` lets a row be lost on transient failure with no recoverable artifact. | Failed-write row written to the named failsink (typically a JSON file). Strongly recommended for external sinks where transient failures are common. |
+
+**The summary rule:** for every node and source/sink in the built pipeline, name each `on_*` setting and state, in plain English, what happens to a row that hits it. **Do not abbreviate to "errors are discarded".** Spell it out:
+
+> "Errors in the `trim` transform are **discarded** — failed rows are dropped from the pipeline; only the audit trail will record them. There is no separate file of failed rows. If you want failed rows preserved, add a `failures` JSON sink and set `on_error: failures`."
+
+This is not optional padding; it is the user's first chance to notice that the pipeline **drops data on failure** before they run it for real. A summary that says "Done — pipeline built" while silently using `discard` for a high-volume external sink is misleading. The audit trail is complete, but the operational story (what file do I look at when something goes wrong?) is not, and most users will be surprised when no failure file appears.
+
+**For external sinks (database, azure_blob, dataverse, chroma_sink):** the skill already requires you to wire a companion failsink (see "Automatic Failsink Creation"). Confirm in the summary that the failsink is wired *and* name the file path it writes to. "External writes that fail will be saved to `outputs/<sink>_failures.jsonl` — review this file if rows are missing from the destination."
+
+**For sources with `on_validation_failure: discard`:** confirm in the summary that schema-validation failures are dropped. "Rows whose schema cannot be coerced to the declared types will be dropped (no output file). Switch to `on_validation_failure: <output_name>` if you need a quarantine file."
+
+**For pipelines using gate `discard` route:** state which branch is the discard branch. "Rows where `<condition>` is false are discarded (audited as `gate_discarded`); they do not appear in any output."
+
+The principle: **make every data-loss path visible in the summary**. Silent data loss with a complete audit trail is still silent data loss from the user's UX perspective.
 
 #### Tool Failure Recovery
 
@@ -1330,14 +1394,101 @@ Pick any string for `<conn_a>` / `<conn_b>` / `<conn_c>`. The names don't have t
 
 ### 10. Fork/Join Enrichment Pipeline
 
-**Trigger phrases:** "enrich with multiple sources", "run two analyses in parallel then combine"
+**Trigger phrases:** "enrich with multiple sources", "run two analyses in parallel then combine", "process the same row two ways and combine", "two side-by-side copies of the row under separate keys", "duplicate then merge", "path_a / path_b naming", "fan out then rejoin", "send to multiple models and merge results", "two enrichments joined into one record"
+
+**Recognise this shape eagerly.** Any user description that mentions duplicating a row, sending it through two distinct processing paths, AND producing a single output that combines both paths is this recipe. **Do not** silently simplify to a linear `source → single transform → sink` because the linear form looks "close enough" — the requested shape has fork+coalesce semantics that linear cannot reproduce, and silent simplification is forbidden (see "Silent shape downgrade is forbidden" near the top of this skill).
 
 **Structure:** `csv` source → fork gate → path A transform + path B transform → `coalesce` → `results` sink
 
-**Required inputs:** Input file, what each parallel path does
-**Ask exactly:** "What file should I read?", "What two things do you want done in parallel?", "How should the results be combined?"
-**Safe defaults:** Coalesce policy `merge` (combines fields from both paths)
-**Caveats:** Coalesce requires `branches` (min 2) and `policy`. Fork gate routes to two different connection points.
+**Required inputs:** Input file, what each parallel path does, **how the output should be saved**
+**Ask exactly (in this order, before building):**
+1. "What file should I read?" (skip if already uploaded — call `list_blobs` first)
+2. "What two things do you want done in parallel on each row?"
+3. **"How should the output be saved?"** — present three options crisply:
+   - **One merged file** — coalesce both paths into one row per input, write a single sink (use this when the user said "single output", "side-by-side under one record", "combined", "merged", or named coalesce-style keys like `path_a`/`path_b`).
+   - **Two separate files, one per branch** — skip the coalesce, write two sinks (use this when the user said "save each path separately", "two files", "one for each").
+   - **Both** — per-branch debug sinks PLUS a coalesced final sink (use only when explicitly asked).
+
+   **This question is not optional.** Output shape for fork/coalesce is product-level ambiguity, not a technical detail — different reasonable users want different shapes. Defaulting to one or the other and reporting "Done" is a silent shape downgrade. If the user's prose strongly implies one option (e.g. "merge into a single JSONL"), confirm in the build summary rather than asking; if the prose is ambiguous, **ask before building**.
+**Safe defaults:** Coalesce policy `merge` (combines fields from both paths). Coalesce policy `nested` when the user wants the two branches' rows preserved under separate keys (e.g. `path_a` / `path_b`).
+**Caveats:** Coalesce requires `branches` (min 2) and `policy`. The fork gate uses **`fork_to`**, not **`routes`** — the two are different mechanisms (see below).
+
+#### Critical: `fork_to` vs `routes` on a gate
+
+A gate node has two distinct branching mechanisms; mixing them up is the most common fork/coalesce authoring failure.
+
+| Field | Semantic | Row-to-branch ratio | Use when |
+|-------|----------|---------------------|----------|
+| `routes: {"true": A, "false": B}` | **Route** — evaluate `condition`, send the row to **one** branch by the truthy/falsy result | 1 row → 1 branch | "split rows by predicate", "send approved here, rejected there" |
+| `fork_to: [A, B]` | **Fork (duplicate)** — clone the row and emit **every** clone, one per listed branch | 1 row → N branches simultaneously | "run two enrichments on every row", "process the same row two ways and combine" |
+
+**Routes and fork_to are different mechanisms with different semantics.** A row can be routed by predicate (`routes`) OR forked to all branches (`fork_to`); they answer different questions. For Fork/Join (Recipe #10) the canonical shape is `routes: {"all": "fork"}` (a single non-empty entry whose destination is the literal string `"fork"`) plus `fork_to: [path_a, path_b]`. **Routes must have at least one entry — the validator rejects `routes: {}`.** **Do not** use `routes: {"true": "branch_a", "false": "branch_b"}` to "duplicate" a row to two branches — that routes one row to one branch by predicate, it does not duplicate.
+
+**Coalesce has two distinct fields — `policy` and `merge` — that are easy to confuse:**
+
+| Field | Choices | Question it answers |
+|-------|---------|----------------------|
+| `policy` | `require_all`, `quorum`, `best_effort`, `first` | **When** does the coalesce emit? `require_all` waits for every branch; `quorum` waits for N (`quorum_count`); `best_effort` emits whatever arrived by `timeout_seconds`; `first` emits the first arrival and discards the rest. |
+| `merge` | `union`, `nested`, `select` | **How** are the branch rows combined? `union` flattens fields from all branches into one row (later wins on conflict); `nested` puts each branch's row under a key matching the branch name (preserves both as sub-objects); `select` picks one branch by configured key. |
+
+For the user's "two side-by-side copies under separate keys (path_a, path_b)" intent → `policy: "require_all"` (need both) + `merge: "nested"` (put each branch under its name).
+
+**Worked example — `set_pipeline` body for "trim then fork+coalesce into nested output":**
+```json
+{
+  "source": {"plugin": "csv", "options": {"...": "..."}, "on_success": "raw_rows"},
+  "nodes": [
+    {"id": "trim", "node_type": "transform", "plugin": "truncate", "input": "raw_rows", "on_success": "trimmed", "on_error": "discard", "options": {"...": "..."}},
+    {
+      "id": "fork",
+      "node_type": "gate",
+      "input": "trimmed",
+      "condition": "True",
+      "routes": {"all": "fork"},
+      "fork_to": ["path_a_in", "path_b_in"],
+      "options": {}
+    },
+    {"id": "path_a", "node_type": "transform", "plugin": "passthrough", "input": "path_a_in", "on_success": "path_a_out", "on_error": "discard", "options": {"schema": {"mode": "observed"}}},
+    {"id": "path_b", "node_type": "transform", "plugin": "passthrough", "input": "path_b_in", "on_success": "path_b_out", "on_error": "discard", "options": {"schema": {"mode": "observed"}}},
+    {
+      "id": "merge",
+      "node_type": "coalesce",
+      "branches": ["path_a_out", "path_b_out"],
+      "policy": "require_all",
+      "merge": "nested",
+      "on_success": "merged_rows",
+      "on_error": "discard",
+      "options": {"schema": {"mode": "observed"}}
+    }
+  ],
+  "outputs": [
+    {"sink_name": "merged_rows", "plugin": "json", "options": {"format": "jsonl", "path": "outputs/merged.jsonl"}}
+  ]
+}
+```
+
+This is the canonical Fork/Join shape. Five nodes total: pre-fork transform + gate (with both `routes: {"all": "fork"}` and `fork_to`) + path A + path B + coalesce (with both `policy` and `merge`). **One** sink at the end consumes the merged output.
+
+**Connection naming — `_in` vs `_out` is load-bearing for fork branches.** Each path-transform sits between the gate (which publishes the *upstream* connection) and the coalesce (which consumes the *downstream* connection). These are **two different connections**, not one — and giving them the same name creates a self-loop the cycle detector rejects. The convention:
+
+| Connection | Producer | Consumer | Naming |
+|------------|----------|----------|--------|
+| Gate → path-transform | gate (via `fork_to`) | path-transform's `input` | `<branch>_in` |
+| Path-transform → coalesce | path-transform's `on_success` | coalesce's `branches` entry | `<branch>_out` |
+
+**WRONG (creates a cycle):**
+```json
+{"id": "path_a", "input": "path_a_out", "on_success": "path_a_out"}    // same name → self-loop
+```
+
+**RIGHT:**
+```json
+{"id": "path_a", "input": "path_a_in", "on_success": "path_a_out"}     // distinct names
+```
+
+The `gate.fork_to` list names the **inputs** to the path-transforms (`[path_a_in, path_b_in]`), and the `coalesce.branches` list names the **outputs** of the path-transforms (`[path_a_out, path_b_out]`). They are different connection-name lists, even though they describe the same parallel paths from different ends. Reusing names across these endpoints is the most common fork/coalesce wiring failure.
+
+
 
 **Worked example — `upsert_node` for a coalesce node:**
 ```json
@@ -1345,12 +1496,13 @@ Pick any string for `<conn_a>` / `<conn_b>` / `<conn_c>`. The names don't have t
   "node_id": "merge_results",
   "type": "coalesce",
   "branches": ["enrich_path_a", "enrich_path_b"],
-  "policy": "merge",
+  "policy": "require_all",
+  "merge": "union",
   "on_success": "results",
   "on_error": "errors"
 }
 ```
-Each `branches` entry is the node id (or output name) feeding into this coalesce point. `policy: "merge"` unions fields from all branches; later branches override earlier ones on key conflict. `on_success` routes the merged row to the next step.
+Each `branches` entry names the upstream `on_success` connection that produces a token for this coalesce. `policy: "require_all"` waits for every named branch before emitting (use `quorum` with `quorum_count` for N-of-M, or `best_effort` with `timeout_seconds` to release on timeout). `merge: "union"` flattens fields from all branches (later wins on conflict); use `merge: "nested"` to preserve both branch rows under separate keys named after the branches; use `merge: "select"` to pick one. `on_success` routes the merged row to the next step.
 
 ---
 

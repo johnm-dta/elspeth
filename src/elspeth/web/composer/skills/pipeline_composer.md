@@ -857,7 +857,9 @@ When reporting validation errors or warnings:
 
 ### Reading Failed Tool Results
 
-When a tool result has `success: false`, the **first** entry in `validation.errors` (component `"rejected_mutation"`) is the precise reason the tool refused the change. The remaining entries describe the *unchanged* state and follow from the rejection — fixing the rejection usually resolves them all. Do not retry the same call shape with cosmetic variations: read the rejection message and adjust the offending field. The same text is mirrored in `data.error` for convenience.
+When a tool result has `success: false`, the **first** entry in `validation.errors` (component `"rejected_mutation"`) is the precise, self-contained reason the tool refused the change — the same text is mirrored in `data.error`. The remaining entries describe the *unchanged* state and follow from the rejection; fixing the rejection usually resolves them all.
+
+**The rejection message is self-contained: read it and adjust the offending field directly.** Do not retry the same call shape with cosmetic variations. Do **not** call `explain_validation_error` on a `rejected_mutation` message unless that message is truly opaque (e.g. a bare error code with no context). The message already names the field, the plugin, and the expected shape; calling `explain_validation_error` to double-check it is a budget-waste round that returns generic advice.
 
 **Example (real session 58d7ede3 round 6 — what NOT to do).** A `set_pipeline` returned `success: false` with these validation errors:
 
@@ -867,7 +869,7 @@ When a tool result has `success: false`, the **first** entry in `validation.erro
 [high] pipeline: No sinks configured.
 ```
 
-The first entry is the action item: add `options` to the csv sink. The second and third are the natural consequence of the rejection (state was unchanged, so it still has no source/sinks). Re-issuing `set_pipeline` with only a schema-format tweak is the wrong response — it ignores `rejected_mutation` and re-triggers the same failure.
+The first entry is the action item: add `options` to the csv sink (the message even shows the exact shape). The second and third are the natural consequence of the rejection (state was unchanged, so it still has no source/sinks). Two wrong responses here: (a) re-issuing `set_pipeline` with only a schema-format tweak — ignores `rejected_mutation` and re-triggers the same failure; (b) calling `explain_validation_error` on the message — the message is already self-explanatory and the explainer will return generic advice. The right response is to add the missing `options` block and re-issue.
 
 ### Ask Only the Minimum Questions
 

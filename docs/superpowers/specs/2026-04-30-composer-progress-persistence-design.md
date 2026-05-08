@@ -2219,6 +2219,54 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 
 ### Phase 1 — `SessionsService.persist_compose_turn` sync primitive
 
+> **Phase 1 implementation plan is authoritative — supersession notice
+> (added 2026-05-08).** The Phase 1 implementation plan
+> [`docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`](../plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md)
+> is the governing handoff for Phase 1 code work. Where this spec and
+> the plan disagree on Phase 1 mechanics, the plan wins until Task 19
+> rewrites this section in place. The plan supersedes the following
+> stale snippets that earlier spec drafts asserted:
+>
+> 1. `chat_messages.role` includes the internal value `"audit"`.
+>    The plan keeps `"audit"` as a stored role but excludes it from
+>    public route responses and composer prompt history; do not copy
+>    spec wording that surfaces audit rows on the public surface.
+> 2. `chat_messages.writer_principal` includes `"session_fork"`. The
+>    plan removes `"session_fork"` from the enumerated values; fork
+>    copies preserve each source row's stored `writer_principal`
+>    instead, and role-keyed fallback helpers are banned.
+> 3. `parent_assistant_id` is enforced by a composite same-session FK:
+>    `(parent_assistant_id, session_id) -> (chat_messages.id,
+>    chat_messages.session_id)`. Use the plan's exact composite-FK
+>    definition; do not infer a single-column FK from earlier text.
+> 4. `_insert_composition_state` accepts `CompositionStateData`
+>    directly and allocates versions under
+>    `_session_write_lock`. No 1A caller supplies a precomputed state
+>    version; do not copy spec wording that hands the caller a
+>    pre-computed version.
+> 5. PostgreSQL session write locks use
+>    `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
+>    hashtext(session_id))`. The plan defers PostgreSQL operational
+>    proof to Schedule 1C; for SQLite-current 1A, use the plan's
+>    SQLite advisory-lock shape, not earlier `hashtextextended`
+>    wording from this spec.
+> 6. `SessionServiceImpl.persist_compose_turn` accepts optional
+>    `raw_content` and `expected_current_state_id`, remains
+>    concrete-only, and is wrapped by the protocol-public async
+>    `SessionServiceProtocol.persist_compose_turn_async`. Use the
+>    plan's exact signature, not any earlier sync-protocol or
+>    raw_content-required wording.
+> 7. `_AuditOutcome` has only `assistant_id` and `unwind_audit_failed`;
+>    Tier-1 audit-write failures raise. Do not copy earlier
+>    `_AuditOutcome` shapes that included additional fields or
+>    swallowed Tier-1 failures.
+>
+> Session tests use `create_session_engine(..., StaticPool)` plus
+> `initialize_session_schema()`, never bare `metadata.create_all()`.
+> Task 19 of the Phase 1 plan rewrites the affected sections of this
+> spec after the implementation lands; until then, treat the plan as
+> the source of truth for Phase 1 mechanics.
+
 **Scope.** Add the new schema columns (`writer_principal`,
 `composition_states.provenance`, `audit_access_log` table); add the
 sync persistence primitive on `SessionsService`; update existing

@@ -50,7 +50,15 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
     # Additional CSVSource-specific contract tests
 
     def test_csv_source_respects_delimiter(self, tmp_path: Path) -> None:
-        """CSVSource MUST respect delimiter configuration."""
+        """CSVSource MUST respect delimiter configuration.
+
+        Asserts column-presence unconditionally for every yielded row and
+        explicitly asserts no rows are quarantined. A delimiter regression
+        (e.g., comma used when ``\\t`` was configured) would produce
+        single-column rows whose only field is the entire ``id\\tname`` blob
+        — these would either fail "id"/"name" key membership or, in stricter
+        modes, be quarantined. Either failure mode is detectable here.
+        """
         tsv_file = tmp_path / "data.tsv"
         tsv_file.write_text("id\tname\n1\tAlice\n2\tBob\n")
 
@@ -71,10 +79,22 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
         assert len(rows) == 2
         for row in rows:
             assert isinstance(row, SourceRow)
-            if not row.is_quarantined:
-                # Should have correctly parsed columns
-                assert "id" in row.row
-                assert "name" in row.row
+            # Happy-path TSV with valid rows: no row should be quarantined.
+            # If the delimiter is mishandled the row will either be
+            # quarantined (strict modes) or arrive with a single combined
+            # column — both are caught below.
+            assert not row.is_quarantined, f"Unexpected quarantine for row {row.row!r}: {row.quarantine_error!r}"
+            # Column-presence assertions run UNCONDITIONALLY — a delimiter
+            # regression that produced a single 'id\tname' column would
+            # fail these even if the row weren't quarantined.
+            assert "id" in row.row, f"Expected 'id' column in row {row.row!r}; delimiter likely mishandled"
+            assert "name" in row.row, f"Expected 'name' column in row {row.row!r}; delimiter likely mishandled"
+
+        # Stronger contract: the actual parsed values must match the TSV.
+        assert [dict(r.row) for r in rows] == [
+            {"id": "1", "name": "Alice"},
+            {"id": "2", "name": "Bob"},
+        ]
 
     def test_csv_source_handles_empty_file(self, tmp_path: Path) -> None:
         """CSVSource: Empty files return no rows gracefully.

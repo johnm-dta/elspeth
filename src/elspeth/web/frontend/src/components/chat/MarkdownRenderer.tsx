@@ -1,8 +1,9 @@
-import { useEffect, useRef, useId, useState, type ComponentPropsWithoutRef } from "react";
+import { useEffect, useRef, useId, useState, useCallback, type ComponentPropsWithoutRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import mermaid from "mermaid";
 import DOMPurify from "dompurify";
+import { Highlight, themes as prismThemes } from "prism-react-renderer";
 import { useTheme, type ResolvedTheme } from "@/hooks/useTheme";
 
 const MERMAID_THEMES: Record<ResolvedTheme, Parameters<typeof mermaid.initialize>[0]> = {
@@ -62,7 +63,9 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
 
 /**
  * Custom code renderer that intercepts mermaid blocks and renders
- * them as diagrams, while passing all other code through normally.
+ * them as diagrams, renders all other fenced blocks with Prism syntax
+ * highlighting and a copy-to-clipboard button, and passes inline code
+ * through as-is.
  */
 function CodeBlock({
   className,
@@ -71,6 +74,18 @@ function CodeBlock({
 }: ComponentPropsWithoutRef<"code">) {
   const language = className?.replace("language-", "") ?? "";
   const code = String(children).replace(/\n$/, "");
+  const { resolvedTheme } = useTheme();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API unavailable — the user can still select-and-copy manually.
+    }
+  }, [code]);
 
   // Inline code (no language, rendered inside a <p>)
   if (!className) {
@@ -82,13 +97,36 @@ function CodeBlock({
     return <MermaidDiagram chart={code} />;
   }
 
-  // All other code blocks render as <pre><code>
+  // All other fenced blocks: Prism syntax highlighting + copy button
+  const prismTheme =
+    resolvedTheme === "dark" ? prismThemes.vsDark : prismThemes.vsLight;
+
   return (
-    <pre className="code-block">
-      <code className={className} {...props}>
-        {code}
-      </code>
-    </pre>
+    <div className="code-block-wrapper">
+      <button
+        type="button"
+        className="code-block-copy"
+        onClick={handleCopy}
+        aria-label={copied ? "Copied" : "Copy code"}
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+      <Highlight code={code} language={language || "text"} theme={prismTheme}>
+        {({ className: hClass, style, tokens, getLineProps, getTokenProps }) => (
+          <pre className={`code-block ${hClass}`} style={style}>
+            <code className={className} {...props}>
+              {tokens.map((line, i) => (
+                <div key={i} {...getLineProps({ line })}>
+                  {line.map((token, j) => (
+                    <span key={j} {...getTokenProps({ token })} />
+                  ))}
+                </div>
+              ))}
+            </code>
+          </pre>
+        )}
+      </Highlight>
+    </div>
   );
 }
 

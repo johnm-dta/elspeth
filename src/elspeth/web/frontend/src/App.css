@@ -1568,6 +1568,30 @@ summary:focus-visible {
   padding: 0;
 }
 
+.markdown-body .code-block-wrapper {
+  position: relative;
+}
+
+.markdown-body .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.markdown-body .code-block-wrapper:hover .code-block-copy,
+.markdown-body .code-block-copy:focus-visible {
+  opacity: 1;
+}
+
 .markdown-body .mermaid-container {
   margin: 8px 0;
   padding: 12px;

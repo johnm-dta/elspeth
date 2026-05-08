@@ -89,4 +89,30 @@ describe("SecretsPanel", () => {
     const valueInput = screen.getByLabelText("Value");
     expect(valueInput).toHaveAttribute("type", "password");
   });
+
+  describe("submit failure recovery", () => {
+    it("re-enables the form after createSecret throws", async () => {
+      const user = userEvent.setup();
+      const failing = vi.fn(async () => {
+        throw new Error("network");
+      });
+      useSecretsStore.setState({ createSecret: failing });
+
+      render(<SecretsPanel onClose={onClose} />);
+
+      await user.type(screen.getByLabelText("Name"), "OPENAI_API_KEY");
+      await user.type(screen.getByLabelText("Value"), "sk-test");
+      await user.click(screen.getByRole("button", { name: /save/i }));
+
+      expect(failing).toHaveBeenCalledOnce();
+
+      // After failure the fields are cleared (security contract) and
+      // isSubmitting is reset to false. Re-filling the fields must
+      // produce an enabled submit button — if isSubmitting were stuck
+      // the button would remain disabled regardless of field content.
+      await user.type(screen.getByLabelText("Name"), "ANOTHER_KEY");
+      await user.type(screen.getByLabelText("Value"), "sk-other");
+      expect(screen.getByRole("button", { name: /save/i })).not.toBeDisabled();
+    });
+  });
 });

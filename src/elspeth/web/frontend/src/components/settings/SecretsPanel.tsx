@@ -83,12 +83,18 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
       e.preventDefault();
       if (!name.trim() || !value) return;
       setIsSubmitting(true);
-      await createSecret(name.trim(), value);
-      // SECURITY: clear value immediately after submission — it must never
-      // linger in component state or the store after the API call.
-      setValue("");
-      setName("");
-      setIsSubmitting(false);
+      try {
+        await createSecret(name.trim(), value);
+      } catch {
+        // Error state is managed by the store (createSecret sets error on the
+        // store slice). Nothing more to do here — fall through to finally.
+      } finally {
+        // SECURITY: clear value immediately — it must never linger in component
+        // state regardless of whether the API call succeeded or failed.
+        setValue("");
+        setName("");
+        setIsSubmitting(false);
+      }
     },
     [name, value, createSecret],
   );

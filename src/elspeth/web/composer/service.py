@@ -901,11 +901,12 @@ _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 # module docstring for the contract details.
 
 
-# Step 4 of the simple-pipeline-convergence program: hard cap on
-# proof-step-driven repair turns. When the assistant claims completion but
-# preview_pipeline's proof_diagnostics still has blocking entries, the loop
-# may inject a synthetic repair message and continue for at most this many
-# additional iterations. After the cap, the original termination path runs.
+# Hard cap on proof-step-driven repair turns. When the assistant claims
+# completion but preview_pipeline's proof_diagnostics still has blocking
+# entries, the loop may inject a synthetic repair message and continue for
+# at most this many additional iterations. After the cap, the original
+# termination path runs — preventing indefinite spin against a model that
+# refuses to apply the suggested repair.
 _MAX_REPAIR_TURNS: Final[int] = 2
 
 
@@ -1090,7 +1091,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         repair_turns_used: int,
     ) -> bool:
-        """Step 4: pre-finalize proof gate.
+        """Pre-finalize proof gate.
 
         When the assistant emits no tool_calls (claiming completion), check
         ``preview_pipeline``'s ``proof_diagnostics`` for blocking entries.
@@ -1513,11 +1514,11 @@ class ComposerServiceImpl:
         # toggle is disabled the counter is never read.
         advisor_calls_used = 0
 
-        # Step 4 of the simple-pipeline-convergence program: forced-repair
-        # counter. When the assistant emits no tool_calls but the proof step
-        # found blocking diagnostics, the loop synthesises a repair message
-        # and continues for at most _MAX_REPAIR_TURNS additional iterations.
-        # NEVER catches plugin exceptions — only configuration diagnostics.
+        # Forced-repair counter. When the assistant emits no tool_calls but
+        # the proof step found blocking diagnostics, the loop synthesises a
+        # repair message and continues for at most _MAX_REPAIR_TURNS
+        # additional iterations. NEVER catches plugin exceptions — only
+        # configuration diagnostics.
         repair_turns_used = 0
 
         while True:
@@ -1534,8 +1535,8 @@ class ComposerServiceImpl:
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
-                # Step 4 forced-repair gate: when the model claims completion
-                # but the proof step still has blocking diagnostics, inject a
+                # Forced-repair gate: when the model claims completion but
+                # the proof step still has blocking diagnostics, inject a
                 # repair message and continue. Capped at _MAX_REPAIR_TURNS so
                 # the loop can never spin indefinitely. NEVER catches plugin
                 # exceptions — only repairs configurations.

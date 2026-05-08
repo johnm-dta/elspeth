@@ -188,7 +188,13 @@ def test_passivity_phrase_scores_red(scenario_path: Path) -> None:
 
 @pytest.mark.parametrize("scenario_path", _scenario_paths(), ids=lambda p: p.parent.name)
 def test_repair_turns_field_absent_ambers(scenario_path: Path) -> None:
-    """Until Step 4 ships, an otherwise-ideal state without composer_meta ambers explicitly."""
+    """An otherwise-ideal state without ``composer_meta.repair_turns_used`` ambers explicitly.
+
+    The scoring contract treats absence as ambiguous (we cannot prove the
+    convergence-budget criterion was met without the field) rather than green
+    or red. This pins that behaviour against scenarios whose green_criteria
+    declare ``max_repair_turns``.
+    """
     scenario = _load(scenario_path)
     state = _ideal_state_for(scenario)
     state.pop("composer_meta", None)

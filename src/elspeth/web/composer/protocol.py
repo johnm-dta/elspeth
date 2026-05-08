@@ -57,11 +57,11 @@ class ComposerResult:
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
     llm_calls: tuple[ComposerLLMCall, ...] = ()
     # Number of forced repair turns the proof step injected into this compose
-    # invocation (Step 4 of the simple-pipeline-convergence program). Capped
-    # at 2 by the loop. 0 means first-pass success; 1 or 2 means the model
-    # was given proof_diagnostics back as a synthesized message and asked to
-    # iterate. Surfaced on the compose-produced ``composition_states`` row
-    # via the ``composer_meta`` JSON column (see web/sessions/models.py and
+    # invocation. Capped at 2 by the loop. 0 means first-pass success; 1 or 2
+    # means the model was given proof_diagnostics back as a synthesized
+    # message and asked to iterate. Surfaced on the compose-produced
+    # ``composition_states`` row via the ``composer_meta`` JSON column (see
+    # web/sessions/models.py and
     # web/sessions/protocol.py::CompositionStateData.composer_meta) and
     # returned by ``GET /api/sessions/{id}/state`` under
     # ``composer_meta.repair_turns_used`` for the convergence-suite eval

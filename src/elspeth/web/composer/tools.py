@@ -3673,11 +3673,10 @@ def _execute_apply_pipeline_recipe(
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
-    Recipes are deterministic scaffolds (Step 5 of the simple-pipeline-
-    convergence program). Slot validation runs before scaffolding so a
-    URL string passed where a blob_id is required is rejected at the
-    recipe boundary with an explicit repair hint, not silently accepted
-    into a config that will fail at runtime.
+    Recipes are deterministic scaffolds. Slot validation runs before
+    scaffolding so a URL string passed where a blob_id is required is
+    rejected at the recipe boundary with an explicit repair hint, not
+    silently accepted into a config that will fail at runtime.
 
     ``set_pipeline`` is full state replacement. When the operator was
     hand-iterating and the LLM applied a recipe, prior work is replaced
@@ -4913,7 +4912,7 @@ def compute_proof_diagnostics(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Step 3 of the composer simple-pipeline-convergence program.
+    """Compute machine-readable proof diagnostics for a composer state.
 
     Promotes ``preview_pipeline`` from a "state validates" check into a
     "state is plausibly runnable against observed input" proof. Returns a
@@ -4927,7 +4926,7 @@ def compute_proof_diagnostics(
             "evidence_locator": {"source": "...", "node_id": "...", ...},
         }
 
-    Diagnostics surfaced (this round):
+    Diagnostics surfaced:
 
       * ``csv_fixed_schema_omits_observed_columns`` — fixed CSV schema +
         on_validation_failure=discard + at least one observed column
@@ -5091,10 +5090,9 @@ def _execute_preview_pipeline(
 
     Returns ``authoring_validation`` (Stage 1), ``runtime_preflight``
     (Stage 2 from the caller-supplied callback), and ``proof_diagnostics``
-    (Stage 3 — operator-input-aware proof from Step 3 of the composer
-    simple-pipeline-convergence program). The presence of any
-    blocking ``proof_diagnostics`` entry means ``is_valid=False`` even
-    when authoring + runtime checks pass.
+    (Stage 3 — operator-input-aware proof against the observed source
+    blob). The presence of any blocking ``proof_diagnostics`` entry means
+    ``is_valid=False`` even when authoring + runtime checks pass.
     """
     validation = state.validate()
     _AUTHORING_VALIDATION_COUNTER.add(

@@ -1,7 +1,5 @@
 """Pipeline recipes — deterministic scaffolds for common simple-pipeline intents.
 
-Step 5 of the composer simple-pipeline-convergence program.
-
 A recipe takes operator-supplied slot values, validates them against a
 typed schema, and returns a ``set_pipeline`` arguments dict ready for
 execution. The resulting pipeline state is identical to one a model would
@@ -22,8 +20,9 @@ Boundary contract:
     UUID, str → float for numeric thresholds) but do NOT fabricate
     defaults beyond what the slot schema declares.
   * Recipes never call external services or read blob bytes — they
-    construct config only. Source inspection (Step 2) and proof step
-    (Step 3) handle blob reads.
+    construct config only. Source inspection (``source_inspection.py``)
+    and the preflight proof step (``compute_proof_diagnostics``) handle
+    blob reads.
 """
 
 from __future__ import annotations

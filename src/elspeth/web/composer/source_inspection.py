@@ -1,7 +1,5 @@
 """Bounded inspection of blob-backed source content.
 
-Step 2 of the composer simple-pipeline-convergence program.
-
 Surfaces structured facts to the model and to ``preview_pipeline`` so the
 LLM no longer has to guess at CSV column names or numeric types when the
 operator has already supplied an inline blob.
@@ -31,8 +29,9 @@ Facts surfaced:
   * ``url_candidates`` — for text or single-line content, any URLs found
     (a strong hint that ``web_scrape`` is needed).
   * ``warnings`` — observations that should bubble up as proof
-    diagnostics in Step 3 (e.g., "first row looks like data, not
-    headers", "field 'price' is numeric-shaped but typed str").
+    diagnostics in ``compute_proof_diagnostics`` (e.g., "first row looks
+    like data, not headers", "field 'price' is numeric-shaped but typed
+    str").
 """
 
 from __future__ import annotations
@@ -549,8 +548,8 @@ def _inspect_text(
 def facts_to_dict(facts: SourceInspectionFacts) -> dict[str, Any]:
     """Serialize facts into a JSON-safe dict for tool results / proof diagnostics.
 
-    Used by ``inspect_source`` MCP tool and by Step 3's ``preview_pipeline``
-    so consumers can iterate without depending on the dataclass shape.
+    Used by ``inspect_source`` MCP tool and by ``preview_pipeline``'s proof
+    step so consumers can iterate without depending on the dataclass shape.
     """
     return {
         "source_kind": facts.source_kind,
@@ -572,8 +571,8 @@ def derive_extra_column_risk(
 
     Returns an empty tuple when the schema is observed/flexible (caller
     passes ``None``) or when every observed header is declared. Used by
-    Step 3 (``preview_pipeline`` proof) to flag the all-row-discard
-    hazard before the pipeline runs.
+    ``preview_pipeline``'s proof step to flag the all-row-discard hazard
+    before the pipeline runs.
     """
     if declared_fields is None or facts.observed_headers is None:
         return ()

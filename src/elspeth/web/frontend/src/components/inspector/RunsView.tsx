@@ -412,8 +412,20 @@ export function RunsView() {
                 </div>
               )}
 
-              {expandedRunId === run.id && (
-                <div id={`run-diagnostics-${run.id}`}>
+              {/*
+                Always-rendered wrapper satisfies WAI-ARIA 1.2: the button's
+                aria-controls IDREF must resolve to an element that exists in
+                the DOM regardless of expanded state.  The heavy
+                RunDiagnosticsPanel (which reads props — no fetch on mount) is
+                only mounted when the row is expanded so that we avoid paying
+                any rendering cost for collapsed rows.
+              */}
+              <div
+                id={`run-diagnostics-${run.id}`}
+                hidden={expandedRunId !== run.id}
+                className="run-diagnostics"
+              >
+                {expandedRunId === run.id && (
                   <RunDiagnosticsPanel
                     diagnostics={diagnosticsByRunId[run.id]}
                     error={diagnosticsErrorByRunId[run.id] ?? null}
@@ -424,8 +436,8 @@ export function RunsView() {
                     onExplain={() => void evaluateRunDiagnostics(run.id)}
                     onRefresh={() => void loadRunDiagnostics(run.id)}
                   />
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
             {/* Show live progress inline for the active running run */}

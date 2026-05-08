@@ -328,6 +328,7 @@ describe("RunsView", () => {
 
 describe("RunsView Inspect button a11y", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     useSessionStore.setState({ activeSessionId: null });
@@ -352,7 +353,7 @@ describe("RunsView Inspect button a11y", () => {
     expect(hide.getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("aria-controls points to the diagnostics panel id", async () => {
+  it("aria-controls IDREF resolves both before and after the panel is expanded", async () => {
     const { fetchRunDiagnostics } = await import("@/api/client");
     (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
     useExecutionStore.setState({
@@ -365,9 +366,14 @@ describe("RunsView Inspect button a11y", () => {
     const inspect = screen.getByRole("button", { name: /inspect/i });
     const controlsId = inspect.getAttribute("aria-controls");
     expect(controlsId).toBe("run-diagnostics-run-1");
+    // Option A: the wrapper div is always in the DOM — IDREF resolves when collapsed
+    expect(document.getElementById(controlsId!)).not.toBeNull();
 
     await user.click(inspect);
 
-    expect(document.getElementById(controlsId!)).not.toBeNull();
+    // IDREF must continue to resolve after expansion (panel is now mounted inside the wrapper)
+    const hide = screen.getByRole("button", { name: /hide/i });
+    const expandedControlsId = hide.getAttribute("aria-controls");
+    expect(document.getElementById(expandedControlsId!)).not.toBeNull();
   });
 });

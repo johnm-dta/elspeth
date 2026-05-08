@@ -8009,3 +8009,202 @@ class TestUpdateBlobAtomicWrite:
         assert self.storage_path.read_bytes() == self.original_content
         leftovers = [p for p in self.storage_dir.iterdir() if p != self.storage_path]
         assert leftovers == [], f"Tempfiles leaked after DB failure: {leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# inspect_source — Step 2 of composer simple-pipeline-convergence (epic
+# elspeth-783c9dede8). Mirrors get_blob_content's lifecycle/integrity/decode
+# guards, but returns SourceInspectionFacts as a structured dict rather than
+# raw bytes — so the LLM can reason about headers and types without seeing
+# row content.
+# ---------------------------------------------------------------------------
+
+
+class TestInspectSourceTool:
+    """``inspect_source`` returns bounded structural facts about a blob."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        self.engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(self.engine)
+
+        self.session_id = str(uuid4())
+        self.blob_id = str(uuid4())
+        now = datetime.now(UTC)
+
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True)
+        self.storage_path = storage_dir / f"{self.blob_id}_orders.csv"
+        self.content_bytes = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        self.content_hash_hex = _content_hash(self.content_bytes)
+        self.storage_path.write_bytes(self.content_bytes)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=self.session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.blob_id,
+                    session_id=self.session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(self.content_bytes),
+                    content_hash=self.content_hash_hex,
+                    storage_path=str(self.storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+    def _set_status(self, status: str) -> None:
+        from elspeth.web.sessions.models import blobs_table
+
+        with self.engine.begin() as conn:
+            conn.execute(blobs_table.update().where(blobs_table.c.id == self.blob_id).values(status=status))
+
+    def test_returns_csv_facts_for_ready_blob(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        data = result.data
+        assert data["source_kind"] == "csv"
+        # Data is deep-frozen by ToolResult.__post_init__: lists become tuples,
+        # dicts become MappingProxyType. Compare against the frozen forms.
+        assert tuple(data["observed_headers"]) == ("order_id", "customer", "price")
+        assert dict(data["inferred_types"]) == {
+            "order_id": "str",
+            "customer": "str",
+            "price": "float",
+        }
+        assert data["sample_row_count"] == 2
+        assert data["redacted_identity"]["filename"] == "orders.csv"
+        assert data["redacted_identity"]["mime_type"] == "text/csv"
+        # Identity must NOT include storage_path
+        assert "storage_path" not in data["redacted_identity"]
+
+    def test_returns_url_candidates_when_present(self) -> None:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        # Add a second blob with URL content
+        url_blob_id = str(uuid4())
+        url_path = self.storage_path.parent / f"{url_blob_id}_urls.txt"
+        url_bytes = b"https://example.com/api\n"
+        url_path.write_bytes(url_bytes)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=url_blob_id,
+                    session_id=self.session_id,
+                    filename="urls.txt",
+                    mime_type="text/plain",
+                    size_bytes=len(url_bytes),
+                    content_hash=_content_hash(url_bytes),
+                    storage_path=str(url_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": url_blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        assert result.data["source_kind"] == "text"
+        assert tuple(result.data["url_candidates"]) == ("https://example.com/api",)
+        assert any("web_scrape" in w for w in result.data["warnings"])
+
+    def test_pending_blob_refused(self) -> None:
+        self._set_status("pending")
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is False
+        # Failure messages live in result.data["error"] (set by _failure_result).
+        assert "pending" in result.data["error"].lower()
+
+    def test_missing_blob_returns_failure(self) -> None:
+        from uuid import uuid4
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": str(uuid4())},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is False
+        assert "not found" in result.data["error"].lower()
+
+    def test_without_session_context_returns_failure(self) -> None:
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+        )
+        assert result.success is False
+
+    def test_hash_mismatch_raises_blob_integrity_error(self) -> None:
+        """Tier-1 invariant — corrupted blob must escalate, not return facts."""
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        # Tamper with the on-disk bytes so SHA-256 mismatches the stored hash.
+        self.storage_path.write_bytes(b"tampered,content\n9,9\n")
+        with pytest.raises(BlobIntegrityError):
+            execute_tool(
+                "inspect_source",
+                {"blob_id": self.blob_id},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )

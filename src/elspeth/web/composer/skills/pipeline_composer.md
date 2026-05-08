@@ -29,7 +29,7 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 - **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
 - **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
 - **Diagnostics:** `explain_validation_error`, `request_advisor_hint`
-- **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `update_blob`, `delete_blob`
+- **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `inspect_source`, `update_blob`, `delete_blob`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 
 When an LLM transform needs a model identifier, do not assume a familiar model is available in this deployment. Use `list_models` first: the no-argument form gives provider counts, and a provider-filtered call gives the concrete model IDs that validation accepts.

@@ -589,6 +589,11 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_handle_list_blobs:arguments"
   - "src/elspeth/web/composer/tools.py:_handle_get_blob_metadata:arguments"
   - "src/elspeth/web/composer/tools.py:_execute_set_source_from_blob:arguments"
+  - "src/elspeth/web/composer/tools.py:_execute_inspect_source:arguments"
+  # Source inspection — operator-supplied JSON sample objects (Tier-3) and
+  # the JSON-safe dict returned to the LLM tool channel.
+  - "src/elspeth/web/composer/source_inspection.py:_facts_from_objects:objects (list)"
+  - "src/elspeth/web/composer/source_inspection.py:facts_to_dict:return"
   # Blob sync helpers — return dicts for tool response payloads
   - "src/elspeth/web/composer/tools.py:_sync_list_blobs:return (list)"
   # Secret tool handlers — same pattern as above, LLM-provided arguments

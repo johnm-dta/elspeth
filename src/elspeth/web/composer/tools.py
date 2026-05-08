@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, TypedDict, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from opentelemetry import metrics
 from pydantic import ValidationError as PydanticValidationError
@@ -37,6 +37,7 @@ from elspeth.web.blobs.service import _guard_blob_row_literals, _source_referenc
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.source_inspection import facts_to_dict, inspect_blob_content
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
@@ -1426,6 +1427,28 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "blob_id": {
                         "type": "string",
                         "description": "ID of the blob to read.",
+                    },
+                },
+                "required": ["blob_id"],
+            },
+        },
+        {
+            "name": "inspect_source",
+            "description": (
+                "Return bounded structural facts about a blob-backed source: source kind, observed "
+                "headers, sample row count, inferred scalar types per column, URL candidates, and "
+                "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
+                "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
+                "tell you which fields the source actually contains and what numeric coercion is "
+                "needed before any gate or value_transform numeric op. Never returns raw row "
+                "content; only summary facts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {
+                        "type": "string",
+                        "description": "ID of the blob to inspect.",
                     },
                 },
                 "required": ["blob_id"],
@@ -3498,6 +3521,68 @@ def _execute_get_blob_content(
     )
 
 
+def _execute_inspect_source(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Inspect a blob-backed source and return bounded structural facts.
+
+    Mirrors the lifecycle and integrity guards of ``_execute_get_blob_content``
+    (only ``ready`` blobs are readable; SHA-256 verified; UnicodeDecodeError
+    surfaced as tool-failure) but returns ``SourceInspectionFacts`` rather
+    than raw content. Reads at most 8 KiB and parses at most 100 rows.
+
+    Never returns raw row content — only summary facts (headers, inferred
+    types, URL candidates, warnings, redacted identity).
+    """
+    if session_engine is None or session_id is None:
+        return _failure_result(state, "Blob tools require session context.")
+
+    blob_id = arguments["blob_id"]
+    blob = _sync_get_blob(session_engine, blob_id, session_id)
+    if blob is None:
+        return _failure_result(state, f"Blob '{blob_id}' not found.")
+
+    blob_status = blob["status"]
+    if blob_status != "ready":
+        return _failure_result(
+            state,
+            f"Blob '{blob_id}' is not readable — status is '{blob_status}', expected 'ready'.",
+        )
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        return _failure_result(state, f"Blob storage file missing for '{blob_id}'.")
+
+    data = storage_path.read_bytes()
+
+    stored_hash = blob["content_hash"]
+    if stored_hash is None:
+        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
+    actual_hash = content_hash(data)
+    if not hmac.compare_digest(actual_hash, stored_hash):
+        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+
+    try:
+        blob_uuid = UUID(blob_id)
+    except ValueError:
+        blob_uuid = None
+
+    facts = inspect_blob_content(
+        content=data,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        blob_id=blob_uuid,
+        content_hash=stored_hash,
+    )
+    return _discovery_result(state, facts_to_dict(facts))
+
+
 # Blob tool handler type — extended signature with session context
 BlobToolHandler = Callable[..., ToolResult]
 
@@ -4771,6 +4856,7 @@ _BLOB_DISCOVERY_TOOLS: dict[str, BlobToolHandler] = {
     "list_blobs": _handle_list_blobs,
     "get_blob_metadata": _handle_get_blob_metadata,
     "get_blob_content": _execute_get_blob_content,
+    "inspect_source": _execute_inspect_source,
 }
 
 _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {

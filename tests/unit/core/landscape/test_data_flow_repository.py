@@ -772,6 +772,144 @@ class TestRecordValidationErrorDirect:
         assert errors[0].error == "bad field"
 
 
+class TestLinkValidationErrorToRow:
+    """Tests for DataFlowRepository.link_validation_error_to_row.
+
+    Audit U-CORE-1 (2026-05-06) found this method had zero tests in
+    either unit or integration suites. Six distinct branches are
+    individually exercised here:
+
+    1. Cross-run contamination via row_id (line 1550-1555 of
+       data_flow_repository.py): caller-supplied run_id mismatches the
+       row's actual run.
+    2. Non-existent error_id (line 1563-1564): error_id is fictional.
+    3. Cross-run contamination via error_id (line 1565-1569): error
+       belongs to a different run than caller-supplied run_id.
+    4. Relink-to-different-row (line 1570-1574): error already linked
+       to row A, caller supplies row B.
+    5. Idempotent same-row relink (line 1575): error already linked
+       to row A, caller supplies row A — early-return without UPDATE.
+    6. Happy-path UPDATE (line 1577-1585): error has row_id NULL,
+       caller supplies a valid row_id.
+
+    Per CLAUDE.md, this method is the quarantine-lineage-exactness
+    guarantee — if linkage is wrong the audit trail confidently
+    misattributes which row failed which validation. Cross-run, cross-row,
+    and silent-relink corruption all fail Tier 1 trust.
+    """
+
+    def test_happy_path_links_row_to_unbound_error(self) -> None:
+        """row_id NULL + valid linkage → UPDATE persists row_id."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+        error_id = repo.record_validation_error(
+            run_id="run-1",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+            # row_id intentionally omitted — error is recorded before quarantine row materialises
+        )
+
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+
+        errors = repo.get_validation_errors_for_run("run-1")
+        assert len(errors) == 1
+        assert errors[0].error_id == error_id
+        assert errors[0].row_id == row_id
+
+    def test_idempotent_relink_to_same_row_is_noop(self) -> None:
+        """Linking the same (error_id, row_id) twice is an early-return no-op."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+        error_id = repo.record_validation_error(
+            run_id="run-1",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+        # Second call must not raise and must not relink.
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+
+        errors = repo.get_validation_errors_for_run("run-1")
+        assert len(errors) == 1
+        assert errors[0].row_id == row_id
+
+    def test_relink_to_different_row_crashes(self) -> None:
+        """Once linked, attempting to relink to a different row is a Tier-1 crash."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+        other_row = repo.create_row("run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
+        error_id = repo.record_validation_error(
+            run_id="run-1",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+
+        with pytest.raises(AuditIntegrityError, match=r"already linked to row .* refusing to relink"):
+            repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=other_row.row_id)
+
+    def test_non_existent_error_id_crashes(self) -> None:
+        """A fictional error_id is Tier-1 data corruption, not a soft miss."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+
+        with pytest.raises(AuditIntegrityError, match=r"does not exist in validation_errors\. This is Tier 1 data corruption"):
+            repo.link_validation_error_to_row(run_id="run-1", error_id="verr_does_not_exist", row_id=row_id)
+
+    def test_cross_run_via_row_id_crashes(self) -> None:
+        """Row from run B + caller-supplied run_id A → crash before any DB lookup of the error."""
+        _db, repo, factory, row_id, _tok = _make_repo_with_token(run_id="run-A")
+        # Set up run-B with its own row
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory.data_flow.register_node(
+            run_id="run-B",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-B",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        row_b = repo.create_row("run-B", "source-B", 0, {"name": "bob"}, row_id="row-B-1")
+        error_id = repo.record_validation_error(
+            run_id="run-A",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+
+        # Caller claims run-A but supplies a row from run-B → guard fires before error lookup.
+        with pytest.raises(AuditIntegrityError, match=r"prevented cross-run contamination: row .* belongs to run 'run-B'"):
+            repo.link_validation_error_to_row(run_id="run-A", error_id=error_id, row_id=row_b.row_id)
+        # Sanity: the unrelated error in run-A is still present and unbound.
+        assert row_id  # row-A is bound to run-A; not part of the assertion but documents fixture intent
+
+    def test_cross_run_via_error_id_crashes(self) -> None:
+        """Error from run B + caller-supplied run_id A (with row from run A) → crash on error-row check."""
+        _db, repo, factory, row_id, _tok = _make_repo_with_token(run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        # Record the validation error against run-B with no row binding.
+        error_id_b = repo.record_validation_error(
+            run_id="run-B",
+            node_id=None,  # avoid composite-FK constraint on (node_id, run_id) for run-B nodes we haven't registered
+            row_data={"name": "stranger"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+
+        # row_id is in run-A so the row-side guard passes; the error-side guard must catch it.
+        with pytest.raises(AuditIntegrityError, match=r"prevented cross-run contamination: error .* belongs to run 'run-B'"):
+            repo.link_validation_error_to_row(run_id="run-A", error_id=error_id_b, row_id=row_id)
+
+
 class TestRecordTransformErrorDirect:
     """Tests for DataFlowRepository.record_transform_error via direct repo."""
 

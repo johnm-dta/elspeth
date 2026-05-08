@@ -174,3 +174,67 @@ class TestTokenInfoLineageFieldGuards:
         kwargs[field] = "valid_value"
         t = TokenInfo(**kwargs)
         assert getattr(t, field) == "valid_value"
+
+
+class TestTokenInfoPipelineRowExtras:
+    """PipelineRow-specific assertions for TokenInfo.row_data.
+
+    These cover behaviour beyond the basic TokenInfo construction/lineage tests:
+    contract accessibility through row_data, and to_dict() preservation of
+    non-contract fields (extras attached during pipeline execution).
+    """
+
+    def test_row_data_contract_accessible(self) -> None:
+        """The schema contract is reachable via token.row_data.contract."""
+        contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                make_field(
+                    "amount",
+                    int,
+                    original_name="'Amount'",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+        pipeline_row = PipelineRow({"amount": 100}, contract)
+
+        token = TokenInfo(
+            row_id="row_001",
+            token_id="token_001",
+            row_data=pipeline_row,
+        )
+
+        assert token.row_data.contract is contract
+        assert token.row_data.contract.mode == "FIXED"
+
+    def test_pipeline_row_to_dict_includes_extra_fields(self) -> None:
+        """to_dict() returns ALL fields, not just contract-declared ones.
+
+        Pipeline execution can attach extras (computed fields, nested objects)
+        beyond the declared schema. to_dict() must round-trip those, otherwise
+        downstream sinks lose data the audit trail needs.
+        """
+        contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                make_field(
+                    "amount",
+                    int,
+                    original_name="'Amount'",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+        data_with_extras = {"amount": 100, "computed_field": "extra", "nested": {"a": 1}}
+        pipeline_row = PipelineRow(data_with_extras, contract)
+
+        result = pipeline_row.to_dict()
+
+        assert result["amount"] == 100
+        assert result["computed_field"] == "extra"
+        assert result["nested"] == {"a": 1}

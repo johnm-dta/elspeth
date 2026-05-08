@@ -2268,6 +2268,23 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 >    Tier-1 audit-write failures raise. Do not copy earlier
 >    `_AuditOutcome` shapes that included additional fields or
 >    swallowed Tier-1 failures.
+> 8. `composition_states.provenance` enum is the SIX-value form
+>    `('tool_call', 'convergence_persist', 'plugin_crash_persist',
+>    'preflight_persist', 'session_seed', 'session_fork')`. The spec
+>    body asserts a five-value enum at §4.1.2 (line 241), §1.4
+>    (line 308), and §6 (line 1305); all three are stale. The plan
+>    adds `session_fork` for the new state row written when a fork
+>    copies the source session's snapshot, and broadens
+>    `session_seed` from "initial state row at session creation" to
+>    "any state row written outside the compose loop's tool-call
+>    path" — which now also covers `save_composition_state`
+>    route-level saves and `set_active_state` within-session
+>    reverts, not only the original session-creation seed case. Use
+>    the plan's six-value list and the broadened `session_seed`
+>    definition; do not copy the spec body's five-value enum or its
+>    narrow `session_seed` definition. Site-by-site mapping of
+>    which writer supplies which value is in plan §1017-1051 and is
+>    enforced by Task 10's writer cutover.
 >
 > Session tests use `create_session_engine(..., StaticPool)` plus
 > `initialize_session_schema()`, never bare `metadata.create_all()`.

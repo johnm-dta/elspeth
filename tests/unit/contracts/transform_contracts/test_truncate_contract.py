@@ -13,7 +13,6 @@ import pytest
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.transforms.truncate import Truncate
 from elspeth.testing import make_field, make_pipeline_row
-from tests.fixtures.factories import make_context
 
 from .test_transform_protocol import (
     TransformContractPropertyTestBase,

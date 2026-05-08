@@ -621,15 +621,21 @@ allow_hits:
   expires: null
 - key: web/composer/recipes.py:R1:get_recipe:fp=fa88d94e82804c1f
   owner: web-composer
-  reason: Tier-3 trust boundary — `_RECIPES.get(name)` for membership probe on a recipe-name lookup. Returns None
-    when the name is not registered; caller (apply_recipe) raises an explicit error with the registered names.
-  safety: None return is the documented "unknown recipe" signal; caller produces a helpful error message.
+  reason: Internal-registry membership probe — `_RECIPES.get(name)` returns None when ``name`` is not a
+    registered recipe. Not a Tier-3 trust boundary; the registry itself is system-owned data and the
+    None-or-spec signal is the function's documented contract (``RecipeSpec | None`` return type).
+    Equivalent to ``dict.get`` used as a probe rather than as a defensive default.
+  safety: None return is the documented "unknown recipe" signal; the caller (apply_recipe) raises
+    RecipeValidationError listing the registered names.
   expires: null
 - key: web/composer/recipes.py:R1:apply_recipe:fp=1696d1cf63bcf4a7
   owner: web-composer
-  reason: Tier-3 trust boundary — `_RECIPES.get(name)` membership probe in apply_recipe. Same pattern as get_recipe;
-    None triggers the explicit RecipeValidationError path with available-recipes guidance.
-  safety: None return raises RecipeValidationError listing available recipe names — never silently fabricates.
+  reason: >-
+    Internal-registry membership probe — `_RECIPES.get(name)` is followed by an immediate
+    `if recipe is None` arm that raises RecipeValidationError listing the registered names. Not a
+    Tier-3 boundary; the registry is system-owned data. Same pattern as get_recipe.
+  safety: None branch raises RecipeValidationError listing available recipe names; never silently
+    fabricates a recipe or coerces a missing entry.
   expires: null
 - key: web/execution/validation.py:R5:validate_pipeline:fp=eccc733dc0a2259d
   owner: web-execution
@@ -2124,37 +2130,6 @@ allow_hits:
   safety: >-
     ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator
     path.
-  expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_attempt_proof_repair:fp=0c1bfcde32d1b1cc
-  owner: web-composer
-  reason: >-
-    Tier-3 trust boundary — `.get("severity")` on a proof_diagnostics dict whose shape is the LLM-bound
-    JSON contract (compute_proof_diagnostics return type, allowlisted in contracts-whitelist.yaml).
-    Severity is the only required-but-permissive field; absence is treated as "not blocking".
-  safety: Diagnostics without "severity" are silently treated as non-blocking, which is the conservative default.
-  expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_attempt_proof_repair:fp=559b295d43193f11
-  owner: web-composer
-  reason: >-
-    Tier-3 trust boundary — `.get("suggested_repair")` on a proof_diagnostics dict. Suggested repair is
-    optional per the documented contract; absent means "no specific suggestion" which is rendered as
-    such in the synthesised message.
-  safety: Falls back to "(no specific suggestion)" string; never crashes, never fabricates a repair.
-  expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_attempt_proof_repair:fp=32fa44e5a82f4b77
-  owner: web-composer
-  reason: >-
-    Tier-3 trust boundary — `.get("code", "unknown")` on a proof_diagnostics dict. Code is the
-    machine-readable identifier; absence is rendered literally as "unknown" in the synthesised message
-    (visible to the model and the audit trail).
-  safety: Falls back to literal "unknown"; never crashes.
-  expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_attempt_proof_repair:fp=39d81e1739ee9dec
-  owner: web-composer
-  reason: >-
-    Tier-3 trust boundary — `.get("message", "")` on a proof_diagnostics dict. Message is the
-    human-readable description; absence renders as empty string in the synthesised repair prompt.
-  safety: Falls back to empty string; never crashes.
   expires: null
 - key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=1ee95391a0f26967
   owner: web-composer

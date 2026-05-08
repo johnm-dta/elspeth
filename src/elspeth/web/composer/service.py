@@ -1103,7 +1103,18 @@ class ComposerServiceImpl:
             session_engine=self._session_engine,
             session_id=session_id,
         )
-        blocking = [d for d in diagnostics if d.get("severity") == "blocking"]
+        # The diagnostic dict shape is the documented contract of
+        # ``compute_proof_diagnostics`` (see ``tools.py``): every entry
+        # has ``severity``, ``code``, ``message``, ``suggested_repair``,
+        # ``evidence_locator``. This is an internal-package invariant,
+        # not a Tier-3 trust boundary — a missing key is a bug in the
+        # diagnostic builder, not malformed external data, so direct
+        # subscript access is correct and a ``KeyError`` here is the
+        # right failure mode (informative crash) per CLAUDE.md
+        # offensive-programming policy. ``.get()`` fallbacks would bury
+        # contract drift and ship ``[unknown]`` codes / empty messages
+        # into the audit trail and the LLM's repair-message context.
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
         if not blocking:
             return False
 
@@ -1112,8 +1123,7 @@ class ComposerServiceImpl:
         # see the full list.
         rendered = []
         for i, d in enumerate(blocking[:3], start=1):
-            repair = d.get("suggested_repair") or "(no specific suggestion)"
-            rendered.append(f"{i}. [{d.get('code', 'unknown')}] {d.get('message', '')}\n   Suggested repair: {repair}")
+            rendered.append(f"{i}. [{d['code']}] {d['message']}\n   Suggested repair: {d['suggested_repair']}")
 
         next_turn = repair_turns_used + 1
         budget_note = (

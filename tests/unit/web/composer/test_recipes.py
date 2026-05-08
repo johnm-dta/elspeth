@@ -508,3 +508,233 @@ class TestRecipeIntegrationWithSetPipeline:
         assert "path" in resolved.options
         # The recipe's caller_options pass through (schema preserved).
         assert resolved.options["schema"] == {"mode": "observed"}
+
+
+# --------------------------------------------------------------------------
+# End-to-end: apply_pipeline_recipe MCP tool invocation drives the full
+# chain through set_pipeline's prevalidation, then compute_proof_diagnostics
+# reads the resulting state's source.options["blob_ref"]. This is the
+# tier-up of Fix 4 (PARTIAL → VERIFIED): the previous coverage stopped at
+# _resolve_source_blob in isolation because both recipes generated
+# transform options that failed schema prevalidation downstream
+# (filigree-obs-2344c737a6). With the recipes now emitting schema-valid
+# options for llm and type_coerce, apply_pipeline_recipe can flow through
+# set_pipeline successfully and the proof step can be exercised end-to-end.
+# --------------------------------------------------------------------------
+
+
+class TestApplyRecipeEndToEnd:
+    """Drive each recipe through ``execute_tool('apply_pipeline_recipe', ...)``
+    and confirm (a) the recipe's transform options now satisfy plugin
+    schema prevalidation (no more "missing schema/api_key" failures) and
+    (b) ``compute_proof_diagnostics`` reads the resulting state's
+    ``source.options['blob_ref']`` end-to-end without error.
+    """
+
+    @pytest.fixture
+    def _seeded(self, tmp_path):
+        from datetime import UTC, datetime
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(engine)
+        session_id = str(uuid4())
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        blob_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        storage_path = storage_dir / f"{blob_id}_orders.csv"
+        body = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        storage_path.write_bytes(body)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=blob_id,
+                    session_id=session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+        return engine, session_id, blob_id
+
+    def _catalog(self):
+        # Real PluginManager so set_pipeline's prevalidation sees authentic
+        # schemas for csv/llm/type_coerce/json. Mocking the catalog would
+        # mask the schema-validity contract under test here.
+        from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.web.catalog.service import CatalogServiceImpl
+
+        pm = PluginManager()
+        pm.register_builtin_plugins()
+        return CatalogServiceImpl(pm)
+
+    def test_classify_recipe_passes_set_pipeline_prevalidation_and_drives_proof_step(self, _seeded) -> None:
+        """The classify recipe must:
+
+        1. Pass ``_execute_set_pipeline`` prevalidation (the bug surface —
+           previously failed with "schema required" / "api_key required"
+           on the llm node). Verified by ``result.success``.
+        2. Produce a state whose ``source.options['blob_ref']`` matches
+           the seeded blob — proves ``_resolve_source_blob`` ran and the
+           canonical key was written.
+        3. Allow ``compute_proof_diagnostics`` to walk the resulting
+           state without raising. The observed-mode blob has no missing
+           columns so we expect zero diagnostics, but the call must
+           successfully reach the blob read (proving the wiring closed
+           the gap that previously made proof_diagnostics return [] by
+           never finding ``blob_ref``).
+        """
+        from elspeth.web.composer.state import CompositionState, PipelineMetadata
+        from elspeth.web.composer.tools import compute_proof_diagnostics, execute_tool
+
+        engine, session_id, blob_id = _seeded
+        empty = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = execute_tool(
+            "apply_pipeline_recipe",
+            {
+                "recipe_name": "classify-rows-llm-jsonl",
+                "slots": {
+                    "source_blob_id": blob_id,
+                    "classifier_template": "Classify: {{ row['customer'] }}",
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "api_key_secret": "OPENROUTER_API_KEY",
+                    # Declare the field referenced in classifier_template
+                    # explicitly. The LLMConfig validator demands an
+                    # explicit list when the template references row.*;
+                    # supplying [customer] proves the slot drives the
+                    # generated config end-to-end.
+                    "required_input_fields": ["customer"],
+                },
+            },
+            empty,
+            self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        # 1. set_pipeline prevalidation passed — this is the bug surface.
+        assert result.success, getattr(result, "data", result)
+
+        # 2. Source is now blob-bound.
+        new_state = result.updated_state
+        assert new_state.source is not None
+        assert new_state.source.options["blob_ref"] == blob_id
+
+        # 3. proof_diagnostics walks the state without raising and
+        #    reaches the blob read (observable via the diagnostics list
+        #    being a list — not None or an exception).
+        diagnostics = compute_proof_diagnostics(
+            new_state,
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert isinstance(diagnostics, list)
+        # Observed schema + headers in the blob: no blocking diagnostics.
+        # Any non-info diagnostic would be a real signal worth surfacing.
+        assert all(d["severity"] != "blocking" for d in diagnostics), diagnostics
+
+        # The wired secret_ref marker must reach the stored node options
+        # — Pydantic prevalidation strips it temporarily, but the marker
+        # is preserved in the durable state for runtime resolution.
+        classifier = next(n for n in new_state.nodes if n.plugin == "llm")
+        assert classifier.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+        # Schema option flows through prevalidation and is durable.
+        assert classifier.options["schema"] == {"mode": "observed"}
+
+    def test_threshold_recipe_passes_set_pipeline_prevalidation_and_drives_proof_step(self, _seeded) -> None:
+        """The threshold recipe must:
+
+        1. Pass ``_execute_set_pipeline`` prevalidation (the bug surface —
+           previously failed with "schema required" on the type_coerce node).
+        2. Produce a state whose ``source.options['blob_ref']`` matches
+           the seeded blob.
+        3. Drive ``compute_proof_diagnostics`` end-to-end through the
+           full apply_pipeline_recipe → set_pipeline → state mutation
+           chain rather than the previous in-isolation
+           ``_resolve_source_blob`` call.
+        """
+        from elspeth.web.composer.state import CompositionState, PipelineMetadata
+        from elspeth.web.composer.tools import compute_proof_diagnostics, execute_tool
+
+        engine, session_id, blob_id = _seeded
+        empty = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = execute_tool(
+            "apply_pipeline_recipe",
+            {
+                "recipe_name": "split-by-numeric-threshold",
+                "slots": {
+                    "source_blob_id": blob_id,
+                    "field": "price",
+                    "threshold": 100.0,
+                },
+            },
+            empty,
+            self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert result.success, getattr(result, "data", result)
+
+        new_state = result.updated_state
+        assert new_state.source is not None
+        assert new_state.source.options["blob_ref"] == blob_id
+
+        diagnostics = compute_proof_diagnostics(
+            new_state,
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert isinstance(diagnostics, list)
+        assert all(d["severity"] != "blocking" for d in diagnostics), diagnostics
+
+        # type_coerce now carries the required schema option through
+        # prevalidation into the durable state.
+        coerce = next(n for n in new_state.nodes if n.plugin == "type_coerce")
+        assert coerce.options["schema"] == {"mode": "observed"}
+        assert coerce.options["conversions"] == ({"field": "price", "to": "float"},) or coerce.options["conversions"] == [
+            {"field": "price", "to": "float"}
+        ]

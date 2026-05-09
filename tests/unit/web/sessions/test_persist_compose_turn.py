@@ -1403,3 +1403,248 @@ async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(ser
         "commit-wins contract, a clean cancel must not fabricate "
         "Tier-1 alerts (SLO threshold = 0)."
     )
+
+
+def test_persist_compose_turn_integrity_error_propagates(service):
+    """Duplicate tool_call_id within one session triggers IntegrityError;
+    counter increments; helper re-raises (no recovery — spec §4.5)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.telemetry import observed_value
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s7")
+
+    # First turn: creates tool_call_id='dup'
+    service.persist_compose_turn(
+        session_id="s7",
+        assistant_content="",
+        redacted_assistant_tool_calls=({"id": "dup", "function": {"name": "x"}},),
+        redacted_tool_rows=(_RedactedToolRow("dup", "{}", None),),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+
+    starting = observed_value(service._telemetry.tool_row_integrity_violation_total)
+    with pytest.raises(
+        IntegrityError,
+        match=(
+            r"(UNIQUE.*chat_messages.*session_id.*tool_call_id"
+            r"|uq_chat_messages_tool_call_id)"
+        ),
+    ):
+        service.persist_compose_turn(
+            session_id="s7",
+            assistant_content="",
+            redacted_assistant_tool_calls=({"id": "dup", "function": {"name": "x"}},),
+            redacted_tool_rows=(_RedactedToolRow("dup", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    assert observed_value(service._telemetry.tool_row_integrity_violation_total) == starting + 1
+
+
+# Spec §4.5 enumerates multiple constraint sources that all flow
+# through the same IntegrityError handler in persist_compose_turn.
+# The test above covers the partial-unique-tool_call_id source; the
+# parametrised test below covers the other reachable source via
+# persist_compose_turn's parameter surface.
+#
+# Sources that are not reachable through public parameters are NOT in
+# this matrix because they cannot occur via the entry point:
+#
+# - role enum violation — persist_compose_turn hardcodes
+#   'assistant'/'tool'.
+# - **uq_composition_state_version — closed by B1.** _StatePayload no
+#   longer carries caller-supplied version; _insert_composition_state
+#   allocates under _session_write_lock. Constraint is structurally
+#   unreachable. The replacement test
+#   ``test_persist_compose_turn_state_versions_do_not_collide`` below
+#   pins the post-B1 contract.
+#
+# nonexistent_parent_composition_state is deliberately NOT in this
+# matrix. Task 11's _assert_state_in_session guard rejects it with
+# RuntimeError before any INSERT — counting that as IntegrityError
+# would double-count a caller contract violation as a Tier-1 DB
+# integrity event. Separate RuntimeError regression below pins this.
+
+
+@pytest.mark.parametrize(
+    "scenario_name, setup_kwargs, expected_match",
+    [
+        pytest.param(
+            "unknown_writer_principal",
+            {"writer_principal": "rogue_caller"},
+            r"ck_chat_messages_writer_principal",
+            id="ck_chat_messages_writer_principal",
+        ),
+    ],
+)
+def test_persist_compose_turn_integrity_error_matrix(
+    service,
+    scenario_name,
+    setup_kwargs,
+    expected_match,
+):
+    """Each scenario triggers a distinct §4.5 source via
+    persist_compose_turn's parameter surface; all flow through the
+    same handler. Asserts both the counter increments AND the
+    constraint name appears in the raised exception message."""
+    from sqlalchemy.exc import IntegrityError
+
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.telemetry import observed_value
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id=f"s_{scenario_name}")
+
+    starting = observed_value(service._telemetry.tool_row_integrity_violation_total)
+
+    base_kwargs = {
+        "session_id": f"s_{scenario_name}",
+        "assistant_content": "",
+        "redacted_assistant_tool_calls": ({"id": f"{scenario_name}_tc", "function": {"name": "f"}},),
+        "redacted_tool_rows": (_RedactedToolRow(f"{scenario_name}_tc", "{}", None),),
+        "parent_composition_state_id": None,
+        "expected_current_state_id": None,
+        "writer_principal": "compose_loop",
+        "plugin_crash_pending": False,
+    }
+    base_kwargs.update(setup_kwargs)
+
+    with pytest.raises(IntegrityError, match=expected_match):
+        service.persist_compose_turn(**base_kwargs)
+
+    assert observed_value(service._telemetry.tool_row_integrity_violation_total) == starting + 1, (
+        f"counter must increment for {scenario_name}"
+    )
+
+
+def test_persist_compose_turn_rejects_missing_parent_state_before_insert(service):
+    """A nonexistent parent composition state is a caller contract error,
+    not an IntegrityError-source matrix case.
+
+    Task 11's _assert_state_in_session guard rejects the missing state
+    before the assistant row INSERT. The audit-integrity counter must
+    not move because no DB constraint fired and no Tier-1 audit
+    corruption was observed."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.telemetry import observed_value
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_missing_parent")
+
+    starting = observed_value(service._telemetry.tool_row_integrity_violation_total)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"persist_compose_turn: composition_state_id='doesnotexist' "
+            r"does not exist"
+        ),
+    ):
+        service.persist_compose_turn(
+            session_id="s_missing_parent",
+            assistant_content="",
+            redacted_assistant_tool_calls=({"id": "missing_parent_tc", "function": {"name": "f"}},),
+            redacted_tool_rows=(_RedactedToolRow("missing_parent_tc", "{}", None),),
+            parent_composition_state_id="doesnotexist",
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    assert observed_value(service._telemetry.tool_row_integrity_violation_total) == starting
+
+
+def test_persist_compose_turn_state_versions_do_not_collide(service):
+    """B1 contract pin: serial successful persists allocate contiguous
+    versions and never increment the integrity counter for the
+    version-collision constraint.
+
+    Pre-B1 a draft of this test asserted the counter SHOULD increment
+    when _StatePayload(version=1) was supplied twice. **That codified
+    the fabrication vector B1 closes** — every IntegrityError increment
+    on uq_composition_state_version was structurally a contention loss
+    masquerading as a Tier-1 audit-integrity violation.
+
+    Post-B1 _StatePayload has no version field; _insert_composition_state
+    allocates versions under _session_write_lock. Two successive turns
+    get [1, 2] (contiguous), counter MUST stay at starting."""
+    from sqlalchemy import text
+
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.telemetry import observed_value
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_ver")
+
+    starting = observed_value(service._telemetry.tool_row_integrity_violation_total)
+
+    service.persist_compose_turn(
+        session_id="s_ver",
+        assistant_content="",
+        redacted_assistant_tool_calls=({"id": "tc_v1", "function": {"name": "f"}},),
+        redacted_tool_rows=(
+            _RedactedToolRow(
+                "tc_v1",
+                "{}",
+                _StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+            ),
+        ),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+
+    with service._engine.begin() as conn:
+        first_state_id = conn.execute(
+            text("SELECT id FROM composition_states WHERE session_id='s_ver' ORDER BY version DESC LIMIT 1")
+        ).scalar_one()
+
+    # Second turn — pre-B1 this would have collided on
+    # uq_composition_state_version because the test supplied
+    # version=1 on both turns. Post-B1 the helper allocates
+    # version=2 (COALESCE(MAX,0)+1 = 2), so the call succeeds.
+    service.persist_compose_turn(
+        session_id="s_ver",
+        assistant_content="",
+        redacted_assistant_tool_calls=({"id": "tc_v2", "function": {"name": "f"}},),
+        redacted_tool_rows=(
+            _RedactedToolRow(
+                "tc_v2",
+                "{}",
+                _StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+            ),
+        ),
+        parent_composition_state_id=None,
+        expected_current_state_id=first_state_id,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+
+    assert observed_value(service._telemetry.tool_row_integrity_violation_total) == starting, (
+        "B1 regression: tool_row_integrity_violation_total incremented "
+        "on serial state-version allocation. SLO threshold for this "
+        "counter is 0; any increment here is a fabricated Tier-1 alert "
+        "and evidence-tampering-class harm under the audit doctrine."
+    )
+
+    with service._engine.begin() as conn:
+        versions = [
+            r.version for r in conn.execute(text("SELECT version FROM composition_states WHERE session_id='s_ver' ORDER BY version"))
+        ]
+    assert versions == [1, 2], f"B1 regression: per-session version allocation broken; got {versions}"

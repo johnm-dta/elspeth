@@ -828,84 +828,102 @@ class SessionServiceImpl:
         )
 
         now = self._now()
-        with self._engine.begin() as conn:
-            with self._session_write_lock(conn, session_id):
-                # B5 (Phase 1 plan-review synthesis): if a parent
-                # composition state is supplied, it MUST belong to this
-                # session.
-                if parent_composition_state_id is not None:
-                    _assert_state_in_session(
-                        conn,
-                        state_id=parent_composition_state_id,
-                        expected_session_id=session_id,
-                        caller="persist_compose_turn",
-                    )
-
-                current_state_id = conn.execute(
-                    select(composition_states_table.c.id)
-                    .where(composition_states_table.c.session_id == session_id)
-                    .order_by(composition_states_table.c.version.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
-                if current_state_id != expected_current_state_id:
-                    raise StaleComposeStateError(
-                        "persist_compose_turn: current composition state changed "
-                        f"for session_id={session_id!r}; "
-                        f"expected={expected_current_state_id!r}, "
-                        f"actual={current_state_id!r}. Refusing to persist a "
-                        "compose result based on a stale state."
-                    )
-
-                base_seq = self._reserve_sequence_range(conn, session_id, count=1 + len(redacted_tool_rows))
-
-                assistant_id = self._insert_chat_message(
-                    conn,
-                    session_id=session_id,
-                    role="assistant",
-                    content=assistant_content,
-                    # B2: raw_content captures pre-redaction LLM output.
-                    raw_content=raw_content,
-                    # ``deep_thaw`` recursively converts MappingProxyType /
-                    # tuple to JSON-serialisable dict / list (closes
-                    # P-L-4 / L18). Mirrors ``add_message``'s pattern.
-                    tool_calls=deep_thaw(redacted_assistant_tool_calls) if redacted_assistant_tool_calls else None,
-                    sequence_no=base_seq,
-                    writer_principal=writer_principal,
-                    composition_state_id=parent_composition_state_id,
-                    tool_call_id=None,
-                    parent_assistant_id=None,
-                    created_at=now,
-                )
-
-                for offset, tool_row in enumerate(redacted_tool_rows, start=1):
-                    state_id: str | None = None
-                    if tool_row.composition_state_payload is not None:
-                        state_id = self._insert_composition_state(
+        # IntegrityError disposition (Task 12 / spec §4.5): the catch is
+        # OUTSIDE ``with self._engine.begin()`` deliberately. Order is
+        # load-bearing — the ``with`` context's ``__exit__`` runs first
+        # (rolling back the transaction so no partial audit row survives),
+        # THEN we increment the operational counter, THEN the exception
+        # re-raises so the caller observes the actual constraint
+        # violation. Putting the catch INSIDE the ``with`` would fire
+        # before rollback completes and could mask the original error.
+        #
+        # Audit primacy: telemetry signals operational rate; the
+        # exception itself is the authoritative signal to the caller.
+        # Both channels fire; neither is suppressed. Catch is exactly
+        # ``IntegrityError`` -- not ``Exception``, not ``SQLAlchemyError``
+        # -- because only constraint violations belong on this counter.
+        try:
+            with self._engine.begin() as conn:
+                with self._session_write_lock(conn, session_id):
+                    # B5 (Phase 1 plan-review synthesis): if a parent
+                    # composition state is supplied, it MUST belong to this
+                    # session.
+                    if parent_composition_state_id is not None:
+                        _assert_state_in_session(
                             conn,
-                            session_id=session_id,
-                            payload=tool_row.composition_state_payload,
-                            provenance="tool_call",
-                            created_at=now,
+                            state_id=parent_composition_state_id,
+                            expected_session_id=session_id,
+                            caller="persist_compose_turn",
                         )
-                    self._insert_chat_message(
+
+                    current_state_id = conn.execute(
+                        select(composition_states_table.c.id)
+                        .where(composition_states_table.c.session_id == session_id)
+                        .order_by(composition_states_table.c.version.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if current_state_id != expected_current_state_id:
+                        raise StaleComposeStateError(
+                            "persist_compose_turn: current composition state changed "
+                            f"for session_id={session_id!r}; "
+                            f"expected={expected_current_state_id!r}, "
+                            f"actual={current_state_id!r}. Refusing to persist a "
+                            "compose result based on a stale state."
+                        )
+
+                    base_seq = self._reserve_sequence_range(conn, session_id, count=1 + len(redacted_tool_rows))
+
+                    assistant_id = self._insert_chat_message(
                         conn,
                         session_id=session_id,
-                        role="tool",
-                        content=tool_row.content,
-                        raw_content=None,
-                        tool_calls=None,
-                        sequence_no=base_seq + offset,
+                        role="assistant",
+                        content=assistant_content,
+                        # B2: raw_content captures pre-redaction LLM output.
+                        raw_content=raw_content,
+                        # ``deep_thaw`` recursively converts MappingProxyType /
+                        # tuple to JSON-serialisable dict / list (closes
+                        # P-L-4 / L18). Mirrors ``add_message``'s pattern.
+                        tool_calls=deep_thaw(redacted_assistant_tool_calls) if redacted_assistant_tool_calls else None,
+                        sequence_no=base_seq,
                         writer_principal=writer_principal,
-                        composition_state_id=state_id,
-                        tool_call_id=tool_row.tool_call_id,
-                        parent_assistant_id=assistant_id,
+                        composition_state_id=parent_composition_state_id,
+                        tool_call_id=None,
+                        parent_assistant_id=None,
                         created_at=now,
                     )
 
-            return _AuditOutcome(
-                assistant_id=assistant_id,
-                unwind_audit_failed=False,
-            )
+                    for offset, tool_row in enumerate(redacted_tool_rows, start=1):
+                        state_id: str | None = None
+                        if tool_row.composition_state_payload is not None:
+                            state_id = self._insert_composition_state(
+                                conn,
+                                session_id=session_id,
+                                payload=tool_row.composition_state_payload,
+                                provenance="tool_call",
+                                created_at=now,
+                            )
+                        self._insert_chat_message(
+                            conn,
+                            session_id=session_id,
+                            role="tool",
+                            content=tool_row.content,
+                            raw_content=None,
+                            tool_calls=None,
+                            sequence_no=base_seq + offset,
+                            writer_principal=writer_principal,
+                            composition_state_id=state_id,
+                            tool_call_id=tool_row.tool_call_id,
+                            parent_assistant_id=assistant_id,
+                            created_at=now,
+                        )
+
+                return _AuditOutcome(
+                    assistant_id=assistant_id,
+                    unwind_audit_failed=False,
+                )
+        except IntegrityError:
+            self._telemetry.tool_row_integrity_violation_total.add(1)
+            raise
 
     async def persist_compose_turn_async(
         self,

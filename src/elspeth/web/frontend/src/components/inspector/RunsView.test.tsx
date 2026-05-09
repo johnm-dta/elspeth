@@ -325,3 +325,85 @@ describe("RunsView", () => {
     expect(screen.getByText("Node states include completed=1, running=1.")).toBeInTheDocument();
   });
 });
+
+describe("RunsView Inspect button a11y", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: null });
+  });
+
+  it("declares aria-expanded reflecting diagnostics panel state", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    const inspect = screen.getByRole("button", { name: /inspect/i });
+    expect(inspect.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(inspect);
+
+    const hide = screen.getByRole("button", { name: /hide/i });
+    expect(hide.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("aria-controls IDREF resolves both before and after the panel is expanded", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    const inspect = screen.getByRole("button", { name: /inspect/i });
+    const controlsId = inspect.getAttribute("aria-controls");
+    expect(controlsId).toBe("run-diagnostics-run-1");
+    // Option A: the wrapper div is always in the DOM — IDREF resolves when collapsed
+    expect(document.getElementById(controlsId!)).not.toBeNull();
+
+    await user.click(inspect);
+
+    // IDREF must continue to resolve after expansion (panel is now mounted inside the wrapper)
+    const hide = screen.getByRole("button", { name: /hide/i });
+    const expandedControlsId = hide.getAttribute("aria-controls");
+    expect(document.getElementById(expandedControlsId!)).not.toBeNull();
+  });
+});
+
+describe("RunsView cancelling badge", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: null });
+  });
+
+  it("uses cancelled badge class when cancel_requested on a running run", () => {
+    useExecutionStore.setState({
+      runs: [
+        makeRun({
+          status: "running",
+          cancel_requested: true,
+          error: null,
+        }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    // Get all status badge elements (excluding the duration label which also contains "cancelling")
+    const badges = screen.getAllByText(/cancelling/i);
+    // The first one is the badge; the second one is the duration span
+    const badge = badges[0].closest("[class*='status-badge']");
+    expect(badge).not.toBeNull();
+    expect(badge).toHaveClass("status-badge-cancelled");
+  });
+});

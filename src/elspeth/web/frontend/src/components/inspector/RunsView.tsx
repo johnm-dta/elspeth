@@ -259,7 +259,13 @@ export function RunsView() {
                 }}
               >
                 {/* Status badge: uses CSS class from App.css */}
-                <span className={STATUS_BADGE_CLASSES[run.status]}>
+                <span
+                  className={
+                    run.cancel_requested && run.status === "running"
+                      ? STATUS_BADGE_CLASSES.cancelled
+                      : STATUS_BADGE_CLASSES[run.status]
+                  }
+                >
                   {displayStatus}
                 </span>
                 <span
@@ -362,6 +368,8 @@ export function RunsView() {
                 </span>
                 <button
                   type="button"
+                  aria-expanded={expandedRunId === run.id}
+                  aria-controls={`run-diagnostics-${run.id}`}
                   onClick={() => {
                     const nextRunId = expandedRunId === run.id ? null : run.id;
                     setExpandedRunId(nextRunId);
@@ -369,15 +377,7 @@ export function RunsView() {
                       void loadRunDiagnostics(run.id);
                     }
                   }}
-                  style={{
-                    border: "1px solid var(--color-border)",
-                    borderRadius: "var(--radius-sm)",
-                    background: "var(--color-bg)",
-                    color: "var(--color-text)",
-                    fontSize: 12,
-                    padding: "2px 7px",
-                    cursor: "pointer",
-                  }}
+                  className="btn btn-small"
                 >
                   {expandedRunId === run.id ? "Hide" : "Inspect"}
                 </button>
@@ -418,18 +418,32 @@ export function RunsView() {
                 </div>
               )}
 
-              {expandedRunId === run.id && (
-                <RunDiagnosticsPanel
-                  diagnostics={diagnosticsByRunId[run.id]}
-                  error={diagnosticsErrorByRunId[run.id] ?? null}
-                  explanation={diagnosticsExplanationByRunId[run.id] ?? null}
-                  isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
-                  isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
-                  workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
-                  onExplain={() => void evaluateRunDiagnostics(run.id)}
-                  onRefresh={() => void loadRunDiagnostics(run.id)}
-                />
-              )}
+              {/*
+                Always-rendered wrapper satisfies WAI-ARIA 1.2: the button's
+                aria-controls IDREF must resolve to an element that exists in
+                the DOM regardless of expanded state.  The heavy
+                RunDiagnosticsPanel (which reads props — no fetch on mount) is
+                only mounted when the row is expanded so that we avoid paying
+                any rendering cost for collapsed rows.
+              */}
+              <div
+                id={`run-diagnostics-${run.id}`}
+                hidden={expandedRunId !== run.id}
+                className="run-diagnostics"
+              >
+                {expandedRunId === run.id && (
+                  <RunDiagnosticsPanel
+                    diagnostics={diagnosticsByRunId[run.id]}
+                    error={diagnosticsErrorByRunId[run.id] ?? null}
+                    explanation={diagnosticsExplanationByRunId[run.id] ?? null}
+                    isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
+                    isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
+                    workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
+                    onExplain={() => void evaluateRunDiagnostics(run.id)}
+                    onRefresh={() => void loadRunDiagnostics(run.id)}
+                  />
+                )}
+              </div>
             </div>
 
             {/* Show live progress inline for the active running run */}
@@ -493,10 +507,10 @@ function RunDiagnosticsPanel({
           {diagnostics?.summary.preview_truncated ? `, first ${diagnostics.summary.preview_limit}` : ""}
         </span>
         <span style={{ display: "flex", gap: 6 }}>
-          <button type="button" onClick={onRefresh} disabled={isLoading}>
+          <button type="button" className="btn btn-small" onClick={onRefresh} disabled={isLoading}>
             Refresh
           </button>
-          <button type="button" onClick={onExplain} disabled={isEvaluating || isLoading || !diagnostics}>
+          <button type="button" className="btn btn-small" onClick={onExplain} disabled={isEvaluating || isLoading || !diagnostics}>
             {isEvaluating ? "Explaining..." : "Explain"}
           </button>
         </span>

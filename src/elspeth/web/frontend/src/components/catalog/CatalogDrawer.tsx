@@ -333,6 +333,7 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
                   schema={schema}
                   schemaError={hasSchemaError}
                   onExpand={() => handleExpand(plugin)}
+                  onCloseDrawer={onClose}
                 />
               );
             })

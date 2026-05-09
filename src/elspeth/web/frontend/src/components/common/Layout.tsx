@@ -304,12 +304,12 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
             onKeyDown={(e) => {
               if (e.key === "ArrowLeft") {
                 e.preventDefault();
+                setInspectorWidth((w) => Math.max(w - 10, MIN_INSPECTOR_WIDTH));
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
                 setInspectorWidth((w) =>
                   Math.min(w + 10, window.innerWidth * 0.5)
                 );
-              } else if (e.key === "ArrowRight") {
-                e.preventDefault();
-                setInspectorWidth((w) => Math.max(w - 10, MIN_INSPECTOR_WIDTH));
               }
             }}
           />

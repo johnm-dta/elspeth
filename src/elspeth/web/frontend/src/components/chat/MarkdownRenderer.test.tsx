@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 describe("MarkdownRenderer", () => {
@@ -51,5 +52,34 @@ describe("MarkdownRenderer", () => {
     for (const block of codeBlocks) {
       expect(block.textContent).not.toContain("graph TD");
     }
+  });
+});
+
+describe("MarkdownRenderer fenced code blocks", () => {
+  it("renders YAML fenced blocks with Prism token spans", () => {
+    const md = "```yaml\nsource:\n  type: csv_file\n```";
+    const { container } = render(<MarkdownRenderer content={md} />);
+    // Prism produces token spans inside the pre element
+    const pre = container.querySelector("pre.code-block");
+    expect(pre).not.toBeNull();
+    expect(pre!.querySelector("span")).not.toBeNull();
+  });
+
+  it("renders a copy button that copies the code to the clipboard", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+      writable: true,
+    });
+
+    const md = "```yaml\nfoo: bar\n```";
+    render(<MarkdownRenderer content={md} />);
+
+    const copy = screen.getByRole("button", { name: /copy/i });
+    await user.click(copy);
+
+    expect(writeText).toHaveBeenCalledWith("foo: bar");
   });
 });

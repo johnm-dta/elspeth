@@ -688,6 +688,11 @@ summary:focus-visible {
   background-color: rgba(232, 86, 83, 0.25);
 }
 
+.btn-small {
+  font-size: var(--font-size-xs);
+  padding: 2px var(--space-sm);
+}
+
 /* ---------------------------------------------------------------------------
    Tab Strip Styles
    --------------------------------------------------------------------------- */
@@ -860,21 +865,38 @@ summary:focus-visible {
   bottom: 0;
   width: 20px;
   cursor: col-resize;
-  background-color: transparent;
+  background: transparent;
   z-index: var(--z-panel-controls);
   touch-action: none;
+  transition: background var(--transition-fast);
 }
 
-.resize-handle:hover {
-  background-color: var(--color-focus-ring);
-  opacity: 0.5;
-  transition: background-color var(--transition-normal);
+/* Static visible bar — 2px wide, centered, low-contrast neutral */
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 9px;
+  width: 2px;
+  background: var(--color-border-strong);
+  transition: background var(--transition-fast);
 }
 
-.resize-handle:focus-visible {
-  background-color: var(--color-focus-ring);
-  opacity: 0.6;
-  outline: none; /* the bar itself IS the indicator */
+.resize-handle:hover::before,
+.resize-handle:focus-visible::before {
+  background: var(--color-focus-ring);
+}
+
+/* Touch breakpoint — widen the hit zone without enlarging the visible bar */
+@media (max-width: 900px), (pointer: coarse) {
+  .resize-handle {
+    width: 36px;
+    left: -16px;
+  }
+  .resize-handle::before {
+    left: 17px;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1381,6 +1403,7 @@ summary:focus-visible {
   --color-status-completed:  #0d8a88;
   --color-status-failed:     #c93b38;
   --color-status-cancelled:  #b86830;
+  --color-status-empty:      #4d6a73;
 
   /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */
   --color-scrollbar-track:       var(--color-bg);
@@ -1560,6 +1583,30 @@ summary:focus-visible {
 .markdown-body .code-block code {
   background: none;
   padding: 0;
+}
+
+.markdown-body .code-block-wrapper {
+  position: relative;
+}
+
+.markdown-body .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.markdown-body .code-block-wrapper:hover .code-block-copy,
+.markdown-body .code-block-copy:focus-visible {
+  opacity: 1;
 }
 
 .markdown-body .mermaid-container {
@@ -3059,13 +3106,13 @@ summary:focus-visible {
 .plugin-card {
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--color-border);
-  cursor: pointer;
 }
 
 .plugin-card-header {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  cursor: pointer;
 }
 
 .plugin-card-name {

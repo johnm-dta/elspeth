@@ -94,3 +94,13 @@ describe("ComposingIndicator", () => {
     expect(screen.getByText("Request focus: produce or update saved output.")).toBeInTheDocument();
   });
 });
+
+describe("ComposingIndicator live region scope", () => {
+  it("does not declare its own aria-live (avoids nesting inside chat-panel-messages)", () => {
+    const { container } = render(<ComposingIndicator />);
+    const root = container.firstChild as HTMLElement;
+    expect(root.getAttribute("aria-live")).toBeNull();
+    // role="status" remains for semantic clarity
+    expect(root.getAttribute("role")).toBe("status");
+  });
+});

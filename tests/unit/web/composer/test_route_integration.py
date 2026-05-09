@@ -314,21 +314,27 @@ class TestVersionChangeDetection:
 
 
 class TestComposerResultPairingInvariant:
-    """I6 lock-in: enforce the docstring contract between
-    ``runtime_preflight`` and ``raw_assistant_content`` mechanically.
+    """Enforce the docstring contract between ``runtime_preflight`` and
+    ``raw_assistant_content`` mechanically.
 
-    The pairing is iff:
-    * ``raw_assistant_content`` is set
-    * ⇔ ``runtime_preflight`` is non-None and ``not is_valid``
-    * ⇔ ``message`` was replaced by the synthetic preflight-failure
-      summary; the original LLM text is parked in ``raw_assistant_content``.
+    The pairing has two directions:
 
-    Without an enforcement check, a caller could construct a
-    ``ComposerResult(raw_assistant_content="...")`` with no preflight
-    failure attached. That object would silently violate the audit-trail
-    contract: the persisted ``raw_content`` would imply a replacement
-    that never happened, mis-attributing a verbatim LLM response as if
-    the runtime gate had intervened.
+    1. preflight failed ⇒ raw_assistant_content MUST be set (so the
+       original LLM text is recoverable from the audit row).
+    2. raw_assistant_content set with passing preflight AND
+       message == raw_assistant_content ⇒ rejected (spurious raw set;
+       the audit row would falsely imply synthesis happened on a
+       verbatim response).
+
+    Note the narrowing on direction (2): synthesis with passing preflight
+    IS legitimate when message ≠ raw_assistant_content (the state-claim
+    grounding correction case from issue elspeth-c028f7d186 augments the
+    happy-path message with an [ELSPETH-SYSTEM] correction suffix).
+    The audit-integrity guarantee — no spurious raw_content set on a
+    verbatim pass-through — survives the narrowing because the consumer
+    discriminator at routes._composer_history_content uses
+    ``message.startswith(raw)`` structurally and does not depend on
+    *why* synthesis happened.
     """
 
     @staticmethod
@@ -371,35 +377,58 @@ class TestComposerResultPairingInvariant:
             raw_assistant_content="The pipeline is complete.",
         )
 
-    def test_raw_content_without_preflight_is_rejected(self) -> None:
-        """raw_assistant_content set but runtime_preflight is None — forbidden.
+    def test_spurious_raw_content_no_preflight_is_rejected(self) -> None:
+        """raw_assistant_content set with no preflight AND message == raw —
+        rejected (verbatim pass-through with raw set spuriously).
 
-        The docstring says raw_content holds the original LLM text "when
-        ``message`` has been replaced with a synthetic preflight-failure
-        message". Without a preflight, no replacement happened, so a
-        non-None raw_content represents a contract violation.
+        The audit row would falsely imply synthesis happened when the
+        message is actually verbatim LLM output.
         """
-        with pytest.raises(ValueError, match=r"message replacement contract|preflight"):
+        with pytest.raises(ValueError, match=r"identical to raw_assistant_content|verbatim"):
             ComposerResult(
                 message="hi",
                 state=_make_empty_state(),
                 runtime_preflight=None,
-                raw_assistant_content="something",
+                raw_assistant_content="hi",
             )
 
-    def test_raw_content_with_passed_preflight_is_rejected(self) -> None:
-        """raw_assistant_content set but runtime_preflight passed — forbidden.
-
-        A passing preflight does not replace ``message``, so raw_content
-        being non-None represents a contract violation.
+    def test_spurious_raw_content_passed_preflight_is_rejected(self) -> None:
+        """raw_assistant_content set with passing preflight AND
+        message == raw — rejected (spurious raw set on verbatim
+        pass-through).
         """
-        with pytest.raises(ValueError, match=r"message replacement contract|preflight"):
+        with pytest.raises(ValueError, match=r"identical to raw_assistant_content|verbatim"):
             ComposerResult(
                 message="hi",
                 state=_make_empty_state(),
                 runtime_preflight=self._passing_validation(),
-                raw_assistant_content="something",
+                raw_assistant_content="hi",
             )
+
+    def test_grounding_correction_synthesis_with_passed_preflight_is_valid(self) -> None:
+        """raw_assistant_content set with passing preflight AND
+        message ≠ raw — legitimate (state-claim grounding correction
+        from issue elspeth-c028f7d186 augments happy-path prose with
+        an [ELSPETH-SYSTEM] correction suffix).
+        """
+        ComposerResult(
+            message="hi\n\n---\n\n[ELSPETH-SYSTEM] correction text",
+            state=_make_empty_state(),
+            runtime_preflight=self._passing_validation(),
+            raw_assistant_content="hi",
+        )
+
+    def test_grounding_correction_synthesis_with_no_preflight_is_valid(self) -> None:
+        """Same shape as above, with no preflight (the finalizer's
+        skip-preflight branch when state.version is unchanged and no
+        cached preflight is available — runtime_result is None and the
+        grounding check still runs)."""
+        ComposerResult(
+            message="hi\n\n---\n\n[ELSPETH-SYSTEM] correction text",
+            state=_make_empty_state(),
+            runtime_preflight=None,
+            raw_assistant_content="hi",
+        )
 
     def test_failed_preflight_without_raw_content_is_rejected(self) -> None:
         """runtime_preflight failed but raw_assistant_content is None — forbidden.

@@ -15,11 +15,20 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
+
+if TYPE_CHECKING:
+    # TYPE_CHECKING-only import to avoid a runtime circular dependency:
+    # ``_persist_payload`` imports ``CompositionStateData`` from this
+    # module, so this module MUST NOT import ``_persist_payload`` at
+    # runtime. The async dispatcher signature on
+    # ``SessionServiceProtocol.persist_compose_turn_async`` only needs
+    # the names for type-checker resolution.
+    from elspeth.web.sessions._persist_payload import _AuditOutcome, _RedactedToolRow
 
 ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
 # ``audit`` is an internal-only role for breadcrumb rows that have no real
@@ -360,6 +369,23 @@ class RunAlreadyActiveError(Exception):
         super().__init__(f"Session {session_id} already has an active run")
 
 
+class StaleComposeStateError(RuntimeError):
+    """Compose result was based on a no-longer-current composition state.
+
+    Raised by ``SessionServiceProtocol.persist_compose_turn_async`` (and
+    its concrete implementation ``SessionServiceImpl.persist_compose_turn``)
+    when the session's current composition state changed between the LLM
+    call and the persist attempt. Defined here on the protocol module so
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract, not an
+    implementation detail.
+
+    Mirrors :class:`elspeth.contracts.errors.AuditIntegrityError`'s
+    placement on the contracts layer: protocol-level error shapes belong
+    on the abstraction, not on the concrete service module.
+    """
+
+
 @runtime_checkable
 class SessionServiceProtocol(Protocol):
     """Protocol for session persistence operations."""
@@ -578,5 +604,34 @@ class SessionServiceProtocol(Protocol):
                 These are skipped even if they exceed max_age_seconds.
             reason: Written to the error column so operators can distinguish
                 orphan-cleanup cancellations from user cancellations.
+        """
+        ...
+
+    async def persist_compose_turn_async(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: str,
+        plugin_crash_pending: bool,
+    ) -> _AuditOutcome:
+        """Persist one compose turn (assistant + tool rows + per-tool
+        composition states) atomically.
+
+        Spec §5.2.2. The async dispatcher; the underlying sync work runs
+        in a worker thread under ``asyncio.shield`` (commit-wins
+        cancellation contract — see ``SessionServiceImpl
+        .persist_compose_turn_async``).
+
+        Raises :class:`StaleComposeStateError` when the session's current
+        composition state changed between the LLM call and the persist
+        attempt. Raises ``ToolCallIDMismatchError`` (defined on
+        ``service.py``) when the assistant ``tool_calls`` IDs and the
+        tool rows' ``tool_call_id`` values are not the same unique set.
         """
         ...

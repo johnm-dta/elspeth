@@ -809,3 +809,597 @@ async def test_add_message_rejects_unknown_writer_principal(service):
         _make_session(conn, session_id=str(sid))
     with pytest.raises(IntegrityError, match="ck_chat_messages_writer_principal"):
         await service.add_message(sid, "user", "hi", writer_principal="rogue_writer")
+
+
+# ---------------------------------------------------------------------------
+# Task 11 tests: persist_compose_turn happy path + transcript validation +
+# commit-wins async contract.
+# ---------------------------------------------------------------------------
+
+
+def test_persist_compose_turn_happy_path(service):
+    from elspeth.web.sessions._persist_payload import (
+        _RedactedToolRow,
+        _StatePayload,
+    )
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s6")
+
+    outcome = service.persist_compose_turn(
+        session_id="s6",
+        assistant_content="ok",
+        redacted_assistant_tool_calls=({"id": "tc_1", "function": {"name": "set_source"}},),
+        redacted_tool_rows=(
+            _RedactedToolRow(
+                tool_call_id="tc_1",
+                content='{"ok": true}',
+                # B1 (Phase 1 plan-review synthesis): no ``version=``.
+                # ``_insert_composition_state`` allocates it under the
+                # held session write lock; the assertion below pins the
+                # allocated value to 1 (first state in this session).
+                composition_state_payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+            ),
+        ),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+
+    # On the success path, _AuditOutcome carries the new
+    # assistant_id and unwind_audit_failed=False. The old
+    # tier1_violation field was removed in Stage 4 of the plan
+    # revision (Tier-1 failures now raise AuditIntegrityError
+    # directly -- see Task 13).
+    assert outcome.unwind_audit_failed is False
+    assert outcome.assistant_id is not None
+
+    with service._engine.begin() as conn:
+        rows = conn.execute(
+            text("SELECT role, sequence_no, tool_call_id FROM chat_messages WHERE session_id='s6' ORDER BY sequence_no")
+        ).fetchall()
+        assert [r.role for r in rows] == ["assistant", "tool"]
+        assert rows[0].sequence_no == 1
+        assert rows[1].sequence_no == 2
+        assert rows[1].tool_call_id == "tc_1"
+
+        states = conn.execute(text("SELECT version, provenance FROM composition_states WHERE session_id='s6'")).fetchall()
+        assert len(states) == 1
+        assert states[0].version == 1
+        assert states[0].provenance == "tool_call"
+
+
+def test_persist_compose_turn_zero_tool_rows(service):
+    """W10a (Phase 1 plan-review synthesis): a turn with
+    ``redacted_tool_rows=()`` and ``redacted_assistant_tool_calls=()``
+    is a valid and reachable shape -- the assistant produced text but
+    chose not to call any tools. Spec §5.2 explicitly allows this. The
+    primitive MUST commit cleanly: the assistant row is persisted, no
+    tool rows are inserted, and no ``composition_states`` rows are
+    created (because the empty tool-row tuple has no
+    ``composition_state_payload`` to write).
+
+    The zero-row case is not exercised by ``happy_path`` (which always
+    includes one ``_RedactedToolRow``), so without this regression the
+    next caller migrating an assistant-only call site (Phase 3) would
+    discover an off-by-one or empty-tuple bug at integration time
+    rather than at the primitive's own unit boundary.
+    """
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_zero")
+    outcome = service.persist_compose_turn(
+        session_id="s_zero",
+        assistant_content="text only",
+        redacted_assistant_tool_calls=(),
+        redacted_tool_rows=(),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+    assert outcome.assistant_id is not None
+    assert outcome.unwind_audit_failed is False
+    with service._engine.begin() as conn:
+        roles = [r.role for r in conn.execute(text("SELECT role FROM chat_messages WHERE session_id='s_zero'")).fetchall()]
+        assert roles == ["assistant"]
+        states = conn.execute(text("SELECT id FROM composition_states WHERE session_id='s_zero'")).fetchall()
+        assert states == []
+
+
+def test_persist_compose_turn_persists_raw_content(service):
+    """B2 (Phase 1 plan-review synthesis): ``persist_compose_turn`` must
+    plumb the optional ``raw_content`` argument to the assistant row
+    verbatim. ``raw_content`` is the audit-attribution column that
+    captures the original LLM output BEFORE preflight redaction
+    rewrote ``content``. Routes 2151 and 2601 in
+    ``src/elspeth/web/sessions/routes.py`` already pass
+    ``raw_content=result.raw_assistant_content`` to ``add_message``;
+    Phase 3 migrates those call sites to ``persist_compose_turn``, so
+    the primitive must accept and persist the column today.
+    """
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s6_raw")
+
+    outcome = service.persist_compose_turn(
+        session_id="s6_raw",
+        assistant_content="ok (redacted)",
+        raw_content="original LLM output before preflight redaction",
+        redacted_assistant_tool_calls=({"id": "tc_1", "function": {"name": "f"}},),
+        redacted_tool_rows=(_RedactedToolRow(tool_call_id="tc_1", content="{}", composition_state_payload=None),),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+    assert outcome.assistant_id is not None
+    assert outcome.unwind_audit_failed is False
+
+    with service._engine.begin() as conn:
+        rows = conn.execute(
+            text("SELECT role, content, raw_content FROM chat_messages WHERE session_id='s6_raw' ORDER BY sequence_no")
+        ).fetchall()
+        # Assistant row carries both visible content (post-redaction)
+        # and raw_content (pre-redaction); tool row has raw_content=None.
+        assert rows[0].role == "assistant"
+        assert rows[0].content == "ok (redacted)"
+        assert rows[0].raw_content == "original LLM output before preflight redaction"
+        assert rows[1].role == "tool"
+        assert rows[1].raw_content is None
+
+
+def test_persist_compose_turn_rejects_cross_session_parent_state(service):
+    """B5: when ``parent_composition_state_id`` belongs to a DIFFERENT
+    session, the call MUST raise ``RuntimeError`` with the precise
+    diagnostic produced by ``_assert_state_in_session`` -- not a generic
+    FK error.
+    """
+    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_A")
+        _make_session(conn, session_id="s_B")
+        with service._session_write_lock(conn, "s_A"):
+            state_a_id = service._insert_composition_state(
+                conn,
+                session_id="s_A",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"persist_compose_turn: composition_state_id=.*belongs to session "
+        r"'s_A', not 's_B'.*cross-session reference is a contract violation",
+    ):
+        service.persist_compose_turn(
+            session_id="s_B",
+            assistant_content="should fail",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=state_a_id,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    with service._engine.begin() as conn:
+        b_count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_B'")).scalar()
+        assert b_count == 0, f"persist_compose_turn rolled back incorrectly; s_B has {b_count} chat rows after a guard-rejected call"
+
+
+def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
+    """B5 happy path: same-session parent state -- guard passes silently
+    and the assistant row is correctly stamped with that
+    ``composition_state_id``."""
+    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_C")
+        with service._session_write_lock(conn, "s_C"):
+            state_c_id = service._insert_composition_state(
+                conn,
+                session_id="s_C",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
+
+    outcome = service.persist_compose_turn(
+        session_id="s_C",
+        assistant_content="ok",
+        redacted_assistant_tool_calls=(),
+        redacted_tool_rows=(),
+        parent_composition_state_id=state_c_id,
+        expected_current_state_id=state_c_id,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+
+    assert outcome.unwind_audit_failed is False
+    assert outcome.assistant_id is not None
+
+    with service._engine.begin() as conn:
+        assistant_row = conn.execute(
+            text("SELECT composition_state_id FROM chat_messages WHERE session_id='s_C' AND role='assistant'")
+        ).fetchone()
+        assert assistant_row is not None
+        assert assistant_row.composition_state_id == state_c_id
+
+
+def test_persist_compose_turn_rejects_stale_expected_current_state(service):
+    """A compose turn may not persist if the session's current state
+    changed while the LLM call was in flight."""
+    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData, StaleComposeStateError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_stale")
+        with service._session_write_lock(conn, "s_stale"):
+            stale_state_id = service._insert_composition_state(
+                conn,
+                session_id="s_stale",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
+            current_state_id = service._insert_composition_state(
+                conn,
+                session_id="s_stale",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=stale_state_id,
+                ),
+                provenance="session_seed",
+            )
+
+    with pytest.raises(
+        StaleComposeStateError,
+        match=r"current composition state changed.*expected=.*actual=",
+    ):
+        service.persist_compose_turn(
+            session_id="s_stale",
+            assistant_content="stale",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=stale_state_id,
+            expected_current_state_id=stale_state_id,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    with service._engine.begin() as conn:
+        rows = conn.execute(text("SELECT role FROM chat_messages WHERE session_id='s_stale'")).fetchall()
+        latest = conn.execute(
+            text("SELECT id FROM composition_states WHERE session_id='s_stale' ORDER BY version DESC LIMIT 1")
+        ).scalar_one()
+    assert rows == []
+    assert latest == current_state_id
+
+
+def test_persist_compose_turn_accepts_matching_expected_current_state(service):
+    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_current_ok")
+        with service._session_write_lock(conn, "s_current_ok"):
+            current_state_id = service._insert_composition_state(
+                conn,
+                session_id="s_current_ok",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
+
+    outcome = service.persist_compose_turn(
+        session_id="s_current_ok",
+        assistant_content="ok",
+        redacted_assistant_tool_calls=(),
+        redacted_tool_rows=(),
+        parent_composition_state_id=None,
+        expected_current_state_id=current_state_id,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+    assert outcome.assistant_id is not None
+    assert outcome.unwind_audit_failed is False
+
+
+@pytest.mark.asyncio
+async def test_persist_compose_turn_refuses_async_invocation(service):
+    """SA-7 / M1: calling the sync method from inside async raises
+    RuntimeError. Production callers use ``await
+    service.persist_compose_turn_async(...)`` which dispatches to a
+    worker thread."""
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_async_guard")
+
+    with pytest.raises(RuntimeError, match="must be dispatched via"):
+        service.persist_compose_turn(
+            session_id="s_async_guard",
+            assistant_content="",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async(service):
+    """Companion: the protocol-public async dispatcher runs the sync
+    primitive in a worker thread (no running loop in that thread), so
+    the guard passes."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_run_sync")
+
+    outcome = await service.persist_compose_turn_async(
+        session_id="s_run_sync",
+        assistant_content="ok",
+        redacted_assistant_tool_calls=({"id": "tc_run_sync", "function": {"name": "f"}},),
+        redacted_tool_rows=(_RedactedToolRow("tc_run_sync", "{}", None),),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+    assert outcome.assistant_id is not None
+    assert outcome.unwind_audit_failed is False
+
+
+def test_persist_compose_turn_rejects_missing_tool_row(service):
+    """Q-F1 missing axis."""
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_missing")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"missing=\['tc_X'\].*extra=\[\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_missing",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=({"id": "tc_X", "function": {"name": "f"}},),
+            redacted_tool_rows=(),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_missing'")).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_extra_tool_row(service):
+    """Q-F1 extra axis."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_extra")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"missing=\[\].*extra=\['tc_Y'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_extra",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(_RedactedToolRow("tc_Y", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_extra'")).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
+    """Q-F1: both ``missing`` and ``extra`` axes fire simultaneously."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_mismatch")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"missing=\['tc_A'\].*extra=\['tc_B'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_mismatch",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=({"id": "tc_A", "function": {"name": "f"}},),
+            redacted_tool_rows=(_RedactedToolRow("tc_B", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_mismatch'")).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(service):
+    """Q-F1: duplicate in assistant tool_calls."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_dup_assist")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"duplicates_in_assistant=\['tc_D'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_dup_assist",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(
+                {"id": "tc_D", "function": {"name": "f"}},
+                {"id": "tc_D", "function": {"name": "g"}},
+            ),
+            redacted_tool_rows=(_RedactedToolRow("tc_D", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_dup_assist'")).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_rows(service):
+    """Q-F1: duplicate in tool rows."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_dup_rows")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"duplicates_in_rows=\['tc_E'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_dup_rows",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=({"id": "tc_E", "function": {"name": "f"}},),
+            redacted_tool_rows=(
+                _RedactedToolRow("tc_E", "{}", None),
+                _RedactedToolRow("tc_E", "{}", None),
+            ),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_dup_rows'")).scalar()
+        assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(service):
+    """Q-F2 commit-wins contract: caller cancellation does NOT roll
+    back the worker. The post-cancel DB state must contain the
+    persisted rows, and the integrity counter MUST NOT have moved on
+    a benign cancel-and-retry pattern.
+
+    Deterministic-gate variant: the spec's original sleep(50ms) trigger
+    is a timing race against the worker's commit speed. On in-memory
+    SQLite the inserts complete in well under 50ms, so by the time
+    cancel arrives the awaiter has already returned cleanly and no
+    ``CancelledError`` ever fires. To pin the contract under test --
+    *cancel-while-work-is-in-flight commits anyway* -- we monkeypatch
+    the sync primitive with a wrapper that blocks on a
+    ``threading.Event`` until the test explicitly releases it. That
+    holds the worker open long enough to receive the cancel; the
+    contract under test is unchanged.
+    """
+    import asyncio
+    import threading
+
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.telemetry import observed_value
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_cancel")
+
+    starting = observed_value(service._telemetry.tool_row_integrity_violation_total)
+
+    real_persist = service.persist_compose_turn
+    release = threading.Event()
+    worker_started = threading.Event()
+
+    def gated_persist(*args, **kwargs):
+        worker_started.set()
+        if not release.wait(timeout=2.0):
+            pytest.fail("test never released the gated worker within 2s")
+        return real_persist(*args, **kwargs)
+
+    # SessionServiceImpl is a plain class with no __slots__; bound-method
+    # rebinding via attribute assignment is the standard test-time
+    # monkey-patch. The mypy ignore is required because mypy treats
+    # bound methods as immutable on classes that declare them.
+    service.persist_compose_turn = gated_persist  # type: ignore[method-assign]
+
+    async def _do_persist() -> None:
+        await service.persist_compose_turn_async(
+            session_id="s_cancel",
+            assistant_content="commit-wins",
+            redacted_assistant_tool_calls=({"id": "tc_c1", "function": {"name": "f"}},),
+            redacted_tool_rows=(_RedactedToolRow("tc_c1", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    inner = asyncio.create_task(_do_persist())
+
+    # Wait until the worker thread has actually entered the gate. This
+    # replaces the spec's racy 50ms sleep with a deterministic
+    # rendezvous on in-memory SQLite (where the entire
+    # persist_compose_turn body would otherwise complete in well under
+    # 50ms, leaving cancel() to land on an already-done task).
+    for _ in range(200):
+        if worker_started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("worker thread never reached the gate within 2s")
+
+    inner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await inner
+
+    # Now release the worker so it can commit. The worker is shielded;
+    # the cancel above only affected the awaiter.
+    release.set()
+
+    # Wait until the shielded worker has finished. Polling is fine
+    # because the worker bridge has no public completion signal --
+    # the test only asserts the committed terminal state.
+    for _ in range(200):
+        with service._engine.begin() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_cancel'")).scalar()
+        if count == 2:  # assistant + tool
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("shielded worker did not commit within 2s; commit-wins contract is not honoured by the current _run_sync bridge.")
+
+    # Counter MUST NOT have moved -- there was no IntegrityError, no
+    # benign "fabricated Tier-1" event from the cancel path.
+    assert observed_value(service._telemetry.tool_row_integrity_violation_total) == starting, (
+        "Q-F2 regression: caller cancellation produced a "
+        "tool_row_integrity_violation_total increment. Under the "
+        "commit-wins contract, a clean cancel must not fabricate "
+        "Tier-1 alerts (SLO threshold = 0)."
+    )

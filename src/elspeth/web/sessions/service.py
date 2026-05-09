@@ -25,7 +25,7 @@ from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
-from elspeth.web.sessions._persist_payload import _StatePayload
+from elspeth.web.sessions._persist_payload import _AuditOutcome, _RedactedToolRow, _StatePayload
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
@@ -46,6 +46,7 @@ from elspeth.web.sessions.protocol import (
     RunRecord,
     SessionRecord,
     SessionRunStatus,
+    StaleComposeStateError,
 )
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
@@ -157,6 +158,91 @@ def _assert_parent_assistant_message(
         raise RuntimeError(
             f"{caller}: parent_assistant_id={parent_assistant_id!r} must reference "
             f"an assistant message in session={session_id!r}; got role={role!r}"
+        )
+
+
+class ToolCallIDMismatchError(RuntimeError):
+    """Assistant ``tool_calls`` and persisted tool rows disagreed on
+    the set of tool-call IDs for one compose turn.
+
+    Carries the four mutually-exclusive failure axes (missing, extra,
+    duplicate-in-assistant, duplicate-in-rows) so the diagnostic
+    string identifies WHICH violation fired without forcing the
+    caller to re-derive it.
+
+    Defined here on the service module because the error shape is
+    internal to ``persist_compose_turn``; callers either catch it as
+    a contract violation or do not catch it at all.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing: frozenset[str],
+        extra: frozenset[str],
+        duplicates_in_assistant: frozenset[str],
+        duplicates_in_rows: frozenset[str],
+    ) -> None:
+        self.missing = missing
+        self.extra = extra
+        self.duplicates_in_assistant = duplicates_in_assistant
+        self.duplicates_in_rows = duplicates_in_rows
+        super().__init__(
+            "persist_compose_turn: assistant tool_calls and tool rows "
+            "disagree on the tool-call ID set "
+            f"(missing={sorted(missing)!r}, extra={sorted(extra)!r}, "
+            f"duplicates_in_assistant={sorted(duplicates_in_assistant)!r}, "
+            f"duplicates_in_rows={sorted(duplicates_in_rows)!r}). "
+            "Refusing to persist a turn that would leave the audit "
+            "trail with an asymmetric assistant/tool transcript."
+        )
+
+
+def _validate_tool_call_id_set_equality(
+    *,
+    redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+    redacted_tool_rows: tuple[_RedactedToolRow, ...],
+) -> None:
+    """Raise ``ToolCallIDMismatchError`` if the assistant's
+    ``tool_calls`` IDs and the tool rows' ``tool_call_id`` values are
+    not the same unique set.
+
+    Four failure axes — any of them raises:
+
+    - ``missing``: assistant ID with no tool row
+    - ``extra``: tool row with no assistant ID
+    - ``duplicates_in_assistant``: ID twice in tool_calls
+    - ``duplicates_in_rows``: ID twice in tool rows
+
+    All four are reported simultaneously so the diagnostic shows the
+    full picture in one shot. The empty-empty case is valid.
+
+    Pure function of caller arguments; called BEFORE
+    ``_engine.begin()`` (pre-lock, pre-transaction) so a contract
+    violation cannot leave a half-written audit trail behind.
+    """
+    assistant_ids: list[str] = [
+        # ``id`` key is contractually present (OpenAI/LiteLLM tool-call
+        # shape requires it). If it's missing, that's an upstream
+        # framework bug, not data we should defend against.
+        tc["id"]
+        for tc in redacted_assistant_tool_calls
+    ]
+    row_ids: list[str] = [row.tool_call_id for row in redacted_tool_rows]
+
+    assistant_set = set(assistant_ids)
+    row_set = set(row_ids)
+    missing = frozenset(assistant_set - row_set)
+    extra = frozenset(row_set - assistant_set)
+    duplicates_in_assistant = frozenset(i for i in assistant_set if assistant_ids.count(i) > 1)
+    duplicates_in_rows = frozenset(i for i in row_set if row_ids.count(i) > 1)
+
+    if missing or extra or duplicates_in_assistant or duplicates_in_rows:
+        raise ToolCallIDMismatchError(
+            missing=missing,
+            extra=extra,
+            duplicates_in_assistant=duplicates_in_assistant,
+            duplicates_in_rows=duplicates_in_rows,
         )
 
 
@@ -667,6 +753,215 @@ class SessionServiceImpl:
             )
         )
         return allocated_state_id
+
+    def persist_compose_turn(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: str,
+        plugin_crash_pending: bool,
+    ) -> _AuditOutcome:
+        """Synchronous, single-transaction persistence of one compose turn.
+
+        Spec §5.2.2. Concrete sync primitive. Production async callers MUST
+        invoke ``await self.persist_compose_turn_async(...)`` through
+        :class:`SessionServiceProtocol`; that dispatcher uses ``_run_sync``
+        under the hood. Calling this sync primitive directly from async land
+        would block the event loop because the body opens a synchronous
+        SQLAlchemy transaction.
+
+        The async-loop guard below uses ``asyncio.get_running_loop()`` to
+        detect misuse: if there is a running loop in the calling thread,
+        we are in async land and MUST refuse. ``RuntimeError`` is the
+        canonical "you called the wrong API" signal — the call site is
+        a bug, not a recoverable user error. Closes synthesised review
+        finding SA-7 / M1.
+
+        Order of work (load-bearing):
+
+        1. Pre-DB transcript validation (``_validate_tool_call_id_set_equality``).
+           Pure function of caller args; runs BEFORE ``_engine.begin()`` so
+           a contract violation cannot leave a half-written audit trail.
+        2. Open transaction; acquire session write lock.
+        3. Cross-session guard on ``parent_composition_state_id`` (B5).
+        4. Stale-state guard on ``expected_current_state_id``.
+        5. Reserve sequence range for assistant + N tool rows.
+        6. Insert assistant row (with optional ``raw_content``,
+           B2 audit-attribution).
+        7. For each tool row: optionally insert composition state under
+           the held lock, then insert tool chat row referencing it.
+
+        ``raw_content`` is the audit-attribution column for assistant
+        messages whose visible ``content`` was rewritten by runtime
+        preflight redaction. Routes already pass
+        ``raw_content=result.raw_assistant_content`` to ``add_message``;
+        Phase 3 migrates those call sites to ``persist_compose_turn``,
+        so the primitive must accept and persist the column today (B2).
+        """
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop in this thread -- we are in a worker thread
+            # or pure sync test context. Proceed.
+            pass
+        else:
+            raise RuntimeError(
+                "persist_compose_turn must be dispatched via "
+                "await self.persist_compose_turn_async(...) -- "
+                "calling it directly from a coroutine blocks the event "
+                "loop on synchronous DB I/O."
+            )
+
+        # Q-F1 (Step 3c): transcript validation BEFORE _engine.begin().
+        # Pre-lock, pre-transaction; pure function of caller args.
+        _validate_tool_call_id_set_equality(
+            redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+            redacted_tool_rows=redacted_tool_rows,
+        )
+
+        now = self._now()
+        with self._engine.begin() as conn:
+            with self._session_write_lock(conn, session_id):
+                # B5 (Phase 1 plan-review synthesis): if a parent
+                # composition state is supplied, it MUST belong to this
+                # session.
+                if parent_composition_state_id is not None:
+                    _assert_state_in_session(
+                        conn,
+                        state_id=parent_composition_state_id,
+                        expected_session_id=session_id,
+                        caller="persist_compose_turn",
+                    )
+
+                current_state_id = conn.execute(
+                    select(composition_states_table.c.id)
+                    .where(composition_states_table.c.session_id == session_id)
+                    .order_by(composition_states_table.c.version.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                if current_state_id != expected_current_state_id:
+                    raise StaleComposeStateError(
+                        "persist_compose_turn: current composition state changed "
+                        f"for session_id={session_id!r}; "
+                        f"expected={expected_current_state_id!r}, "
+                        f"actual={current_state_id!r}. Refusing to persist a "
+                        "compose result based on a stale state."
+                    )
+
+                base_seq = self._reserve_sequence_range(conn, session_id, count=1 + len(redacted_tool_rows))
+
+                assistant_id = self._insert_chat_message(
+                    conn,
+                    session_id=session_id,
+                    role="assistant",
+                    content=assistant_content,
+                    # B2: raw_content captures pre-redaction LLM output.
+                    raw_content=raw_content,
+                    # ``deep_thaw`` recursively converts MappingProxyType /
+                    # tuple to JSON-serialisable dict / list (closes
+                    # P-L-4 / L18). Mirrors ``add_message``'s pattern.
+                    tool_calls=deep_thaw(redacted_assistant_tool_calls) if redacted_assistant_tool_calls else None,
+                    sequence_no=base_seq,
+                    writer_principal=writer_principal,
+                    composition_state_id=parent_composition_state_id,
+                    tool_call_id=None,
+                    parent_assistant_id=None,
+                    created_at=now,
+                )
+
+                for offset, tool_row in enumerate(redacted_tool_rows, start=1):
+                    state_id: str | None = None
+                    if tool_row.composition_state_payload is not None:
+                        state_id = self._insert_composition_state(
+                            conn,
+                            session_id=session_id,
+                            payload=tool_row.composition_state_payload,
+                            provenance="tool_call",
+                            created_at=now,
+                        )
+                    self._insert_chat_message(
+                        conn,
+                        session_id=session_id,
+                        role="tool",
+                        content=tool_row.content,
+                        raw_content=None,
+                        tool_calls=None,
+                        sequence_no=base_seq + offset,
+                        writer_principal=writer_principal,
+                        composition_state_id=state_id,
+                        tool_call_id=tool_row.tool_call_id,
+                        parent_assistant_id=assistant_id,
+                        created_at=now,
+                    )
+
+            return _AuditOutcome(
+                assistant_id=assistant_id,
+                unwind_audit_failed=False,
+            )
+
+    async def persist_compose_turn_async(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: str,
+        plugin_crash_pending: bool,
+    ) -> _AuditOutcome:
+        """Async dispatcher for :meth:`persist_compose_turn`.
+
+        Bridges to the sync primitive via ``_run_sync``, which dispatches
+        to a worker thread. The worker is shielded from caller
+        cancellation: a ``CancelledError`` raised in the awaiter does NOT
+        interrupt the in-flight sync transaction (see
+        ``elspeth.web.async_workers.run_sync_in_worker``).
+
+        **Commit-wins cancellation contract (Q-F2).** When the caller is
+        cancelled mid-flight, the underlying worker continues to run to
+        completion. Either:
+
+        1. The transaction commits — the assistant + tool rows are durably
+           persisted; the caller observes ``CancelledError`` and never
+           sees the ``_AuditOutcome``. **Callers MUST NOT retry on
+           CancelledError** — retrying risks a duplicate tool-call-ID
+           INSERT that fires a fabricated Tier-1 counter increment.
+        2. The transaction rolls back atomically — DB-level errors
+           (``IntegrityError``, ``OperationalError``,
+           ``ToolCallIDMismatchError`` raised pre-DB) cause the
+           ``engine.begin()`` block to roll back. No rows persisted.
+           Retry-on-CancelledError still forbidden.
+
+        The Phase 3 compose loop is the only caller of this method.
+
+        Pinned by ``test_persist_compose_turn_async_caller_cancellation_commits_anyway``.
+        """
+        return cast(
+            _AuditOutcome,
+            await self._run_sync(
+                self.persist_compose_turn,
+                session_id=session_id,
+                assistant_content=assistant_content,
+                raw_content=raw_content,
+                redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+                redacted_tool_rows=redacted_tool_rows,
+                parent_composition_state_id=parent_composition_state_id,
+                expected_current_state_id=expected_current_state_id,
+                writer_principal=writer_principal,
+                plugin_crash_pending=plugin_crash_pending,
+            ),
+        )
 
     async def create_session(
         self,

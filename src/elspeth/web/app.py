@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from opentelemetry import metrics
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -51,6 +52,7 @@ from elspeth.web.sessions.protocol import RunAlreadyActiveError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -388,7 +390,12 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     session_engine = create_session_engine(session_db_url)
     initialize_session_schema(session_engine)
 
-    session_service = SessionServiceImpl(session_engine, data_dir=settings.data_dir)
+    session_service = SessionServiceImpl(
+        session_engine,
+        data_dir=settings.data_dir,
+        telemetry=build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer")),
+        log=structlog.get_logger("sessions"),
+    )
     app.state.session_service = session_service
 
     # --- Blob service ---

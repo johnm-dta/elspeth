@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
+import structlog
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -45,6 +46,7 @@ from elspeth.web.sessions.protocol import (
     SessionRecord,
     SessionRunStatus,
 )
+from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 # Process-wide SQLite session-write lock registry.
 #
@@ -262,9 +264,18 @@ class SessionServiceImpl:
     bounded worker thread so the async event loop is never blocked.
     """
 
-    def __init__(self, engine: Engine, data_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        data_dir: Path | None = None,
+        *,
+        telemetry: _SessionsTelemetry,
+        log: structlog.stdlib.BoundLogger,
+    ) -> None:
         self._engine = engine
         self._data_dir = data_dir
+        self._telemetry = telemetry
+        self._log = log
 
     async def _run_sync(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         """Run a synchronous callable in the thread pool executor."""

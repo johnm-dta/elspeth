@@ -9,9 +9,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 from sqlalchemy import text
 
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web.conftest import _make_session
 
 
@@ -26,7 +28,12 @@ def service(engine, tmp_path) -> SessionServiceImpl:
     fixture — without it, the fixture's untyped parameters poison the
     return type to ``Any`` and helper-method calls return ``Any``.
     """
-    return SessionServiceImpl(engine, data_dir=tmp_path)
+    return SessionServiceImpl(
+        engine,
+        data_dir=tmp_path,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
 
 def test_advisory_lock_sqlite_is_noop(service):
@@ -166,7 +173,12 @@ def test_file_backed_sqlite_sequence_allocator_smoke(tmp_path):
     db_path = tmp_path / "sessions.db"
     engine = create_session_engine(f"sqlite:///{db_path}")
     initialize_session_schema(engine)
-    service = SessionServiceImpl(engine, data_dir=tmp_path)
+    service = SessionServiceImpl(
+        engine,
+        data_dir=tmp_path,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_file")
         with service._session_write_lock(conn, "s_file"):
@@ -191,7 +203,12 @@ def test_file_backed_sqlite_lock_serializes_independent_connections(tmp_path):
     db_path = tmp_path / "sessions.db"
     engine = create_session_engine(f"sqlite:///{db_path}")
     initialize_session_schema(engine)
-    service: SessionServiceImpl = SessionServiceImpl(engine, data_dir=tmp_path)
+    service: SessionServiceImpl = SessionServiceImpl(
+        engine,
+        data_dir=tmp_path,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
     with engine.begin() as conn:
         _make_session(conn, session_id="s_file_concurrent")
 

@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 import pytest
+import structlog
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.execution.schemas import (
@@ -27,6 +28,7 @@ from elspeth.web.sessions.protocol import (
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 @pytest.fixture
@@ -48,7 +50,11 @@ def engine():
 @pytest.fixture
 def service(engine):
     """Create a SessionServiceImpl backed by the in-memory engine."""
-    return SessionServiceImpl(engine)
+    return SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
 
 class TestSessionCRUD:
@@ -119,7 +125,12 @@ class TestSessionCRUD:
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
-        service_with_dir = SessionServiceImpl(engine, data_dir=data_dir)
+        service_with_dir = SessionServiceImpl(
+            engine,
+            data_dir=data_dir,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         session = await service_with_dir.create_session("alice", "Blob Session", "local")
         sid = str(session.id)
@@ -155,7 +166,12 @@ class TestSessionCRUD:
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
-        service_with_dir = SessionServiceImpl(engine, data_dir=data_dir)
+        service_with_dir = SessionServiceImpl(
+            engine,
+            data_dir=data_dir,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         session = await service_with_dir.create_session("alice", "Blob Session", "local")
         sid = str(session.id)

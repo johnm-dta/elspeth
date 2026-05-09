@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -64,6 +65,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # Sentinel empty state for mock composer responses
@@ -370,7 +372,11 @@ def _make_app(
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
-    service = SessionServiceImpl(engine)
+    service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
     app = FastAPI()
 
@@ -1239,7 +1245,11 @@ class TestIDORProtection:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        service = SessionServiceImpl(engine)
+        service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         # Create two apps sharing the same service
         def make_app_for_user(uid: str) -> FastAPI:
@@ -1429,7 +1439,11 @@ class TestSendMessageStateIdValidation:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        service = SessionServiceImpl(engine)
+        service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         def make_app_for_user(uid: str) -> FastAPI:
             app = FastAPI()
@@ -2956,7 +2970,11 @@ class TestRevertEndpoint:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        service = SessionServiceImpl(engine)
+        service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         def make_app_for_user(uid: str) -> FastAPI:
             app = FastAPI()

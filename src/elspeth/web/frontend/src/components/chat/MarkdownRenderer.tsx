@@ -123,7 +123,11 @@ function FencedCodeBlock({
     try {
       await navigator.clipboard.writeText(code);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+      // 2000ms keeps the confirmation visible long enough for users with
+      // higher cognitive load (looking-away to find the paste target and
+      // returning) — below this threshold the affordance often reverts
+      // before they can confirm the copy succeeded.
+      window.setTimeout(() => setCopied(false), 2000);
     } catch {
       // Clipboard API unavailable — the user can still select-and-copy manually.
     }

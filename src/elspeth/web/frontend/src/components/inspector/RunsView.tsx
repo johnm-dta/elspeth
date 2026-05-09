@@ -258,11 +258,14 @@ export function RunsView() {
                   marginBottom: 4,
                 }}
               >
-                {/* Status badge: uses CSS class from App.css */}
+                {/* Status badge: uses CSS class from App.css.  Cancel-pending
+                    (running + cancel_requested) gets a dedicated class with a
+                    pulsing dot glyph so it is visually distinguishable from
+                    a fully cancelled run that uses the same colour. */}
                 <span
                   className={
                     run.cancel_requested && run.status === "running"
-                      ? STATUS_BADGE_CLASSES.cancelled
+                      ? "status-badge status-badge-cancelling"
                       : STATUS_BADGE_CLASSES[run.status]
                   }
                 >
@@ -379,7 +382,7 @@ export function RunsView() {
                   }}
                   className="btn btn-small"
                 >
-                  {expandedRunId === run.id ? "Hide" : "Inspect"}
+                  {expandedRunId === run.id ? "Hide detail" : "Show detail"}
                 </button>
               </div>
 
@@ -392,7 +395,7 @@ export function RunsView() {
                 failure-like terminal runs:
                   - FAILED  → structural failure message
                   - COMPLETED_WITH_FAILURES → _partial_completion_message
-                    (count summary; per-token detail lives behind "Inspect")
+                    (count summary; per-token detail lives behind "Show detail")
                 A count-based predicate would duplicate the L0
                 `failure_indicator` invariant (web/execution/schemas.py)
                 and would also miss FAILED-with-zero-counts (engine crash

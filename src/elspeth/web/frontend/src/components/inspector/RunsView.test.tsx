@@ -245,7 +245,7 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    fireEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    fireEvent.click(screen.getByRole("button", { name: /show detail/i }));
 
     expect(fetchRunDiagnostics).toHaveBeenCalledTimes(1);
     await act(async () => {
@@ -262,7 +262,7 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    await userEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
 
     expect(await screen.findByText("token-1")).toBeInTheDocument();
     expect(screen.getByText(/extract completed/)).toBeInTheDocument();
@@ -288,7 +288,7 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    await userEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
     await userEvent.click(await screen.findByRole("button", { name: /explain/i }));
 
     expect(await screen.findByText("The run has saved output")).toBeInTheDocument();
@@ -318,7 +318,7 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    await userEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
 
     expect(screen.getByText("Reading current run evidence")).toBeInTheDocument();
     expect(screen.getByText("2 tokens are visible in the runtime trace.")).toBeInTheDocument();
@@ -344,7 +344,7 @@ describe("RunsView Inspect button a11y", () => {
 
     render(<RunsView />);
 
-    const inspect = screen.getByRole("button", { name: /inspect/i });
+    const inspect = screen.getByRole("button", { name: /show detail/i });
     expect(inspect.getAttribute("aria-expanded")).toBe("false");
 
     await user.click(inspect);
@@ -363,7 +363,7 @@ describe("RunsView Inspect button a11y", () => {
 
     render(<RunsView />);
 
-    const inspect = screen.getByRole("button", { name: /inspect/i });
+    const inspect = screen.getByRole("button", { name: /show detail/i });
     const controlsId = inspect.getAttribute("aria-controls");
     expect(controlsId).toBe("run-diagnostics-run-1");
     // Option A: the wrapper div is always in the DOM — IDREF resolves when collapsed
@@ -386,7 +386,7 @@ describe("RunsView cancelling badge", () => {
     useSessionStore.setState({ activeSessionId: null });
   });
 
-  it("uses cancelled badge class when cancel_requested on a running run", () => {
+  it("uses dedicated cancelling badge class (visual differentiation from fully cancelled)", () => {
     useExecutionStore.setState({
       runs: [
         makeRun({
@@ -404,6 +404,10 @@ describe("RunsView cancelling badge", () => {
     // The first one is the badge; the second one is the duration span
     const badge = badges[0].closest("[class*='status-badge']");
     expect(badge).not.toBeNull();
-    expect(badge).toHaveClass("status-badge-cancelled");
+    // Distinct class — NOT status-badge-cancelled.  This pins the visual
+    // differentiation invariant: cancel-pending uses a pulsing-dot glyph,
+    // cancelled uses an em-dash glyph (App.css).
+    expect(badge).toHaveClass("status-badge-cancelling");
+    expect(badge).not.toHaveClass("status-badge-cancelled");
   });
 });

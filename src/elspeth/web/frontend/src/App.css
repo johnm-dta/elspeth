@@ -577,6 +577,28 @@ summary:focus-visible {
   content: "\2014 "; /* — em dash */
 }
 
+/* Cancel-pending badge — same colour family as cancelled but distinguished
+   by a pulsing glyph that signals "still running, stop requested" rather
+   than "done, was cancelled".  Without this, the only visual distinction
+   between the two states is a 3-character text suffix ("cancelling" vs
+   "cancelled") which is easy to miss in the uppercase 13px badge. */
+.status-badge-cancelling {
+  background-color: rgba(227, 132, 68, 0.15);
+  color: var(--color-status-cancelled);
+}
+.status-badge-cancelling::before {
+  content: "\25CF "; /* ● filled circle */
+  display: inline-block;
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-badge-cancelling::before {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 /* Phase 2.2 (elspeth-0de989c56d): widened taxonomy.
    - completed_with_failures: reuses --color-status-completed (teal) so the
      run is visually grouped with successful runs, but the warning glyph
@@ -3126,6 +3148,32 @@ summary:focus-visible {
   flex-direction: column;
   gap: 2px;
   cursor: pointer;
+}
+
+/* "Use in pipeline" action — hidden at rest, revealed on card hover or
+   keyboard focus.  Mirrors the .code-block-copy pattern so the catalog
+   matches the chat code-block ergonomics.  Always reachable by keyboard
+   navigation via :focus-visible; never invisible to AT (the button still
+   exists in the DOM and accessibility tree, just visually hidden). */
+.plugin-card-use-btn {
+  align-self: flex-start;
+  margin-top: var(--space-xs);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.plugin-card:hover .plugin-card-use-btn,
+.plugin-card:focus-within .plugin-card-use-btn,
+.plugin-card-use-btn:focus-visible {
+  opacity: 1;
+}
+
+/* Touch devices have no hover — fall back to always-visible there so the
+   feature remains discoverable on mobile/tablet. */
+@media (hover: none), (pointer: coarse) {
+  .plugin-card-use-btn {
+    opacity: 1;
+  }
 }
 
 .plugin-card-name {

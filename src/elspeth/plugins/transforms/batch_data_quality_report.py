@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -54,6 +55,16 @@ class _QualityStats:
     observed_type_counts: Mapping[str, int]
     valid_values: tuple[object, ...]
 
+    def __post_init__(self) -> None:
+        # ``observed_type_counts`` is Mapping[str, int]; producers may
+        # pass a mutable dict. ``valid_values`` is tuple[object, ...] —
+        # the tuple itself is immutable, but the elements are
+        # ``object`` (typically scalar bucket entries from
+        # ``append_unique_bucket_value``); deep_freeze is identity-
+        # preserving for already-immutable scalars and would crash
+        # loudly if a future caller passed a nested mutable.
+        freeze_fields(self, "observed_type_counts", "valid_values")
+
     @property
     def observed_count(self) -> int:
         return sum(self.observed_type_counts.values())
@@ -91,7 +102,7 @@ class BatchDataQualityReport(BaseTransform):
 
     name = "batch_data_quality_report"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:732ed1d012c5f982"
+    source_file_hash: str | None = "sha256:0707c5c912fbba6f"
     config_model = BatchDataQualityReportConfig
     is_batch_aware = True
 

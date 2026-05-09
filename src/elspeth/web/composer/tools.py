@@ -1880,6 +1880,17 @@ class _ResolvedSourceBlob:
     options: Mapping[str, Any]
     payload: SourceBlobPayload
 
+    def __post_init__(self) -> None:
+        # ``options`` is the resolved-source pipeline-options mapping; it
+        # may carry nested dicts/lists from the composer YAML and is
+        # mutable through the attribute reference without a freeze guard,
+        # defeating ``frozen=True``. ``payload`` is a SourceBlobPayload
+        # TypedDict whose declared fields are all scalars (str / int /
+        # str | None) — the dict itself is a container so we deep-freeze
+        # both for symmetry rather than relying on caller discipline to
+        # keep payload scalar-only forever.
+        freeze_fields(self, "options", "payload")
+
 
 def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
     """Serialize a validated blobs row to the tool-layer dict shape."""

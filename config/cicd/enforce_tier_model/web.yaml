@@ -2450,84 +2450,84 @@ allow_hits:
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=acb7b346b49d78de
+- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=37783254993bc717
   owner: web-execution
   reason: Launch guard inspects user-authored LLM plugin options at the execution
     boundary; queries may be a mapping for named multi-query prompts.
   safety: Only the query count is used for spend estimation; malformed options still
     go through plugin/runtime validation before any provider call.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=3bc6520349f25f93
+- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=4f09759c469258d0
   owner: web-execution
   reason: Launch guard inspects user-authored LLM plugin options at the execution
     boundary; queries may be a sequence for multi-query prompts.
   safety: Strings and byte sequences are excluded from the sequence count; malformed
     options still go through plugin/runtime validation before any provider call.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=c5cb478f091b67dd
+- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=bbfb386271aa5a70
   owner: web-execution
   reason: Launch guard distinguishes scalar string-like values from query sequences
     when estimating LLM provider calls from user-authored plugin options.
   safety: Scalar string-like values fall back to one provider call per row; plugin/runtime
     validation remains the authority for option correctness.
   expires: null
-- key: web/execution/fanout_guard.py:R6:_estimate_source_rows:fp=7dd44a74e9adfaca
+- key: web/execution/fanout_guard.py:R6:_estimate_source_rows:fp=fdf1ab16ee8462d4
   owner: web-execution
   reason: Fanout estimation reads user-provided source files before execution; filesystem,
     encoding, CSV, or JSON parse failures mean cardinality is unknown.
   safety: The guard never fabricates a row count from unreadable data; execution still
     validates/opens the source on the normal path before any downstream provider calls.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_source_path:fp=43c70a65df834ad8
+- key: web/execution/fanout_guard.py:R5:_source_path:fp=ddcfcb5be92f7e23
   owner: web-execution
   reason: Source path/file options are user-authored plugin options and may be absent
     or non-string before plugin validation runs.
   safety: Non-string values are treated as unavailable for local row estimation only;
     normal execution validation remains responsible for rejecting invalid source options.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_remote_source_limit:fp=7d9dc7a2eeb65d98
+- key: web/execution/fanout_guard.py:R5:_remote_source_limit:fp=f3e8691c99939d74
   owner: web-execution
   reason: Remote source limit/top/max_rows options are user-authored plugin options
     and only integer row caps can safely inform spend estimation.
   safety: Non-integer values do not reduce the guard's estimate; plugin/runtime validation
     remains responsible for option correctness.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_count_csv_source_rows:fp=68a64944bd3152b8
+- key: web/execution/fanout_guard.py:R5:_count_csv_source_rows:fp=4de1a38e6489f86a
   owner: web-execution
   reason: CSV skip_rows is a user-authored option inspected before execution so the
     launch guard can estimate source cardinality.
   safety: Only integer skip_rows affects the estimator; invalid values are still rejected
     by plugin/runtime validation on the normal execution path.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=f49836a7537b01a5
+- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=4de14b5c3571bbc7
   owner: web-execution
   reason: JSON source files are external/user data; data_key counting must first verify
     the decoded payload is an object before indexing it.
   safety: Non-object payloads return unknown cardinality for the estimator instead
     of fabricating a count; execution source validation still handles malformed data.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=b7cd8b2011b9fdf9
+- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=b90c5294dec6686f
   owner: web-execution
   reason: JSON source files are external/user data; only top-level arrays have a directly
     countable row cardinality for this launch guard.
   safety: Non-array payloads return unknown cardinality for the estimator instead
     of fabricating a count; execution source validation still handles malformed data.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_string_option:fp=9fa90e44796e9f63
+- key: web/execution/fanout_guard.py:R5:_string_option:fp=551453a6d1751fa2
   owner: web-execution
   reason: Fanout estimation reads optional user-authored plugin string options such
     as provider, model, encoding, delimiter, format, and data_key.
   safety: Only nonblank strings are surfaced into the guard payload; absent or malformed
     values remain unknown and normal plugin/runtime validation remains authoritative.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=5cb9875f0f626a65
+- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=195a89405c54ca1d
   owner: web-execution
   reason: LLM credential configuration can be either an inline string or a secret-ref
     mapping in user-authored plugin options.
   safety: The guard emits only credential category/ref metadata and never the secret
     value; actual secret resolution remains on the execution path.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=0a8d0c29849f2252
+- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=24c08e5d0ce127d5
   owner: web-execution
   reason: Secret-ref mappings are user-authored plugin options and the nested secret_ref
     value must be a visible nonblank string before being identified in the guard payload.
@@ -2551,7 +2551,7 @@ allow_hits:
   safety: Returns the frozenset value (default empty), unioned with the new key and reset() in the finally block to restore
     prior state on context exit.
   expires: null
-- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=cedbffb408e67884
+- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=b0754fca2fa41500
   owner: web-execution
   reason: Inline LLM API keys are user-authored plugin options and must be identified
     without exposing their contents in the launch guard.

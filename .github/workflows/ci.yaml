@@ -90,6 +90,37 @@ jobs:
             --format text
 
   # ===========================================================================
+  # Stage 2a: Frozen-Dataclass Freeze-Guard Enforcement (closes
+  # elspeth-obs-c025f9fc15 — CLAUDE.md asserted "Enforced by CI" but no
+  # workflow file existed prior to this lane).
+  #
+  # MUST stay listed in ci-success.needs: below so the gate is real
+  # under branch protection. Mirror the test-postgres-testcontainer
+  # rationale: removing this lane from ci-success.needs would let a red
+  # freeze-guard lane silently leave ci-success green.
+  # ===========================================================================
+  enforce-freeze-guards:
+    name: Enforce Freeze Guards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run freeze-guard enforcement
+        run: |
+          python scripts/cicd/enforce_freeze_guards.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_freeze_guards
+
+  # ===========================================================================
   # Stage 2a: Audit Evidence Nominal Enforcement
   # ===========================================================================
   enforce-audit-evidence-nominal:
@@ -412,7 +443,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test, test-postgres-testcontainer]
+    needs: [lint, enforce-tier-model, enforce-freeze-guards, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test, test-postgres-testcontainer]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -423,6 +454,10 @@ jobs:
           fi
           if [[ "${{ needs.enforce-tier-model.result }}" != "success" ]]; then
             echo "Tier model enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-freeze-guards.result }}" != "success" ]]; then
+            echo "Freeze-guard enforcement job failed"
             exit 1
           fi
           if [[ "${{ needs.enforce-audit-evidence-nominal.result }}" != "success" ]]; then

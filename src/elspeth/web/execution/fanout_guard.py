@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.composer.state import CompositionState, NodeSpec, SourceSpec
@@ -65,6 +66,13 @@ class ExecutionFanoutRisk:
     risk_level: _RiskLevel
     message: str
 
+    def __post_init__(self) -> None:
+        # ``upstream_fanout`` declared as Sequence[str]; producers may
+        # pass a list literal which is mutable through the attribute
+        # reference without a freeze guard, defeating ``frozen=True``.
+        # All scalars are immutable; only the sequence needs the guard.
+        freeze_fields(self, "upstream_fanout")
+
     def to_dict(self) -> ExecutionFanoutRiskPayload:
         return {
             "node_id": self.node_id,
@@ -87,6 +95,14 @@ class ExecutionFanoutGuard:
     risk_level: _RiskLevel
     summary: str
     risks: Sequence[ExecutionFanoutRisk]
+
+    def __post_init__(self) -> None:
+        # ``risks`` declared as Sequence[ExecutionFanoutRisk]. The risk
+        # elements are themselves frozen (with their own freeze guards
+        # above), but the outer sequence may be a mutable list at the
+        # call site — without deep_freeze the guard's ``frozen=True``
+        # claim leaks ``risks.append(...)`` mutability.
+        freeze_fields(self, "risks")
 
     def to_dict(self) -> ExecutionFanoutGuardPayload:
         return {

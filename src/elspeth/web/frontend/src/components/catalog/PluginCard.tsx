@@ -154,7 +154,10 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawe
         <span className="plugin-card-desc">{plugin.description}</span>
       </div>
 
-      {/* Action button — sibling of the disclosure header, not inside it */}
+      {/* Action button — sibling of the disclosure header, NOT a descendant.
+          WAI-ARIA forbids interactive descendants of role="button"; nesting
+          this button inside .plugin-card-header would be a nested-interactive
+          a11y violation.  See PluginCard.test.tsx structural-invariant test. */}
       <button
         type="button"
         className="btn plugin-card-use-btn"

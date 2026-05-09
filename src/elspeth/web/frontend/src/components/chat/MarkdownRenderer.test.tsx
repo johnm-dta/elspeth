@@ -82,4 +82,30 @@ describe("MarkdownRenderer fenced code blocks", () => {
 
     expect(writeText).toHaveBeenCalledWith("foo: bar");
   });
+
+  it("does not crash and does not show 'Copied' when clipboard write rejects", async () => {
+    // Clipboard API may throw in non-secure contexts (HTTP) or when
+    // permission is denied.  The component swallows the rejection — verify
+    // that swallow behaviour: no thrown error, no false 'Copied' affordance.
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockRejectedValue(new Error("permission denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+      writable: true,
+    });
+
+    const md = "```yaml\nfoo: bar\n```";
+    render(<MarkdownRenderer content={md} />);
+
+    const copy = screen.getByRole("button", { name: /copy code/i });
+    await user.click(copy);
+
+    expect(writeText).toHaveBeenCalledWith("foo: bar");
+    // Button label must NOT flip to "Copied" on failure — that would lie to
+    // the user about the operation succeeding.
+    expect(screen.queryByRole("button", { name: /^copied$/i })).toBeNull();
+    // Original 'Copy code' affordance still present.
+    expect(screen.getByRole("button", { name: /copy code/i })).toBeInTheDocument();
+  });
 });

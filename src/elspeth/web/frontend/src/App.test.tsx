@@ -95,15 +95,26 @@ describe("App banner roles", () => {
     } satisfies SystemStatus);
   });
 
-  it("uses role=status, not role=alert, for the backend-unavailable banner", async () => {
+  it("uses role=alert for the backend-unavailable banner (hard outage)", async () => {
     vi.spyOn(api, "fetchSystemStatus").mockRejectedValue(new Error("down"));
+    // Silence the intentional diagnostic log so test stderr stays clean,
+    // AND positively VER that the diagnostic actually fired.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     render(<App />);
 
     const banner = await screen.findByText(/Backend unavailable/i);
     const root = banner.closest(".alert-banner") as HTMLElement | null;
     expect(root).not.toBeNull();
-    expect(root!.getAttribute("role")).toBe("status");
+    expect(root!.getAttribute("role")).toBe("alert");
+
+    // Diagnostic must have fired — the role=alert banner is the user-visible
+    // signal; console.error is the operator-visible signal in DevTools.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[health-check]"),
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
   });
 
   it("uses role=status, not role=alert, for the composer-unavailable banner", async () => {

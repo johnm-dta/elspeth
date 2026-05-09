@@ -77,6 +77,11 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
   const [isOverlayMode, setIsOverlayMode] = useState(
     () => window.innerWidth <= OVERLAY_BREAKPOINT,
   );
+  // Tracks viewport width so aria-valuemax (= 50% of viewport) on the resize
+  // separator stays in sync with the live clamp inside handleMouseDown /
+  // onKeyDown.  Without this, AT announces a max captured at mount time and
+  // the user can keep increasing past the announced max after a window resize.
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const isResizing = useRef(false);
   const { resolvedTheme, toggleTheme } = useTheme();
 
@@ -113,9 +118,26 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
 
     narrowMq.addEventListener("change", handleNarrow);
     overlayMq.addEventListener("change", handleOverlay);
+
+    // Keep viewportWidth in sync so aria-valuemax stays accurate.  Window
+    // resize fires frequently; debounce-via-rAF keeps the state churn cheap.
+    let rafHandle = 0;
+    function handleResize() {
+      if (rafHandle) return;
+      rafHandle = window.requestAnimationFrame(() => {
+        rafHandle = 0;
+        setViewportWidth(window.innerWidth);
+      });
+    }
+    window.addEventListener("resize", handleResize);
+
     return () => {
       narrowMq.removeEventListener("change", handleNarrow);
       overlayMq.removeEventListener("change", handleOverlay);
+      window.removeEventListener("resize", handleResize);
+      if (rafHandle) {
+        window.cancelAnimationFrame(rafHandle);
+      }
     };
   }, []);
 
@@ -291,7 +313,15 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
               : undefined
         }
       >
-        {/* Drag-to-resize handle — hidden in overlay mode */}
+        {/* Drag-to-resize handle — hidden in overlay mode.
+            Keyboard convention: ArrowLeft decreases the value (panel narrows),
+            ArrowRight increases it (panel widens) — per WAI-ARIA APG for
+            role=separator. Note the visual paradox: the handle sits on the
+            inspector's LEFT edge, so ArrowLeft moves the handle visually right
+            (toward the chat) when the panel shrinks. The convention is
+            value-direction, not spatial-drag-direction.
+            aria-valuenow/min/max are required for focusable separators so AT
+            can announce the current width. */}
         {!isOverlayMode && (
           <div
             className="resize-handle"
@@ -300,6 +330,9 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize inspector panel"
+            aria-valuenow={inspectorWidth}
+            aria-valuemin={MIN_INSPECTOR_WIDTH}
+            aria-valuemax={Math.round(viewportWidth * 0.5)}
             tabIndex={0}
             onKeyDown={(e) => {
               if (e.key === "ArrowLeft") {

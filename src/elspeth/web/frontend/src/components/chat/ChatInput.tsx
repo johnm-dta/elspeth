@@ -59,9 +59,22 @@ export function ChatInput({
   useEffect(() => {
     function handlePrefill(e: Event) {
       const detail = (e as CustomEvent<string>).detail;
-      if (typeof detail !== "string") return;
+      if (typeof detail !== "string") {
+        // System-to-system contract violation (PluginCard always sends a
+        // string).  Per CLAUDE.md trust-tier model: internal contract
+        // violations crash, not log-and-continue.  This surfaces immediately
+        // in dev / tests / DevTools rather than producing a silent no-op
+        // that a future contributor wouldn't notice.
+        throw new TypeError(
+          `[ChatInput] PREFILL_CHAT_INPUT_EVENT: expected string detail, got ${typeof detail}`,
+        );
+      }
       setTextRef.current(detail);
-      // Defer focus + caret placement to after React re-renders the controlled value.
+      // Defer focus + caret placement to a microtask so React flushes the
+      // controlled-value re-render first; otherwise focus() runs against a
+      // stale textarea value and setSelectionRange uses the wrong length.
+      // queueMicrotask (not requestAnimationFrame) keeps the prefill
+      // synchronous from the user's perspective — no visible 16ms gap.
       queueMicrotask(() => {
         const ta = inputRef.current;
         if (!ta) return;

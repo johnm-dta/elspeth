@@ -27,6 +27,12 @@
   --color-border:            rgba(143, 200, 200, 0.12);
   --color-border-strong:     rgba(143, 200, 200, 0.25);
 
+  /* Affordance bar for the inspector resize handle. Solid teal at ~3.5:1
+     contrast against --color-bg (#0f2d35) — meets WCAG 1.4.11 (3:1 non-text)
+     for the static-visible-bar pattern. Distinct from --color-border-strong,
+     which is a low-alpha border accent and fails 3:1 by design. */
+  --color-resize-handle:     #5a8a8a;
+
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.14);
   --color-bubble-user-border:    rgba(40, 130, 100, 0.35);
@@ -871,7 +877,9 @@ summary:focus-visible {
   transition: background var(--transition-fast);
 }
 
-/* Static visible bar — 2px wide, centered, low-contrast neutral */
+/* Static visible bar — 2px wide, centered. Always visible (not hover-only)
+   so the resize affordance is discoverable by sighted users without exploring,
+   and meets WCAG 1.4.11 (3:1 non-text contrast) via --color-resize-handle. */
 .resize-handle::before {
   content: "";
   position: absolute;
@@ -879,7 +887,7 @@ summary:focus-visible {
   bottom: 0;
   left: 9px;
   width: 2px;
-  background: var(--color-border-strong);
+  background: var(--color-resize-handle);
   transition: background var(--transition-fast);
 }
 
@@ -1335,6 +1343,9 @@ summary:focus-visible {
   --color-border:            rgba(15, 45, 53, 0.12);
   --color-border-strong:     rgba(15, 45, 53, 0.25);
 
+  /* Resize-handle bar — solid mid-tone teal at ~4.3:1 against #f4f8f9 (light bg). */
+  --color-resize-handle:     #5a7884;
+
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.10);
   --color-bubble-user-border:    rgba(40, 130, 100, 0.30);
@@ -1482,6 +1493,7 @@ summary:focus-visible {
     --color-text-muted:     #96c0c0;
     --color-border:         rgba(143, 200, 200, 0.30);
     --color-border-strong:  rgba(143, 200, 200, 0.50);
+    --color-resize-handle:  #96c0c0;
   }
 
   [data-theme="light"] {
@@ -1490,6 +1502,7 @@ summary:focus-visible {
     --color-text-muted:     #2a4a54;
     --color-border:         rgba(15, 45, 53, 0.30);
     --color-border-strong:  rgba(15, 45, 53, 0.50);
+    --color-resize-handle:  #2a4a54;
   }
 
   .type-badge {

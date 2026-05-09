@@ -375,6 +375,28 @@ describe("PluginCard — Use in pipeline action", () => {
     expect(onExpand).not.toHaveBeenCalled();
   });
 
+  it("renders 'Use in pipeline' as a sibling of the disclosure header, not a descendant", () => {
+    // Structural invariant for ARIA correctness: the card had a nested-
+    // interactive-content failure when the outer card was role=button and the
+    // action button was inside it.  The fix moved role=button to the
+    // .plugin-card-header div and made the action button a sibling.  This
+    // test pins that structure: a behavioural test (e.g. click handlers) would
+    // still pass if a refactor reintroduced nesting plus stopPropagation.
+    render(
+      <PluginCard
+        plugin={makePlugin({ name: "csv", plugin_type: "source" })}
+        schema={null}
+        onExpand={vi.fn()}
+        onCloseDrawer={vi.fn()}
+      />,
+    );
+
+    const useBtn = screen.getByRole("button", { name: /use csv in pipeline/i });
+    // Must NOT have any role=button ancestor — that would be the
+    // nested-interactive a11y violation the disclosure-header refactor fixes.
+    expect(useBtn.closest('[role="button"]')).toBeNull();
+  });
+
   it("works without an onCloseDrawer prop (no crash)", async () => {
     const user = userEvent.setup();
     render(

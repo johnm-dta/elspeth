@@ -39,6 +39,7 @@ from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
     ChatMessageRole,
+    ChatMessageWriterPrincipal,
     CompositionStateData,
     CompositionStateRecord,
     IllegalRunTransitionError,
@@ -514,7 +515,7 @@ class SessionServiceImpl:
         raw_content: str | None,
         tool_calls: Any,
         sequence_no: int,
-        writer_principal: str,
+        writer_principal: ChatMessageWriterPrincipal,
         composition_state_id: str | None,
         tool_call_id: str | None,
         parent_assistant_id: str | None,
@@ -728,7 +729,7 @@ class SessionServiceImpl:
         redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
-        writer_principal: str,
+        writer_principal: ChatMessageWriterPrincipal,
         plugin_crash_pending: bool,
     ) -> AuditOutcome:
         """Synchronous, single-transaction persistence of one compose turn.
@@ -954,7 +955,7 @@ class SessionServiceImpl:
         redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
-        writer_principal: str,
+        writer_principal: ChatMessageWriterPrincipal,
         plugin_crash_pending: bool,
     ) -> AuditOutcome:
         """Async dispatcher for :meth:`persist_compose_turn`.
@@ -1173,7 +1174,7 @@ class SessionServiceImpl:
         role: ChatMessageRole,
         content: str,
         *,
-        writer_principal: str,
+        writer_principal: ChatMessageWriterPrincipal,
         tool_calls: Sequence[Mapping[str, Any]] | None = None,
         composition_state_id: UUID | None = None,
         raw_content: str | None = None,

@@ -47,7 +47,24 @@ SessionRunStatus = Literal["pending", "running", "completed", "completed_with_fa
 TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
 OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
 
+# Closed enum mirroring the ``ck_chat_messages_writer_principal`` CHECK
+# constraint in ``web/sessions/models.py``. The Python Literal and the SQL
+# CHECK are paired contracts: extending one without the other lets the
+# dataclass validator pass while the DB rejects the row (or vice versa).
+# The order here mirrors the CHECK declaration (models.py L116) for visual
+# diff clarity. Adding a value is a governance action — see the
+# closed-list-of-permitted-writers comment block at the
+# ``audit_access_log_table`` definition for the same posture.
+ChatMessageWriterPrincipal = Literal[
+    "compose_loop",
+    "route_user_message",
+    "route_system_message",
+    "admin_tool",
+    "session_fork",
+]
+
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
+CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
@@ -153,7 +170,7 @@ class ChatMessageRecord:
     role: ChatMessageRole
     content: str
     created_at: datetime
-    writer_principal: str
+    writer_principal: ChatMessageWriterPrincipal
     raw_content: str | None = None
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     composition_state_id: UUID | None = None
@@ -163,9 +180,21 @@ class ChatMessageRecord:
     def __post_init__(self) -> None:
         if self.role not in CHAT_MESSAGE_ROLE_VALUES:
             raise AuditIntegrityError(f"Tier 1: chat_messages.role is {self.role!r}, expected one of {sorted(CHAT_MESSAGE_ROLE_VALUES)}")
-        # writer_principal / tool_call_id / parent_assistant_id are scalar
-        # fields and need no freeze guard (CLAUDE.md "Scalar-Only Fields
-        # Need No Guard"). Only ``tool_calls`` carries mutable contents.
+        # Tier-1 read guard: ``writer_principal`` mirrors the
+        # ``ck_chat_messages_writer_principal`` CHECK constraint. Reading a
+        # value outside the closed enum from our own session DB means
+        # something catastrophic happened (constraint disabled, direct SQL
+        # write, schema drift). Crash with a Tier-1 audit-integrity error
+        # rather than letting a Literal-typed field carry a wider str at
+        # runtime — same posture as the role guard above.
+        if self.writer_principal not in CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: chat_messages.writer_principal is {self.writer_principal!r}, "
+                f"expected one of {sorted(CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES)}"
+            )
+        # tool_call_id / parent_assistant_id are scalar fields and need no
+        # freeze guard (CLAUDE.md "Scalar-Only Fields Need No Guard"). Only
+        # ``tool_calls`` carries mutable contents.
         if self.tool_calls is not None:
             freeze_fields(self, "tool_calls")
 
@@ -456,7 +485,7 @@ class SessionServiceProtocol(Protocol):
         role: ChatMessageRole,
         content: str,
         *,
-        writer_principal: str,
+        writer_principal: ChatMessageWriterPrincipal,
         tool_calls: Sequence[Mapping[str, Any]] | None = None,
         composition_state_id: UUID | None = None,
         raw_content: str | None = None,
@@ -656,7 +685,7 @@ class SessionServiceProtocol(Protocol):
         redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
-        writer_principal: str,
+        writer_principal: ChatMessageWriterPrincipal,
         plugin_crash_pending: bool,
     ) -> AuditOutcome:
         """Persist one compose turn (assistant + tool rows + per-tool

@@ -12,6 +12,7 @@ import pytest
 import structlog
 from sqlalchemy import text
 
+from elspeth.web.sessions._persist_payload import _StatePayload
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web.conftest import _make_session
@@ -406,16 +407,19 @@ def test_insert_composition_state_returns_id(service):
                 conn,
                 session_id="s4",
                 # B1: no ``version=``. The helper allocates it.
-                state=CompositionStateData(
-                    source={"kind": "tool_response"},
-                    nodes=[],
-                    edges=[],
-                    outputs=[],
-                    metadata_={},
-                    is_valid=True,
-                    validation_errors=None,
+                # Phase 1B: state + lineage bundled into ``_StatePayload``.
+                payload=_StatePayload(
+                    data=CompositionStateData(
+                        source={"kind": "tool_response"},
+                        nodes=[],
+                        edges=[],
+                        outputs=[],
+                        metadata_={},
+                        is_valid=True,
+                        validation_errors=None,
+                    ),
+                    derived_from_state_id=None,
                 ),
-                derived_from_state_id=None,
                 provenance="tool_call",
             )
         assert isinstance(state_id, str)
@@ -449,8 +453,10 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
                     service._insert_composition_state(
                         conn,
                         session_id="s4_seq",
-                        state=CompositionStateData(),
-                        derived_from_state_id=None,
+                        payload=_StatePayload(
+                            data=CompositionStateData(),
+                            derived_from_state_id=None,
+                        ),
                         provenance="session_seed",
                     )
                 )
@@ -483,8 +489,10 @@ def test_session_write_lock_serializes_sqlite_same_session_state_version_allocat
                 state_id = service._insert_composition_state(
                     conn,
                     session_id="s4_state_lock",
-                    state=CompositionStateData(metadata_={"index": index}),
-                    derived_from_state_id=None,
+                    payload=_StatePayload(
+                        data=CompositionStateData(metadata_={"index": index}),
+                        derived_from_state_id=None,
+                    ),
                     provenance="session_seed",
                 )
                 time.sleep(0.01)
@@ -524,8 +532,10 @@ def test_insert_composition_state_versions_are_per_session(service):
                 service._insert_composition_state(
                     conn,
                     session_id="s_ver_a",
-                    state=CompositionStateData(),
-                    derived_from_state_id=None,
+                    payload=_StatePayload(
+                        data=CompositionStateData(),
+                        derived_from_state_id=None,
+                    ),
                     provenance="session_seed",
                 )
 
@@ -536,8 +546,10 @@ def test_insert_composition_state_versions_are_per_session(service):
             service._insert_composition_state(
                 conn,
                 session_id="s_ver_b",
-                state=CompositionStateData(),
-                derived_from_state_id=None,
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
                 provenance="session_seed",
             )
         row = conn.execute(text("SELECT version FROM composition_states WHERE session_id='s_ver_b'")).first()
@@ -557,8 +569,10 @@ def test_insert_composition_state_requires_session_write_lock(service):
             service._insert_composition_state(
                 conn,
                 session_id="s4_no_lock",
-                state=CompositionStateData(),
-                derived_from_state_id=None,
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
                 provenance="session_seed",
             )
 
@@ -578,8 +592,10 @@ def test_insert_composition_state_rejects_unknown_provenance(service):
             service._insert_composition_state(
                 conn,
                 session_id="s5",
-                state=CompositionStateData(),
-                derived_from_state_id=None,
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
                 provenance="rogue_value",
             )
 

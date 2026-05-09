@@ -25,6 +25,7 @@ from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.sessions._persist_payload import _StatePayload
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
@@ -547,14 +548,24 @@ class SessionServiceImpl:
         conn: Connection,
         *,
         session_id: str,
-        state: CompositionStateData,
-        derived_from_state_id: str | None,
+        payload: _StatePayload,
         provenance: str,
         created_at: datetime | None = None,
         state_id: str | None = None,
     ) -> str:
         """Single-row insert into composition_states with per-session
         version allocation under _session_write_lock.
+
+        Phase 1B refactor: takes a single :class:`_StatePayload` carrying
+        ``data`` (a :class:`CompositionStateData`) and
+        ``derived_from_state_id`` rather than two separate keyword
+        arguments. Bundling the two coheres with B1 — the payload object
+        is the unit of state-advance, so a helper that takes it as a
+        unit prevents future callers from passing inconsistent
+        ``(state, derived_from_state_id)`` pairs. Critically,
+        ``_StatePayload`` does NOT carry a caller-supplied ``version``;
+        version allocation remains inside this helper, under the held
+        lock (see B1 below).
 
         PRECONDITION: caller MUST be inside
         ``with self._session_write_lock(conn, session_id):`` in the same
@@ -616,6 +627,13 @@ class SessionServiceImpl:
             session_id,
             caller="_insert_composition_state",
         )
+        # Unpack the bundled payload once so the rest of the body refers
+        # to ``state`` and ``derived_from_state_id`` exactly as it did
+        # pre-1B-refactor. This avoids touching the version-allocation
+        # arithmetic, the per-column INSERT, or the IntegrityError
+        # handler — all of which Schedule 1A reviewed and merged.
+        state = payload.data
+        derived_from_state_id = payload.derived_from_state_id
         # B1: allocate version under _session_write_lock. The
         # SELECT-MAX-then-INSERT sequence is atomic against every other
         # writer for this session because the caller is required to be
@@ -1889,17 +1907,24 @@ class SessionServiceImpl:
                             # not "always 1" — so the literal ``state_version =
                             # 1`` below is correct because of the freshness
                             # invariant, not because the helper is hard-coded.
-                            state=CompositionStateData(
-                                source=source_state_record.source,
-                                nodes=source_state_record.nodes,
-                                edges=source_state_record.edges,
-                                outputs=source_state_record.outputs,
-                                metadata_=source_state_record.metadata_,
-                                is_valid=source_state_record.is_valid,
-                                validation_errors=source_state_record.validation_errors,
-                                composer_meta=source_state_record.composer_meta,
+                            #
+                            # Phase 1B: state + lineage are bundled into a
+                            # single ``_StatePayload`` rather than passed as
+                            # two separate kwargs (see ``_insert_composition_state``
+                            # docstring for rationale).
+                            payload=_StatePayload(
+                                data=CompositionStateData(
+                                    source=source_state_record.source,
+                                    nodes=source_state_record.nodes,
+                                    edges=source_state_record.edges,
+                                    outputs=source_state_record.outputs,
+                                    metadata_=source_state_record.metadata_,
+                                    is_valid=source_state_record.is_valid,
+                                    validation_errors=source_state_record.validation_errors,
+                                    composer_meta=source_state_record.composer_meta,
+                                ),
+                                derived_from_state_id=None,
                             ),
-                            derived_from_state_id=None,
                             provenance="session_fork",
                             created_at=now,  # cross-table timestamp consistency
                             state_id=copied_state_id_str,

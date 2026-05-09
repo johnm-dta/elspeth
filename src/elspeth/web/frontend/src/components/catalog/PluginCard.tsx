@@ -119,9 +119,7 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawe
   }
 
   const handleUseInPipeline = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      e.preventDefault();
+    () => {
       const prompt = buildInsertionPrompt(plugin);
       window.dispatchEvent(
         new CustomEvent(PREFILL_CHAT_INPUT_EVENT, { detail: prompt }),

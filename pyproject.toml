@@ -92,6 +92,8 @@ dev = [
     "asgi-lifespan>=2.1,<3",  # FastAPI lifespan support for AsyncClient end-to-end tests
     # HTTP mocking
     "respx>=0.23,<1",  # httpx mocking for web scrape tests
+    "testcontainers[postgres]>=4.0,<5",  # Docker-backed Postgres for CL-PP-11 dialect-portability tests
+    "psycopg2-binary>=2.9,<3",  # Postgres DB-API driver for testcontainer lane (pre-built libpq wheel; testcontainers' default driver= is psycopg2)
 ]
 
 llm = [
@@ -178,6 +180,7 @@ all = [
     "errorworks>=0.1.1",
     "starlette>=0.52,<1",
     "respx>=0.23,<1",
+    "testcontainers[postgres]>=4.0,<5",
     # llm dependencies
     "jinja2>=3.1,<4",
     "openai>=2.36,<3",
@@ -346,7 +349,7 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "-m", "not slow and not stress and not performance",  # Skip slow/stress/performance tests by default
+    "-m", "not slow and not stress and not performance and not testcontainer",  # Skip slow/stress/performance/testcontainer tests by default
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -356,6 +359,7 @@ markers = [
     "stress: marks tests as stress tests requiring ChaosLLM HTTP server (deselect with '-m \"not stress\"')",
     "composer_llm_eval: characterization/replay tests for the 2026-04-28 composer LLM evaluation scenarios",
     "chaosllm: Configure ChaosLLM server for the test (preset=None, **kwargs)",
+    "testcontainer: marks tests requiring Docker via testcontainers-python (deselect with '-m \"not testcontainer\"')",
 ]
 # Load .env file for integration tests (API keys)
 env_files = [".env"]

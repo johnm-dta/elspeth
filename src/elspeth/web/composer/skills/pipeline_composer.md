@@ -313,7 +313,7 @@ Fix — insert a fork gate and patch the consumers:
       "on_success": null,
       "on_error": null,
       "condition": "True",
-      "routes": {"true": "fork", "false": "discard"},
+      "routes": {"all": "fork"},
       "fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"],
       "options": {}
     },
@@ -1425,7 +1425,7 @@ A gate node has two distinct branching mechanisms; mixing them up is the most co
 | `routes: {"true": A, "false": B}` | **Route** — evaluate `condition`, send the row to **one** branch by the truthy/falsy result | 1 row → 1 branch | "split rows by predicate", "send approved here, rejected there" |
 | `fork_to: [A, B]` | **Fork (duplicate)** — clone the row and emit **every** clone, one per listed branch | 1 row → N branches simultaneously | "run two enrichments on every row", "process the same row two ways and combine" |
 
-**Routes and fork_to are different mechanisms with different semantics.** A row can be routed by predicate (`routes`) OR forked to all branches (`fork_to`); they answer different questions. For Fork/Join (Recipe #10) the canonical shape is `condition: "True"` + `routes: {"true": "fork", "false": "discard"}` + `fork_to: [path_a_in, path_b_in]`. The `condition: "True"` always evaluates true, so every row takes the `"true"` route which expands via `fork_to` into all listed branches; the `"false"` branch is dead (audited as `gate_discarded` if ever taken). **Both `"true"` AND `"false"` route labels are required** — the engine validator (`core/config.py:validate_boolean_routes`) inspects the `condition` and, when it parses as a boolean expression (literals `"True"`/`"False"`, comparisons, `and`/`or`/`not`), rejects routes whose label set is anything other than `{"true", "false"}`. The literal `"True"` IS a boolean expression by this check; `routes: {"all": "fork"}` (or any single-label-not-in-{true,false} mapping) WILL be rejected with `"boolean expressions evaluate to True/False"`. **Routes must have at least one entry — the validator also rejects `routes: {}`.** **Do not** use `routes: {"true": "branch_a", "false": "branch_b"}` (without `fork_to`) to "duplicate" a row to two branches — that routes one row to one branch by predicate, it does not duplicate. The combination of boolean condition + `routes: {"true": "fork", "false": <dest>}` + `fork_to: [...]` is what makes a fork.
+**Routes and fork_to are different mechanisms with different semantics.** A row can be routed by predicate (`routes`) OR forked to all branches (`fork_to`); they answer different questions. For Fork/Join (Recipe #10) the canonical shape is `routes: {"all": "fork"}` (a single non-empty entry whose destination is the literal string `"fork"`) plus `fork_to: [path_a_in, path_b_in]`. **Routes must have at least one entry — the validator rejects `routes: {}`.** **Do not** use `routes: {"true": "branch_a", "false": "branch_b"}` to "duplicate" a row to two branches — that routes one row to one branch by predicate, it does not duplicate.
 
 **The `fork_to` entries are CONNECTION NAMES, not node IDs.** This is the most-frequently-mistaken wiring step in fork+coalesce. A gate's `fork_to: [path_a_in, path_b_in]` *publishes* two new connections named `path_a_in` and `path_b_in`. Each path-transform node must then *consume* one of those connections via its `input` field (e.g. `{"id": "path_a", "input": "path_a_in", ...}`) — and **`input` must equal the corresponding `fork_to` entry exactly**. If you set `fork_to: [path_a, path_b]` (using the node IDs) while the path nodes have `input: "rows_in"` (the source's connection), the gate publishes connections nothing consumes and the path nodes consume from a connection the gate never targeted — runtime preflight rejects with `"fork branch '<name>' has no destination"`. The full convention:
 - `gate.fork_to: [path_a_in, path_b_in]` — publishes upstream branch connections.
@@ -1455,7 +1455,7 @@ For the user's "two side-by-side copies under separate keys (path_a, path_b)" in
       "node_type": "gate",
       "input": "trimmed",
       "condition": "True",
-      "routes": {"true": "fork", "false": "discard"},
+      "routes": {"all": "fork"},
       "fork_to": ["path_a_in", "path_b_in"],
       "options": {}
     },
@@ -1478,7 +1478,7 @@ For the user's "two side-by-side copies under separate keys (path_a, path_b)" in
 }
 ```
 
-This is the canonical Fork/Join shape. Five nodes total: pre-fork transform + gate (with `condition: "True"`, `routes: {"true": "fork", "false": "discard"}`, and `fork_to: [...branches]`) + path A + path B + coalesce (with both `policy` and `merge`). **One** sink at the end consumes the merged output.
+This is the canonical Fork/Join shape. Five nodes total: pre-fork transform + gate (with both `routes: {"all": "fork"}` and `fork_to`) + path A + path B + coalesce (with both `policy` and `merge`). **One** sink at the end consumes the merged output.
 
 **Connection naming — `_in` vs `_out` is load-bearing for fork branches.** Each path-transform sits between the gate (which publishes the *upstream* connection) and the coalesce (which consumes the *downstream* connection). These are **two different connections**, not one — and giving them the same name creates a self-loop the cycle detector rejects. The convention:
 

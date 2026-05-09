@@ -625,6 +625,8 @@ If a tool call fails or returns unexpected results:
 
    Call `request_advisor_hint` *before* `set_pipeline` and describe both the user's task and the wiring shape you intend; ask for a sanity check on plugin choice and option-block content.
 
+   **Red-listing extends to one compositional pattern: Recipe #10 (Fork/Join Enrichment Pipeline).** Fork+coalesce has multiple cross-node naming invariants and a boolean-routes contract the cheap composer routinely gets wrong. **Mandatory:** when the user describes any fork+coalesce shape (duplicate-and-merge, side-by-side enrichment, "two parallel paths combined", `path_a`/`path_b` style outputs, fan-out-then-rejoin), call `request_advisor_hint` with `trigger: "proactive_red_listed_plugin"` **BEFORE** `set_pipeline`. In `problem_summary` name the shape ("user wants fork+coalesce — duplicate each row through two paths and merge under nested keys"), in `attempted_actions` note "have not yet built — escalating proactively per Recipe #10 mandatory-advisor rule", and use the advisor's guidance to construct wiring. Do not attempt fork+coalesce without an advisor consultation — the historical record on bug elspeth-7197f92457 shows the cheap model cannot reliably converge on this shape unaided.
+
 Every `request_advisor_hint` call must declare exactly one `trigger` value:
 
 | `trigger` | Use when |

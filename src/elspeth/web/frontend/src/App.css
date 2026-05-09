@@ -3106,13 +3106,13 @@ summary:focus-visible {
 .plugin-card {
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--color-border);
-  cursor: pointer;
 }
 
 .plugin-card-header {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  cursor: pointer;
 }
 
 .plugin-card-name {

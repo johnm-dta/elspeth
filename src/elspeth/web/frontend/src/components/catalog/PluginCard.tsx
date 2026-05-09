@@ -136,40 +136,39 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawe
     | undefined;
 
   return (
-    <div
-      onClick={handleClick}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          handleClick();
-        }
-      }}
-      tabIndex={0}
-      role="button"
-      aria-expanded={expanded}
-      aria-label={`${plugin.name} plugin details`}
-      className="plugin-card"
-    >
-      {/* Header — always visible */}
-      <div className="plugin-card-header">
+    <div className="plugin-card">
+      {/* Disclosure header — the interactive expand/collapse target */}
+      <div
+        onClick={handleClick}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleClick();
+          }
+        }}
+        tabIndex={0}
+        role="button"
+        aria-expanded={expanded}
+        aria-label={`${plugin.name} plugin details`}
+        className="plugin-card-header"
+      >
         <span className="plugin-card-name">{plugin.name}</span>
         <span className="plugin-card-desc">{plugin.description}</span>
-        <button
-          type="button"
-          className="btn plugin-card-use-btn"
-          onClick={handleUseInPipeline}
-          aria-label={`Use ${plugin.name} in pipeline`}
-        >
-          Use in pipeline
-        </button>
       </div>
+
+      {/* Action button — sibling of the disclosure header, not inside it */}
+      <button
+        type="button"
+        className="btn plugin-card-use-btn"
+        onClick={handleUseInPipeline}
+        aria-label={`Use ${plugin.name} in pipeline`}
+      >
+        Use in pipeline
+      </button>
 
       {/* Expanded content */}
       {expanded && (
-        <div
-          className="plugin-card-expanded"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="plugin-card-expanded">
           {schemaError ? (
             <span className="plugin-card-schema-error">
               Failed to load schema. Collapse and expand to retry.

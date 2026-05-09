@@ -507,10 +507,10 @@ function RunDiagnosticsPanel({
           {diagnostics?.summary.preview_truncated ? `, first ${diagnostics.summary.preview_limit}` : ""}
         </span>
         <span style={{ display: "flex", gap: 6 }}>
-          <button type="button" onClick={onRefresh} disabled={isLoading}>
+          <button type="button" className="btn btn-small" onClick={onRefresh} disabled={isLoading}>
             Refresh
           </button>
-          <button type="button" onClick={onExplain} disabled={isEvaluating || isLoading || !diagnostics}>
+          <button type="button" className="btn btn-small" onClick={onExplain} disabled={isEvaluating || isLoading || !diagnostics}>
             {isEvaluating ? "Explaining..." : "Explain"}
           </button>
         </span>

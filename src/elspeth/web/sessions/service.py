@@ -19,7 +19,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
@@ -924,6 +924,61 @@ class SessionServiceImpl:
         except IntegrityError:
             self._telemetry.tool_row_integrity_violation_total.add(1)
             raise
+        except OperationalError as audit_exc:
+            # OperationalError disposition (Task 13 / spec §5.2.2 / §5.5
+            # rows 9-10): the audit insert itself failed (commit-time
+            # disk full, fsync failure, network partition, etc.). The
+            # ``with self._engine.begin()`` context has already rolled
+            # back by the time we enter this handler, so no partial
+            # audit row survives.
+            #
+            # Disposition is asymmetric on ``plugin_crash_pending``:
+            #
+            # 1. ``plugin_crash_pending=True`` — the tool plugin
+            #    already crashed and the caller is on the unwind path
+            #    with a captured plugin exception in hand. Surfacing
+            #    a separate ``AuditIntegrityError`` here would mask
+            #    the original tool failure (which is what the operator
+            #    needs to see). Record the audit failure via counter
+            #    + slog (the slog call is permitted under CLAUDE.md
+            #    primacy because the audit system itself failed —
+            #    telemetry has nowhere to write the structured event)
+            #    and return ``_AuditOutcome(unwind_audit_failed=True)``
+            #    so the caller can raise the captured plugin
+            #    exception while still surfacing that the unwind
+            #    audit row could not be persisted.
+            #
+            # 2. ``plugin_crash_pending=False`` — the tool succeeded
+            #    but the audit insert failed. This is a Tier-1 audit
+            #    corruption per CLAUDE.md doctrine: the system did
+            #    work that it cannot prove it did. Returning a flag
+            #    would let the caller proceed with corrupted audit
+            #    state (synthesised review finding H1).
+            #    ``AuditIntegrityError`` is registered in
+            #    ``TIER_1_ERRORS`` via ``@tier_1_error`` on its
+            #    declaration in ``contracts/errors.py``, so
+            #    ``except Exception:`` blocks elsewhere cannot
+            #    silently swallow it. The original ``OperationalError``
+            #    is preserved as the ``__cause__`` via ``from
+            #    audit_exc`` so the underlying DB error remains
+            #    visible to the operator.
+            if plugin_crash_pending:
+                self._telemetry.tool_row_persist_failed_during_unwind_total.add(1)
+                self._log.warning(
+                    "audit_insert_failed_during_tool_failure_unwind",
+                    session_id=session_id,
+                    audit_exc_class=type(audit_exc).__name__,
+                )
+                return _AuditOutcome(
+                    assistant_id=None,
+                    unwind_audit_failed=True,
+                )
+            self._telemetry.tool_row_tier1_violation_total.add(1)
+            raise AuditIntegrityError(
+                f"persist_compose_turn: audit insert failed for "
+                f"session_id={session_id!r} with tool succeeded — "
+                f"Tier-1 audit corruption (no recovery)"
+            ) from audit_exc
 
     async def persist_compose_turn_async(
         self,

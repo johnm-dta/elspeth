@@ -356,8 +356,14 @@ jobs:
         run: uv run python -c "import testcontainers.postgres"
 
       - name: Run testcontainer tests
+        # Marker filter is the contract; path narrowing breeds drift.
+        # Future testcontainer-marked tests anywhere under tests/
+        # (e.g. tests/integration/landscape/) should be picked up
+        # automatically. The earlier `tests/integration/web/` constraint
+        # would silently skip out-of-tree testcontainer-marked tests
+        # while CI still reported green — defeating the gate's purpose.
         run: |
-          uv run pytest tests/integration/web/ \
+          uv run pytest tests/ \
             -v \
             -m testcontainer
 

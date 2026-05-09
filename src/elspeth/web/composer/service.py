@@ -70,6 +70,10 @@ from elspeth.web.composer.protocol import (
     ToolArgumentError,
 )
 from elspeth.web.composer.state import CompositionState, ValidationSummary
+from elspeth.web.composer.state_claim_grounding import (
+    check_state_claim_grounding,
+    compose_grounded_message,
+)
 from elspeth.web.composer.tools import (
     ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_VALUES,
@@ -786,6 +790,7 @@ _INFORMATION_ONLY_PREFIXES: Final[tuple[str, ...]] = (
 _AugmentationBranch = Literal[
     "no_mutation_empty_state_augmentation",
     "preflight_invalid_empty_state_augmentation",
+    "state_claim_grounding_correction",
 ]
 _ReplacementBranch = Literal["preflight_invalid_non_empty_state_replacement"]
 
@@ -1463,6 +1468,49 @@ class ComposerServiceImpl:
             )
             return ComposerResult(
                 message=replacement_message,
+                state=state,
+                runtime_preflight=runtime_result,
+                raw_assistant_content=content,
+                tool_invocations=tool_invocations,
+                llm_calls=llm_calls,
+            )
+
+        # State-claim grounding correction (Path 3 of issue elspeth-c028f7d186).
+        # State has reached passing preflight with non-empty contents. The
+        # model's prose may still contradict that state — claiming a field
+        # has its old value when the mutation already landed (T4 forward
+        # contradiction), or claiming a fresh action when state was
+        # unchanged this turn (T5 backward contradiction). Detect and
+        # append an [ELSPETH-SYSTEM] correction so amateur personas
+        # (compliance, marketing-ops) cannot read confidently-wrong prose
+        # as authoritative.
+        #
+        # Augmentation shape preserves the model's prose verbatim per the
+        # ``_enforce_augmentation_prefix_invariant`` contract; the
+        # raw_assistant_content field carries the original prose for the
+        # LLM history-replay path (consistent with the empty-state
+        # augmentation branches above). The natural-language regex used
+        # by ``check_state_claim_grounding`` is content-grounding, not
+        # gate routing — the gate decision (state non-empty + preflight
+        # valid) was already taken above without consulting prose.
+        grounding_violations = check_state_claim_grounding(
+            prose=content,
+            state=state,
+            mutation_success_seen=mutation_success_seen,
+            state_changed=state.version > initial_version,
+        )
+        if grounding_violations:
+            augmented_message = compose_grounded_message(
+                prose=content,
+                violations=grounding_violations,
+            )
+            _enforce_augmentation_prefix_invariant(
+                branch="state_claim_grounding_correction",
+                content=content,
+                augmented=augmented_message,
+            )
+            return ComposerResult(
+                message=augmented_message,
                 state=state,
                 runtime_preflight=runtime_result,
                 raw_assistant_content=content,

@@ -4649,6 +4649,172 @@ class TestEmptyStateFinalizePassthrough:
         assert result.message == "All good."
         assert result.raw_assistant_content is None  # no replacement happened
 
+    @pytest.mark.asyncio
+    async def test_state_claim_grounding_appends_correction_on_t4_contradiction(self) -> None:
+        """Path 3 of issue elspeth-c028f7d186: when the model's prose claims
+        a state field has its old value while state has been mutated to a
+        new value, the finalizer appends an [ELSPETH-SYSTEM] correction.
+
+        Reproduces the panel-evals T4 case from the
+        boolean_routing__p1_compliance cell (Linda the compliance officer):
+        prose claims ``on_validation_failure: discard`` while state has
+        ``rejected_records`` (the fix had already landed a turn earlier).
+
+        The augmentation must satisfy
+        ``_enforce_augmentation_prefix_invariant`` — message starts with
+        the model's prose verbatim — and ``raw_assistant_content`` must
+        carry the unaugmented prose for LLM history replay.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        # State already has the fix applied: on_validation_failure == "rejected_records".
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="rows",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="rejected_records",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        valid_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        # Prose contradicts state: claims discard, but state has rejected_records.
+        contradicting_prose = "I see the issue — the source still uses `on_validation_failure: discard`, so I'll fix that next."
+
+        with patch.object(service, "_runtime_preflight"):
+            result = await service._finalize_no_tool_response(
+                content=contradicting_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=valid_preflight,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        # Augmentation prefix invariant: model's prose verbatim at start.
+        assert result.message.startswith(contradicting_prose)
+        # Correction suffix attached.
+        assert "[ELSPETH-SYSTEM]" in result.message
+        # Actual state value surfaced for the operator to read.
+        assert "rejected_records" in result.message
+        # raw_assistant_content carries the unaugmented prose so the
+        # LLM history-replay path is unaffected by the synthetic suffix.
+        assert result.raw_assistant_content == contradicting_prose
+        # Preflight was passed through (still valid).
+        assert result.runtime_preflight is valid_preflight
+
+    @pytest.mark.asyncio
+    async def test_state_claim_grounding_appends_correction_on_t5_unmotivated_action(self) -> None:
+        """Path 3 backward-contradiction case from the panel-evals T5 cell:
+        prose claims a fresh action ("I just fixed it") while state was
+        unchanged this turn and no mutation tool succeeded.
+
+        The action-claim detector flags the un-grounded completion claim
+        even though the prose contains no concrete field=value claim.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        # State is the same as the prior turn — no mutation happened this turn.
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="rows",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="rejected_records",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        valid_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        unmotivated_prose = "I just fixed the workflow behavior. All set now."
+
+        with patch.object(service, "_runtime_preflight"):
+            result = await service._finalize_no_tool_response(
+                content=unmotivated_prose,
+                state=state,
+                initial_version=state.version,  # unchanged → no mutation
+                user_id="user-1",
+                last_runtime_preflight=valid_preflight,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=False,
+            )
+
+        assert result.message.startswith(unmotivated_prose)
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "no successful mutation tool was called this turn" in result.message
+        assert result.raw_assistant_content == unmotivated_prose
+
+    @pytest.mark.asyncio
+    async def test_state_claim_grounding_no_op_on_grounded_prose(self) -> None:
+        """Negative control: when the model's prose is consistent with
+        state, the grounding check is a no-op and the prose is passed
+        through verbatim. Critical to avoid corrupting honest reports."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="rows",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="rejected_records",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        valid_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        # Prose accurately reports state: it correctly says rejected_records.
+        grounded_prose = "I configured the source with `on_validation_failure: rejected_records`. The pipeline is ready."
+
+        with patch.object(service, "_runtime_preflight"):
+            result = await service._finalize_no_tool_response(
+                content=grounded_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=valid_preflight,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=True,
+            )
+
+        # Verbatim pass-through; no augmentation; no raw_assistant_content set.
+        assert result.message == grounded_prose
+        assert "[ELSPETH-SYSTEM]" not in result.message
+        assert result.raw_assistant_content is None
+
 
 # ---------------------------------------------------------------------------
 # Forced-repair loop coverage. When the assistant emits no tool_calls but

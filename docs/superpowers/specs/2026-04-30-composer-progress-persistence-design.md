@@ -159,10 +159,9 @@ chat_messages_table = Table(
     ),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("composition_state_id", String, nullable=True),
-    Column(                                            # NEW (rev 3) — explicit cascade
+    Column(                                            # NEW (rev 3); composite FK below (Phase 1)
         "parent_assistant_id",
         String,
-        ForeignKey("chat_messages.id", ondelete="CASCADE"),
         nullable=True,
     ),
     ForeignKeyConstraint(
@@ -170,8 +169,24 @@ chat_messages_table = Table(
         ["composition_states.id", "composition_states.session_id"],
         name="fk_chat_messages_composition_state_session",
     ),
+    # Phase 1: composite same-session FK on parent_assistant_id closes the
+    # cross-session lineage hole — a tool row in session B cannot reference
+    # an assistant row in session A. ON DELETE CASCADE removes child tool
+    # rows when the assistant is deleted, preventing orphan tool rows from
+    # accumulating in the audit DB.
+    ForeignKeyConstraint(
+        ["parent_assistant_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_chat_messages_parent_assistant_session",
+        ondelete="CASCADE",
+    ),
+    UniqueConstraint(
+        "id",
+        "session_id",
+        name="uq_chat_messages_id_session",
+    ),
     CheckConstraint(
-        "role IN ('user', 'assistant', 'system', 'tool')",
+        "role IN ('user', 'assistant', 'system', 'tool', 'audit')",
         name="ck_chat_messages_role",
     ),
     CheckConstraint(                                                              # NEW (rev 3)
@@ -183,9 +198,11 @@ chat_messages_table = Table(
         name="ck_chat_messages_parent_role",
     ),
     CheckConstraint(                                                              # NEW (rev 4)
-        # writer_principal is one of the four expected sources; future writers
-        # require a schema migration that adds the new value to this CHECK.
-        "writer_principal IN ('compose_loop', 'route_user_message', 'route_system_message', 'admin_tool')",
+        # writer_principal is one of the five expected sources; future writers
+        # require a destructive session-DB recreation per
+        # ``project_db_migration_policy`` (no Alembic in this project) that
+        # extends this CHECK with the new value.
+        "writer_principal IN ('compose_loop', 'route_user_message', 'route_system_message', 'admin_tool', 'session_fork')",
         name="ck_chat_messages_writer_principal",
     ),
     Index(
@@ -215,13 +232,27 @@ token_id)" attributability standard. Permitted values:
 - `route_system_message` — the route-layer insert for system-prompt seeding
   (existing call site at `routes.py:1883`).
 - `admin_tool` — reserved for future admin tooling. No current writer.
+- `session_fork` — the Phase 1 fork-copy writer that re-emits inherited
+  history into a forked session without losing actor attribution. Distinct
+  from the original writer because the row is a fork-time copy, not a
+  fresh authoring event.
+
+The `role='audit'` value is an internal-only role for breadcrumb rows
+that have no real OpenAI tool-response or assistant parent (LLM-call
+audit envelopes, pre-flight redaction failures, etc.). They MUST be
+filtered out of any user-facing chat response and any composer
+prompt-history rebuild — enforced at
+``_is_composer_audit_tool_message`` /
+``_composer_conversation_messages`` and the public messages route.
 
 The CHECK constraint pins the enum at the database level; a new writer
-identity requires an explicit schema migration that extends the CHECK,
-which forces architectural review of any new write surface. This is the
-mechanical mitigation for the "single-writer-per-session structurally
-enforced" assertion in §5.7 — instead of relying on convention, the
-database refuses unrecognised principal strings.
+identity requires a destructive session-DB recreation per
+``project_db_migration_policy`` (no Alembic in this project) that
+extends the CHECK, which forces architectural review of any new write
+surface. This is the mechanical mitigation for the
+"single-writer-per-session structurally enforced" assertion in §5.7 —
+instead of relying on convention, the database refuses unrecognised
+principal strings.
 
 #### 4.1.2 `composition_states` — provenance discriminator (NEW in rev 4)
 
@@ -301,7 +332,7 @@ CREATE UNIQUE INDEX uq_chat_messages_tool_call_id
 **Database-enforced invariants:**
 
 - `tool_call_id` is non-null iff `role='tool'`. (`ck_chat_messages_tool_call_id_role`.)
-- `parent_assistant_id` is non-null iff `role='tool'`, with `ON DELETE CASCADE` so deleting an assistant row removes its tool rows. (`ck_chat_messages_parent_role`.)
+- `parent_assistant_id` is non-null iff `role='tool'` (`ck_chat_messages_parent_role`). The same-session composite FK `(parent_assistant_id, session_id) -> (chat_messages.id, chat_messages.session_id)` (`fk_chat_messages_parent_assistant_session`, backed by the `uq_chat_messages_id_session` composite uniqueness target) ensures a tool row's parent assistant lives in the same session, with `ON DELETE CASCADE` so deleting an assistant row removes its tool rows.
 - `(session_id, sequence_no)` is unique — every row in a session has a unique sequence number, monotonically increasing in commit order. **Sequence numbers are ordering keys, not counts.** Gaps are permitted (e.g., when an atomic-pair transaction rolls back after the next free sequence number was reserved). The property test post-condition asserts strict monotonicity within a session, NOT density. Closes architect H-3.
 - `(session_id, tool_call_id)` is unique among `role='tool'` rows. Cross-turn collisions (same `tool_call_id` reused by the LLM provider in a different turn) are rejected as a Tier-3 input-validation failure: the compose loop crashes the request rather than silently mis-correlating.
 - `writer_principal` is one of the four enumerated values; the database refuses any other string at write time.
@@ -876,11 +907,18 @@ redacted_assistant_tool_calls = tuple(
     for tc in assistant_message.tool_calls
 )
 redacted_tool_rows = tuple(
-    _RedactedToolRow(
+    RedactedToolRow(
         tool_call_id=outcome.call.id,
         content=_serialize_response(outcome, lookup_tool_class(outcome.call.function.name)),
         composition_state_payload=(
-            _StatePayload.from_composition_state(state, outcome.post_version)
+            # B1 (Phase 1 plan-review synthesis): no caller-supplied
+            # ``version`` here. ``StatePayload`` carries the per-column
+            # ``CompositionStateData`` plus a ``derived_from_state_id``;
+            # the new state row's ``version`` is allocated inside
+            # ``_insert_composition_state`` under the held
+            # ``_session_write_lock`` via
+            # ``SELECT COALESCE(MAX(version), 0) + 1 ...`` (§5.7.1).
+            StatePayload.from_composition_state(state)
             if outcome.post_version > outcome.pre_version
             else None
         ),
@@ -888,42 +926,65 @@ redacted_tool_rows = tuple(
     for outcome in tool_outcomes
 )
 
-# _run_sync handles ALL database writes. Cancellation of the outer task
-# while this is in flight has no effect — the sync worker runs to
-# completion. If the outer task is cancelled before this line is reached,
-# no DB work has been done; no invariant is violated.
-audit_outcome = await self._run_sync(
-    self.sessions_service.persist_compose_turn,
+# Production async callers MUST go through the protocol's async
+# dispatcher: ``persist_compose_turn_async`` opens an
+# ``asyncio.shield``-wrapped worker thread and runs the sync primitive
+# under it (commit-wins cancellation contract — see §5.2.2 and the
+# concrete implementation at
+# ``SessionServiceImpl.persist_compose_turn_async``). The sync method
+# ``persist_compose_turn`` stays concrete-only and async-loop guarded;
+# direct invocation from a coroutine raises ``RuntimeError`` rather
+# than blocking the event loop on synchronous DB I/O.
+#
+# Cancellation of the outer task while this is in flight has no effect —
+# the sync worker runs to completion. If the outer task is cancelled
+# before this line is reached, no DB work has been done; no invariant
+# is violated.
+audit_outcome = await self.sessions_service.persist_compose_turn_async(
     session_id=session_id,
     assistant_content=assistant_message.content or "",
+    raw_content=raw_assistant_content,  # B2: pre-redaction LLM output
     redacted_assistant_tool_calls=redacted_assistant_tool_calls,
     redacted_tool_rows=redacted_tool_rows,
     parent_composition_state_id=current_state_id,
+    # Stale-state guard input: the latest state id observed before
+    # the LLM call. ``persist_compose_turn`` re-reads
+    # ``MAX(version)`` under the session write lock and raises
+    # ``StaleComposeStateError`` if a different state has landed
+    # since (e.g. a concurrent fork or admin write).
+    expected_current_state_id=current_state_id,
     writer_principal="compose_loop",
     plugin_crash_pending=plugin_crash is not None,
 )
 
 # Step 3 — dispatch by audit outcome and any pending plugin crash.
-if audit_outcome.tier1_violation:
-    # Tier-1 audit invariant violation: tool succeeded but audit write
-    # failed. Per CLAUDE.md primacy, raise unconditionally. The route
-    # layer cannot recover from this; surface as 500 with no partial_state
-    # claim (the partial state isn't durable).
-    raise audit_outcome.tier1_violation_exc
+# AuditOutcome has two valid shapes (see §5.2.2 below):
+# (1) success — assistant_id set, unwind_audit_failed=False;
+# (2) tool failed AND audit unwind failed — assistant_id=None,
+#     unwind_audit_failed=True.
+# The third historical shape (tier1_violation flag) is REMOVED:
+# Tier-1 audit-write failures raise ``AuditIntegrityError``
+# directly inside the sync worker rather than returning a flag for
+# the caller to re-raise (CLAUDE.md primacy: Tier-1 anomalies crash
+# unconditionally; ``@tier_1_error`` registration prevents
+# ``except Exception`` blocks from swallowing it).
 
 if plugin_crash is not None:
     # The audit row for the crashing tool was written successfully (or the
-    # audit failure was logged under primacy). Now re-raise the captured
+    # audit failure was logged under primacy and ``unwind_audit_failed``
+    # is set on the returned outcome). Now re-raise the captured
     # ComposerPluginCrashError so _handle_plugin_crash receives it.
     raise plugin_crash
 
 # (loop continues to next turn)
 ```
 
-Where `_ToolOutcome`, `_RedactedToolRow`, `_StatePayload`, and
-`_AuditOutcome` are dataclasses defined in `web/composer/service.py`
-or a sibling `web/composer/_persist_payload.py` module (implementer's
-choice; either location is L3 and adheres to layer rules).
+Where `_ToolOutcome`, `RedactedToolRow`, `StatePayload`, and
+`AuditOutcome` are dataclasses defined in
+`src/elspeth/web/sessions/_persist_payload.py` (the
+``CompositionStateData`` input DTO that ``StatePayload`` composes lives
+in `src/elspeth/web/sessions/protocol.py`). Both modules are L3 and
+adhere to layer rules.
 
 #### 5.2.2 The sync write function — `SessionsService.persist_compose_turn`
 
@@ -934,54 +995,149 @@ class SessionsService:
         *,
         session_id: str,
         assistant_content: str,
+        raw_content: str | None = None,            # B2 audit attribution
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,     # stale-state guard input
         writer_principal: str,  # "compose_loop"
         plugin_crash_pending: bool,
-    ) -> _AuditOutcome:
+    ) -> AuditOutcome:
         """Synchronous, single-transaction persistence of one compose turn.
-        Called from a _run_sync worker; MUST NOT be invoked from async land.
+
+        Concrete sync primitive. Production async callers MUST invoke
+        ``await self.persist_compose_turn_async(...)`` through
+        :class:`SessionServiceProtocol`; that dispatcher uses ``_run_sync``
+        under the hood. Calling this sync primitive directly from async
+        land would block the event loop because the body opens a
+        synchronous SQLAlchemy transaction. The implementation guards via
+        ``asyncio.get_running_loop()`` and raises ``RuntimeError`` if a
+        running loop is detected (closes synthesised review finding
+        SA-7 / M1).
+
+        Order of work (load-bearing):
+
+        1. Pre-DB transcript validation
+           (``_validate_tool_call_id_set_equality``). Pure function of
+           caller args; runs BEFORE ``_engine.begin()`` so a contract
+           violation cannot leave a half-written audit trail. Raises
+           :class:`ToolCallIDMismatchError` (defined in
+           ``elspeth.web.sessions.protocol`` alongside
+           :class:`StaleComposeStateError`).
+        2. Open transaction; acquire ``_session_write_lock`` (PostgreSQL
+           uses ``pg_advisory_xact_lock`` two-arg form; SQLite uses a
+           process-wide RLock — see §5.7.1).
+        3. Cross-session guard on ``parent_composition_state_id`` (B5).
+        4. Stale-state guard on ``expected_current_state_id``: re-read the
+           session's latest committed composition state id and raise
+           :class:`StaleComposeStateError` if it does not match.
+        5. Reserve sequence range for assistant + N tool rows under the
+           held lock.
+        6. Insert assistant row (with optional ``raw_content`` — B2
+           audit-attribution column for assistant messages whose visible
+           ``content`` was rewritten by runtime preflight redaction).
+        7. For each tool row: optionally allocate the new
+           ``composition_states`` row's ``version`` under the held lock
+           (``SELECT COALESCE(MAX(version), 0) + 1 ...``) and insert it
+           via ``_insert_composition_state``, then insert the tool chat
+           row referencing the new state id. ``StatePayload`` does NOT
+           carry a caller-supplied ``version`` (B1 fix — see §5.2 /
+           §5.2.1).
 
         Atomicity contract:
-        - Either every row (assistant + N tool + N state) commits, or none does.
-        - INV-AUDIT-AHEAD bidirectional is delivered structurally: state rows
-          and tool rows share a transaction.
+
+        - Either every row (assistant + N tool + N state) commits, or
+          none does.
+        - INV-AUDIT-AHEAD bidirectional is delivered structurally: state
+          rows and tool rows share a transaction.
 
         Audit-failure primacy:
-        - Tool succeeded (plugin_crash_pending=False) + audit raised
-          non-Integrity error => populate _AuditOutcome.tier1_violation_exc;
-          caller raises. Counter:
-          composer.audit.tool_row_tier1_violation_total += 1.
-        - Tool failed (plugin_crash_pending=True) + audit raised
-          non-Integrity error => log permitted, counter
-          composer.audit.tool_row_persist_failed_during_unwind_total += 1,
-          return _AuditOutcome.unwind_audit_failed=True. Caller proceeds
-          to raise the ComposerPluginCrashError.
-        - IntegrityError of any class => counter
-          composer.audit.tool_row_integrity_violation_total += 1, raise
-          (no recovery; CLAUDE.md offensive-programming).
-        - OperationalError on COMMIT after successful INSERTs => same as
-          non-Integrity audit failure; primacy disposition applies.
-        """
-        with self._engine.begin() as conn:
-            # Acquire session-scoped advisory lock (PostgreSQL only; SQLite
-            # has a global write lock).
-            self._acquire_session_advisory_lock(conn, session_id)
 
-            try:
-                # Reserve sequence numbers for the entire batch.
+        - Tool succeeded (``plugin_crash_pending=False``) + audit raised
+          non-Integrity error => raise ``AuditIntegrityError`` from the
+          sync worker, chained from the underlying ``OperationalError``
+          via ``raise ... from audit_exc``. The exception is registered
+          in ``TIER_1_ERRORS`` (via the ``@tier_1_error`` decoration on
+          :class:`AuditIntegrityError`) so ``except Exception`` blocks
+          cannot silently swallow it. There is NO ``tier1_violation``
+          field on ``AuditOutcome``; the caller has no opportunity to
+          ignore the failure (closes synthesised review finding H1).
+        - Tool failed (``plugin_crash_pending=True``) + audit raised
+          non-Integrity error => log permitted (audit-system failure
+          under CLAUDE.md primacy), counter
+          ``composer.audit.tool_row_persist_failed_during_unwind_total
+          += 1``, return ``AuditOutcome(assistant_id=None,
+          unwind_audit_failed=True)``. Caller proceeds to raise the
+          captured ``ComposerPluginCrashError``; the unwind flag tells
+          the caller "your raise should also record this audit failure"
+          (the counter + slog inside ``persist_compose_turn`` have
+          already done so).
+        - IntegrityError of any class => counter
+          ``composer.audit.tool_row_integrity_violation_total += 1``;
+          raise (no recovery; CLAUDE.md offensive-programming). Catch is
+          OUTSIDE ``with self._engine.begin()`` so the context's
+          ``__exit__`` rolls back the transaction BEFORE the counter
+          increment, preventing a partial audit row from surviving.
+        """
+        # Async-loop guard (closes SA-7 / M1).
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # No running loop; we are in a worker thread or sync test.
+        else:
+            raise RuntimeError(
+                "persist_compose_turn must be dispatched via "
+                "await self.persist_compose_turn_async(...) -- "
+                "calling it directly from a coroutine blocks the event "
+                "loop on synchronous DB I/O."
+            )
+
+        # Step 1: pre-DB transcript validation (Q-F1 / Step 3c).
+        _validate_tool_call_id_set_equality(
+            redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+            redacted_tool_rows=redacted_tool_rows,
+        )
+
+        with self._engine.begin() as conn:
+            with self._session_write_lock(conn, session_id):
+                # Step 3: same-session guard on parent_composition_state_id.
+                if parent_composition_state_id is not None:
+                    _assert_state_in_session(
+                        conn,
+                        state_id=parent_composition_state_id,
+                        expected_session_id=session_id,
+                        caller="persist_compose_turn",
+                    )
+
+                # Step 4: stale-state guard.
+                current_state_id = conn.execute(
+                    select(composition_states_table.c.id)
+                    .where(composition_states_table.c.session_id == session_id)
+                    .order_by(composition_states_table.c.version.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                if current_state_id != expected_current_state_id:
+                    raise StaleComposeStateError(
+                        "persist_compose_turn: current composition state "
+                        f"changed for session_id={session_id!r}; "
+                        f"expected={expected_current_state_id!r}, "
+                        f"actual={current_state_id!r}. Refusing to persist "
+                        "a compose result based on a stale state."
+                    )
+
+                # Step 5: reserve sequence range under the held lock.
                 base_seq = self._reserve_sequence_range(
                     conn, session_id,
-                    count=1 + len(redacted_tool_rows),  # 1 assistant + N tool
+                    count=1 + len(redacted_tool_rows),
                 )
 
-                # 1) Insert assistant row.
+                # Step 6: insert assistant row (with optional raw_content).
                 assistant_id = self._insert_chat_message(
                     conn,
                     session_id=session_id,
                     role="assistant",
                     content=assistant_content,
+                    raw_content=raw_content,
                     tool_calls=redacted_assistant_tool_calls,
                     sequence_no=base_seq,
                     writer_principal=writer_principal,
@@ -990,7 +1146,13 @@ class SessionsService:
                     parent_assistant_id=None,
                 )
 
-                # 2) Insert each tool row + corresponding composition_states row.
+                # Step 7: insert each tool row + state row (when state advanced).
+                # ``_insert_composition_state`` allocates ``version`` under
+                # the held ``_session_write_lock`` (B1 fix); StatePayload
+                # carries no caller-supplied version. Both helpers use the
+                # shared ``_enveloped_state_column(...)`` helper used by
+                # ``_insert_composition_state``, ``save_composition_state``,
+                # and ``fork_session``.
                 for offset, tool_row in enumerate(redacted_tool_rows, start=1):
                     state_id: str | None = None
                     if tool_row.composition_state_payload is not None:
@@ -1005,6 +1167,7 @@ class SessionsService:
                         session_id=session_id,
                         role="tool",
                         content=tool_row.content,
+                        raw_content=None,
                         tool_calls=None,
                         sequence_no=base_seq + offset,
                         writer_principal=writer_principal,
@@ -1014,44 +1177,56 @@ class SessionsService:
                     )
 
                 # Transaction commits on context exit.
-                return _AuditOutcome(
+                return AuditOutcome(
                     assistant_id=assistant_id,
-                    tier1_violation=False,
-                    tier1_violation_exc=None,
                     unwind_audit_failed=False,
                 )
 
-            except IntegrityError:
-                # Tier-1 invariant violation. Counter + raise; transaction
-                # rolls back automatically on context exit.
-                self._telemetry.tool_row_integrity_violation_total.add(1)
-                raise
+        # IntegrityError / OperationalError disposition lives OUTSIDE the
+        # ``with self._engine.begin()`` block deliberately — see the
+        # docstring "Audit-failure primacy" notes above. Order is
+        # load-bearing: rollback first (context __exit__), then the
+        # counter increment, then the exception re-raises (or, in the
+        # ``plugin_crash_pending`` branch, the AuditOutcome with
+        # ``unwind_audit_failed=True`` is returned).
 
-            except OperationalError as audit_exc:
-                # Connection drop / pool exhaustion / disk full / fsync
-                # failure. Apply audit-failure primacy.
-                if plugin_crash_pending:
-                    self._telemetry.tool_row_persist_failed_during_unwind_total.add(1)
-                    self._log.warning(
-                        # Permitted under CLAUDE.md primacy: audit-system failure.
-                        "audit_insert_failed_during_tool_failure_unwind",
-                        session_id=session_id,
-                        audit_exc_class=type(audit_exc).__name__,
-                    )
-                    return _AuditOutcome(
-                        assistant_id=None,
-                        tier1_violation=False,
-                        tier1_violation_exc=None,
-                        unwind_audit_failed=True,
-                    )
-                # Tool succeeded but audit failed → Tier-1 violation.
-                self._telemetry.tool_row_tier1_violation_total.add(1)
-                return _AuditOutcome(
-                    assistant_id=None,
-                    tier1_violation=True,
-                    tier1_violation_exc=audit_exc,
-                    unwind_audit_failed=False,
-                )
+    async def persist_compose_turn_async(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: str,
+        plugin_crash_pending: bool,
+    ) -> AuditOutcome:
+        """Async dispatcher for :meth:`persist_compose_turn` — the public
+        async entry point on :class:`SessionServiceProtocol`.
+
+        Bridges to the sync primitive via ``_run_sync`` (worker-thread
+        dispatch shielded from caller cancellation). Commit-wins
+        cancellation contract: on caller cancellation the worker
+        continues to completion; the transaction either commits durably
+        or rolls back atomically. **Callers MUST NOT retry on
+        ``CancelledError``** — retrying risks a duplicate
+        ``tool_call_id`` INSERT that fires a fabricated Tier-1 counter
+        increment.
+        """
+        return await self._run_sync(
+            self.persist_compose_turn,
+            session_id=session_id,
+            assistant_content=assistant_content,
+            raw_content=raw_content,
+            redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+            redacted_tool_rows=redacted_tool_rows,
+            parent_composition_state_id=parent_composition_state_id,
+            expected_current_state_id=expected_current_state_id,
+            writer_principal=writer_principal,
+            plugin_crash_pending=plugin_crash_pending,
+        )
 ```
 
 #### 5.2.3 What this design eliminates
@@ -1170,8 +1345,8 @@ a turn lands or nothing does. The table reflects that.
 | 6 | `asyncio.CancelledError` between Step 1 and Step 2 (after for-loop completes, before `_run_sync` dispatched) | NOTHING persisted for this turn. | Same as row 5. |
 | 7 | `asyncio.CancelledError` arrives while `_run_sync` is executing | The sync worker continues to completion (cancellation does not propagate into running threads in CPython's worker pool). The transaction either commits (if it reached COMMIT before the worker's natural exit) or rolls back. The async caller observes `CancelledError` immediately. The route helper queries chat_messages directly to compute `tool_responses_persisted` from committed state. Either: (a) the turn committed atomically (everything persisted) and `tool_responses_persisted == N`; or (b) the worker rolled back and `tool_responses_persisted == 0`. No third state. | Recovery panel shows the actual committed state, not in-flight bookkeeping. |
 | 8 | DB write fails on `INSERT` (any constraint) — `IntegrityError` | Counter `composer.audit.tool_row_integrity_violation_total` increments; transaction rolls back; sync worker raises `IntegrityError`; async caller raises | Crash; surfaces real bug class (RSK-12 LLM misbehaviour, sequence race, writer_principal violation, provenance violation). |
-| 9 | DB INSERT succeeded, COMMIT fails (`OperationalError`) — disk full, fsync failure, connection dropped between INSERT and COMMIT, no plugin crash in flight | Counter `composer.audit.tool_row_tier1_violation_total` increments; sync worker returns `_AuditOutcome.tier1_violation=True`; async caller raises | 500 response; `partial_state_save_failed=true` carries through; Tier-1 audit invariant violation telemetry alerts. |
-| 10 | DB INSERT succeeded, COMMIT fails (`OperationalError`) — plugin crash in flight | Counter `composer.audit.tool_row_persist_failed_during_unwind_total` increments; sync worker logs (permitted under primacy) and returns `_AuditOutcome.unwind_audit_failed=True`; async caller raises the captured `ComposerPluginCrashError` | Plugin crash path runs as in row 4; the audit-failure-during-unwind is visible via telemetry counter only. |
+| 9 | DB INSERT succeeded, COMMIT fails (`OperationalError`) — disk full, fsync failure, connection dropped between INSERT and COMMIT, no plugin crash in flight | Counter `composer.audit.tool_row_tier1_violation_total` increments; sync worker raises `AuditIntegrityError` chained from the underlying `OperationalError` (no flag-return — see §5.2.2); async caller propagates | 500 response; `partial_state_save_failed=true` carries through; Tier-1 audit invariant violation telemetry alerts. |
+| 10 | DB INSERT succeeded, COMMIT fails (`OperationalError`) — plugin crash in flight | Counter `composer.audit.tool_row_persist_failed_during_unwind_total` increments; sync worker logs (permitted under primacy) and returns `AuditOutcome(assistant_id=None, unwind_audit_failed=True)`; async caller raises the captured `ComposerPluginCrashError` | Plugin crash path runs as in row 4; the audit-failure-during-unwind is visible via telemetry counter only. |
 | 11 | Advisory lock acquisition fails (PostgreSQL pool exhausted, deadlock detector aborts) | Transaction never opens; sync worker raises `OperationalError`; primacy disposition applies as in rows 9/10 | Same dispatch as the post-INSERT commit failure. |
 | 12 | Per-turn tool-call cap exceeded (>16 by default) | NO tool execution attempted; loop raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")` BEFORE the for-loop runs | `_handle_convergence_error` runs; 500 response with the new reason code; partial_state captured pre-cap with state.version unchanged. |
 
@@ -1242,54 +1417,125 @@ class SessionsService:
         *,
         session_id: str,
         assistant_content: str,
+        raw_content: str | None = None,
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
-        writer_principal: str,           # one of the four CHECK-permitted values
+        expected_current_state_id: str | None,
+        writer_principal: str,           # one of the five CHECK-permitted values
         plugin_crash_pending: bool,
-    ) -> _AuditOutcome:
-        """Synchronous, single-transaction persistence of one compose turn.
-        Implementation in §5.2.2. Called from a _run_sync worker; do NOT
-        invoke directly from async land (use the async route-helper paths
-        for non-compose writers).
+    ) -> AuditOutcome:
+        """Concrete-only synchronous primitive. Implementation in §5.2.2.
+        Production async callers go through the protocol's
+        :meth:`persist_compose_turn_async` dispatcher; calling this sync
+        method directly from async land raises ``RuntimeError`` (the
+        ``asyncio.get_running_loop()`` guard).
+        """
+        ...
+
+    async def persist_compose_turn_async(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: str,
+        plugin_crash_pending: bool,
+    ) -> AuditOutcome:
+        """Public async entry point on
+        :class:`SessionServiceProtocol`. Bridges to the sync primitive
+        above via ``_run_sync`` (worker-thread dispatch shielded from
+        caller cancellation). Commit-wins cancellation contract — see
+        §5.2.2.
         """
         ...
 
     # ── Helpers private to persist_compose_turn ─────────────────────
 
     def _acquire_session_advisory_lock(self, conn: Connection, session_id: str) -> None:
-        """Acquire a session-scoped advisory lock for the duration of the
-        current transaction. Released automatically on COMMIT or ROLLBACK.
+        """Acquire a session write lock for the duration of the current
+        transaction. Released automatically on COMMIT or ROLLBACK.
 
-        SQLite: no-op. SQLite's global write lock already serialises writers
-        per database file, which is sufficient because we only have one
-        SQLite database per deployment.
+        SQLite: no-op. SQLite serialisation is owned by
+        ``_session_write_lock`` below (process-wide RLock keyed on
+        ``(database_url, session_id)``); this helper exists only for the
+        PostgreSQL advisory-lock SQL and remains no-op on SQLite so
+        callers can test the dialect-specific SQL separately.
 
-        PostgreSQL: pg_advisory_xact_lock(hashtextextended(session_id::text, 0)).
-        Note: hashtextextended (NOT hashtext) — hashtext returns int4 (32-bit)
-        and would experience birthday collisions at ~65k distinct sessions per
-        Python engineer Q4. hashtextextended returns int8, eliminating the
-        collision risk at any foreseeable scale. The seed argument 0 is
-        canonical; do not vary it across deployments or the lock space
-        becomes inconsistent.
+        PostgreSQL: ``pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
+        hashtext(session_id))`` — the **two-argument** form (B3 from the
+        Phase 1 plan-review synthesis). The classid namespace is reserved
+        in ``src/elspeth/contracts/advisory_locks.py`` as
+        ``ELSPETH_SESSIONS_LOCK_CLASSID`` and is on-the-wire ABI under
+        change control; do not open-code the literal here, always import
+        the constant. The classid value is **NOT** a deployment knob —
+        two ELSPETH instances on the same PostgreSQL cluster (including
+        different versions during a rolling deploy) MUST share the same
+        value or they will not mutually exclude each other.
+
+        Hash-function notes:
+
+        - ``pg_advisory_xact_lock(int, int)`` requires two signed int4
+          arguments. ``hashtext(text)`` returns int4 directly. Do not
+          use ``hashtextextended(...)::int``: PostgreSQL integer casts
+          are range-checked and may fail before the lock is acquired.
+          (B3 amendment: rev-3 spec text used the one-arg
+          ``hashtextextended`` form. The two-arg form with the reserved
+          classid namespaces ELSPETH's session-write locks distinctly
+          from any other advisory-lock space on the cluster.)
+        - Birthday collisions become probable around ~65k *concurrent*
+          sessions hashing to the same classid slot. This is benign —
+          the unique index ``ix_chat_messages_session_sequence`` is the
+          correctness guarantee; the advisory lock is a contention
+          reducer ahead of it. Collisions cause spurious serialisation
+          between two unrelated sessions, never duplicate rows or lost
+          writes.
+        """
+
+    @contextlib.contextmanager
+    def _session_write_lock(self, conn: Connection, session_id: str) -> Iterator[None]:
+        """Serialise same-session sequence/version allocators.
+
+        PostgreSQL uses the transaction-scoped advisory lock above.
+        SQLite uses a process-wide per-session ``threading.RLock`` keyed
+        on ``(str(self._engine.url), session_id)`` around the whole
+        allocator + insert sequence — the staging deployment is
+        single-process today; cross-process serialisation will arrive
+        with the Phase 3 Postgres-default switch.
+
+        Every caller that performs ``SELECT MAX(...) + 1`` for
+        ``chat_messages.sequence_no`` or ``composition_states.version``
+        MUST wrap that read and every dependent INSERT in this context.
+        ``_assert_session_write_lock_held`` enforces the precondition
+        mechanically (per-thread ``ContextVar`` token keyed on
+        ``(id(conn), session_id)``); lock-requiring helpers crash
+        immediately if called without that token in the same
+        transaction.
         """
 
     def _reserve_sequence_range(
         self, conn: Connection, session_id: str, *, count: int
     ) -> int:
         """Reserve `count` consecutive sequence numbers for `session_id`.
-        Inside the same transaction, performs:
-            SELECT COALESCE(MAX(sequence_no), 0) FROM chat_messages WHERE session_id = ?
-        and returns max+1; the caller writes rows at max+1, max+2, ... max+count.
 
-        The advisory lock acquired in _acquire_session_advisory_lock prevents
-        cross-session collisions on PostgreSQL. The transaction's serialisable
-        guarantees on SQLite handle the SQLite case.
+        MUST be called inside ``_session_write_lock(conn, session_id)``
+        (enforced by ``_assert_session_write_lock_held``). Inside the
+        same transaction, performs:
 
-        Note: gaps in sequence_no are permitted (transaction rollback after
-        reservation leaves the next caller's MAX+1 higher than the first
-        successful row's sequence_no). Sequence_no is an ordering key, not
-        a count.
+            SELECT COALESCE(MAX(sequence_no), 0) FROM chat_messages
+             WHERE session_id = ?
+
+        and returns max+1; the caller writes rows at
+        max+1, max+2, ... max+count.
+
+        Note: gaps in sequence_no are permitted (transaction rollback
+        after reservation leaves the next caller's MAX+1 higher than the
+        first successful row's sequence_no). Sequence_no is an ordering
+        key, not a count.
         """
 
     def _insert_chat_message(self, conn: Connection, /, **fields) -> str:
@@ -1301,13 +1547,23 @@ class SessionsService:
     def _insert_composition_state(
         self, conn: Connection, *,
         session_id: str,
-        payload: _StatePayload,
-        provenance: str,                 # one of the five CHECK-permitted values
+        payload: StatePayload,
+        provenance: str,                 # one of the six CHECK-permitted values
     ) -> str:
         """Single-row insert into composition_states with the supplied
-        provenance discriminator. Existing rev-3 inline inserts at
-        src/elspeth/web/sessions/service.py:395-418 and :828-850 are
-        refactored to call this helper rather than emitting raw INSERTs.
+        provenance discriminator. Caller MUST already hold
+        ``_session_write_lock(conn, session_id)`` (enforced by
+        ``_assert_session_write_lock_held``); the helper allocates the
+        new row's ``version`` under that lock via
+        ``SELECT COALESCE(MAX(version), 0) + 1 FROM composition_states
+        WHERE session_id = :sid`` (B1 — see §5.2 / §5.2.1).
+
+        All per-column writes use the shared
+        ``_enveloped_state_column(...)`` helper (replaces earlier
+        method-local ``_enveloped(...)`` snippets in
+        ``save_composition_state`` and ``fork_session``); existing rev-3
+        inline inserts in ``service.py`` are refactored to call this
+        helper rather than emit raw INSERTs.
         """
 
     # ── Existing async wrappers — kept for non-compose callers ─────
@@ -1480,7 +1736,14 @@ gains:
       metadata,
       Column("id", String, primary_key=True),
       Column("timestamp", DateTime(timezone=True), nullable=False),
-      Column("session_id", String, ForeignKey("sessions.id"), nullable=False),
+      Column(
+          "session_id",
+          String,
+          # ON DELETE CASCADE so ``archive_session`` can delete sessions
+          # that have audit-grade view rows.
+          ForeignKey("sessions.id", ondelete="CASCADE"),
+          nullable=False,
+      ),
       Column("requesting_principal", String, nullable=False),  # auth subject
       Column("request_path", String, nullable=False),
       Column("query_args", JSON, nullable=False),
@@ -1685,19 +1948,29 @@ polish.
     (no partial-turn state visible after the rollback).
   - Assert advisory lock is acquired and released (PostgreSQL only;
     inspect `pg_locks` between INSERT and COMMIT).
-  - Assert `_AuditOutcome.tier1_violation=True` when no plugin crash
-    pending and `OperationalError` is injected on COMMIT.
-  - Assert `_AuditOutcome.unwind_audit_failed=True` when plugin crash
-    pending and `OperationalError` is injected on COMMIT.
+  - Assert that ``persist_compose_turn`` raises ``AuditIntegrityError``
+    (chained from the underlying ``OperationalError``) when no plugin
+    crash is pending and ``OperationalError`` is injected on COMMIT —
+    Tier-1 audit-write failures raise inside the sync worker rather
+    than returning a flag (§5.2.2; closes synthesised review finding
+    H1).
+  - Assert ``AuditOutcome.unwind_audit_failed=True`` when a plugin
+    crash is pending and ``OperationalError`` is injected on COMMIT.
 
 - `tests/unit/web/composer/test_audit_failure_primacy.py`
   - Tool succeeds + audit fails (non-IntegrityError on COMMIT) →
-    `_AuditOutcome.tier1_violation_exc` populated; counter increments;
-    caller raises.
+    ``AuditIntegrityError`` raised from the sync worker (chained from
+    the underlying ``OperationalError`` via ``raise ... from``); counter
+    ``composer.audit.tool_row_tier1_violation_total`` increments;
+    ``AuditIntegrityError`` is registered in ``TIER_1_ERRORS`` so
+    ``except Exception`` blocks cannot swallow it.
   - Tool fails + audit fails (non-IntegrityError on COMMIT) →
-    `_AuditOutcome.unwind_audit_failed=True`; counter increments
-    (different counter); log permitted; caller raises the captured
-    `ComposerPluginCrashError`.
+    ``AuditOutcome(assistant_id=None, unwind_audit_failed=True)``
+    returned; counter
+    ``composer.audit.tool_row_persist_failed_during_unwind_total``
+    increments (different counter); log permitted under primacy
+    (audit-system failure); caller raises the captured
+    ``ComposerPluginCrashError``.
   - Audit `IntegrityError` (any constraint) → counter increments;
     caller raises (no recovery; no primacy disposition).
   - Tool-call cap exceeded → caller raises
@@ -1775,22 +2048,32 @@ Extend `tests/integration/pipeline/test_composer_llm_eval_characterization.py`:
 - **CL-PP-10: INSERT succeeded, COMMIT failed (NEW in rev 4 — QA F-2).**
   Inject an `OperationalError` at COMMIT (e.g., via a SQLAlchemy event
   hook on `commit` that raises). Two sub-cases:
-  - **CL-PP-10a:** No plugin crash in flight. Assert `_AuditOutcome.tier1_violation=True`,
-    `composer.audit.tool_row_tier1_violation_total` increments,
-    caller raises, no rows visible in chat_messages (transaction rolled back).
+  - **CL-PP-10a:** No plugin crash in flight. Assert
+    ``persist_compose_turn`` raises ``AuditIntegrityError`` (chained
+    from the injected ``OperationalError``);
+    ``composer.audit.tool_row_tier1_violation_total`` increments;
+    caller propagates; no rows visible in chat_messages (transaction
+    rolled back). Tier-1 raise (no flag-return) — see §5.2.2.
   - **CL-PP-10b:** Plugin crash in flight. Assert
-    `_AuditOutcome.unwind_audit_failed=True`,
-    `composer.audit.tool_row_persist_failed_during_unwind_total` increments,
-    log entry emitted (permitted under primacy), caller raises the
-    captured `ComposerPluginCrashError`.
+    ``AuditOutcome(assistant_id=None, unwind_audit_failed=True)``
+    returned;
+    ``composer.audit.tool_row_persist_failed_during_unwind_total``
+    increments; log entry emitted (permitted under primacy); caller
+    raises the captured ``ComposerPluginCrashError``.
 
 - **CL-PP-11: Concurrent multi-session writes (NEW in rev 4 — QA F-2).**
   Two compose loops on session A and session B, sharing one PostgreSQL
-  connection pool. Force `hashtextextended` to produce colliding hashes
-  by selecting session_ids whose hashes are known to collide (seeded
-  test fixture). Assert: no deadlock; sequence_no values are independently
-  monotonic per session; both transactions commit; the advisory-lock
-  collision serialises but does not error.
+  connection pool. The advisory lock uses the two-arg
+  ``pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
+  hashtext(session_id))`` form (§5.7.1). Phase 1 lands the structural
+  test against testcontainer Postgres
+  (``tests/integration/web/test_compose_loop_concurrent_sessions.py``);
+  the deliberate hash-collision variant remains a Phase 3 follow-up
+  because it requires a seeded fixture that selects session_ids whose
+  ``hashtext`` outputs collide modulo the classid slot. Assert: no
+  deadlock; sequence_no values are independently monotonic per session;
+  both transactions commit; the advisory-lock collision serialises but
+  does not error.
 
 - **CL-PP-12: Tool-call cap exceeded (NEW in rev 4 — RSK-13).** Drive
   the LLM to emit 17 tool calls in one assistant turn (cap is 16).
@@ -2020,6 +2303,37 @@ constitute VER-without-VAL theatre. Confirm
 [elspeth-599ecf69fa](filigree:elspeth-599ecf69fa) carries the
 `blocks-rc5.1` label before this ticket's Phase 4 closes.
 
+#### 8.5.1 CI lane structure — testcontainer marker and aggregation
+
+Phase 1C splits the CI matrix into a Docker-enabled lane and a set of
+non-Docker lanes:
+
+- **Docker-enabled lane.** Pulls the
+  ``testcontainers[postgres]`` image and runs the full pytest suite
+  including tests marked ``@pytest.mark.testcontainer``. The
+  ``testcontainer`` marker is registered in ``pyproject.toml`` and
+  carries the documented intent "Requires a Docker daemon and the
+  ``testcontainers`` extra." Only this lane exercises CL-PP-11 and any
+  future PostgreSQL-only assertions.
+- **Non-Docker lanes** (Linux/macOS without a Docker socket, lint-only
+  jobs, etc.). These runners cannot pull the Postgres image and MUST
+  deselect the marker explicitly via ``pytest -m "not testcontainer"``.
+  Implicit deselection (e.g. relying on import-time skip) is
+  insufficient — pytest collects markered tests by default and would
+  fail the lane on import errors before the skip fires.
+- **``ci-success`` aggregation job.** A single GitHub Actions job that
+  ``needs:`` every lane and inspects ``needs.<job>.result`` for each
+  one. The aggregation passes only when every required lane reports
+  ``success`` (and explicitly tolerates ``skipped`` only for lanes that
+  declare themselves optional). Branch-protection requires
+  ``ci-success`` rather than the individual lane jobs so a Docker
+  outage on a single runner cannot silently mask a Phase 3 regression
+  by causing the lane to be skipped without failing the merge gate.
+
+The marker registration, the deselection expression, and the
+aggregation job are all required by Schedule 1C Task 16; their
+absence is a Phase 1C blocker, not a hardening follow-up.
+
 ### 8.6 Test path integrity — explicit composer rule
 
 CLAUDE.md's "never bypass production code paths in tests" rule is about
@@ -2030,13 +2344,27 @@ Revision 4 spells out the equivalent rule for composer tests:
 **Composer integration tests MUST instantiate the full route → service →
 SessionsService stack against either:**
 
-- An in-memory SQLite database (`sqlalchemy.create_engine("sqlite:///:memory:")`
-  + `metadata.create_all()`), suitable for unit-level integration that
-  exercises check constraints, partial unique indexes, and CASCADE
-  semantics; OR
+- An in-memory SQLite database constructed via the production-equivalent
+  helpers — ``create_session_engine("sqlite:///:memory:",
+  poolclass=StaticPool)`` followed by ``initialize_session_schema(engine)``
+  — suitable for unit-level integration that exercises check constraints,
+  partial unique indexes, and CASCADE semantics. **Bare
+  ``sqlalchemy.create_engine("sqlite:///:memory:")`` +
+  ``metadata.create_all()`` is forbidden**: it bypasses the schema
+  initialiser's PRAGMA wiring (most importantly ``PRAGMA foreign_keys =
+  ON``), the ``StaticPool`` configuration that keeps the in-memory DB
+  alive across connections, and any future schema-bootstrap steps that
+  ``initialize_session_schema`` adds. Tests that bypass these helpers
+  silently disagree with production on FK enforcement and on
+  multi-connection lifetime, which is exactly the class of drift
+  ``elspeth.web.sessions.engine`` exists to prevent. OR
 - A testcontainer PostgreSQL database, for tests that need
-  `pg_advisory_xact_lock`, `hashtextextended`, partial-unique-index
+  ``pg_advisory_xact_lock`` (the two-arg form keyed on
+  ``ELSPETH_SESSIONS_LOCK_CLASSID`` — see §5.7.1), partial-unique-index
   dialect-specific behaviour, or multi-session concurrency (CL-PP-11).
+  Constructed identically: ``create_session_engine(pg.get_connection_url())``
+  + ``initialize_session_schema(engine)``. The pattern is captured in
+  ``tests/integration/web/test_compose_loop_concurrent_sessions.py``.
 
 **Mocking is permitted ONLY at:**
 
@@ -2123,7 +2451,7 @@ go/no-go decision recorded in the PR description.
 | RSK-08 | `chat_messages` and `audit_access_log` tables grow unboundedly without retention. | Medium (over time) | Low (pre-release) | Table size exceeds 1 GB in dev/staging. | Cascade-delete with sessions today; retention extension filed under `[elspeth-RETENTION-WEB]` (§10 OQ-1). | RC 5.1 production hardening |
 | RSK-09 | Partial unique index syntax differs across DB dialects. | Low | Low | DDL fails on a target dialect. | Use SQL `CREATE UNIQUE INDEX ... WHERE ...` (SQLite 3.8.0+; PostgreSQL); SQLAlchemy DDL emit hook for both dialects. | Implementing engineer |
 | RSK-10 | State-rollback race during atomic-pair commit. | **Negligible (rev 4 — structurally impossible)** | n/a | Counter retained for production observability only; never expected to fire. | Single-sync-block design means there is no atomic-pair-across-await window. The counter `composer.audit.state_rolled_back_during_persist_total` exists but the §5.2 code path cannot increment it. Kept in the schema so a future re-introduction of multi-transaction grain (per-call atomicity) has the observability point ready. | n/a |
-| RSK-11 | Audit-write failure when no tool exception in flight (Tier-1 violation). | Very low | Critical | OTel counter `composer.audit.tool_row_tier1_violation_total` non-zero. | §5.2.2 sync function returns `_AuditOutcome.tier1_violation_exc`; caller raises unconditionally; CL-PP-10a asserts. | RC 5.1 SRE |
+| RSK-11 | Audit-write failure when no tool exception in flight (Tier-1 violation). | Very low | Critical | OTel counter `composer.audit.tool_row_tier1_violation_total` non-zero. | §5.2.2 sync function raises `AuditIntegrityError` (registered in `TIER_1_ERRORS` so `except Exception` blocks cannot swallow it) chained from the underlying `OperationalError`; caller propagates; CL-PP-10a asserts. | RC 5.1 SRE |
 | RSK-12 | LLM provider re-uses `tool_call_id` across turns within a session. | Medium (provider-dependent) | High (silent mis-correlation absent the partial-unique index) | Partial unique index rejects insert; CL-PP-8 fires; counter `composer.audit.tool_row_integrity_violation_total` increments. | Crash on duplicate; do not silently recover. Per-provider observation: OpenRouter/OpenAI ids are message-scoped per current spec but not contractually forever. | Implementing engineer |
 | RSK-13 (NEW rev 4) | LLM-driven tool-call amplification via prompt injection. | Medium (LLM-dependent) | High (storage growth, Tier-3 input attack) | Per-turn cap of 16 tool calls fires; `composer.tool_call_cap_exceeded_total` increments. | Hard cap per assistant turn (configurable); CL-PP-12 covers; `_handle_convergence_error` returns the new reason code. | Security review at RC 5.1 |
 | RSK-14 (NEW rev 4) | Redaction-policy weakening lands without security review (T-3). | Low | High (silent audit-safety regression) | Policy-hash snapshot test fails on PR; no `policy-weaken-justified` PR label. | Snapshot test (§4.4.3); CODEOWNERS routes redaction.py + tools.py + snapshot file changes to security team. | Security review per PR |
@@ -2135,10 +2463,17 @@ go/no-go decision recorded in the PR description.
 
 ## 10. Open Questions
 
-- **OQ-1.** Filigree ticket ID for the `chat_messages` and
-  `audit_access_log` retention CLI extension (referenced as
-  `[elspeth-RETENTION-WEB]` in §4.6, §6.3, RSK-08). File during
-  implementation; cite in the implementation PR description.
+- **OQ-1 (resolved Phase 1C, Task 19).** Filigree ticket
+  [elspeth-63012b19a5](filigree:elspeth-63012b19a5) — "chat_messages
+  and audit_access_log retention CLI extension". P3, labels
+  ``cluster:composer-progress-persistence`` and ``from-design-spec``.
+  Extends the ``elspeth purge --retention-days`` CLI to operate on web
+  session ``chat_messages`` and ``audit_access_log`` tables in addition
+  to its existing pipeline-payload scope. Web tables grow only through
+  cascade-delete with sessions today; an explicit retention path is
+  needed before the production composer corpus exists. Cited as
+  ``[elspeth-RETENTION-WEB]`` in §4.6, §6.3, and RSK-08; resolution
+  cited in the Phase 1C closure PR description.
 - **OQ-2.** `composition_states` redaction symmetry: today the partial
   state is persisted with raw paths; the new code path uniformly
   redacts. The historical asymmetry is filed as a follow-up issue
@@ -2194,14 +2529,32 @@ go/no-go decision recorded in the PR description.
   Same chain pattern applies to `composition_states` and
   `audit_access_log`.
 
-- **OQ-4 (NEW rev 4).** Pre-deploy migration step for staging
-  (`elspeth.foundryside.dev`). The §3 Migration ADR row authorises a
-  destructive `DELETE FROM chat_messages` before applying the new
-  schema (because the rev-3-era schema has been generating rows that
-  cannot satisfy the new NOT NULL columns without a default). Confirm
-  the operator runbook for staging deployment captures this step BEFORE
-  the spec is implemented; surface in the PR description and update the
-  staging-deploy runbook in the same PR.
+- **OQ-4 (NEW rev 4).** Pre-deploy session-DB recreation step for
+  staging (``elspeth.foundryside.dev``). Per
+  ``project_db_migration_policy``, ELSPETH does not ship Alembic
+  migrations or schema-version probes — schema changes are landed by
+  destroying and recreating the session DB, never by row-level DELETE
+  + structural ALTER. The §3 Migration ADR row authorises the
+  recreation: the rev-3-era schema generated rows that cannot satisfy
+  the new NOT NULL columns without a fabricated default, and a
+  row-level ``DELETE FROM chat_messages`` followed by structural ALTER
+  would smuggle backfilled defaults into the audit trail (Tier-1
+  fabrication). The runbook step is:
+
+  1. Stop ``elspeth-web.service`` (operator action; the staging
+     deployment is single-process — see ``project_staging_deployment``).
+  2. ``mv sessions.db sessions.db.archive-YYYY-MM-DD`` so the prior
+     audit corpus is preserved offline rather than overwritten.
+     ``DELETE`` is forbidden — operator-initiated archive only.
+  3. Start the service. ``initialize_session_schema`` recreates the
+     tables with the rev-4 column set on first connection.
+  4. Verify in the same PR that the staging-deploy runbook captures
+     this archive/delete/restart procedure in writing.
+
+  The recreation discards the staging audit corpus by design — staging
+  is pre-release and has no users; deferring the schema change until
+  there are users would be the opposite of the project's "no legacy
+  code" policy.
 
 All four questions are administrative (file a ticket, cite an ID, update
 a runbook); none blocks design or implementation.
@@ -2219,13 +2572,17 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 
 ### Phase 1 — `SessionsService.persist_compose_turn` sync primitive
 
-> **Phase 1 implementation plan is authoritative — supersession notice
-> (added 2026-05-08).** The Phase 1 implementation plan
-> [`docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`](../plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md)
-> is the governing handoff for Phase 1 code work. Where this spec and
-> the plan disagree on Phase 1 mechanics, the plan wins until Task 19
-> rewrites this section in place. The plan supersedes the following
-> stale snippets that earlier spec drafts asserted:
+> **Supersession notice — Task 19 closed (2026-05-09).** The Phase 1
+> spec amendments listed below have been applied in-place to §4.1.1,
+> §4.5, §5.2 / §5.2.1, §5.2.2, §5.7.1, §6.3, §8.5.1, §8.6, and §10
+> OQ-4. The Phase 1A/1B/1C implementation plans
+> ([`phase-1A-schema-current-writer-safety.md`](../plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md),
+> the 1B handover at
+> [`2026-05-09-phase-1B-plan-review-handover.md`](../plans/2026-05-09-phase-1B-plan-review-handover.md),
+> and the 1C postgresql-ci-operational-proof plan) remain the
+> authoritative handoff for *future* Phase 3 code work that builds on
+> the primitive landed here. The list below is retained as a
+> historical pointer to what the spec body now reflects:
 >
 > 1. `chat_messages.role` includes the internal value `"audit"`.
 >    The plan keeps `"audit"` as a stored role but excludes it from
@@ -2264,10 +2621,13 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 >    `SessionServiceProtocol.persist_compose_turn_async`. Use the
 >    plan's exact signature, not any earlier sync-protocol or
 >    raw_content-required wording.
-> 7. `_AuditOutcome` has only `assistant_id` and `unwind_audit_failed`;
->    Tier-1 audit-write failures raise. Do not copy earlier
->    `_AuditOutcome` shapes that included additional fields or
->    swallowed Tier-1 failures.
+> 7. ``AuditOutcome`` (renamed from ``_AuditOutcome`` in the Pre-Phase-3
+>    hygiene pass once the type crossed the protocol boundary) has only
+>    ``assistant_id`` and ``unwind_audit_failed``; Tier-1 audit-write
+>    failures raise ``AuditIntegrityError`` from inside the sync worker
+>    rather than returning a flag. Do not copy earlier four-field
+>    shapes that included ``tier1_violation`` / ``tier1_violation_exc``
+>    or that swallowed Tier-1 failures.
 > 8. `composition_states.provenance` enum is the SIX-value form
 >    `('tool_call', 'convergence_persist', 'plugin_crash_persist',
 >    'preflight_persist', 'session_seed', 'session_fork')`. The spec
@@ -2293,18 +2653,30 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 > the source of truth for Phase 1 mechanics.
 
 **Scope.** Add the new schema columns (`writer_principal`,
-`composition_states.provenance`, `audit_access_log` table); add the
-sync persistence primitive on `SessionsService`; update existing
-`add_message` callers (`routes.py:1487`, `:1883`) to pass
-`writer_principal`; expand `_acquire_session_advisory_lock` to use
-`hashtextextended`; refactor existing inline state-row inserts at
+`composition_states.provenance`, `audit_access_log` table — with
+``ON DELETE CASCADE`` on ``audit_access_log.session_id``); add the
+sync persistence primitive on `SessionsService` (with `raw_content`,
+`expected_current_state_id`, the two-field ``AuditOutcome``, and the
+async dispatcher ``persist_compose_turn_async`` on the protocol);
+update existing `add_message` callers (`routes.py:1487`, `:1883`) to
+pass `writer_principal`; wire ``_acquire_session_advisory_lock`` to
+the two-arg ``pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
+hashtext(session_id))`` form (B3) with the SQLite per-session RLock
+fallback; refactor existing inline state-row inserts at
 `web/sessions/service.py:395-418` and `:828-850` to call
-`_insert_composition_state`.
+`_insert_composition_state` and the shared
+``_enveloped_state_column`` helper.
 
 **Done when.** §8.1 unit tests pass against in-memory SQLite (real
-database, not metadata-only); CL-PP-11 passes against testcontainer
-PostgreSQL; `enforce_tier_model.py` and `enforce_freeze_guards.py`
-green; staging runbook updated for the pre-deploy DELETE step.
+database constructed via ``create_session_engine`` +
+``initialize_session_schema``, not bare ``metadata.create_all``);
+CL-PP-11 passes against testcontainer PostgreSQL on the Docker-enabled
+CI lane (with the ``testcontainer`` marker registered, non-Docker lanes
+deselecting it via ``-m "not testcontainer"``, and the ``ci-success``
+aggregation job inspecting ``needs.<job>.result`` for every required
+lane — see §8.5.1); ``enforce_tier_model.py`` and
+``enforce_freeze_guards.py`` green; staging runbook updated for the
+pre-deploy archive/delete/restart procedure (§10 OQ-4).
 
 **Out of scope for Phase 1.** No compose-loop changes; no redaction
 framework; no frontend.
@@ -2330,13 +2702,17 @@ structured justification; quarterly-review structural test passes
 ### Phase 3 — Compose-loop persistence + tool-call cap
 
 **Scope.** Modify `_compose_loop` (§5.2.1) to (a) enforce the per-turn
-tool-call cap; (b) accumulate tool outcomes; (c) dispatch
-`persist_compose_turn` via `_run_sync`; (d) raise
-`ComposerPluginCrashError` after audit write completes; (e) handle
-`_AuditOutcome.tier1_violation` and `unwind_audit_failed` correctly.
-Add the route-helper `failed_turn` field to 422/500 response bodies.
-Extend `GET /api/sessions/{sid}/messages` with `include_tool_rows`
-parameter and the audit-grade access-log emission (§6.3).
+tool-call cap; (b) accumulate tool outcomes; (c) dispatch the protocol's
+``persist_compose_turn_async`` (which bridges to the sync primitive via
+``_run_sync``, shielded from caller cancellation); (d) raise
+`ComposerPluginCrashError` after the audit write completes; (e) honour
+``AuditOutcome.unwind_audit_failed`` for the unwind-path counter, and
+let the sync primitive's ``AuditIntegrityError`` propagate (Tier-1
+audit-write failures raise inside the worker rather than returning a
+flag — see §5.2.2). Add the route-helper `failed_turn` field to 422/500
+response bodies. Extend `GET /api/sessions/{sid}/messages` with
+`include_tool_rows` parameter and the audit-grade access-log emission
+(§6.3).
 
 **Done when.** All §8.2 CL-PP-* scenarios pass (including new
 CL-PP-9/10/11/12/13); §8.3 property test passes with the schema-level
@@ -2547,8 +2923,15 @@ specific concern without re-reading the entire panel response.
   raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")`
   before any tool execution. Defends against prompt-injection-induced
   amplification.
-- **`_AuditOutcome`** (rev 4). The dataclass returned by
-  `SessionsService.persist_compose_turn`. Carries the audit-failure
-  primacy disposition: `tier1_violation` (caller must raise),
-  `unwind_audit_failed` (caller proceeds to raise the captured plugin
-  crash), or success (no flags set, `assistant_id` populated).
+- **`AuditOutcome`** (rev 4; renamed from ``_AuditOutcome`` in the
+  Pre-Phase-3 hygiene pass once the type crossed the protocol
+  boundary). The dataclass returned by
+  ``SessionsService.persist_compose_turn``. Two valid shapes:
+  (1) success — ``assistant_id`` populated, ``unwind_audit_failed=False``;
+  (2) tool failed AND audit unwind failed — ``assistant_id=None``,
+  ``unwind_audit_failed=True`` (caller proceeds to raise the captured
+  plugin crash). There is NO ``tier1_violation`` field: Tier-1
+  audit-write failures raise ``AuditIntegrityError`` directly inside
+  the sync worker (registered in ``TIER_1_ERRORS``). See
+  ``src/elspeth/web/sessions/_persist_payload.py`` for the canonical
+  definition; ``RedactedToolRow`` and ``StatePayload`` live alongside it.

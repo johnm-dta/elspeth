@@ -1831,38 +1831,38 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised
     at the caller site with full chain preservation; no silent swallowing
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=3c9b05232e0eee8f
+- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=d8ea1726a1736cdb
   owner: web-execution
   reason: Tier 1 field_validator — isinstance whitelists datetime|str for timestamp,
     rejects int (Unix epoch)
   safety: Raises ValueError on non-datetime/non-str; tightens Field(strict=False)
     coercion scope
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=dcc657a0ad575656
+- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=927e50c1805d88ef
   owner: web-execution
   reason: Pydantic before-validator — isinstance(values, dict) gates JSON round-trip
     path; non-dict values handled by Pydantic
   safety: Structural dispatch for deserialization, not error suppression
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=722acae92f14936c
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=34675317a9847e1f
   owner: web-execution
   reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON
     round-trip
   safety: Missing keys fall through to Pydantic field validation downstream
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=0cea4977dfaad477
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=571c10f5f47d3562
   owner: web-execution
   reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON
     round-trip
   safety: Missing keys fall through to Pydantic field validation downstream
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=fc80b640eaad1fe2
+- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=1407480257889325
   owner: web-execution
   reason: Pydantic before-validator — isinstance(values, dict) gates JSON round-trip
     path; non-dict values handled by Pydantic
   safety: Structural dispatch for deserialization, not error suppression
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=24d8a0d80e61796b
+- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=14758d6c80092a7e
   owner: web-execution
   reason: Offensive programming — isinstance enforces event_type/data type correspondence
     at construction time

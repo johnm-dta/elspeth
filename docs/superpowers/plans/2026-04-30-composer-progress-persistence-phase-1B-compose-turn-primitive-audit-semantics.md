@@ -32,11 +32,27 @@ Verify the branch contains the Schedule 1A schema/current-writer compatibility c
 
 - [ ] **Step 2: Define cancellation/idempotency before coding**
 
-Record the chosen retry-after-cancel behavior in this PR before `persist_compose_turn_async` is implemented. The shielded worker bridge can continue after caller cancellation, so the contract must be explicit and testable.
+Record the chosen retry-after-cancel behavior in this PR before
+`persist_compose_turn_async` is implemented. The shielded worker
+bridge can continue after caller cancellation, so the contract must
+be explicit and testable. The contract is documented and tested in
+**Task 11 Step 3d** (Q-F2 fix); the chosen contract is "commit-wins":
+once the worker is dispatched, callers MUST NOT retry on
+``CancelledError``. See Step 3d for the full rationale, the binding
+caller contract for Phase 3, and the
+``test_persist_compose_turn_async_caller_cancellation_commits_anyway``
+regression that pins the behaviour.
 
 - [ ] **Step 3: Define transcript validation before coding**
 
-Before any insert, `persist_compose_turn` must prove assistant `tool_calls` and redacted tool rows have the same unique tool-call ID set. Missing, extra, mismatched, and duplicate IDs must fail before database writes.
+Before any insert, `persist_compose_turn` must prove assistant
+`tool_calls` and redacted tool rows have the same unique tool-call ID
+set. Missing, extra, mismatched, and duplicate IDs must fail before
+database writes. The guard, the typed exception
+(``ToolCallIDMismatchError``), and the four named regression tests
+are implemented in **Task 11 Step 3c** (Q-F1 fix); the helper is
+``_validate_tool_call_id_set_equality`` and is called pre-lock,
+pre-transaction.
 
 ---
 
@@ -44,7 +60,7 @@ Before any insert, `persist_compose_turn` must prove assistant `tool_calls` and 
 
 **Why this task includes the constructor wiring.** Tasks 7–13 reference
 `self._telemetry` and `self._log` on `SessionServiceImpl`. The current
-constructor (`service.py:86`) takes only `(engine, data_dir=None)` —
+constructor (`service.py:265`) takes only `(engine, data_dir=None)` —
 neither attribute exists. Extending the constructor independently of
 the telemetry module would create a circular dependency (constructor
 needs `_SessionsTelemetry` type; telemetry module exists only after this
@@ -57,9 +73,13 @@ per CLAUDE.md no-legacy / single-commit-hard-cut policy: every caller
 that constructs `SessionServiceImpl` is updated atomically with the
 signature change.
 
-**Current call-site reality.** The Phase 1 plan-review pass found 14
-`SessionServiceImpl(` call sites across `src` and `tests`, including
-`tests/unit/web/blobs/test_routes.py` outside the sessions test tree.
+**Current call-site reality.** As of the post-1A worktree snapshot,
+`rg -n "SessionServiceImpl\\(" src tests -g '*.py'` finds 17
+`SessionServiceImpl(` call sites across `src` and `tests` (the count
+grew from 14 in the original Phase 1 plan-review pass because Schedule
+1A added new persist-compose-turn unit tests and additional regression
+fixtures), including `tests/unit/web/blobs/test_routes.py` outside the
+sessions test tree.
 Task 5 is not complete until the implementer runs
 `rg -n "SessionServiceImpl\\(" src tests -g '*.py'`, updates every
 existing construction site, and pastes the before/after inventory into
@@ -472,7 +492,7 @@ Expected: FAIL — constructor does not yet accept `telemetry` or `log`.
 - [ ] **Step 7: Extend `SessionServiceImpl.__init__`**
 
 In `src/elspeth/web/sessions/service.py`, replace the existing
-constructor (around line 86) with:
+constructor (around line 265) with:
 
 ```python
 from elspeth.web.sessions.telemetry import _SessionsTelemetry  # add to imports
@@ -572,15 +592,19 @@ Run the inventory command before editing:
 rg -n "SessionServiceImpl\\(" src tests -g '*.py'
 ```
 
-Expected before this task on the reviewed snapshot: 14 call sites,
-including:
+Expected before this task on the post-1A snapshot: 17 call sites
+(verified by `rg -n "SessionServiceImpl\\(" src tests -g '*.py'` from
+the worktree root), spread across:
 
-- `src/elspeth/web/app.py`
-- `tests/unit/web/sessions/test_fork.py`
-- `tests/unit/web/sessions/test_datetime_timezone.py`
-- `tests/unit/web/sessions/test_routes.py`
-- `tests/unit/web/sessions/test_service.py`
-- `tests/unit/web/blobs/test_routes.py`
+- `src/elspeth/web/app.py` — 1 site (line 391, production wiring)
+- `tests/unit/web/blobs/test_routes.py` — 2 sites
+- `tests/unit/web/sessions/test_datetime_timezone.py` — 1 site
+- `tests/unit/web/sessions/test_fork.py` — 3 sites
+- `tests/unit/web/sessions/test_persist_compose_turn.py` — 3 sites
+  (Schedule 1A's persist-compose-turn unit tests; not present in the
+  pre-1A snapshot)
+- `tests/unit/web/sessions/test_routes.py` — 4 sites
+- `tests/unit/web/sessions/test_service.py` — 3 sites
 
 Update every construction to pass `telemetry=build_sessions_telemetry()`
 and `log=structlog.get_logger(...)` in tests, or the production OTel
@@ -869,7 +893,8 @@ class _StatePayload:
     (``source/nodes/edges/outputs/metadata_/is_valid/validation_errors/derived_from_state_id``).
     The plan's earlier ``payload_json: str`` design was a hallucination —
     no ``payload`` column exists, and the existing
-    ``save_composition_state`` insert at ``service.py:395-418`` writes
+    ``save_composition_state`` insert at ``service.py:1005-1020``
+    (function body starts at 948) writes
     each column individually via a method-local ``_enveloped(...)`` helper
     and ``deep_thaw(...)`` patterns. Task 10 extracts that rule to the
     shared ``_enveloped_state_column(...)`` helper. ``_StatePayload``
@@ -877,7 +902,7 @@ class _StatePayload:
     duplicating its fields and freeze-guard machinery.
 
     ``derived_from_state_id`` is ``str | None`` rather than ``str``
-    because the existing inline inserts at ``service.py:395-418``
+    because the existing inline inserts at ``service.py:1005-1020``
     (initial state) currently set it to ``None``. The compose-loop
     caller in Phase 3 will always supply a non-None value (every
     tool-call-driven state advance has a predecessor).
@@ -997,11 +1022,160 @@ class _AuditOutcome:
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Refactor `_insert_composition_state` to accept `payload: _StatePayload`**
+
+**Why this refactor lands in Schedule 1B and not in Schedule 1A.**
+Schedule 1A introduced ``_insert_composition_state`` at
+``service.py:534`` with signature ``(conn, *, session_id,
+state: CompositionStateData, derived_from_state_id, provenance,
+created_at=None, state_id=None)`` — i.e. ``state`` and
+``derived_from_state_id`` as separate keyword arguments. Schedule 1B
+introduces ``_StatePayload``, which by construction (Steps 1-4 above)
+bundles exactly those two fields (``data: CompositionStateData`` and
+``derived_from_state_id: str | None``) into one frozen dataclass.
+
+Keeping the helper signature unchanged would force every Schedule 1B
+caller (Tasks 11, 12, 13, 15) to unpack the payload at the call site
+— ``service._insert_composition_state(conn, session_id=...,
+state=row.composition_state_payload.data,
+derived_from_state_id=row.composition_state_payload.derived_from_state_id,
+...)``. That repeated unpacking is a structural smell that contradicts
+the B1 rationale: the payload object is the unit of state-advance,
+and a helper that takes the payload directly is the only signature
+that prevents future callers from passing inconsistent
+``(data, derived_from_state_id)`` pairs by mistake. The refactor
+coheres with the same plan-review synthesis (B1) that removed
+``version`` from ``_StatePayload``: both fixes reshape the helper
+contract to make misuse structurally impossible rather than asking
+callers to be careful.
+
+The refactor lands in 1B (not 1A) because ``_StatePayload`` is a 1B
+deliverable — Schedule 1A could not have used the new shape, and
+landing the refactor in 1A would have required defining the dataclass
+out-of-order. Now that Step 1-4 above has just defined ``_StatePayload``
+in this PR, the helper can be migrated to take it as a unit in the
+same commit.
+
+**Refactor target.** Replace the current signature at
+``src/elspeth/web/sessions/service.py:534`` with:
+
+```python
+from elspeth.web.sessions._persist_payload import _StatePayload  # add to imports
+
+def _insert_composition_state(
+    self,
+    conn: Connection,
+    *,
+    session_id: str,
+    payload: _StatePayload,
+    provenance: str,
+    created_at: datetime | None = None,
+    state_id: str | None = None,
+) -> str:
+    """Single-row insert into composition_states with per-session
+    version allocation under _session_write_lock.
+
+    PRECONDITION: caller MUST be inside
+    ``with self._session_write_lock(conn, session_id):`` in the same
+    transaction. (See full precondition contract in the existing
+    docstring — reproduced unchanged across the refactor; only the
+    parameter shape changes.)
+    """
+    # Extract the bundled fields once so the rest of the body can refer
+    # to ``state`` and ``derived_from_state_id`` exactly as it did
+    # pre-refactor. This avoids touching the version-allocation
+    # arithmetic, the per-column INSERT, or the IntegrityError handler
+    # — all of which Schedule 1A reviewed and merged.
+    state = payload.data
+    derived_from_state_id = payload.derived_from_state_id
+    # ... existing body unchanged ...
+```
+
+**Caller sweep.** Run, then update every site:
 
 ```bash
-git add src/elspeth/web/sessions/_persist_payload.py tests/unit/web/sessions/test_persist_payload.py
-git commit -m "feat(sessions): add persist-payload dataclasses (composer-progress-persistence phase 1)"
+rg -n "_insert_composition_state\\(" src tests -g '*.py'
+```
+
+Expected before this step (post-1A snapshot, verified by `grep -rn
+'_insert_composition_state(' src/ tests/`): 9 sites — 1 producer
+(``service.py:534`` definition), 1 internal caller
+(``service.py:1871``, in the ``_save_composition_states_for_revert``
+unwind path or equivalent — verify shape and update kwargs), and 7
+test sites in ``tests/unit/web/sessions/test_persist_compose_turn.py``
+(lines 388, 432, 466, 507, 519, 540, 561 — re-confirm via the rg
+output above; the file was added by Schedule 1A).
+
+For every test site, replace:
+
+```python
+# BEFORE — Schedule 1A signature
+service._insert_composition_state(
+    conn,
+    session_id=...,
+    state=CompositionStateData(...),
+    derived_from_state_id=...,
+    provenance=...,
+)
+```
+
+with:
+
+```python
+# AFTER — 1B signature
+service._insert_composition_state(
+    conn,
+    session_id=...,
+    payload=_StatePayload(
+        data=CompositionStateData(...),
+        derived_from_state_id=...,
+    ),
+    provenance=...,
+)
+```
+
+For the in-service caller at ``service.py:1871``, mirror the same
+shape — read the surrounding context to check whether the caller
+already has a ``_StatePayload`` in hand (e.g. from a tool row) or
+needs to construct one from local ``state``/``derived_from_state_id``
+locals.
+
+No-legacy policy applies: the old ``state=``/``derived_from_state_id=``
+parameter shape is removed from the helper in this same commit. There
+is no migration period — every site is updated atomically per CLAUDE.md
+"No Legacy Code Policy" / single-cut hard-policy.
+
+- [ ] **Step 6: Run all `_insert_composition_state` tests + mypy**
+
+```bash
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v
+.venv/bin/python -m mypy src/elspeth/web/sessions/service.py src/elspeth/web/sessions/_persist_payload.py
+```
+Expected: every existing 1A persist-compose-turn test PASSES (the
+behaviour is unchanged; only the parameter shape moved); mypy clean.
+If any test was relying on the old kwarg names being available, it
+must be updated in this same commit, not later — failing to do so is
+a no-legacy violation.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/elspeth/web/sessions/_persist_payload.py \
+        tests/unit/web/sessions/test_persist_payload.py \
+        src/elspeth/web/sessions/service.py \
+        tests/unit/web/sessions/test_persist_compose_turn.py
+git commit -m "feat(sessions): add persist-payload dataclasses + refactor _insert_composition_state to take payload (composer-progress-persistence phase 1B)
+
+- Adds web/sessions/_persist_payload.py with _StatePayload, _ToolOutcome,
+  _RedactedToolRow, _AuditOutcome (B1 fix: no caller-supplied version).
+- Refactors _insert_composition_state to take payload: _StatePayload
+  instead of (state, derived_from_state_id) separately. Coheres with B1:
+  the payload object is the unit of state-advance and a helper that
+  takes it as a unit prevents future callers from passing inconsistent
+  (data, derived_from_state_id) pairs.
+- Updates the in-service caller and all Schedule-1A persist-compose-turn
+  tests in the same commit (no-legacy single-cut policy).
+"
 ```
 
 ---
@@ -1120,8 +1294,10 @@ def test_persist_compose_turn_persists_raw_content(service):
     plumb the optional ``raw_content`` argument to the assistant row
     verbatim. ``raw_content`` is the audit-attribution column that
     captures the original LLM output BEFORE preflight redaction
-    rewrote ``content``. Routes 1749 and 2152 (formerly 1542/1945
-    pre-rev-4) already passed ``raw_content=result.raw_assistant_content`` to
+    rewrote ``content``. Routes ``src/elspeth/web/sessions/routes.py``
+    lines 2151 and 2601 (formerly 1749/2152 in earlier plan revisions,
+    and 1542/1945 pre-rev-4) already pass
+    ``raw_content=result.raw_assistant_content`` to
     ``add_message``; Phase 3 migrates those call sites to
     ``persist_compose_turn``, so the primitive must accept and persist
     the column today (Phase 1) — not later (Phase 3, which is
@@ -1295,7 +1471,7 @@ def test_persist_compose_turn_rejects_stale_expected_current_state(service):
     """
     from elspeth.web.sessions._persist_payload import _StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
-    from elspeth.web.sessions.service import StaleComposeStateError
+    from elspeth.web.sessions.protocol import StaleComposeStateError
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_stale")
@@ -1445,12 +1621,43 @@ Expected: FAIL — `persist_compose_turn` does not yet exist (or, after Step 3, 
 
 - [ ] **Step 3: Implement `persist_compose_turn` (success path only)**
 
-In `src/elspeth/web/sessions/service.py`, add the method (full body in spec §5.2.2; success-path implementation here, error-path tasks later):
+**Architectural note (A-F1, plan-review synthesis): place
+``StaleComposeStateError`` in ``protocol.py``, not ``service.py``.**
+The exception is part of the public contract that
+``persist_compose_turn_async`` raises through
+``SessionServiceProtocol`` (Step 3b adds the protocol method).
+Defining the exception in the concrete service implementation would
+force every Phase 3 caller — and any future replacement service
+implementation — to import a concrete-class symbol just to catch a
+contract-level error. Mirroring ``AuditIntegrityError``'s placement
+in ``elspeth.contracts.errors`` (a leaf module that protocol clients
+already import without taking a service dependency), the stale-state
+error belongs alongside the Protocol definition. This keeps the
+protocol surface — including its raises-set — importable by callers
+that depend only on the abstraction.
+
+First, in ``src/elspeth/web/sessions/protocol.py`` add the exception
+class near the top of the module (after the imports, before the
+Protocol class):
 
 ```python
 class StaleComposeStateError(RuntimeError):
-    """Compose result was based on a no-longer-current composition state."""
+    """Compose result was based on a no-longer-current composition state.
 
+    Raised by ``SessionServiceProtocol.persist_compose_turn_async`` (and
+    its concrete implementation ``SessionServiceImpl.persist_compose_turn``)
+    when the session's current composition state changed between the LLM
+    call and the persist attempt. Defined here on the protocol module so
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract, not an
+    implementation detail.
+    """
+```
+
+Then, in `src/elspeth/web/sessions/service.py`, add the method (full body in spec §5.2.2; success-path implementation here, error-path tasks later). Import the exception from the protocol module:
+
+```python
+from elspeth.web.sessions.protocol import StaleComposeStateError  # add to imports
 
 def persist_compose_turn(
     self,
@@ -1518,10 +1725,18 @@ def persist_compose_turn(
                     caller="persist_compose_turn",
                 )
 
+            # ``composition_states_table`` is imported directly at
+            # ``service.py:27-29`` (``from elspeth.web.sessions.models
+            # import composition_states_table``); the bare module-level
+            # symbol is the canonical reference shape used elsewhere in
+            # this file (see ``service.py:617`` and ``service.py:1005``).
+            # Do NOT prefix with ``models.`` — there is no ``models``
+            # module alias bound in this scope, and a stray prefix would
+            # raise ``NameError`` at import time.
             current_state_id = conn.execute(
-                select(models.composition_states_table.c.id)
-                .where(models.composition_states_table.c.session_id == session_id)
-                .order_by(models.composition_states_table.c.version.desc())
+                select(composition_states_table.c.id)
+                .where(composition_states_table.c.session_id == session_id)
+                .order_by(composition_states_table.c.version.desc())
                 .limit(1)
             ).scalar_one_or_none()
             if current_state_id != expected_current_state_id:
@@ -1549,7 +1764,8 @@ def persist_compose_turn(
                 # "Phase 3 plumbs through then" comment, but Phase 3 is
                 # described in its own plan as "loop only, no new
                 # primitives" — Phase 3 wires the call site, it does not
-                # extend the signature. Routes 1749 and 2152 already pass
+                # extend the signature. Routes 2151 and 2601 in
+                # ``src/elspeth/web/sessions/routes.py`` already pass
                 # ``raw_content=result.raw_assistant_content`` to
                 # ``add_message`` today; persist_compose_turn must accept
                 # the same column from Phase 3 onward, so the parameter is
@@ -1560,7 +1776,7 @@ def persist_compose_turn(
                 # ``deep_thaw`` recursively converts any MappingProxyType /
                 # tuple inputs to JSON-serializable dict / list forms; this
                 # is the same pattern ``save_composition_state`` uses for
-                # frozen ``validation_errors`` (service.py:413). Plain
+                # frozen ``validation_errors`` (service.py:1015). Plain
                 # ``list(...)`` would leave MappingProxyType inner values
                 # unchanged, which json.dumps then rejects with TypeError.
                 # Closes synthesised review finding P-L-4 / L18.
@@ -1675,13 +1891,521 @@ async def persist_compose_turn_async(
 If `from __future__ import annotations` is ever removed from this file,
 the annotation strategy must be revisited before landing the change.
 
+**Protocol-isolation discipline note (A-F1).**
+``StaleComposeStateError`` is defined on
+``src/elspeth/web/sessions/protocol.py`` (see Step 3 above), not on
+``service.py``. Phase 3 callers and any future replacement service
+implementation can therefore catch the error using
+``from elspeth.web.sessions.protocol import StaleComposeStateError``
+without taking a dependency on the concrete service class. This
+mirrors ``AuditIntegrityError``'s placement in
+``elspeth.contracts.errors``: protocol-level error shapes belong on
+the abstraction, not the implementation.
+
+- [ ] **Step 3c: Validate tool-call ID set equality before any DB write (Q-F1)**
+
+Before the ``self._engine.begin()`` block — and therefore before any
+INSERT, before ``_session_write_lock`` acquisition, and before the
+``_assert_state_in_session`` guard — ``persist_compose_turn`` MUST
+prove that the assistant row's ``tool_calls`` list and the
+``redacted_tool_rows`` tuple agree on a single, duplicate-free set
+of tool-call IDs. Mismatches must fail with a precise typed exception
+that names the violating IDs.
+
+**Why this guard exists.** The transcript invariant
+"every assistant ``tool_calls`` ID appears exactly once in the tool
+rows for the same turn" is part of the audit contract: a transcript
+where the assistant claimed to call tool ``tc_X`` but no tool row
+was ever persisted (or vice versa) is a lie the audit trail cannot
+distinguish from a successful exchange. The composite FK
+``fk_chat_messages_composition_state_session`` and the partial unique
+``uq_chat_messages_tool_call_id`` would catch a duplicate ID at
+INSERT time, but only with a generic constraint error AFTER partial
+work — and missing/extra IDs are not caught by any DB-level check
+(an assistant with ``tool_calls=[{"id": "tc_X"}]`` and zero tool
+rows is structurally legal at the row level, but is a contract
+violation at the turn level).
+
+The guard also runs BEFORE ``_session_write_lock`` because acquiring
+the per-session lock to validate caller-supplied data would needlessly
+serialise contention. The validation is a function of the call's
+own arguments — no DB read required — so it is safe (and correct) to
+run pre-lock.
+
+**Where to place the helper.** Define it as a module-level private
+function in ``src/elspeth/web/sessions/service.py`` (alongside the
+existing ``_assert_state_in_session`` helper at ``service.py:88``)
+so it is testable in isolation and the diagnostic strings live with
+the rest of the service-boundary guards. Do NOT put it on
+``_persist_payload.py`` — the payload module is intentionally pure
+data containers, no validation behaviour.
+
+```python
+class ToolCallIDMismatchError(RuntimeError):
+    """Assistant ``tool_calls`` and persisted tool rows disagreed on
+    the set of tool-call IDs for one compose turn.
+
+    Carries the four mutually-exclusive failure axes (missing, extra,
+    duplicate-in-assistant, duplicate-in-rows) so the diagnostic
+    string identifies WHICH violation fired without forcing the
+    caller to re-derive it.
+
+    Defined here on the service module because the error shape is
+    internal to ``persist_compose_turn``; callers either catch it as
+    a contract violation or do not catch it at all (the more typical
+    shape — a contract violation indicates a bug in the compose loop,
+    not a recoverable user error).
+    """
+
+    def __init__(
+        self,
+        *,
+        missing: frozenset[str],
+        extra: frozenset[str],
+        duplicates_in_assistant: frozenset[str],
+        duplicates_in_rows: frozenset[str],
+    ) -> None:
+        self.missing = missing
+        self.extra = extra
+        self.duplicates_in_assistant = duplicates_in_assistant
+        self.duplicates_in_rows = duplicates_in_rows
+        super().__init__(
+            "persist_compose_turn: assistant tool_calls and tool rows "
+            "disagree on the tool-call ID set "
+            f"(missing={sorted(missing)!r}, extra={sorted(extra)!r}, "
+            f"duplicates_in_assistant={sorted(duplicates_in_assistant)!r}, "
+            f"duplicates_in_rows={sorted(duplicates_in_rows)!r}). "
+            "Refusing to persist a turn that would leave the audit "
+            "trail with an asymmetric assistant/tool transcript."
+        )
+
+
+def _validate_tool_call_id_set_equality(
+    *,
+    redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+    redacted_tool_rows: tuple[_RedactedToolRow, ...],
+) -> None:
+    """Raise ``ToolCallIDMismatchError`` if the assistant's
+    ``tool_calls`` IDs and the tool rows' ``tool_call_id`` values are
+    not the same unique set.
+
+    Four failure axes — any of them raises:
+
+    - ``missing``: an assistant ``tool_calls`` ID with no
+      corresponding ``_RedactedToolRow``.
+    - ``extra``: a ``_RedactedToolRow.tool_call_id`` not claimed by
+      any assistant ``tool_calls`` entry.
+    - ``duplicates_in_assistant``: the same ID appears twice in
+      ``redacted_assistant_tool_calls``.
+    - ``duplicates_in_rows``: the same ID appears twice in
+      ``redacted_tool_rows``.
+
+    All four are reported simultaneously (rather than short-circuiting
+    on the first one) so the caller sees the full picture in one
+    diagnostic — debugging asymmetric transcripts is exponentially
+    easier when every violation is named at once.
+
+    The empty-empty case (assistant has zero tool calls, zero tool
+    rows) is valid and returns silently — see W10a /
+    ``test_persist_compose_turn_zero_tool_rows``.
+    """
+    assistant_ids: list[str] = [
+        # The ``id`` key is contractually present on every entry — the
+        # OpenAI / LiteLLM tool-call shape requires it. If it isn't,
+        # that's an upstream framework bug, not data we should defend
+        # against (CLAUDE.md offensive programming).
+        tc["id"]
+        for tc in redacted_assistant_tool_calls
+    ]
+    row_ids: list[str] = [row.tool_call_id for row in redacted_tool_rows]
+
+    assistant_set = set(assistant_ids)
+    row_set = set(row_ids)
+    missing = frozenset(assistant_set - row_set)
+    extra = frozenset(row_set - assistant_set)
+    duplicates_in_assistant = frozenset(
+        i for i in assistant_set if assistant_ids.count(i) > 1
+    )
+    duplicates_in_rows = frozenset(
+        i for i in row_set if row_ids.count(i) > 1
+    )
+
+    if missing or extra or duplicates_in_assistant or duplicates_in_rows:
+        raise ToolCallIDMismatchError(
+            missing=missing,
+            extra=extra,
+            duplicates_in_assistant=duplicates_in_assistant,
+            duplicates_in_rows=duplicates_in_rows,
+        )
+```
+
+In ``persist_compose_turn``, call the guard FIRST — before
+``_now()``, before ``_engine.begin()``:
+
+```python
+def persist_compose_turn(self, *, ...):
+    # ... async-loop guard ...
+    _validate_tool_call_id_set_equality(
+        redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+        redacted_tool_rows=redacted_tool_rows,
+    )
+    now = self._now()
+    with self._engine.begin() as conn:
+        # ... rest of body ...
+```
+
+Add four named regression tests to
+``tests/unit/web/sessions/test_persist_compose_turn.py``. Each test
+verifies the guard fires BEFORE any DB write — the post-condition is
+``SELECT COUNT(*) FROM chat_messages WHERE session_id = ...`` returns
+0 — and that the diagnostic identifies the right axis:
+
+```python
+def test_persist_compose_turn_rejects_missing_tool_row(service):
+    """Assistant claimed tc_X but no tool row was supplied. Guard
+    fires pre-DB; ``missing`` axis named in the diagnostic."""
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_missing")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"missing=\['tc_X'\].*extra=\[\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_missing",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(
+                {"id": "tc_X", "function": {"name": "f"}},
+            ),
+            redacted_tool_rows=(),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id='s_missing'"
+        )).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_extra_tool_row(service):
+    """Tool row supplied for tc_Y, but assistant did not claim it.
+    Guard fires pre-DB; ``extra`` axis named in the diagnostic."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_extra")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"missing=\[\].*extra=\['tc_Y'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_extra",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(_RedactedToolRow("tc_Y", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id='s_extra'"
+        )).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
+    """Assistant claimed tc_A; the tool row was for tc_B. Both axes
+    fire — ``missing=['tc_A']`` AND ``extra=['tc_B']`` — and the
+    diagnostic names both."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_mismatch")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"missing=\['tc_A'\].*extra=\['tc_B'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_mismatch",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(
+                {"id": "tc_A", "function": {"name": "f"}},
+            ),
+            redacted_tool_rows=(_RedactedToolRow("tc_B", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id='s_mismatch'"
+        )).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(service):
+    """Same ID appears twice in ``redacted_assistant_tool_calls`` —
+    structurally malformed transcript. Guard fires pre-DB."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_dup_assist")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"duplicates_in_assistant=\['tc_D'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_dup_assist",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(
+                {"id": "tc_D", "function": {"name": "f"}},
+                {"id": "tc_D", "function": {"name": "g"}},
+            ),
+            redacted_tool_rows=(_RedactedToolRow("tc_D", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id='s_dup_assist'"
+        )).scalar()
+        assert count == 0
+
+
+def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_rows(service):
+    """Same ID appears twice in ``redacted_tool_rows`` — would
+    eventually fire ``uq_chat_messages_tool_call_id`` at INSERT time,
+    but the named guard catches it pre-DB so the diagnostic identifies
+    the duplicate and the audit-integrity counter does not move."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.service import ToolCallIDMismatchError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_dup_rows")
+    with pytest.raises(
+        ToolCallIDMismatchError,
+        match=r"duplicates_in_rows=\['tc_E'\]",
+    ):
+        service.persist_compose_turn(
+            session_id="s_dup_rows",
+            assistant_content="ok",
+            redacted_assistant_tool_calls=(
+                {"id": "tc_E", "function": {"name": "f"}},
+            ),
+            redacted_tool_rows=(
+                _RedactedToolRow("tc_E", "{}", None),
+                _RedactedToolRow("tc_E", "{}", None),
+            ),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    with service._engine.begin() as conn:
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id='s_dup_rows'"
+        )).scalar()
+        assert count == 0
+```
+
+Closes synthesised review finding Q-F1 and makes the Preflight Step 3
+contract testable rather than aspirational. The guard placement
+(pre-lock, pre-transaction) is what makes Done-When items 1 and 2
+implementable: missing/extra/mismatched/duplicate IDs fail before
+any database write.
+
+- [ ] **Step 3d: Document the cancellation/idempotency contract for `persist_compose_turn_async` (Q-F2)**
+
+Per Preflight Step 2 ("Define cancellation/idempotency before
+coding"), record the chosen retry-after-cancel behaviour explicitly
+in this PR before ``persist_compose_turn_async`` is exercised by any
+caller. The dispatcher uses ``self._run_sync(self.persist_compose_turn,
+...)``, which (per the existing ``SessionServiceImpl._run_sync``
+contract) bridges to a worker thread — that thread is shielded from
+the caller's task cancellation, so a caller ``cancel()`` in async
+land does NOT interrupt the in-flight DB transaction.
+
+**Decision: commit-wins.** When the caller is cancelled mid-flight
+through ``persist_compose_turn_async``, the underlying worker
+continues to run the synchronous ``persist_compose_turn`` body to
+completion. One of two terminal states results:
+
+1. **The transaction commits.** The assistant row, tool rows, and
+   composition_states rows are durably persisted. The caller observes
+   ``CancelledError`` and never sees the ``_AuditOutcome`` — but the
+   audit trail records that the turn was persisted. **Callers MUST
+   NOT retry on ``CancelledError`` once the worker is dispatched.**
+   Retrying would attempt to insert the same assistant + tool rows a
+   second time and fire ``uq_chat_messages_tool_call_id``, fabricating
+   a ``tool_row_integrity_violation_total`` increment — which under
+   ELSPETH's auditability standard is evidence-tampering-class harm
+   (SLO threshold = 0; the alert fires on a non-event). The compose
+   loop in Phase 3 is the only caller of
+   ``persist_compose_turn_async``, so the no-retry policy is enforced
+   in one location.
+2. **The transaction rolls back atomically.** A DB-level error
+   (``IntegrityError``, ``OperationalError``, the new
+   ``ToolCallIDMismatchError`` raised pre-DB) causes the
+   ``engine.begin()`` block to roll back. No rows are persisted.
+   Retry-on-``CancelledError`` is still forbidden in this branch
+   because the caller cannot distinguish branch 1 (committed) from
+   branch 2 (rolled back) without reading back the database — and
+   reading back is itself a race against the next compose turn.
+
+**Why "commit-wins" rather than "rollback on cancel".** ELSPETH's
+audit doctrine treats Tier-1 audit failures as crash-immediately
+events (``AuditIntegrityError`` is registered in ``TIER_1_ERRORS``).
+A "rollback on cancel" semantics would require the worker to
+cooperate with caller cancellation — i.e. propagate
+``CancelledError`` into the synchronous transaction context — which
+is only achievable by raising mid-transaction. Mid-transaction
+cancellation of an in-flight INSERT is not deterministically safe
+across SQLite and PostgreSQL: SQLite's transaction model would not
+roll back a partially-committed group of statements, and PostgreSQL
+would emit a connection-state error that the existing
+``OperationalError`` handler would classify as a Tier-1 audit
+failure. Both behaviours fabricate Tier-1 alerts on a benign
+caller-cancel pattern. "Commit-wins" sidesteps this by guaranteeing
+the transaction reaches a definite terminal state regardless of
+caller fate.
+
+**Caller contract (binding).** The Phase 3 compose loop is the only
+caller of ``persist_compose_turn_async``. The contract it must
+honour, recorded here so Phase 3 can pin against it:
+
+- On ``CancelledError`` from ``await
+  service.persist_compose_turn_async(...)``: do not retry. The
+  worker may have committed the turn; retrying risks a duplicate
+  tool-call-ID INSERT that fires a fabricated Tier-1 counter
+  increment. Re-raise the ``CancelledError`` and let the caller's
+  cancellation propagate.
+- On ``ToolCallIDMismatchError``, ``StaleComposeStateError``,
+  ``IntegrityError``, ``AuditIntegrityError``: do not retry. These
+  are caller-contract / Tier-1 errors and retry would hide the bug
+  or fabricate audit-integrity violations.
+- The ``unwind_audit_failed=True`` outcome path is the only flag-
+  return shape that Phase 3 may handle locally — and even there the
+  caller raises the captured plugin-crash exception (see Task 13).
+
+**Testable proof.** Add the following to
+``tests/unit/web/sessions/test_persist_compose_turn.py``:
+
+```python
+@pytest.mark.asyncio
+async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(service):
+    """Q-F2 contract: when the caller is cancelled mid-flight through
+    ``persist_compose_turn_async``, the underlying worker continues to
+    completion. The post-cancel DB state must contain the persisted
+    rows (commit-wins), and the integrity counter MUST NOT have moved
+    on a benign cancel-and-retry pattern.
+
+    The shielded ``_run_sync`` worker bridge does not propagate
+    ``CancelledError`` into the synchronous transaction. The test
+    proves this by:
+
+    1. Awaiting ``persist_compose_turn_async`` inside an inner task.
+    2. Cancelling the inner task immediately after awaiting it.
+    3. Observing ``CancelledError`` on the caller side.
+    4. Asserting the assistant row IS in the database (commit-wins).
+    5. Asserting ``tool_row_integrity_violation_total`` did NOT move.
+
+    The cancellation injection uses ``asyncio.shield`` /
+    ``inner_task.cancel()`` — no monkeypatching of ``_run_sync`` is
+    required. Closes synthesised review finding Q-F2.
+    """
+    import asyncio
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions.telemetry import observed_value
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_cancel")
+
+    starting = observed_value(
+        service._telemetry.tool_row_integrity_violation_total
+    )
+
+    async def _do_persist() -> None:
+        await service.persist_compose_turn_async(
+            session_id="s_cancel",
+            assistant_content="commit-wins",
+            redacted_assistant_tool_calls=(
+                {"id": "tc_c1", "function": {"name": "f"}},
+            ),
+            redacted_tool_rows=(_RedactedToolRow("tc_c1", "{}", None),),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    inner = asyncio.create_task(_do_persist())
+    # Yield control to let the dispatcher hand off to the worker
+    # thread before we cancel. The worker is shielded; the cancel
+    # only affects the awaiter.
+    # 50ms — single asyncio.sleep(0) is racy on slow CI; this validates
+    # the worker has actually started before cancel arrives.
+    await asyncio.sleep(0.05)
+    inner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await inner
+
+    # Wait until the shielded worker has finished. Polling is fine
+    # because the worker bridge has no public completion signal —
+    # the test only asserts the committed terminal state.
+    for _ in range(200):
+        with service._engine.begin() as conn:
+            count = conn.execute(text(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id='s_cancel'"
+            )).scalar()
+        if count == 2:  # assistant + tool
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail(
+            "shielded worker did not commit within 2s; commit-wins "
+            "contract is not honoured by the current _run_sync bridge."
+        )
+
+    # Counter MUST NOT have moved — there was no IntegrityError, no
+    # benign "fabricated Tier-1" event from the cancel path.
+    assert (
+        observed_value(service._telemetry.tool_row_integrity_violation_total)
+        == starting
+    ), (
+        "Q-F2 regression: caller cancellation produced a "
+        "tool_row_integrity_violation_total increment. Under the "
+        "commit-wins contract, a clean cancel must not fabricate "
+        "Tier-1 alerts (SLO threshold = 0)."
+    )
+```
+
+The test's commit-wins polling loop is intentional: the shielded
+worker's completion is observable only through the database state.
+``asyncio.shield`` would prevent cancellation from reaching the
+worker thread, but ``_run_sync`` already provides equivalent
+shielding by dispatching to the bounded worker pool — a future
+refactor that drops the shield must update this test along with the
+caller contract above.
+
 - [ ] **Step 4: Run tests to verify pass**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "happy_path or zero_tool_rows or persists_raw_content or rejects_cross_session_parent_state or accepts_valid_same_session_parent_state or rejects_stale_expected_current_state or accepts_matching_expected_current_state or refuses_async_invocation or async_protocol_dispatch_succeeds_from_async"
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "happy_path or zero_tool_rows or persists_raw_content or rejects_cross_session_parent_state or accepts_valid_same_session_parent_state or rejects_stale_expected_current_state or accepts_matching_expected_current_state or refuses_async_invocation or async_protocol_dispatch_succeeds_from_async or rejects_missing_tool_row or rejects_extra_tool_row or rejects_mismatched_tool_call_ids or rejects_duplicate_tool_call_id_in_assistant or rejects_duplicate_tool_call_id_in_rows or async_caller_cancellation_commits_anyway"
 .venv/bin/python -m mypy src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py
 ```
-Expected: PASS for all nine Task-11 tests:
+Expected: PASS for all fifteen Task-11 tests:
 - `test_persist_compose_turn_happy_path`
 - `test_persist_compose_turn_zero_tool_rows` (W10a fix — pins the
   assistant-only call shape with empty `redacted_tool_rows` and empty
@@ -1695,12 +2419,35 @@ Expected: PASS for all nine Task-11 tests:
 - `test_persist_compose_turn_accepts_matching_expected_current_state`
 - `test_persist_compose_turn_refuses_async_invocation`
 - `test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async`
+- `test_persist_compose_turn_rejects_missing_tool_row` (Q-F1 fix —
+  Step 3c transcript validation guard)
+- `test_persist_compose_turn_rejects_extra_tool_row` (Q-F1 fix)
+- `test_persist_compose_turn_rejects_mismatched_tool_call_ids` (Q-F1
+  fix — both ``missing`` and ``extra`` axes fire simultaneously)
+- `test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant` (Q-F1 fix)
+- `test_persist_compose_turn_rejects_duplicate_tool_call_id_in_rows` (Q-F1 fix)
+- `test_persist_compose_turn_async_caller_cancellation_commits_anyway`
+  (Q-F2 fix — Step 3d commit-wins contract)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/service.py src/elspeth/web/sessions/protocol.py tests/unit/web/sessions/test_persist_compose_turn.py
-git commit -m "feat(sessions): add persist_compose_turn happy path (composer-progress-persistence phase 1)"
+git commit -m "feat(sessions): add persist_compose_turn happy path with transcript validation guard and commit-wins async contract (composer-progress-persistence phase 1B)
+
+- Adds the synchronous persist_compose_turn primitive (success path,
+  spec §5.2.2) and its async dispatcher persist_compose_turn_async on
+  SessionServiceProtocol.
+- StaleComposeStateError lives on protocol.py, not service.py (A-F1 —
+  protocol-level error shape belongs on the abstraction).
+- Adds the pre-DB transcript validation guard
+  _validate_tool_call_id_set_equality and ToolCallIDMismatchError
+  (Q-F1 — Preflight Step 3 made testable; missing/extra/mismatched/
+  duplicate IDs fail before any DB write).
+- Documents and tests the commit-wins cancellation contract for
+  persist_compose_turn_async (Q-F2 — Preflight Step 2 made binding
+  for Phase 3).
+"
 ```
 
 ---
@@ -2569,10 +3316,22 @@ git commit -m "test(integration): schema-level INV-AUDIT-AHEAD backward-directio
 
 ## Schedule 1B Done When
 
-1. [ ] `persist_compose_turn` cannot persist assistant/tool transcript mismatches.
-2. [ ] Missing, extra, mismatched, and duplicate tool-call IDs fail before any database write.
-3. [ ] IntegrityError and broader persistence-failure tests preserve primary failure semantics and privacy.
-4. [ ] `persist_compose_turn_async` has tested cancellation/retry semantics.
-5. [ ] INV-AUDIT-AHEAD backward-direction proof passes without relying on PostgreSQL/testcontainer infrastructure.
-6. [ ] No compose-loop, route-visible, redaction, frontend, or PostgreSQL CI work is included.
-7. [ ] A follow-up review confirms Schedule 1B no longer blocks Schedule 1C.
+1. [ ] `persist_compose_turn` cannot persist assistant/tool transcript mismatches. (Implemented by Task 11 Step 3c — `_validate_tool_call_id_set_equality` guard and `ToolCallIDMismatchError`. Pinned by `test_persist_compose_turn_rejects_missing_tool_row`, `..._rejects_extra_tool_row`, `..._rejects_mismatched_tool_call_ids`.)
+2. [ ] Missing, extra, mismatched, and duplicate tool-call IDs fail before any database write. (Same guard as item 1; the post-condition `SELECT COUNT(*) FROM chat_messages = 0` after each rejection proves the pre-DB placement. Duplicates pinned by `..._rejects_duplicate_tool_call_id_in_assistant` and `..._rejects_duplicate_tool_call_id_in_rows`.)
+3. [ ] IntegrityError and broader persistence-failure tests preserve primary failure semantics and privacy. (Tasks 12 + 13 — IntegrityError handler with counter increment, OperationalError handler with audit-primacy disposition.)
+4. [ ] `persist_compose_turn_async` has tested cancellation/retry semantics. (Task 11 Step 3d — commit-wins contract documented; `test_persist_compose_turn_async_caller_cancellation_commits_anyway` proves the worker commits despite caller cancel and the integrity counter does not move.)
+5. [ ] INV-AUDIT-AHEAD backward-direction proof passes without relying on PostgreSQL/testcontainer infrastructure. (Task 15 — SQL predicate against in-memory SQLite engine.)
+6. [ ] Run `pytest tests/unit/web/sessions/test_static_direct_writers.py -v` and confirm it passes after all 1B tasks land.
+      Reason: 1B introduces new direct-write paths (`_insert_chat_message`, `_insert_composition_state` callers via `persist_compose_turn`).
+      The static-writer scanner is the mechanical guard that they're allowlisted with past-tense purpose strings explaining why each direct write is necessary
+      instead of going through the normal session-write façade.
+7. [ ] Pre-merge gate (run all four from worktree root, all must pass before opening or merging the PR):
+      ```bash
+      .venv/bin/python -m pytest tests/unit/web tests/integration/web && \
+      .venv/bin/python -m mypy src/ && \
+      .venv/bin/python -m ruff check src/ tests/ && \
+      .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+      ```
+      The `&&` chain is intentional: a failure in any earlier command short-circuits and surfaces immediately rather than masking later failures.
+8. [ ] No compose-loop, route-visible, redaction, frontend, or PostgreSQL CI work is included.
+9. [ ] A follow-up review confirms Schedule 1B no longer blocks Schedule 1C.

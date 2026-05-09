@@ -439,7 +439,7 @@ class TestDiffStates:
         node = NodeSpec(
             id="n1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="in",
             on_success="out",
             on_error=None,
@@ -460,7 +460,7 @@ class TestDiffStates:
         node1 = NodeSpec(
             id="n1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="in",
             on_success="out",
             on_error=None,
@@ -475,7 +475,7 @@ class TestDiffStates:
         node2 = NodeSpec(
             id="n1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="in",
             on_success="out",
             on_error=None,
@@ -496,7 +496,7 @@ class TestDiffStates:
         node = NodeSpec(
             id="n1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="in",
             on_success="out",
             on_error=None,

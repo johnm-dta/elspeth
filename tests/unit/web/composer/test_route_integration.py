@@ -63,7 +63,7 @@ def _make_populated_state() -> CompositionState:
     node = NodeSpec(
         id="transform_1",
         node_type="transform",
-        plugin="uppercase",
+        plugin="passthrough",
         input="source_out",
         on_success="sink_out",
         on_error="discard",

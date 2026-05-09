@@ -69,7 +69,7 @@ class TestNodeSpec:
         defaults: dict[str, Any] = {
             "id": "transform_1",
             "node_type": "transform",
-            "plugin": "uppercase",
+            "plugin": "passthrough",
             "input": "source_out",
             "on_success": "sink_main",
             "on_error": None,
@@ -377,7 +377,7 @@ class TestCompositionState:
         return NodeSpec(
             id=id,
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="source_out",
             on_success="sink_main",
             on_error=None,
@@ -760,7 +760,7 @@ class TestStage1Validation:
         return NodeSpec(
             id=id,
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input=input,
             on_success=on_success,
             on_error=on_error,
@@ -1188,7 +1188,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="in",
             on_success="out",
             on_error=None,
@@ -1813,7 +1813,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success=None,
             on_error="discard",
@@ -1838,7 +1838,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success="",
             on_error="discard",
@@ -1863,7 +1863,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success="main",
             on_error="  ",
@@ -1888,7 +1888,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success="main",
             on_error=None,

@@ -2145,8 +2145,7 @@ def _prevalidate_plugin_options(
             # PluginKind is Literal["source", "transform", "sink"] — unreachable.
             raise AssertionError(f"_prevalidate_plugin_options: unexpected plugin_type={plugin_type!r}")
     except UnknownPluginTypeError:
-        # Plugin name not in registry — let engine validation catch it later.
-        return None
+        return f"Unknown {plugin_type} plugin '{plugin_name}'. Call list_{plugin_type}s to see available {plugin_type} plugins."
     except ValueError as exc:
         # Config model selection raised (e.g. unknown LLM provider) — surface it.
         return f"Invalid options for {plugin_type} '{plugin_name}': {exc}"

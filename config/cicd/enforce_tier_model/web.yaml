@@ -494,13 +494,6 @@ allow_hits:
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
     exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=1fd205d15cdec572
-  owner: web-composer
-  reason: UnknownPluginTypeError is expected for unrecognised plugin names — lets
-    engine validation catch it later
-  safety: Returns None (no pre-validation result); plugin name still validated during
-    full pipeline instantiation
-  expires: null
 - key: web/composer/tools.py:R6:_execute_update_blob:fp=fd103b0d6c58a62c
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk

@@ -105,7 +105,7 @@ def _mock_catalog() -> MagicMock:
     ]
     catalog.list_transforms.return_value = [
         PluginSummary(
-            name="uppercase",
+            name="passthrough",
             description="Uppercase",
             plugin_type="transform",
             config_fields=[],
@@ -1040,7 +1040,7 @@ class TestComposerErrorHandling:
                             {
                                 "id": "t1",
                                 "node_type": "transform",
-                                "plugin": "uppercase",
+                                "plugin": "passthrough",
                                 "input": "source_out",
                                 "on_success": "main",
                                 "options": {},
@@ -1117,7 +1117,7 @@ class TestComposerErrorHandling:
                             {
                                 "id": "t1",
                                 "node_type": "transform",
-                                "plugin": "uppercase",
+                                "plugin": "passthrough",
                                 "input": "main",
                                 "on_success": "main",
                                 "options": {},
@@ -1198,7 +1198,7 @@ class TestComposerErrorHandling:
                             {
                                 "id": "t1",
                                 "node_type": "transform",
-                                "plugin": "uppercase",
+                                "plugin": "passthrough",
                                 "input": "main",
                                 "on_success": "main",
                                 "options": {},

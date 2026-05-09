@@ -96,7 +96,7 @@ def _mock_catalog() -> MagicMock:
     ]
     catalog.list_transforms.return_value = [
         PluginSummary(
-            name="uppercase",
+            name="passthrough",
             description="Uppercase transform",
             plugin_type="transform",
             config_fields=[],
@@ -554,10 +554,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -574,10 +574,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -587,10 +587,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "new_in",
                 "on_success": "out",
-                "options": {"field": "x"},
+                "options": {"schema": {"mode": "observed"}},
             },
             result1.updated_state,
             catalog,
@@ -794,10 +794,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
                 "condition": "this is not python!!!",
             },
             state,
@@ -860,10 +860,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "old_stream",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -900,10 +900,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1090,10 +1090,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1160,10 +1160,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "stream_a",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1173,10 +1173,10 @@ class TestUpsertEdge:
             {
                 "id": "t2",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "stream_a",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             r1.updated_state,
             catalog,
@@ -1200,10 +1200,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "csv_out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1243,10 +1243,10 @@ class TestRemoveNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -2360,7 +2360,7 @@ class TestGetPipelineState:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source",
                 "on_success": "out",
                 "options": {"schema": {"mode": "observed"}},
@@ -2493,7 +2493,7 @@ class TestGetPipelineState:
         data = result.to_dict()["data"]
         assert "node" in data
         assert data["node"]["id"] == "t1"
-        assert data["node"]["plugin"] == "uppercase"
+        assert data["node"]["plugin"] == "passthrough"
         assert isinstance(data["node"]["options"], dict)
 
     def test_full_state_alias_does_not_shadow_real_node_id(self) -> None:
@@ -2502,7 +2502,7 @@ class TestGetPipelineState:
             NodeSpec(
                 id="full",
                 node_type="transform",
-                plugin="uppercase",
+                plugin="passthrough",
                 input="source",
                 on_success="out",
                 on_error=None,
@@ -4866,7 +4866,7 @@ class TestPatchNodeOptions:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
                 "options": options,
@@ -4878,11 +4878,11 @@ class TestPatchNodeOptions:
         return r.updated_state
 
     def test_patch_node_options_updates_key(self) -> None:
-        state = self._state_with_node({"field": "old"})
+        state = self._state_with_node({"schema": {"mode": "observed"}, "required_input_fields": ["old"]})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_node_options",
-            {"node_id": "t1", "patch": {"field": "new"}},
+            {"node_id": "t1", "patch": {"required_input_fields": ["new"]}},
             state,
             catalog,
         )
@@ -4891,13 +4891,13 @@ class TestPatchNodeOptions:
         assert node.id == "t1"
 
         opts = deep_thaw(node.options)
-        assert opts["field"] == "new"
+        assert opts["required_input_fields"] == ["new"]
         # Other node fields preserved
         assert node.node_type == "transform"
-        assert node.plugin == "uppercase"
+        assert node.plugin == "passthrough"
 
     def test_patch_node_options_rejects_literal_credential_value_without_mutating_state(self) -> None:
-        state = self._state_with_node({"field": "old"})
+        state = self._state_with_node({"schema": {"mode": "observed"}})
         catalog = _mock_catalog()
         literal = "literal-node-key-for-test"
 
@@ -4924,11 +4924,11 @@ class TestPatchNodeOptions:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
                 "on_error": "discard",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -5181,11 +5181,11 @@ def _valid_pipeline_args() -> dict[str, Any]:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
                 "on_error": "discard",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             }
         ],
         "edges": [
@@ -5735,10 +5735,10 @@ class TestSetPipeline:
                 {
                     "id": f"t{i}",
                     "node_type": "transform",
-                    "plugin": "uppercase",
+                    "plugin": "passthrough",
                     "input": "in",
                     "on_success": "out",
-                    "options": {},
+                    "options": {"schema": {"mode": "observed"}},
                 },
                 state,
                 catalog,
@@ -5779,11 +5779,11 @@ class TestSetPipeline:
             {
                 "id": "t2",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "orphan_channel",
                 "on_success": "main",
                 "on_error": None,
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             }
         )
         result = execute_tool("set_pipeline", args, state, catalog)
@@ -6372,7 +6372,14 @@ class TestPreviewPipeline:
         )
         r2 = execute_tool(
             "upsert_node",
-            {"id": "t1", "node_type": "transform", "plugin": "uppercase", "input": "t1", "on_success": "main", "options": {}},
+            {
+                "id": "t1",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "t1",
+                "on_success": "main",
+                "options": {"schema": {"mode": "observed"}},
+            },
             r1.updated_state,
             catalog,
         )
@@ -6664,7 +6671,7 @@ class TestPrevalidatePluginOptions:
     """Direct unit tests for _prevalidate_plugin_options.
 
     Covers the 6 code paths identified in the architecture review:
-    bypass (unknown plugin), success, config error with prefix stripping,
+    structured rejection (unknown plugin), success, config error with prefix stripping,
     injected_fields merge, MappingProxyType deep-thaw, and ValueError surfacing.
     Also covers the absence-is-evidence contract: missing required fields (like
     path) must produce validation errors, not be papered over by placeholders.
@@ -6689,14 +6696,41 @@ class TestPrevalidatePluginOptions:
         assert result is not None
         assert result.startswith("Invalid options for transform 'passthrough':")
 
-    def test_unknown_plugin_name_returns_none(self) -> None:
-        """Unregistered plugin name skips pre-validation; engine catches it later."""
+    def test_unknown_transform_plugin_returns_actionable_error(self) -> None:
+        """Unregistered transform name surfaces as an actionable error string."""
         result = _prevalidate_plugin_options(
             "transform",
-            "nonexistent_plugin_xyz",
-            {},
+            "this_plugin_does_not_exist",
+            {"some": "options"},
         )
-        assert result is None
+        assert result is not None
+        assert "this_plugin_does_not_exist" in result
+        assert "transform" in result.lower()
+        assert "list_transforms" in result
+
+    def test_unknown_source_plugin_returns_actionable_error(self) -> None:
+        """Unregistered source name surfaces as an actionable error string."""
+        result = _prevalidate_plugin_options(
+            "source",
+            "no_such_source_plugin",
+            {"path": "/data/blobs/in.csv"},
+        )
+        assert result is not None
+        assert "no_such_source_plugin" in result
+        assert "source" in result.lower()
+        assert "list_sources" in result
+
+    def test_unknown_sink_plugin_returns_actionable_error(self) -> None:
+        """Unregistered sink name surfaces as an actionable error string."""
+        result = _prevalidate_plugin_options(
+            "sink",
+            "no_such_sink_plugin",
+            {"path": "/data/outputs/out.csv"},
+        )
+        assert result is not None
+        assert "no_such_sink_plugin" in result
+        assert "sink" in result.lower()
+        assert "list_sinks" in result
 
     def test_injected_fields_satisfy_required_options(self) -> None:
         """Injected fields are merged in for validation only — not stored in state."""

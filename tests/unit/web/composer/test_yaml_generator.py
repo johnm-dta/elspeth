@@ -29,7 +29,7 @@ def _make_linear_pipeline() -> CompositionState:
             NodeSpec(
                 id="transform_1",
                 node_type="transform",
-                plugin="uppercase",
+                plugin="passthrough",
                 input="source_out",
                 on_success="main_output",
                 on_error="discard",
@@ -193,7 +193,7 @@ class TestGenerateYaml:
         assert len(parsed["transforms"]) == 1
         t = parsed["transforms"][0]
         assert t["name"] == "transform_1"
-        assert t["plugin"] == "uppercase"
+        assert t["plugin"] == "passthrough"
         assert t["input"] == "source_out"
         assert t["on_success"] == "main_output"
         assert t["on_error"] == "discard"
@@ -336,7 +336,7 @@ class TestGenerateYaml:
                 NodeSpec(
                     id="t1",
                     node_type="transform",
-                    plugin="uppercase",
+                    plugin="passthrough",
                     input="in",
                     on_success="out",
                     on_error="error_sink",
@@ -374,7 +374,7 @@ class TestGenerateYaml:
                 NodeSpec(
                     id="t1",
                     node_type="transform",
-                    plugin="uppercase",
+                    plugin="passthrough",
                     input="in",
                     on_success="out",
                     on_error="discard",
@@ -450,7 +450,7 @@ class TestGenerateYaml:
                 NodeSpec(
                     id="t1",
                     node_type="transform",
-                    plugin="uppercase",
+                    plugin="passthrough",
                     input="in",
                     on_success="out",
                     on_error=None,

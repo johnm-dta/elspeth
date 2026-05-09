@@ -165,7 +165,26 @@ def _validate_named_unique_constraints(inspector: Inspector, table_name: str, ta
 
 def _validate_named_indexes(inspector: Inspector, table_name: str, table: Table) -> None:
     expected = {str(index.name) for index in table.indexes if index.name is not None}
-    actual = {str(index["name"]) for index in inspector.get_indexes(table_name) if index["name"] is not None}
+    # Dialect-portability filter: PostgreSQL's information_schema reports
+    # every UNIQUE constraint as a duplicate index entry (because uniques
+    # are physically backed by btree indexes), while SQLite does not. To
+    # keep this validator dialect-agnostic, exclude names that already
+    # appear as named UNIQUE constraints — those are validated in full by
+    # ``_validate_named_unique_constraints`` and would otherwise produce
+    # spurious "extra index" mismatches on Postgres. The same filter is
+    # applied to ``expected`` so that any explicit ``Index(name=...)``
+    # whose name happens to collide with a UniqueConstraint name (none
+    # currently, but the filter must be symmetric) does not produce a
+    # false mismatch in either direction.
+    unique_names = {
+        str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None
+    }
+    actual = {
+        str(index["name"])
+        for index in inspector.get_indexes(table_name)
+        if index["name"] is not None and str(index["name"]) not in unique_names
+    }
+    expected = expected - unique_names
     if actual != expected:
         _schema_error(
             f"{table_name} index mismatch",

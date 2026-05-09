@@ -253,11 +253,26 @@ runs_table = Table(
 # Partial unique index: at most one active (pending/running) run per session.
 # Enforces the one-active-run invariant at the database level, eliminating
 # the TOCTOU race in the service-level check-and-insert.
+#
+# BOTH ``sqlite_where=`` AND ``postgresql_where=`` must be set to the same
+# predicate. Without ``postgresql_where=`` SQLAlchemy emits a non-partial
+# unique index on ``session_id`` alone on Postgres, which silently
+# over-restricts the invariant from "at most one ACTIVE run per session"
+# to "at most one run per session ever" — a real audit-integrity defect
+# (the second run in a session would fail to insert with a unique-violation
+# unrelated to its actual status). Mirrors the project pattern at
+# ``uq_chat_messages_tool_call_id`` above where both keys are set.
+#
+# The schema validator (sessions/schema.py:_validate_named_indexes) only
+# compares index NAMES, not WHERE clauses, so a future drift between the
+# two predicates would not be caught by ``initialize_session_schema``.
+# That validator-coverage gap is tracked separately.
 Index(
     "uq_runs_one_active_per_session",
     runs_table.c.session_id,
     unique=True,
     sqlite_where=runs_table.c.status.in_(["pending", "running"]),
+    postgresql_where=runs_table.c.status.in_(["pending", "running"]),
 )
 
 blobs_table = Table(
@@ -300,15 +315,38 @@ blobs_table = Table(
     # docs/plans/rc4.2-ux-remediation/2026-03-30-02-blob-manager-subplan.md).
     #
     # The shape rule mirrors ``_validate_finalize_hash`` at the write
-    # side (``re.compile(r"^[a-f0-9]{64}$")``).  The DDL here uses
-    # SQLite GLOB syntax because the session DB is SQLite (see
-    # ``sessions/engine.py`` and the StaticPool test harness). If a
-    # different dialect is introduced, add its V0 check expression here
-    # instead of adding a migration path.
+    # side (``re.compile(r"^[a-f0-9]{64}$")``).
+    #
+    # Two dialect-conditional expressions enforce the same invariant:
+    # SQLite uses ``NOT GLOB '*[^a-f0-9]*'`` (Postgres has no GLOB
+    # operator); PostgreSQL uses POSIX regex ``~ '^[a-f0-9]+$'`` (SQLite
+    # has no built-in POSIX regex). Both reject the same set of
+    # malformed content_hash values on rows with status='ready':
+    # NULL, length≠64, or any non-lowercase-hex character. The
+    # ``length(...) = 64`` clause anchors the length check on both sides,
+    # and the character-class checks anchor the alphabet — together they
+    # are equivalent to ``re.compile(r"^[a-f0-9]{64}$")`` on the write
+    # side.
+    #
+    # The shared name ``ck_blobs_ready_hash`` lets the schema validator
+    # (sessions/schema.py:_validate_named_checks) treat the two
+    # CheckConstraints as one named constraint via set dedup; only the
+    # dialect-active one is created by ``metadata.create_all`` because of
+    # the ``ddl_if(dialect=...)`` filter, so the inspector reports
+    # exactly one CHECK named ``ck_blobs_ready_hash`` per dialect and
+    # set comparison passes on both.
+    #
+    # If a third dialect is introduced, add its V0 check expression here
+    # with a matching ``ddl_if(dialect=...)`` instead of adding a
+    # migration path.
     CheckConstraint(
         "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash NOT GLOB '*[^a-f0-9]*')",
         name="ck_blobs_ready_hash",
-    ),
+    ).ddl_if(dialect="sqlite"),
+    CheckConstraint(
+        "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash ~ '^[a-f0-9]+$')",
+        name="ck_blobs_ready_hash",
+    ).ddl_if(dialect="postgresql"),
 )
 
 blob_run_links_table = Table(

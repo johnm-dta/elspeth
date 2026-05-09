@@ -4,13 +4,15 @@
 **Parent epic:** [elspeth-528bde62bb](filigree:elspeth-528bde62bb) — Composer LLM evaluation remediation
 **Related future epic:** [elspeth-f0460a6594](filigree:elspeth-f0460a6594) — Composer async/background execution model (deferred to Future release)
 **Date:** 2026-04-30
-**Status:** Proposed (revision 4 — addresses six-reviewer first-principles panel: solution architect, systems-thinking pattern recognizer, Python engineer, QA analyst, security threat analyst, reality/hallucination check)
+**Status:** Proposed (revision 5 — addresses four-reviewer plan-review pass on the Phase 2 plan derived from rev 4: reality, architecture, quality, systems. Closes the four BLOCKERs identified at `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` and re-derives the redaction design from the actual `tools.py` architecture.)
 **Branch:** RC5-UX (or successor)
 **Tier-artifact match:** **M-tier** change delivered as a four-phase plan. Revision 1 labelled XS; revision 2 grew to S; revision 3 retained S; revision 4 demotes to M and explicitly splits delivery (see §11) because the `SessionsTransaction` primitive (Phase 1), the redaction framework (Phase 2), the compose-loop persistence (Phase 3), and the frontend recovery surface (Phase 4) are independently reviewable, independently testable, and independently deployable. Each phase is a separate PR against the parent epic.
 
 **Path conventions.** Throughout this spec, `web/...` and `sessions/...` are shorthand for `src/elspeth/web/...` and `src/elspeth/web/sessions/...` respectively. Full paths appear the first time a file is cited per major section; later references in the same section may use the shorthand. Test paths are written full from repo root (`tests/...`). Implementers cloning the repo and following a citation should prepend `src/elspeth/` when the path begins with `web/`.
 
 **Architectural pivot in revision 4.** Revision 3 proposed an async `SessionsTransaction` context manager interleaved with `asyncio.shield`-protected audit inserts. The first-principles panel established that (a) the current `SessionsService` is built on a sync `Engine` dispatched via `_run_sync`/`run_sync_in_worker`, so a multi-await transaction context cannot share a connection without pinning a worker thread; (b) `asyncio.shield` does not deliver "the inner write completes before the outer await returns" — it detaches the shielded coroutine and lets the outer await re-raise `CancelledError` immediately; (c) the proposed `try/except/finally` block reads an unbound local in the `BaseException` path, raising `NameError` that replaces the in-flight `CancelledError`. Revision 4 resolves all three by collapsing each per-turn write (assistant row + N tool rows + corresponding `composition_states` rows + sequence-number reservations) into **one sync block dispatched through `_run_sync`**. This eliminates the cross-async-boundary race surface entirely. The `SessionsTransaction` primitive becomes a sync-only context yielded inside the `_run_sync` worker. See ADR row "Transaction primitive shape" in §3 and the rewritten §5.2 / §5.7.
+
+**Architectural pivot in revision 5.** Revision 4's redaction design (§4.2 / §4.4) was derived from the false premise that "Composer tools declare arguments via Pydantic `BaseModel` subclasses" (rev-4 §4.4.1, line 649). The four-reviewer plan-review pass on the rev-4-derived Phase 2 plan established by direct citation against `src/elspeth/web/composer/tools.py` (HEAD `f5115fd5`, 5481 lines) that (a) **no tool declares a Pydantic argument model**: `tools.py` imports Pydantic only for `ValidationError`, and every handler takes `arguments: dict[str, Any]`; (b) dispatch is via **six function-pointer registries** at lines 5250–5314 (`_DISCOVERY_TOOLS`, `_MUTATION_TOOLS`, `_BLOB_DISCOVERY_TOOLS`, `_BLOB_MUTATION_TOOLS`, `_SECRET_DISCOVERY_TOOLS`, `_SECRET_MUTATION_TOOLS`), with three tools (`preview_pipeline`, `diff_pipeline`, `set_pipeline`) carrying extended signatures handled inline in `execute_tool()`; (c) there is **no `class ComposerTool` base** anywhere in the project — the rev-4 §4.4.2 `ClassVar` pattern is fictional. Revision 5 replaces the implicit class-hierarchy registry with an explicit **manifest** (`MANIFEST: dict[str, ToolRedaction]` keyed by tool name, mirroring the existing `_TOOL_REQUIRED_PATHS: dict[str, ...]` precedent at `src/elspeth/web/composer/service.py:702`). Each `ToolRedaction` entry is *either* type-driven (an `argument_model: type[BaseModel]` whose fields carry `Sensitive[T]` annotations — Phase 2 promotes ~6–8 sensitive-touching tools to this shape with full `model.model_validate` dispatch validation routed to the existing `ARG_ERROR` path at `service.py:1836–1870`) *or* declarative (the rev-4 `ToolRedactionPolicy` shape, retained for tools whose argument surface is purely structural — Phase 2 covers the remaining ~29–31 tools this way, enumerated explicitly per registry). The walker and the adequacy guard share **one** traversal iterator (§4.2.4) yielding `(path, field_type, metadata, value_provider)` tuples, parametrically descending into `BaseModel`, `list[BaseModel]`, `dict[str, BaseModel]`, `tuple[BaseModel, ...]`, `Optional[BaseModel]`, `Union[*, BaseModel, *]` arms, and `Annotated[T, *, Sensitive(), *]` regardless of marker position; future schema changes touch the iterator and both consumers atomically. The walker is at the **Tier-3 → Tier-1 boundary**: unknown response keys are **fail-closed-redacted** with a fixed sentinel string (`"<redacted-unknown-response-key>"` — no length disclosure) and a counter increments; only **internal-invariant violations** (manifest entry missing for a dispatched tool name, summarizer raises, summarizer returns non-`str`) crash via `AuditIntegrityError`, in line with CLAUDE.md plugin-ownership policy. The `@elspeth/security` CODEOWNERS team referenced in rev-4 §4.4.5 cannot exist on `johnm-dta/elspeth` (personal-account repo; GitHub teams require an organisation), so rev-5 drops the team-routing control and promotes the policy-hash snapshot test plus a `policy-weaken-justified` PR-label gate enforced by a CI step (§4.4.5) to primary control — defense by mechanism, not defense by paperwork. See the rewritten §4.2 and §4.4, the amended §9 RSK-03 (summarizer-exception crash discipline), the amended §11 Phase 2 scope, and the rev-5 reviewer-finding traceability at §12.2.
 
 ---
 
@@ -65,7 +67,7 @@ specific failure mode).
 | Per-turn DB write overhead (sanity bound) | p95 ≤ 250 ms with N ≤ 8 tool calls per assistant turn, measured in CI on standard infra | `tests/integration/web/test_compose_loop_latency_sanity.py` (new) — order-of-magnitude bound, not a tight budget |
 | Per-turn DB write overhead (tight target) | p95 ≤ 25 ms with N ≤ 8 on dedicated bench host | Nightly bench job, not gated on CI; failure raises a tracking observation, not a build break |
 | Recovery panel time-to-interactive | ≤ 500 ms with ≤ 50 tool rows in transcript | Frontend perf test (new); same sanity-bound discipline as latency NFR |
-| Redaction-summarizer failure rate | ≤ 0.1% of tool calls in a 24-hour window; alerts above | OTel counter `composer.redaction.summarizer_errors_total` |
+| Redaction-summarizer failure rate (rev 5: SLO tightened to 0) | **0 events expected**; any non-zero value is an incident, not a budget. The walker raises `AuditIntegrityError` on summarizer exception or non-`str` return (§9 RSK-03; §4.2.6 boundary table). The rev-4 "≤ 0.1% in 24h" budget is removed because silent sentinel-substitution is no longer the disposition — system-code summarizers must be total and `str`-returning by contract; non-zero events represent system bugs, not pathological inputs. | OTel counter `composer.redaction.summarizer_errors_total`; SLO threshold = 0 |
 | Tier-1 audit-write failure rate (tool succeeded, audit insert raised non-IntegrityError) | **0 events expected**; any non-zero value alerts | OTel counter `composer.audit.tool_row_tier1_violation_total`; SLO threshold = 0. This is the load-bearing primacy violation. |
 | Audit-state-rollback during atomic-pair commit | **0 events expected**; any non-zero value alerts | OTel counter `composer.audit.state_rolled_back_during_persist_total`; SLO threshold = 0 |
 | Audit-row insert failure during tool-exception unwind (best-effort path) | telemetry-only; no SLO. The tool exception is the dominant signal; the audit best-effort write is ancillary. | OTel counter `composer.audit.tool_row_persist_failed_during_unwind_total` (no alert). Discussed in §5.5 row 7 / §5.2 audit-failure primacy. |
@@ -122,7 +124,7 @@ does not constrain this work.
 | Transaction primitive shape (NEW in rev 4) | **TX1.** Single sync block per turn dispatched via `_run_sync`. The compose loop builds redacted payloads in async land, then hands a fully-populated work item to a sync function that opens ONE `engine.begin()` transaction, reserves sequence numbers, writes assistant + N tool + state rows, and commits. `SessionsTransaction` becomes a sync context manager yielded inside that worker. `asyncio.shield` and the `try/except/finally` interleaving disappear. | **TX2.** Async `SessionsTransaction` with a connection pinned to a single worker thread for the txn lifetime (incompatible with SQLite's cross-thread connection rule, complex on PostgreSQL pool semantics). **TX3.** Migrate `SessionsService` to `async_engine` as a prerequisite ticket (correct long-term direction, but materially out of scope for this work). | TX1 is reversible at the API boundary — if a future ticket migrates SessionsService to async_engine, the inner sync block becomes a single async-with body without compose-loop-side changes. | If sync-block design causes unexpected blocking issues, isolate the worker pool dedicated to compose persistence (existing `run_sync_in_worker` pattern accepts a pool selector). | Cost: existing `_run_sync` worker pool capacity. Bench shows N≤8 tool calls per turn at ≤25ms p95 fits comfortably. | RC 5.1 architecture review; concurrency review by Web subsystem owner |
 | Tool-response persistence shape | **A1.** One `role='tool'` `chat_messages` row per tool response, correlated to its assistant turn via `tool_call_id`. | A2 (embed responses in assistant row's `tool_calls` JSON) | One-way after first compose run executes — tool rows accumulate. Pre-release the corpus is empty so revisable. | Drop the tool rows + `tool_call_id` column; revert to A2 shape. Costs one schema migration + audit-data-loss event. | Per-call audit row growth (1 + N rows per turn vs 1) | RC 5.1 readiness review |
 | Frontend recovery UX | **F2.** Diff-and-confirm modal showing pipeline diff + tool transcript with explicit Apply / Discard buttons. | F1 (auto-apply) destructive of unsaved edits; F3 (reload-to-recover) clunky. | Reversible — frontend-only change, no DB shape implications. | Hide the panel; failure path falls back to existing toast/banner. | Frontend dev + accessibility cost | RC 5.1 frontend review |
-| Redaction primitive (NEW in rev 4) | **R4.** **Type-driven**, with declarative escape valve. The primary mechanism is a `Sensitive[T]` `Annotated`-based marker on Pydantic argument and response model fields. The persistence layer reads field annotations and redacts marked fields unconditionally — the tool author cannot opt out. The legacy `ToolRedactionPolicy` declaration is retained ONLY for cases where the type-annotation approach is impractical (raw dict accepted, third-party model) and is gated behind an explicit `EXEMPT_FROM_TYPE_DRIVEN_REDACTION: ClassVar[bool]` flag on the tool class. The structural Level-4 leverage (Meadows hierarchy) is the type system itself; declaration discipline is no longer the dominant defence. | R3 (rev-3 design): per-tool string-keyed `ToolRedactionPolicy` with `handles_no_sensitive_data=True` opt-out and quarterly review. Vulnerable to declaration-burden normalisation (RSK-02 in rev 3). | One-way after first compose run executes against the new layer (any tool already migrated to `Sensitive[T]` cannot revert without churn). | Remove the `Sensitive[T]` annotation from every tool's argument/response models and reintroduce the rev-3 string-keyed policy. Costs auditability discontinuity. | Per-tool annotation burden (small, structural) + adequacy-guard (§4.4 expanded) + structured `handles_no_sensitive_data` schema for the legacy escape valve | RC 5.1 security review; new `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True` declarations require security CODEOWNERS approval per PR |
+| Redaction primitive (rev 4 → rev 5 reshape) | **R5.** **Manifest-keyed dispatch.** Each tool name has exactly one entry in `MANIFEST: Mapping[str, ToolRedaction]` (§4.2.1). Each entry is *either* type-driven (an `argument_model: type[BaseModel]` whose fields carry `Sensitive[T]` annotations — Phase 2 promotes ~6–8 sensitive-touching tools to this shape with `Model.model_validate` dispatch validation routed to `service.py:1836–1870` `ARG_ERROR`) *or* declarative (`policy: ToolRedactionPolicy` with explicit `sensitive_argument_keys` / `argument_summarizers` / `known_response_keys` / structured reason). Both shapes set is a construction-time `ValueError` (§4.2.7). There is no `EXEMPT_FROM_TYPE_DRIVEN_REDACTION` ClassVar; there is no `class ComposerTool` base. The walker and the adequacy guard share **one** traversal iterator (§4.2.5). The structural Level-4 leverage (Meadows hierarchy) is the manifest itself: the registration root for redaction policy is a single object reviewed by every consumer. | R4 (rev-4 design): implicit class-based registry assumed via `EXEMPT_FROM_TYPE_DRIVEN_REDACTION: ClassVar[bool]` on a fictional `class ComposerTool` base. Plan-review BLOCKER B1 established the class hierarchy does not exist; `tools.py` dispatches via six function-pointer registries at lines 5250–5314. | One-way after Phase 2 lands. Reverting requires re-introducing a class hierarchy (which has never existed) AND restoring the rev-4 `EXEMPT_FROM_*` ClassVar pattern. | Remove the manifest, re-introduce string-keyed declarative policy at module level, accept that the type-driven Sensitive[T] leverage point is lost. Costs auditability discontinuity and a structural regression to the rev-3 declaration-burden-normalisation feedback loop (rev-3 RSK-02). | Per-tool manifest-entry definition (small, structural; ~6–8 type-driven + ~29–31 declarative across the 37-tool surface) + four-assertion adequacy guard (§4.4) + label-gate CI step (§4.4.5) + content-keyed policy-hash snapshot (§4.4.3) | RC 5.1 security review; redaction-policy weakening lands only with `policy-weaken-justified` PR label and a "Redaction policy weakening rationale" section in the PR body, enforced by the label-gate CI step |
 | Tool argument redaction (legacy escape valve) | **R3-LEGACY.** Retained only for tools that cannot or have not yet adopted `Sensitive[T]`. Same shape as rev 3 (`sensitive_argument_keys`, `sensitive_response_keys`, `argument_summarizers`, `known_response_keys`, `handles_no_sensitive_data`, `handles_no_sensitive_data_reason_struct`). The `handles_no_sensitive_data_reason_struct` is now a structured dataclass (see §4.2), not a free-text string, so adequacy-guard checks reason quality programmatically rather than via stop-list pattern-matching. | R3-FREE-TEXT (rev-3 free-text reason) — fragile against plausible-but-wrong reasoning. | One-way per tool — once migrated to `Sensitive[T]`, removing the type annotation requires re-declaring policy. | Per-tool: re-declare ToolRedactionPolicy and remove the type annotation. | Per-tool author declaration burden + structured reason discipline | RC 5.1 security review |
 | Migration | **None for chat_messages content; pre-deploy `DELETE` for chat_messages rows on staging.** Pre-release per CLAUDE.md no-legacy policy. New columns ship as part of the schema. Because staging deploys (`elspeth.foundryside.dev` per project memory) have generated `chat_messages` rows under the rev-3-era schema, the new NOT NULL columns (`sequence_no`, `provenance` on `composition_states`, `writer_principal` on `chat_messages`) cannot be added by `ALTER ... ADD COLUMN ... NOT NULL` without a default. The migration plan is therefore: (1) dev: empty database, no migration concern; (2) staging: pre-deploy step `DELETE FROM chat_messages` and `DELETE FROM composition_states` (or `DROP TABLE` + recreate via Alembic) before applying schema; (3) production (when reached): no existing corpus exists yet because composer is still pre-release. | A multi-stage migration with `server_default='0'` followed by backfill assigning sequence numbers in `created_at` order, then `ALTER COLUMN ... DROP DEFAULT`. Rejected because pre-release deployments contain test data only and the no-legacy policy authorises destructive resets at this stage. | One-way — first eval run after deploy produces rows in the new shape. | Delete the chat_messages corpus; pre-release acceptable. | No backward-compat shim cost; pre-deploy DELETE step is a known operation, not a project-novel one. | Once a real corpus exists |
 
@@ -381,30 +383,170 @@ CREATE UNIQUE INDEX uq_chat_messages_tool_call_id
 
 `composition_state_id` FK behaviour — see §4.5.
 
-### 4.2 Redaction primitives — type-driven first, declarative escape valve second
+### 4.2 Redaction primitives — manifest-keyed dispatch with type-driven and declarative shapes
 
 **Location.** `src/elspeth/web/composer/redaction.py` (L3, alongside the
 existing `redact_source_storage_path` helper). Tools are L3; their
 redaction primitives belong in the same layer.
 
-#### 4.2.1 `Sensitive[T]` — type-driven primitive (NEW in rev 4)
+**Architecture (rev 5).** The unit of redaction policy is **the tool
+name**, not a Python class. There is no `class ComposerTool` base;
+`tools.py` dispatches via six function-pointer registries at
+`src/elspeth/web/composer/tools.py:5250–5314`, and that dispatch shape
+is preserved. Redaction layers a **manifest** —
+`MANIFEST: dict[str, ToolRedaction]` keyed by tool name — alongside it.
+This mirrors the existing `_TOOL_REQUIRED_PATHS: dict[str, ...]`
+precedent at `src/elspeth/web/composer/service.py:702`: the same project
+idiom applied to a different concern. The manifest is the single
+registration root for redaction; the adequacy guard walks it, the
+runtime walker dispatches through it, and the policy-hash snapshot
+covers every entry.
+
+Each `ToolRedaction` entry chooses **exactly one** of two shapes:
+
+- **Type-driven** — the entry carries `argument_model: type[BaseModel]`
+  (and optionally `response_model: type[BaseModel]`). The model's fields
+  carry `Sensitive[T]` annotations (§4.2.2) where redaction is required;
+  the runtime walker uses Pydantic `model_fields[name].metadata` to
+  detect markers. Phase 2 (§11) promotes ~6–8 sensitive-touching tools
+  to this shape. Promoted tools' handlers also gain
+  `Model.model_validate(arguments)` at the dispatch boundary, with
+  `pydantic.ValidationError` mapped to the existing `ARG_ERROR` audit
+  pattern at `service.py:1836–1870` — so the type-driven primitive
+  delivers two guarantees: dispatch-time validation AND persistence-time
+  redaction.
+- **Declarative** — the entry carries `sensitive_argument_keys`,
+  `argument_summarizers`, `known_response_keys`, and (when
+  `handles_no_sensitive_data=True`) a structured
+  `HandlesNoSensitiveDataReason` (§4.2.3). Phase 2 covers the remaining
+  ~29–31 tools this way; their dispatch surface remains
+  `arguments: dict[str, Any]` because their argument schema is
+  structural (graph IDs, node names, plugin-key strings) and does not
+  benefit from a redaction-specific Pydantic model.
+
+Declaring both shapes in one entry is a **construction-time error**
+(§4.2.7). The adequacy guard rejects it; the manifest dataclass
+`__post_init__` raises `ValueError`.
+
+**Walker is a Tier-3 → Tier-1 boundary** (§4.2.6). The walker accepts
+the LLM's raw decoded JSON `dict` (Tier-3 input — may carry malformed
+keys, unexpected types, prompt-injection payloads) and produces the
+canonical redacted dict that lands in `chat_messages.tool_calls` /
+`chat_messages.content` (Tier-1 audit row — must be pristine). The
+boundary discipline is: **fail-closed redact** unknown keys with a
+fixed sentinel, count, and continue (Tier-3 inputs do not crash
+audit); but **internal-invariant violations** (manifest entry missing
+for a dispatched tool name, summarizer raises, summarizer returns
+non-`str`) **crash via `AuditIntegrityError`** (Tier-1 invariants must
+be honoured; CLAUDE.md plugin-ownership policy applies because the
+manifest and summarizer are system code).
+
+#### 4.2.1 `ToolRedaction` — the manifest-entry dataclass (NEW in rev 5)
+
+```python
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from elspeth.contracts.freeze import freeze_fields
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRedaction:
+    """One manifest entry. Each entry is keyed by tool name in MANIFEST.
+
+    Exactly one of the two shapes must be populated:
+      • type-driven  — argument_model is not None
+      • declarative  — argument_model is None AND policy is not None
+
+    Both populated → ValueError (precedence is undefined; use one shape).
+    Neither populated → ValueError (every tool must have a redaction
+    declaration; the adequacy guard cannot consult what doesn't exist).
+
+    response_model is only valid alongside argument_model. Declarative
+    entries express response shape via policy.known_response_keys.
+    """
+
+    argument_model: type["BaseModel"] | None = None
+    response_model: type["BaseModel"] | None = None
+    policy: "ToolRedactionPolicy | None" = None
+
+    def __post_init__(self) -> None:
+        type_driven = self.argument_model is not None
+        declarative = self.policy is not None
+
+        if type_driven and declarative:
+            raise ValueError(
+                "ToolRedaction declared both argument_model and policy; "
+                "each manifest entry must choose exactly one shape. "
+                "If a tool has a Pydantic argument model with Sensitive[T] "
+                "annotations, the model is the single source of truth — "
+                "remove the policy. If the argument surface is purely "
+                "structural and does not benefit from Sensitive[T], "
+                "remove the argument_model and declare the policy."
+            )
+        if not type_driven and not declarative:
+            raise ValueError(
+                "ToolRedaction declared neither argument_model nor policy; "
+                "every manifest entry must declare its redaction shape. "
+                "If the tool genuinely handles no sensitive material, set "
+                "policy=ToolRedactionPolicy(handles_no_sensitive_data=True, "
+                "handles_no_sensitive_data_reason_struct=...) — the "
+                "structured reason is part of the audit trail."
+            )
+        if self.response_model is not None and not type_driven:
+            raise ValueError(
+                "response_model requires argument_model to also be set "
+                "(declarative entries express response shape via "
+                "policy.known_response_keys)."
+            )
+
+
+# The manifest itself. Module-level so the adequacy guard, the runtime
+# walker, and the snapshot test consume the same object. Construction
+# happens at import time; failure raises immediately and is caught by
+# pytest collection or the import statement in the dispatcher.
+MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType({
+    "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel, ...),
+    "list_sources": ToolRedaction(policy=ToolRedactionPolicy(
+        handles_no_sensitive_data=True,
+        handles_no_sensitive_data_reason_struct=...,
+    )),
+    # ... one entry per tool name; enumeration in §4.7 ...
+})
+```
+
+#### 4.2.2 `Sensitive[T]` — type-driven redaction metadata (rev 4, refined for rev 5)
+
+`Sensitive[T]` remains the field-level annotation that drives mechanical
+redaction inside type-driven manifest entries. Rev 5 refines its role:
+the marker is **redaction-only metadata**, not a dispatch-validation
+gate by itself. The dispatch-validation guarantee comes from
+`Model.model_validate(arguments)` invoked by the promoted handler
+(§4.2.1, type-driven shape); the `Sensitive[T]` marker tells the walker
+*which fields of that validated model* to redact.
 
 ```python
 from collections.abc import Callable
-from typing import Annotated, Any, ClassVar, TypeVar
+from typing import Annotated, Any, TypeVar
 
 T = TypeVar("T")
 
 
 class _SensitiveMarker:
-    """Annotated metadata marker. Presence on a Pydantic field indicates
-    the field's value MUST be redacted at the persistence boundary. The
-    tool author has no opt-out path — redaction is mechanical, not
-    declarative.
+    """Annotated metadata marker. Presence on a Pydantic field of a
+    manifest-entry argument_model or response_model indicates the field's
+    value MUST be redacted at the persistence boundary. The tool author
+    has no opt-out path — redaction is mechanical, not declarative.
 
     summarizer: optional per-field replacement function. If None, the
         sentinel '<redacted>' is substituted. If present, the function
         receives the original value and returns the replacement string.
+        See §4.2.6 for the summarizer contract (must not raise; must
+        return str — violations crash via AuditIntegrityError).
     """
 
     __slots__ = ("summarizer",)
@@ -417,75 +559,70 @@ def Sensitive(  # noqa: N802 — capitalised to read as a type alias at use site
     *, summarizer: Callable[[Any], str] | None = None
 ) -> _SensitiveMarker:
     """Field-level annotation requesting redaction at the persistence
-    boundary. Use as Pydantic field metadata via ``Annotated``.
+    boundary. Used as Pydantic field metadata via ``Annotated``.
 
-    Example:
+    Example (the set_source tracer-bullet model in §4.7):
+
         from typing import Annotated
+        from pydantic import BaseModel
 
-        class SetSourceArguments(BaseModel):
-            path: Annotated[str, Sensitive(summarizer=redact_source_storage_path)]
-            options: Annotated[dict, Sensitive()]
-            label: str    # not sensitive, persisted verbatim
+        class SetSourceArgumentsModel(BaseModel):
+            plugin: str    # not sensitive — plugin name is structural
+            options: Annotated[
+                dict[str, Any],
+                Sensitive(summarizer=redact_source_storage_path),
+            ]
+            on_success: str | None = None
+            label: str | None = None    # not sensitive
     """
     return _SensitiveMarker(summarizer=summarizer)
 ```
 
 **Why this is a Level-4 (Meadows hierarchy) intervention rather than a
-Level-5 / Level-6 mitigation.** The redaction policy is now expressed in
-the type system. There is no "I declare this tool has no sensitive data"
-flag for fields whose model uses `Sensitive[T]`; the persistence layer
-reads the model's `Annotated` metadata and acts on it. The
-declaration-burden-normalisation feedback loop (rev-3 RSK-02) cannot run
-because there is nothing to declare. New tools that adopt `Sensitive[T]`
-inherit the redaction guarantee mechanically.
+Level-5 / Level-6 mitigation.** For tools with type-driven entries the
+redaction policy is expressed in the type system. There is no "I declare
+this tool has no sensitive data" flag for fields whose model uses
+`Sensitive[T]`; the persistence layer reads the model's `Annotated`
+metadata and acts on it. The declaration-burden-normalisation feedback
+loop (rev-3 RSK-02) cannot run because there is nothing to declare. New
+tools that adopt the type-driven shape inherit the redaction guarantee
+mechanically.
 
-**Redaction layer reads annotations recursively.** `apply_redaction_policy`
-descends into nested Pydantic submodels and into `dict`/`list`-typed
-`Sensitive[T]` fields, applying the marker at every level. Implementation
-sketch:
+The walker's recursion semantics (which container types descend, in
+what order, with what marker-position rules) are defined once in the
+shared traversal iterator (§4.2.5) so that the adequacy guard
+(CI-time) and the runtime walker (persistence-time) cannot diverge.
 
-```python
-def _redact_pydantic_value(value: Any, model: type[BaseModel]) -> Any:
-    """Walk a Pydantic model and produce a redacted dict.
-    For each field:
-      - If field metadata contains _SensitiveMarker, substitute sentinel/summarizer.
-      - If field type is a nested BaseModel, recurse.
-      - If field type is dict[str, Sensitive[V]], substitute every value.
-      - If field type is list[Sensitive[V]], substitute every element.
-      - Otherwise pass through verbatim.
-    """
-    ...
-```
+#### 4.2.3 Declarative legacy escape valve — `ToolRedactionPolicy` and `HandlesNoSensitiveDataReason` (rev 4, refined for rev 5)
 
-The recursion is bounded by Pydantic's existing model-resolution depth
-limit; cycles in user-defined models would already fail Pydantic's own
-validation.
+For tools whose argument surface is purely structural (graph IDs, node
+names, plugin-key strings) and does not benefit from a
+redaction-specific Pydantic model, the rev-4 declarative shape is
+retained as the **declarative manifest-entry shape** — *not* as a
+"legacy" fallback to be migrated. Some tools genuinely have nothing
+sensitive to declare; for those, the declarative shape with
+`handles_no_sensitive_data=True` and a structured reason is the correct
+permanent representation. Phase 2 (§11) declares one entry per tool;
+the ~29–31 tools without sensitive arguments use this shape.
 
-#### 4.2.2 `ToolRedactionPolicy` — declarative legacy escape valve
+Rev 5 refinements over rev 4:
 
-For tools that cannot or have not yet adopted `Sensitive[T]` annotations
-(e.g., raw-`dict` arguments, third-party Pydantic models the team does
-not own), the rev-3 declarative policy survives as a legacy escape valve
-with three strengthening changes:
-
-1. **Structured `handles_no_sensitive_data_reason_struct`** replaces the
-   free-text string. Adequacy-guard checks the structure mechanically
-   rather than pattern-matching reason text against a stop-list.
-2. **`known_response_keys` allowlist** is REQUIRED for any tool with
-   `handles_no_sensitive_data=False`. At persistence time, every key in
-   the actual tool response is checked against the allowlist; unknown
-   keys are fail-closed redacted (substituted with
-   `<redacted-unknown-key:{n}-bytes>`) and a counter increments. Closes
-   security I-1 (response-shape drift).
-3. **`EXEMPT_FROM_TYPE_DRIVEN_REDACTION: ClassVar[bool] = False`** on the
-   tool class, defaulting False, must be explicitly set True for the
-   legacy policy to apply. CODEOWNERS routes any commit that flips this
-   to True through security review.
+1. The shape lives **inside** a manifest entry's `policy` field
+   (§4.2.1), not on a tool class. There is no `EXEMPT_FROM_*` ClassVar.
+2. **Mass-copy uniqueness** is enforced by the adequacy guard
+   (§4.4.4): no two tools' `why_arguments_safe` (or `why_responses_safe`)
+   strings may exact-match. Closes W7.
+3. **`last_reviewed_iso` is replaced by `policy_text_hash`** — a
+   SHA-256 over the structured reason's textual content. Review is
+   triggered by *content change*, not by calendar tick. The adequacy
+   guard fails if the manifest's `policy_text_hash` differs from the
+   committed snapshot value without the corresponding
+   `policy-weaken-justified` PR label. Closes W2 (calendar
+   synchronicity at migration → mass batch expiry → date-bump ritual).
 
 ```python
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any
 
 from elspeth.contracts.freeze import freeze_fields
@@ -504,27 +641,22 @@ class HandlesNoSensitiveDataReason:
     why_arguments_safe: prose explanation of why every argument, including
         any string-typed ones, is safe to persist verbatim. Adequacy-guard
         checks length >= 32 chars and that the text does not exact-match
-        any prior tool's why_arguments_safe (mass-copy detection).
+        any other tool's why_arguments_safe (mass-copy uniqueness, §4.4.4).
 
     why_responses_safe: same as above, for responses.
-
-    last_reviewed_iso: ISO-8601 date when this justification was last
-        reviewed. Adequacy-guard fails if the date is more than 365 days
-        old at test time. The reviewer is responsible for incrementing
-        this on every quarterly redaction-policy audit.
     """
 
     sensitive_data_locations: tuple[str, ...]
     why_arguments_safe: str
     why_responses_safe: str
-    last_reviewed_iso: date
 
     def __post_init__(self) -> None:
         if not self.sensitive_data_locations:
             raise ValueError(
                 "sensitive_data_locations is empty; declare at least one location "
                 "where sensitive material related to this tool exists, OR migrate "
-                "the tool's arguments/responses to use Sensitive[T] annotations."
+                "the tool's arguments to a Pydantic model with Sensitive[T] "
+                "annotations (the type-driven manifest-entry shape, §4.2.1)."
             )
         for label, value in (("why_arguments_safe", self.why_arguments_safe),
                              ("why_responses_safe", self.why_responses_safe)):
@@ -538,14 +670,11 @@ class HandlesNoSensitiveDataReason:
 
 @dataclass(frozen=True, slots=True)
 class ToolRedactionPolicy:
-    """Legacy declarative redaction policy. Use Sensitive[T] annotations
-    on Pydantic field types instead when possible — the type-driven
-    primitive is the preferred mechanism (§4.2.1) and is enforced
-    structurally rather than declaratively.
-
-    This policy is consulted only for tools that set
-    EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True on their class. CODEOWNERS
-    routes such PRs through security review.
+    """Declarative redaction policy. Used inside the `policy` field of a
+    manifest entry whose argument surface is purely structural (no
+    Pydantic argument model declared). The type-driven shape (§4.2.1
+    with argument_model set) is preferred for any tool that has, or
+    would benefit from, a redaction-bearing Pydantic argument model.
 
     sensitive_argument_keys: keys in the tool-call argument dict whose
         values must be replaced before the tool call is persisted to
@@ -559,18 +688,23 @@ class ToolRedactionPolicy:
         The complete set of keys the tool may legitimately emit in its
         response. At persistence time, every key in the actual response
         is checked against this allowlist; unknown keys are fail-closed
-        redacted and the counter
-        composer.redaction.unknown_response_key_total increments. Closes
-        security I-1 (response-shape drift defeating static policy).
+        redacted with the FIXED sentinel '<redacted-unknown-response-key>'
+        (no length disclosure — closes W6) and the counter
+        composer.redaction.unknown_response_key_total increments.
+        Closes security I-1 (response-shape drift defeating static policy).
 
     argument_summarizers: optional per-key replacement functions for keys
-        in sensitive_argument_keys.
+        in sensitive_argument_keys. Summarizer contract (§4.2.6): the
+        function MUST NOT raise on any argument value reachable through
+        the dispatch boundary; it MUST return str. Violations crash via
+        AuditIntegrityError (system-code discipline, CLAUDE.md plugin
+        ownership).
 
     handles_no_sensitive_data: explicit "this tool reviewed and asserts
         no sensitive material in arguments or responses" flag.
 
     handles_no_sensitive_data_reason_struct: structured justification
-        REQUIRED when handles_no_sensitive_data=True. See above.
+        REQUIRED when handles_no_sensitive_data=True.
 
     NOTE on freeze: argument_summarizers values are Callables; deep_freeze
     passes Callables through unchanged (verified against
@@ -614,7 +748,7 @@ class ToolRedactionPolicy:
                 "known_response_keys must be declared (non-empty) when "
                 "handles_no_sensitive_data=False. The allowlist defends "
                 "against response-shape drift; unknown keys at persistence "
-                "time are fail-closed redacted."
+                "time are fail-closed redacted with a fixed sentinel."
             )
 
         freeze_fields(
@@ -626,6 +760,216 @@ class ToolRedactionPolicy:
         )
 ```
 
+#### 4.2.4 `RedactionTelemetry` — typed Protocol for OTel emissions (NEW in rev 5)
+
+The walker increments OTel counters at three points: unknown response
+keys (fail-closed redact), summarizer-error path (does not exist in rev
+5; the code path crashes — see §4.2.6 and §9 RSK-03), and
+manifest-entry lookup (records each dispatch by shape). Rev 4 left the
+telemetry surface as duck-typed `telemetry=None` parameters. Rev 5
+defines a `Protocol` so the type checker enforces the contract;
+this closes W4. The walker accepts a `RedactionTelemetry` instance,
+never `None`. A no-op implementation is provided for tests.
+
+```python
+from typing import Protocol
+
+
+class RedactionTelemetry(Protocol):
+    """OTel counter surface for the redaction walker.
+
+    Implementations live in src/elspeth/web/composer/telemetry.py
+    (production: wraps the project's structured-counter helper). Tests
+    use NoopRedactionTelemetry (counts to a dict; assertable). The
+    walker never accepts None — callers must pass a real telemetry
+    instance, even in tests.
+    """
+
+    def unknown_response_key_redacted(self, *, tool_name: str) -> None:
+        """Counter: composer.redaction.unknown_response_key_total."""
+        ...
+
+    def manifest_dispatch(self, *, tool_name: str, shape: str) -> None:
+        """Counter: composer.redaction.manifest_dispatch_total{shape}.
+
+        shape ∈ {'type_driven', 'declarative'}. Records walker
+        dispatch by manifest-entry shape; useful for migration
+        progress visibility.
+        """
+        ...
+```
+
+#### 4.2.5 Shared traversal iterator (NEW in rev 5)
+
+The adequacy guard (§4.4) and the runtime walker (§4.2.6) share **one**
+traversal iterator. This is the structural mitigation for plan-review
+B2 (the rev-4 spec promised recursion into `list[BaseModel]`,
+`dict[str, BaseModel]` etc., but the walker omitted it; the adequacy
+guard could not detect the gap because the two were defined
+independently).
+
+The iterator is a generator over a Pydantic model class. It yields one
+`TraversalNode` per field encountered, descending parametrically into
+container types. Both consumers walk the same nodes:
+
+```python
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Any, Callable, get_args, get_origin
+from pydantic import BaseModel
+
+
+@dataclass(frozen=True, slots=True)
+class TraversalNode:
+    """One field encountered while walking a model schema.
+
+    path: dotted path from the root model to this field, e.g.
+        "options.path" or "items[*].secret". '[*]' marks list-element
+        descent; '{*}' marks dict-value descent. Adequacy-guard error
+        messages cite these paths verbatim.
+
+    field_type: the resolved Python type of the field (post-Annotated
+        unwrap). For list[X], dict[str, X], tuple[X, ...] etc. the
+        iterator descends into X and the path captures the indirection.
+
+    metadata: tuple of all metadata objects from any Annotated[...]
+        wrapping. Walker checks isinstance(m, _SensitiveMarker); guard
+        checks the same; both reach the same decision.
+
+    value_provider: callable that returns the value at this path given
+        the root dict. None for the adequacy guard (no value). Walker
+        passes the LLM dict as the root and the provider extracts.
+        Decoupling field-introspection from value-extraction is what
+        lets one iterator serve both consumers.
+    """
+
+    path: str
+    field_type: type
+    metadata: tuple[Any, ...]
+    value_provider: Callable[[dict[str, Any]], Any] | None = None
+
+
+def walk_model_schema(
+    model: type[BaseModel],
+    *,
+    with_values: bool = False,
+) -> Iterator[TraversalNode]:
+    """Yield one TraversalNode per field, descending into:
+
+      • BaseModel subclasses (recurse into model_fields)
+      • list[X] where X is BaseModel or non-scalar (descend into X)
+      • dict[str, X] where X is BaseModel or non-scalar (descend into X)
+      • tuple[X, ...] where X is BaseModel or non-scalar (descend into X)
+      • Optional[X] / Union[*, X, *] (descend into every non-None arm)
+      • Annotated[T, *, marker, *] regardless of marker position in the
+        Annotated args (the iterator scans the full tuple, not just
+        args[0])
+
+    Does NOT descend into:
+      • scalar types (int, float, bool, str, bytes, datetime, enum)
+      • Any, object (the adequacy guard fails on these per §4.4.1)
+      • cycles (Pydantic's model-resolution depth limit applies)
+
+    with_values=False: yields nodes with value_provider=None (adequacy
+    guard).
+    with_values=True: yields nodes with value_provider set (walker).
+    """
+    ...
+```
+
+The iterator is **the** definition of which container types
+participate in redaction. Adding a new container type (e.g. a future
+`frozenset[BaseModel]`) is a single edit to this function and is
+covered by both consumers automatically. Test coverage in §8.1 includes
+all six container shapes plus marker-position-not-first-in-Annotated
+plus duplicate-marker (error) plus nested-three-levels.
+
+#### 4.2.6 Walker semantics — Tier-3 → Tier-1 boundary disposition (NEW in rev 5)
+
+Two redaction entry points consume the manifest:
+
+```python
+def redact_tool_call_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    telemetry: RedactionTelemetry,
+) -> dict[str, Any]:
+    """Produce the redacted arguments dict that lands in
+    chat_messages.tool_calls JSON. Called once per tool invocation
+    inside the per-turn audit-write block (§5.2).
+
+    Tier-3 → Tier-1 boundary discipline:
+      • Unknown manifest-entry shape branches → crash (internal-invariant).
+      • Manifest entry missing for tool_name → crash AuditIntegrityError
+        (registry-consistency invariant; the dispatch-time check at
+        compose-loop entry asserts MANIFEST.keys() == registered tool
+        names exactly).
+      • Type-driven entry: validate against argument_model. ValidationError
+        is caught by the caller (compose loop) and routed to ARG_ERROR
+        per service.py:1836–1870. The walker does not swallow it.
+      • Declarative entry: walk arguments by sensitive_argument_keys.
+        Keys not in the dict are no-ops; keys present are summarized
+        or sentinel-substituted.
+      • Summarizer raises → AuditIntegrityError chained from the
+        underlying exception (registered in TIER_1_ERRORS so
+        `except Exception` cannot swallow). System-code discipline:
+        summarizer is contractually required to never raise.
+      • Summarizer returns non-str → AuditIntegrityError with a typed
+        message indicating which tool, which key, which return type.
+    """
+    ...
+
+
+def redact_tool_call_response(
+    tool_name: str,
+    response: dict[str, Any],
+    *,
+    telemetry: RedactionTelemetry,
+) -> dict[str, Any]:
+    """Produce the redacted response dict that lands in
+    chat_messages.content (as JSON). Tier-3 → Tier-1 boundary same as
+    above, plus:
+
+      • Type-driven entry with response_model declared: walk via
+        model_fields metadata. Keys not in the model are unknown.
+      • Declarative entry: walk by sensitive_response_keys ∪
+        known_response_keys allowlist.
+      • Unknown response key (not in any declared set) → substitute
+        the FIXED sentinel '<redacted-unknown-response-key>'; emit
+        telemetry.unknown_response_key_redacted(tool_name=...).
+        No length disclosure (closes W6 / spec §8.1 RSK-03 weak echo).
+        Continue walking (Tier-3 input does not crash audit).
+    """
+    ...
+```
+
+The boundary discipline is summarised:
+
+| Failure mode | Trust tier | Walker disposition |
+|---|---|---|
+| Unknown response key (key in input dict, not in any declared set) | Tier-3 (LLM-supplied response data) | Fixed-sentinel substitute, counter increment, continue |
+| Argument fails Pydantic validation (type-driven) | Tier-3 | Walker not invoked; compose-loop ARG_ERROR path runs |
+| Manifest entry missing for dispatched tool name | Tier-1 (registry consistency) | `AuditIntegrityError` |
+| Summarizer raises | Tier-1 (system code; CLAUDE.md plugin policy) | `AuditIntegrityError` chained |
+| Summarizer returns non-str | Tier-1 | `AuditIntegrityError` |
+| Argument summarizer key declared but argument key absent in input | Tier-3 | No-op (key absence is not a fault) |
+
+#### 4.2.7 Sensitive[T] vs declarative precedence (NEW in rev 5)
+
+Each manifest entry chooses **exactly one** shape (§4.2.1
+`__post_init__`). Both shapes set is a `ValueError` at construction
+time; neither set is also a `ValueError`. There is no precedence rule
+to define because there is no path in which both apply. Closes W8.
+
+Rationale: a manifest entry with `argument_model=X` AND a `policy` with
+`sensitive_argument_keys=("y",)` would describe two parallel,
+potentially divergent policies for the same arguments. The walker
+would have to define which wins; the adequacy guard would have to walk
+both; the snapshot would have to capture both hashes. Each of those is
+a divergence-risk surface. Forbidding the configuration eliminates the
+class of bugs.
+
 ### 4.3 Sentinel rules
 
 - Plain sensitive key → value replaced by literal string `"<redacted>"`.
@@ -636,113 +980,241 @@ class ToolRedactionPolicy:
 
 ### 4.4 Adequate-redaction guard
 
-The adequacy guard is the CI-time enforcement that every tool's arguments and
-responses are either (a) annotated for type-driven redaction via
-`Sensitive[T]` (§4.2.1), or (b) covered by a `ToolRedactionPolicy` legacy
-escape valve with a structured justification (§4.2.2). Revision 4 expands
-the rev-3 guard to address security T-4 (nested-type traversal) and T-3
-(programmatic detection of policy weakening over time).
+The adequacy guard is the CI-time enforcement that **every tool name
+present in the six dispatch registries at `tools.py:5250–5314` has
+exactly one corresponding entry in `MANIFEST` (§4.2.1)** and that the
+entry's redaction declaration covers every field where redaction may be
+required. Revision 5 re-derives the guard against the manifest
+architecture; revision 4's class-walk approach is replaced because the
+class hierarchy it assumed does not exist.
 
-#### 4.4.1 Recursive schema introspection
+The guard is a single pytest module
+(`tests/unit/web/composer/test_adequacy_guard.py`) with four
+assertions:
 
-Composer tools declare arguments via Pydantic `BaseModel` subclasses (see
-existing tools in `src/elspeth/web/composer/tools.py`). The adequacy
-test walks each tool's argument model and response model recursively.
-For each field encountered:
+1. **Registry-manifest set equality** (§4.4.1).
+2. **Per-entry shape walk** (§4.4.2).
+3. **Mass-copy uniqueness** of declarative reasons (§4.4.4).
+4. **Policy-hash snapshot equality** (§4.4.3).
+
+The four assertions share the same shared traversal iterator (§4.2.5)
+that the runtime walker uses. Future schema changes touch the iterator
+and both consumers atomically (closes plan-review B2: walker-vs-guard
+divergence).
+
+#### 4.4.1 Registry-manifest set equality
+
+Tool names are the join key. The guard asserts:
+
+```python
+def test_manifest_covers_every_dispatch_registry_entry() -> None:
+    """Every name in any of the six dispatch registries has exactly one
+    MANIFEST entry. No orphans on either side. Source of truth: the
+    actual dispatch dicts at src/elspeth/web/composer/tools.py:5250–5314.
+
+    The registry-side names come from a small helper that imports the
+    six dicts and unions their keys, plus the three names with extended
+    signatures handled inline in execute_tool() (preview_pipeline,
+    diff_pipeline, set_pipeline). The compose-loop advisor escape-hatch
+    name 'request_advisor_hint' is intercepted before execute_tool()
+    (service.py:2070 onward) and is not in the dispatch registries; it
+    is enumerated separately as a manifest entry.
+    """
+    registry_names = _collect_registry_names()  # union of six dicts + 3 inline + advisor
+    manifest_names = set(MANIFEST.keys())
+
+    only_in_registry = registry_names - manifest_names
+    only_in_manifest = manifest_names - registry_names
+    assert not only_in_registry, (
+        f"Tools registered for dispatch but missing MANIFEST entry: "
+        f"{sorted(only_in_registry)}. Add a ToolRedaction entry."
+    )
+    assert not only_in_manifest, (
+        f"MANIFEST entries with no dispatch registration: "
+        f"{sorted(only_in_manifest)}. Either delete the entry or add "
+        f"the tool to its appropriate dispatch dict."
+    )
+```
+
+The test reads the dispatch dicts from `tools.py` directly. A new tool
+added to `_DISCOVERY_TOOLS` (or any registry) without a manifest entry
+fails CI on the next test run. A manifest entry without a dispatch
+registration also fails — this catches stale entries left behind after
+a tool is renamed or removed. Closes plan-review B1 (precondition
+gap).
+
+#### 4.4.2 Per-entry shape walk
+
+For each manifest entry the guard traverses the entry's declared
+shape:
+
+| Entry shape | Guard action |
+|---|---|
+| `argument_model is not None` (type-driven) | Walk `argument_model` via `walk_model_schema(model, with_values=False)` (§4.2.5). For each `TraversalNode`, apply the field-shape rule below. If `response_model` is also set, walk it too. |
+| `policy is not None` (declarative) | If `policy.handles_no_sensitive_data=True`: pass (the structured reason covers it; no schema to walk). If `False`: assert `policy.known_response_keys` is non-empty AND `policy.sensitive_argument_keys ⊆ <documented argument-key set>` for the tool. The argument-key set is collected from `tools.py` by static AST inspection of the handler function (every `arguments[KEY]` and `arguments.get(KEY)` literal). Closes the gap where `sensitive_argument_keys` lists a typo'd key that the handler never reads. |
+
+The field-shape rule for type-driven entries:
 
 | Field shape | Adequacy rule |
 |---|---|
-| `Annotated[T, Sensitive(...)]` (any `T`) | Pass. Type-driven redaction handles it. |
-| `BaseModel` subclass | Recurse into the nested model's fields. |
-| `dict[str, T]` where `T` is non-scalar | Treat as **opaque container**: fail-closed unless explicitly listed in `sensitive_argument_keys` / `sensitive_response_keys` OR the tool sets `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True` and the policy declares the dict via `known_response_keys`. The dict could contain anything (e.g., `headers={"Authorization": "Bearer …"}`). |
-| `list[T]` where `T` is `BaseModel` or non-scalar | Same as `dict`: fail-closed unless explicitly declared. |
-| `Any`, `object`, untyped fields | **Fail the test.** `Any`-typed fields are inspection-resistant; tools must narrow the type or annotate with `Sensitive[T]`. |
-| Discriminated union / `Union[A, B]` | Recurse into every arm. If any arm is `BaseModel`, walk it; if any arm is `str`/`bytes`/`Any`, apply the corresponding rule. |
-| `str`, `bytes`, `Annotated[str, ...]` without `Sensitive` | Apply the rev-3 rule: EITHER listed in `sensitive_argument_keys` OR covered by `handles_no_sensitive_data=True` with a structured reason. |
+| `Annotated[T, *, Sensitive(...), *]` (marker anywhere in the annotation tuple, any `T`) | Pass — type-driven redaction will handle it at runtime. |
+| `BaseModel` subclass | The iterator already descends; nodes for nested fields are produced and rule-checked individually. |
+| `list[T]` / `dict[str, T]` / `tuple[T, ...]` where `T` is `BaseModel` or non-scalar | The iterator descends into `T`. If `T` is itself `Any` or `object`, fail. |
+| `Optional[T]` / `Union[A, B, ...]` | Iterator descends into every non-`None` arm. Each arm rule-checked individually. If any arm is `Any`/`object`, fail. |
+| `Any`, `object`, untyped fields | **Fail.** `Any`-typed fields are inspection-resistant; the model author must narrow the type. |
+| `str`, `bytes`, `Annotated[str, ...]` *without* `Sensitive` | Pass IF the tool's manifest entry has `argument_model` only (the model author asserts the field is non-sensitive by omission of the marker). The model is reviewed via the policy-hash snapshot (§4.4.3); a removed `Sensitive()` annotation flips the snapshot and triggers CODEOWNERS / label review. |
 | `int`, `float`, `bool`, `datetime`, enum members | Pass — scalars not covered by the redaction policy. |
 
-The recursion is bounded by Pydantic's existing model-resolution depth
-limit (no manual cycle detection needed).
+The iterator descends parametrically; adding a new container type
+(e.g. `frozenset[BaseModel]`) is a single edit (§4.2.5) covered by
+both the guard and the walker.
 
-#### 4.4.2 `EXEMPT_FROM_*` class attributes — `ClassVar`, not `getattr`
+#### 4.4.3 Policy-hash snapshot test (rev 4 → broadened in rev 5)
 
-CLAUDE.md bans `getattr` for defensive attribute access (Python engineer
-review Q8). The exempt flags are declared as `ClassVar[bool]` on the
-shared composer tool base class, defaulting to `False`. The adequacy test
-reads them by direct attribute access:
+Revision 4's snapshot covered only legacy-policy tools
+(`EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True`). Rev 5 broadens the
+snapshot to **every manifest entry**, type-driven and declarative
+alike (closes plan-review M9 / W12: type-driven Sensitive[T] removal
+was previously undetectable).
 
-```python
-class ComposerTool:
-    """Shared base class for composer tools."""
-
-    EXEMPT_FROM_ADEQUACY_CHECK: ClassVar[bool] = False
-    EXEMPT_FROM_TYPE_DRIVEN_REDACTION: ClassVar[bool] = False
-    # ... rest of base class ...
-
-# Adequacy test:
-for tool_class in registered_composer_tools():
-    if tool_class.EXEMPT_FROM_ADEQUACY_CHECK:  # Direct read; no getattr.
-        continue
-    _check_tool_adequacy(tool_class)
-```
-
-`EXEMPT_FROM_ADEQUACY_CHECK=True` skips the tool entirely (e.g., a
-no-argument utility tool with a void response). It must be paired with a
-class-level docstring comment block explaining why exemption is
-appropriate. CODEOWNERS rules require security review for any commit
-that flips either flag.
-
-#### 4.4.3 Policy-hash snapshot test (NEW in rev 4 — closes security T-3)
-
-The adequacy guard also performs a **policy-hash snapshot test**. For
-every tool with `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True`, the test
-computes a deterministic SHA-256 hash of the tool's `ToolRedactionPolicy`
-shape:
+The snapshot is committed to
+`tests/unit/web/composer/redaction_policy_snapshot.json`. Each
+manifest entry contributes a SHA-256 over its canonical shape:
 
 ```python
-def _policy_hash(policy: ToolRedactionPolicy) -> str:
-    canon = json.dumps({
-        "sensitive_argument_keys": sorted(policy.sensitive_argument_keys),
-        "sensitive_response_keys": sorted(policy.sensitive_response_keys),
-        "known_response_keys": sorted(policy.known_response_keys),
-        "summarizer_keys": sorted(policy.argument_summarizers.keys()),
-        "handles_no_sensitive_data": policy.handles_no_sensitive_data,
-    }, sort_keys=True, separators=(",", ":"))
+def _entry_hash(name: str, entry: ToolRedaction) -> str:
+    if entry.argument_model is not None:
+        # Type-driven: hash over the schema-walk produced by the
+        # shared iterator. Two type-driven entries with identical
+        # shapes have identical hashes; a removed Sensitive() marker,
+        # an added field, a renamed field, a changed summarizer
+        # identity all flip the hash.
+        nodes = list(walk_model_schema(entry.argument_model))
+        if entry.response_model is not None:
+            nodes.extend(walk_model_schema(entry.response_model))
+        canon_payload = [_canonicalise_node(n) for n in nodes]
+    else:
+        policy = entry.policy
+        canon_payload = {
+            "sensitive_argument_keys": sorted(policy.sensitive_argument_keys),
+            "sensitive_response_keys": sorted(policy.sensitive_response_keys),
+            "known_response_keys": sorted(policy.known_response_keys),
+            "summarizer_keys": sorted(policy.argument_summarizers.keys()),
+            "handles_no_sensitive_data": policy.handles_no_sensitive_data,
+            "reason_text_hash": (
+                _reason_text_hash(policy.handles_no_sensitive_data_reason_struct)
+                if policy.handles_no_sensitive_data_reason_struct is not None
+                else None
+            ),
+        }
+    canon = json.dumps(canon_payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canon.encode()).hexdigest()
 ```
 
-Hashes for every tool are committed to
-`tests/unit/web/composer/redaction_policy_snapshot.json`. The CI test
-fails when any hash differs from the snapshot. Policy changes therefore
-require an explicit commit to the snapshot file, which CODEOWNERS routes
-to security review. PR labels `policy-strengthen` or
-`policy-weaken-justified` annotate the change category in the merge
-log; weakening without the latter label fails CI. Closes security T-3
-(programmatic detection rather than relying on quarterly human review).
+`_canonicalise_node` produces a deterministic representation of a
+`TraversalNode`: `{"path": ..., "type_name": ..., "metadata":
+[...marker types and summarizer fully-qualified names...]}`.
+Summarizer identity is captured by fully-qualified name, not by
+function `id()`, so reloading the module does not flip the snapshot.
 
-#### 4.4.4 Quarterly review of structured reasons
+The CI test compares `{name: _entry_hash(name, entry) for name, entry
+in MANIFEST.items()}` against the committed JSON file. Any difference
+fails the test. Policy changes therefore require an explicit commit to
+the snapshot file. The label-gate CI step (§4.4.5) requires a
+`policy-weaken-justified` PR label on any change that flips the
+snapshot; without the label, CI is red.
 
-`HandlesNoSensitiveDataReason.last_reviewed_iso` is checked at test time:
-fail if older than 365 days. The quarterly review process (RC 5.1
-security calendar) is now a structural requirement — CI fires red 365
-days after the last review increment, forcing the review rather than
-calendaring it informally. Closes the rev-3 RSK-02 erosion concern by
-moving the control from process to mechanism.
+Closes security T-3 (programmatic detection of policy weakening) and
+plan-review M9 / W12 (type-driven coverage in snapshot).
 
-#### 4.4.5 CODEOWNERS rules
+#### 4.4.4 Mass-copy uniqueness of declarative reasons (NEW in rev 5)
 
-The following file globs route changes to the security review team:
+Closes plan-review M5 / W7. The adequacy guard asserts:
 
+```python
+def test_handles_no_sensitive_data_reasons_are_unique() -> None:
+    """Two tools must not share an exact-match why_arguments_safe (or
+    why_responses_safe) string. Mass-copy is a signal that someone
+    bulk-applied a placeholder reason during migration.
+
+    Whitespace-normalised exact match. The 32-char minimum (§4.2.3)
+    plus this uniqueness assertion together force concrete reasoning.
+    """
+    arg_reasons: dict[str, list[str]] = collections.defaultdict(list)
+    resp_reasons: dict[str, list[str]] = collections.defaultdict(list)
+
+    for name, entry in MANIFEST.items():
+        if entry.policy is None:
+            continue
+        struct = entry.policy.handles_no_sensitive_data_reason_struct
+        if struct is None:
+            continue
+        arg_reasons[" ".join(struct.why_arguments_safe.split())].append(name)
+        resp_reasons[" ".join(struct.why_responses_safe.split())].append(name)
+
+    duplicates = {
+        ("arguments", text, names)
+        for text, names in arg_reasons.items()
+        if len(names) > 1
+    } | {
+        ("responses", text, names)
+        for text, names in resp_reasons.items()
+        if len(names) > 1
+    }
+    assert not duplicates, (
+        "Mass-copy detected in handles_no_sensitive_data reasons: "
+        f"{duplicates}"
+    )
 ```
-# .github/CODEOWNERS
-src/elspeth/web/composer/redaction.py            @elspeth/security
-src/elspeth/web/composer/tools.py                @elspeth/security  # for ToolRedactionPolicy declarations
-tests/unit/web/composer/redaction_policy_snapshot.json    @elspeth/security
-tests/unit/web/composer/test_redaction_policy.py @elspeth/security
-```
 
-This is the same control pattern used elsewhere in the project for
-config contracts and tier-model allowlists.
+Closes the calendar-synchronicity-at-migration concern (W2 / plan
+review). The `last_reviewed_iso` field of rev 4 is **removed** from
+`HandlesNoSensitiveDataReason` (§4.2.3); review is triggered by
+content change via the policy-hash snapshot, not by calendar tick. A
+manifest entry whose reason text and shape never change does not need
+periodic review — the underlying tool's behaviour did not change.
+
+#### 4.4.5 Label-gate CI step (rev 5; replaces CODEOWNERS team routing)
+
+Rev 4 §4.4.5 routed `redaction.py`, `tools.py`, the snapshot file, and
+`test_redaction_policy.py` to a `@elspeth/security` GitHub team.
+**That team cannot exist on this repository:** the project lives at
+`https://github.com/johnm-dta/elspeth.git` (a personal-account remote;
+GitHub teams require an organisation). A `CODEOWNERS` file naming a
+non-existent team is silently no-op — CODEOWNERS-as-control would be
+defense by paperwork.
+
+Rev 5 replaces the team routing with a **CI-enforced PR-label gate**:
+
+1. **The policy-hash snapshot is the primary control** (§4.4.3). Any
+   change to a manifest entry — Sensitive[T] annotation removed,
+   declarative key set narrowed, summarizer replaced, structured
+   reason rewritten — flips the snapshot.
+2. **A CI step** at `.github/workflows/composer-redaction-gate.yml`
+   compares the snapshot file's content hash on the PR head against
+   the snapshot on `main`. If they differ, the step asserts the PR
+   carries one of the two labels:
+     - `policy-strengthen` — the change tightens the redaction surface
+       (e.g. adds a `Sensitive()` marker, narrows
+       `known_response_keys`).
+     - `policy-weaken-justified` — the change loosens the surface
+       (e.g. removes a `Sensitive()` marker, broadens
+       `sensitive_response_keys` to include keys previously redacted).
+       The PR description MUST justify the change in a section titled
+       "Redaction policy weakening rationale". The CI step grep-asserts
+       the section header exists in the PR body fetched via `gh api`.
+3. **Without a label**, the CI step fails. There is no override
+   mechanism; the change does not merge.
+4. **No `.github/CODEOWNERS` file is created** as part of this work.
+   The repo's ownership model remains "the operator reviews everything"
+   until the project migrates to an organisation-owned repo. At that
+   point the team-routing variant becomes available and the gate can
+   be augmented (filed as a follow-up; not blocking).
+
+The label-gate is mechanism over policy: a label is enforced by CI,
+not by a reviewer's discipline. CODEOWNERS-as-team-routing would
+add a second checkpoint *after* a CI gate already exists. Closes
+plan-review B4 / W9 / M10.
 
 ### 4.5 `composition_state_id` FK behaviour, `IntegrityError`, and `OperationalError` semantics
 
@@ -944,13 +1416,20 @@ for tool_call in assistant_message.tool_calls:
 # All redaction is pure / non-blocking; building the redacted payload in
 # async-land keeps the sync worker's wall-clock window narrow.
 redacted_assistant_tool_calls = tuple(
-    redact_tool_call(tc, lookup_tool_class(tc.function.name))
+    # Rev 5: dispatch via MANIFEST[tool_name] inside the walker.
+    # No lookup_tool_class helper, no MissingToolError class
+    # (see §5.7.5 — Tier-3 unknown tool name does not reach here;
+    # only successfully-dispatched tools produce tool_calls in the
+    # post-execute_tool list). Walker takes the already-decoded
+    # arguments dict (M3: single parse) and the redaction telemetry
+    # instance.
+    redact_tool_call_arguments(tc.function.name, decoded_args[tc.id], telemetry=redaction_telemetry)
     for tc in assistant_message.tool_calls
 )
 redacted_tool_rows = tuple(
     RedactedToolRow(
         tool_call_id=outcome.call.id,
-        content=_serialize_response(outcome, lookup_tool_class(outcome.call.function.name)),
+        content=_serialize_response_via_walker(outcome, telemetry=redaction_telemetry),
         composition_state_payload=(
             # B1 (Phase 1 plan-review synthesis): no caller-supplied
             # ``version`` here. ``StatePayload`` carries the per-column
@@ -1715,23 +2194,42 @@ on `SessionServiceImpl` for assertable behaviour. The injected fake
 counter is itself asserted against by the property-test post-conditions
 (§8.3.2 closes QA F-4).
 
-#### 5.7.5 `lookup_tool_class` and redaction-layer integration
+#### 5.7.5 `MANIFEST` lookup and redaction-layer integration (rev 5)
 
-The `lookup_tool_class(tool_name: str) -> type[ComposerTool]` helper
-returns the registered tool class, which in turn carries the
-`Sensitive[T]`-annotated argument and response Pydantic models AND any
-legacy `ToolRedactionPolicy` declared via the
-`EXEMPT_FROM_TYPE_DRIVEN_REDACTION` escape valve. The redaction layer
-prefers type-driven redaction; the legacy policy is consulted only when
-the exempt flag is `True`.
+(Rev 4 framed this section around a fictional `lookup_tool_class(tool_name) -> type[ComposerTool]` helper and a `MissingToolError` exception. Plan-review B1 / W3 established that no class hierarchy exists. Rev 5 restates the integration around the manifest.)
 
-The lookup raises `MissingToolError` (a new exception) on unregistered
-names. The adequacy guard (§4.4) ensures this never fires in practice —
-every registered tool either has annotated models or has the exempt
-flag + legacy policy, enforced at registry build time. The crash on
-missing tool is offensive programming: the case is impossible by
-construction; if it ever fires, the registry itself is corrupt and the
-audit trail must not proceed.
+`MANIFEST: Mapping[str, ToolRedaction]` (§4.2.1) is the single
+registration root for redaction policy. The runtime walker
+(`redact_tool_call_arguments`, `redact_tool_call_response`; §4.2.6)
+dispatches via `MANIFEST[tool_name]`. There is no `lookup_tool_class`
+helper and no `MissingToolError` exception class.
+
+Boundary disposition (per §4.2.6 table):
+
+- **Tier-3 input**: an LLM-supplied tool name with no entry in any of
+  the six dispatch registries at `tools.py:5250–5314` is handled by
+  the existing compose-loop pattern at `service.py:1836–1870`. The
+  dispatcher returns a failure `ToolResult` (the fall-through at
+  `tools.py:5481` reads `return _failure_result(state, f"Unknown
+  tool: {tool_name}")`); the compose loop records the failure as an
+  audit entry and continues to the next iteration. **The walker is
+  not invoked for unknown tool names** because dispatch never
+  succeeds — there is nothing to redact.
+- **Tier-1 invariant**: a manifest entry missing for a tool name
+  that *did* dispatch successfully is a registry-consistency
+  violation. The walker raises `AuditIntegrityError` chained from a
+  `KeyError` on `MANIFEST[tool_name]`. The adequacy guard (§4.4.1)
+  ensures this never fires in practice — registry-manifest set
+  equality is asserted at CI time. If it ever fires, the registry
+  itself is corrupt; offensive-programming policy applies and the
+  audit trail must not proceed.
+
+The two cases are distinguished by *whether dispatch succeeded*:
+Tier-3 unknown-tool-name input never reaches the walker; only a
+dispatched-but-not-manifest-registered tool name does. This matches
+the trust-tier discipline in CLAUDE.md: external input (LLM tool
+names) is Tier-3 and absence-tolerant; internal registry consistency
+is Tier-1 and crash-on-violation.
 
 ---
 
@@ -1938,49 +2436,21 @@ polish.
 
 ### 8.1 Backend — unit
 
-- `tests/unit/web/composer/test_redaction_policy.py`
-  - **Registry-presence test.** Iterate composer tool registry; assert
-    every tool either uses `Sensitive[T]` annotations on its argument and
-    response models OR has `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True` AND
-    a non-default `ToolRedactionPolicy`.
-  - **Adequacy guard test (rev 4).** For every non-exempt tool, walk
-    its Pydantic argument and response models recursively per §4.4.1
-    table; assert no `Any`-typed fields, no opaque `dict`/`list`
-    containers without explicit declaration, and every `str`/`bytes`
-    field either annotated with `Sensitive[T]` or covered by the
-    legacy policy's `sensitive_argument_keys` /
-    `sensitive_response_keys`.
-  - **Recursive descent test.** Synthetic tool with a 3-level-nested
-    Pydantic model containing `Sensitive[T]` at the deepest level;
-    assert the redaction layer reaches it.
-  - **`EXEMPT_FROM_*` ClassVar test.** Assert direct attribute access
-    works on the base class (no `getattr` defensive read); assert
-    flipping the flag requires CODEOWNERS approval (verified by
-    inspecting `.github/CODEOWNERS`).
-  - **Structured reason validators.**
-    - Orphan summarizer key → `ValueError`.
-    - `handles_no_sensitive_data=True` with `None` reason struct → `ValueError`.
-    - `handles_no_sensitive_data=False` with non-None reason struct → `ValueError`.
-    - `HandlesNoSensitiveDataReason` empty `sensitive_data_locations` → `ValueError`.
-    - `HandlesNoSensitiveDataReason` `why_arguments_safe` < 32 chars → `ValueError`.
-    - `last_reviewed_iso` > 365 days old → adequacy-guard test fails red.
-    - `known_response_keys` empty when `handles_no_sensitive_data=False` → `ValueError`.
-  - **Policy-hash snapshot test.** Compute hash for every legacy
-    policy; compare against `redaction_policy_snapshot.json`; fail on
-    mismatch. Verifies T-3 mitigation.
-  - **Per-policy round-trip.** Synthetic tool call with sentinel-marked
-    arguments; redaction layer produces expected output; non-listed
-    keys are byte-identical to input (defends against a buggy policy
-    that redacts everything).
-  - **Unknown response key fail-closed test (NEW).** Tool returns a
-    response with a key not in `known_response_keys`; assert the
-    unknown key's value is replaced with the
-    `<redacted-unknown-key:...>` sentinel; counter increments.
-  - **Summarizer raises.** Inject a summarizer that raises; assert the
-    fallback sentinel `<redacted-summarizer-error:{exc_type}>` is
-    written (exception class only — no message echo per security I-3);
-    OTel counter `composer.redaction.summarizer_errors_total`
-    increments; redaction never raises through the persistence boundary.
+- **Phase 2 redaction test suite (rev 5 — see plan tasks for the per-file canonical list).** The unit-test surface for the rev-5 redaction framework is split across multiple files (replacing the rev-4 single `test_redaction_policy.py`):
+  - `tests/unit/web/composer/test_walk_model_schema.py` — six container-shape coverage (BaseModel, list, dict, tuple, Optional, Union); marker-not-first-in-Annotated; three-level nesting; `with_values=True` extraction. Closes plan-review B2.
+  - `tests/unit/web/composer/test_tool_redaction_dataclass.py` — both-shapes-set / neither-shape-set / response_model-without-argument_model construction errors. Closes plan-review W8.
+  - `tests/unit/web/composer/test_redaction_telemetry.py` — typed Protocol contract; Noop and OTel impls. Closes plan-review W4.
+  - `tests/unit/web/composer/test_redact_set_source.py` — tracer-bullet end-to-end. Validates `Sensitive[T]` integration on one path before bulk migration.
+  - `tests/unit/web/composer/test_handles_no_sensitive_data_reason.py` — empty locations, < 32-char reason, freeze-guard, idempotent `__post_init__`. (No `last_reviewed_iso` validator — calendar-keyed review removed in rev 5; closes W2.)
+  - `tests/unit/web/composer/test_tool_redaction_policy.py` — orphan summarizer, `handles_no_sensitive_data` XOR reason, missing `known_response_keys`.
+  - `tests/unit/web/composer/test_redact_tool_call_response.py` — known-key passthrough; sensitive-key substitution; **fixed-sentinel `<redacted-unknown-response-key>`** for unknown keys (no length disclosure; closes W6); summarizer-raises crashes via `AuditIntegrityError` (closes M2 / W5); summarizer-non-`str`-return crashes (closes W5).
+  - `tests/unit/web/composer/test_redact_tool_call_arguments.py` — full disposition table from §4.2.6; type-driven walks via shared iterator; declarative walks via `sensitive_argument_keys`; manifest-entry-missing-for-dispatched-tool-name crashes (Tier-1 registry violation distinct from Tier-3 LLM-hallucinated tool name).
+  - `tests/unit/web/composer/test_adequacy_guard.py` — four assertions per §4.4 (registry-manifest set equality; per-entry shape walk; mass-copy uniqueness; policy-hash snapshot equality). Sanity bound: < 5 s for the current 37-tool set.
+  - `tests/unit/web/composer/test_promote_*.py` — one per promoted tool (`set_source`, `create_blob`, `update_blob`, `set_source_from_blob`, `set_pipeline`, `apply_pipeline_recipe`, optionally `patch_*_options`). Each asserts `ValidationError` raised on invalid input AND existing handler-behaviour regression for valid input.
+  - `tests/unit/web/composer/test_compose_loop_unknown_tool_name.py` — pins existing `ARG_ERROR + continue` routing for LLM-supplied unknown tool names per `service.py:1836–1870`. Closes plan-review M7 / W3.
+  - `tests/unit/web/composer/redaction_policy_snapshot.json` — committed hash snapshot covering every manifest entry (type-driven + declarative; broadened from rev 4's legacy-only coverage). Closes plan-review M9 / W12.
+
+  The rev-4 single-file `test_redaction_policy.py` does not survive into rev 5: the assertion surface is too broad to live in one file readable for review. Each rev-5 test module covers one mechanism; the adequacy guard is the integration point. The rev-4 "fallback summarizer-error sentinel" path is removed (closes M2 / W5; see §9 RSK-03 amendment); the rev-4 length-disclosing `<redacted-unknown-key:{n}-bytes>` sentinel is replaced by the fixed `<redacted-unknown-response-key>` form (closes W6).
 
 - `tests/unit/web/sessions/test_chat_messages.py` (executed against
   in-memory SQLite — closes QA F-8)
@@ -2154,11 +2624,13 @@ Extend `tests/integration/pipeline/test_composer_llm_eval_characterization.py`:
   helper emits the new reason code; counter
   `composer.tool_call_cap_exceeded_total` increments.
 
-- **CL-PP-13: Unknown response key fail-closed (NEW in rev 4 — security I-1).**
-  A legacy-escape-valve tool (with `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True`
-  and explicit `known_response_keys`) returns a response containing a key
-  not in the allowlist. Assert the unknown key's value is replaced with
-  `<redacted-unknown-key:{n}-bytes>` in the persisted content;
+- **CL-PP-13: Unknown response key fail-closed (rev 4 → rev 5 framing).**
+  A declarative-manifest-entry tool (with explicit `known_response_keys`)
+  returns a response containing a key not in the allowlist. Assert the
+  unknown key's value is replaced with the FIXED sentinel
+  `<redacted-unknown-response-key>` (rev-5 sentinel; rev-4's
+  `<redacted-unknown-key:{n}-bytes>` length-disclosing form is replaced
+  per plan-review W6) in the persisted content;
   `composer.redaction.unknown_response_key_total` increments. The tool
   call still completes successfully — fail-closed redaction is not a
   failure, it is the policy.
@@ -2514,8 +2986,8 @@ go/no-go decision recorded in the PR description.
 | ID | Risk | Likelihood | Impact | Trigger | Mitigation | Owner |
 |---|---|---|---|---|---|---|
 | RSK-01 | Tool author ships a tool without redaction primitive (neither `Sensitive[T]` nor a legacy `ToolRedactionPolicy`). | Low | High (silent leakage) | Adequacy-guard CI test fires red on PR. | Recursive adequacy guard (§4.4) covers nested types; type-driven primitive (`Sensitive[T]`) is preferred; legacy policy is the explicit-exempt path with structured justification. | Implementing engineer per PR; reviewer sign-off |
-| RSK-02 | Legacy `ToolRedactionPolicy` declarations with `handles_no_sensitive_data=True` normalize over time (Shifting the Burden). | Low (rev 4 — moved from Medium) | Medium (erosion of audit safety) | Quarterly review (mechanically enforced via `last_reviewed_iso < today - 365d` test failure) finds new declarations or stale reviews. | (Rev-4 strengthening:) Type-driven `Sensitive[T]` is the preferred primitive — declarations are no longer the dominant defence. The legacy escape valve requires `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True` ClassVar AND a structured `HandlesNoSensitiveDataReason` AND CODEOWNERS routing to security review. Adequacy guard tests `last_reviewed_iso` mechanically; the calendar review is structural, not informal. | Security review at RC 5.1; PR reviewers per CODEOWNERS |
-| RSK-03 | Redaction summarizer raises on pathological input. | Low | Medium | OTel counter `composer.redaction.summarizer_errors_total` exceeds 0.1% of tool calls in 24h. | Persistence wrapper catches summarizer exceptions and falls back to `<redacted-summarizer-error:{exc_type}>`. Property test asserts redaction never raises. The fallback sentinel uses ONLY the exception class name; raw exception messages are NOT included (closes security I-3 — message echo would risk leaking values). | RC 5.1 production hardening |
+| RSK-02 (rev 5: control set restated) | Declarative manifest entries with `handles_no_sensitive_data=True` normalize over time (Shifting the Burden) — the structured-reason field becomes a default copy-paste. | Low | Medium (erosion of audit safety) | Mass-copy uniqueness assertion (§4.4.4) fires on any two tools sharing exact-match `why_arguments_safe` or `why_responses_safe` text. Policy-hash snapshot diff (§4.4.3) without `policy-weaken-justified` PR label fails the label-gate CI step (§4.4.5). | (Rev-5 controls, replacing rev-4's CODEOWNERS-team routing which is non-functional on this repo:) Type-driven manifest entries (§4.2.1 with `argument_model`) are preferred for any tool whose argument surface benefits from a redaction-bearing Pydantic model. Declarative entries (§4.2.3) are the permanent shape for tools whose surface is structural. Adequacy-guard mass-copy uniqueness check forces concrete reasoning; policy-hash snapshot is content-keyed (review on change, not on calendar tick — closes W2); label-gate CI step is the merge control. | Implementing engineer per PR; label-gate CI step |
+| RSK-03 (rev 5: discipline tightened) | Redaction summarizer raises on pathological input, OR returns a non-`str` value. | Very low (rev 5; was Low) | Critical (rev 5; was Medium) — Tier-1 audit invariant violation | Either: (a) summarizer raises during a per-turn audit-write, OR (b) summarizer returns a non-`str` value. Both surface inside `redact_tool_call_arguments` / `redact_tool_call_response` (§4.2.6). | **Persistence wrapper does NOT catch summarizer exceptions and does NOT coerce non-`str` returns.** Per CLAUDE.md plugin-ownership policy and Tier-1 discipline (§4.2.6), the summarizer is system code; an exception or wrong return type is a system bug, not a Tier-3 input fault. The walker raises `AuditIntegrityError` chained from the underlying exception (registered in `TIER_1_ERRORS` so `except Exception` cannot swallow). Property test (§8.1) asserts: (i) every committed summarizer returns `str` for every input value reachable through its declared field type; (ii) every summarizer is total (does not raise) on the same domain. The "fallback sentinel" path of rev 4 is removed — silent sentinel-substitution would mask the bug, and the audit row would record "we redacted this" when in fact the redaction implementation was broken. Closes plan-review M2 / M3 / W5 (Tier-1 silent-sentinel and non-str coercion). The rev-4 `composer.redaction.summarizer_errors_total` counter is retained for production observability; SLO threshold is 0 (any non-zero value is an incident, not a budget). | Implementing engineer per PR; SRE on incident |
 | RSK-04 | Per-turn sync transaction slows down the loop. | Low | Low (latency NFR §1.4) | CI sanity bound (p95 ≤ 250 ms with N ≤ 8) red. | CI sanity bound + nightly tight bench; bounded write per turn; SQLite/PostgreSQL handle small transactions well; per-turn (not per-row) atomicity reduces transaction count. | Implementing engineer |
 | RSK-05 | Frontend diff blows up on very large `partial_state`. | Low | Low (UX nuisance) | Recovery panel TTI exceeds 500 ms in CI sanity test. | Diff helper iterates fields rather than diffing entire JSON; UI shows "large diff — expand" disclosure for thousands of nodes. | Frontend follow-up |
 | RSK-06 | New `tool_call_id` index slows large message-table writes. | Very low | Low | Insert latency regression in benchmarks. | Composite single-column index; SQLite/PostgreSQL handle this trivially. | n/a |
@@ -2526,7 +2998,7 @@ go/no-go decision recorded in the PR description.
 | RSK-11 | Audit-write failure when no tool exception in flight (Tier-1 violation). | Very low | Critical | OTel counter `composer.audit.tool_row_tier1_violation_total` non-zero. | §5.2.2 sync function raises `AuditIntegrityError` (registered in `TIER_1_ERRORS` so `except Exception` blocks cannot swallow it) chained from the underlying `OperationalError`; caller propagates; CL-PP-10a asserts. | RC 5.1 SRE |
 | RSK-12 | LLM provider re-uses `tool_call_id` across turns within a session. | Medium (provider-dependent) | High (silent mis-correlation absent the partial-unique index) | Partial unique index rejects insert; CL-PP-8 fires; counter `composer.audit.tool_row_integrity_violation_total` increments. | Crash on duplicate; do not silently recover. Per-provider observation: OpenRouter/OpenAI ids are message-scoped per current spec but not contractually forever. | Implementing engineer |
 | RSK-13 (NEW rev 4) | LLM-driven tool-call amplification via prompt injection. | Medium (LLM-dependent) | High (storage growth, Tier-3 input attack) | Per-turn cap of 16 tool calls fires; `composer.tool_call_cap_exceeded_total` increments. | Hard cap per assistant turn (configurable); CL-PP-12 covers; `_handle_convergence_error` returns the new reason code. | Security review at RC 5.1 |
-| RSK-14 (NEW rev 4) | Redaction-policy weakening lands without security review (T-3). | Low | High (silent audit-safety regression) | Policy-hash snapshot test fails on PR; no `policy-weaken-justified` PR label. | Snapshot test (§4.4.3); CODEOWNERS routes redaction.py + tools.py + snapshot file changes to security team. | Security review per PR |
+| RSK-14 (rev 5: control restated) | Redaction-policy weakening lands without explicit justification (T-3). | Low | High (silent audit-safety regression) | Policy-hash snapshot test fails on PR (§4.4.3); the label-gate CI step (§4.4.5) requires either `policy-strengthen` or `policy-weaken-justified` PR label and a "Redaction policy weakening rationale" section in the PR description for the latter. | Snapshot test (§4.4.3) + label-gate CI step (§4.4.5). The rev-4 CODEOWNERS-team routing to `@elspeth/security` is dropped because the team cannot exist on `johnm-dta/elspeth` (personal-account repo; see W9 / §12.2). The label gate is the merge control. | Implementing engineer; label-gate CI step |
 | RSK-15 (NEW rev 4) | Tool response-shape drift defeats static `sensitive_response_keys` (security I-1). | Medium (over time) | High (silent leakage of new keys) | `composer.redaction.unknown_response_key_total` non-zero. | `known_response_keys` allowlist with fail-closed redaction (§4.2.2); CL-PP-13 covers; counter alerts on first occurrence in production. | Implementing engineer; tool authors when extending response shapes |
 | RSK-16 (NEW rev 4) | Actor attribution missing on rows from a future writer (security R-1). | Low | Medium (audit-trail gap for unattributable rows) | A new writer attempts to insert without a registered `writer_principal` value; CHECK constraint refuses. | `writer_principal` CHECK constraint (§4.1.1); new writers require schema migration that adds the value to the CHECK enum AND coordinates with the advisory lock. | Architecture review for any new writer |
 | RSK-17 (NEW rev 4) | Audit-grade transcript view exposed without access logging (security I-5). | Low | Medium (forensic gap on access patterns) | `audit_access_log` row missing for an `include_tool_rows=true` request. | Route helper writes the access-log row before returning the response; integration test asserts the row exists for every audit-grade query. | Security review at RC 5.1 |
@@ -2753,23 +3225,77 @@ pre-deploy archive/delete/restart procedure (§10 OQ-4).
 **Out of scope for Phase 1.** No compose-loop changes; no redaction
 framework; no frontend.
 
-### Phase 2 — Redaction framework: `Sensitive[T]`, `ToolRedactionPolicy`, adequacy guard
+### Phase 2 — Redaction framework: manifest dispatch, `Sensitive[T]` promotion wave, adequacy guard (rev 5)
 
-**Scope.** Add `Sensitive[T]` annotation primitive (§4.2.1); update
-existing tool argument/response models in `web/composer/tools.py` to
-use `Sensitive[T]` where applicable; add `ToolRedactionPolicy` legacy
-escape valve with structured `HandlesNoSensitiveDataReason`
-(§4.2.2); implement recursive adequacy guard (§4.4); add policy-hash
-snapshot test (§4.4.3); add CODEOWNERS rules; declare
-`EXEMPT_FROM_TYPE_DRIVEN_REDACTION` ClassVar on the composer-tool
-base class.
+**Scope (rev 5 reshape).** Introduce the `ToolRedaction` manifest
+dataclass (§4.2.1) and the module-level `MANIFEST` keyed by tool name.
+Add the `Sensitive[T]` field-level annotation (§4.2.2) and the
+declarative `ToolRedactionPolicy` / `HandlesNoSensitiveDataReason`
+manifest-entry shape (§4.2.3). Promote a wave of ~6–8 sensitive-touching
+tools (the "Sensitive[T] promotion wave" — `set_source`, `create_blob`,
+`update_blob`, `set_source_from_blob`, `set_pipeline`,
+`apply_pipeline_recipe`, and any `patch_*_options` whose option dict
+can carry secrets) to type-driven manifest entries:
 
-**Done when.** §8.1 redaction-policy unit tests pass; every registered
-composer tool either uses `Sensitive[T]` or has a legacy policy with
-structured justification; quarterly-review structural test passes
-(`last_reviewed_iso` is recent); snapshot file committed.
+  - Each promoted tool gains a redaction-bearing Pydantic argument
+    model with `Sensitive[T]` annotations on the relevant fields.
+  - The handler's dispatch path validates `Model.model_validate(arguments)`
+    at the dispatch boundary; `pydantic.ValidationError` raised by
+    validation is caught at the existing `ARG_ERROR` site
+    (`service.py:1836–1870`) and routed through the existing audit
+    pattern (no new error class, no new audit shape).
+  - The handler reads typed attributes from the validated instance,
+    not `arguments["key"]` — replaces ~6–8 instances of the loose-dict
+    pattern.
 
-**Out of scope for Phase 2.** No compose-loop persistence; no frontend.
+The remaining ~29–31 tools in the six dispatch registries get
+declarative manifest entries (`ToolRedactionPolicy` with explicit
+`sensitive_argument_keys`, `argument_summarizers`, `known_response_keys`
+or `handles_no_sensitive_data=True` with structured reason). These
+tools' handler signatures and dispatch paths are not changed by Phase
+2 — their argument schema is structural and does not benefit from a
+redaction-bearing Pydantic model.
+
+Add the shared traversal iterator (§4.2.5); the runtime walker
+`redact_tool_call_arguments` / `redact_tool_call_response` (§4.2.6);
+the typed `RedactionTelemetry` Protocol (§4.2.4); the four-assertion
+adequacy guard (§4.4); the broadened policy-hash snapshot covering
+**every** manifest entry (§4.4.3); and the label-gate CI step
+(§4.4.5). No `.github/CODEOWNERS` file is created.
+
+**Done when.**
+
+- `tests/unit/web/composer/test_adequacy_guard.py` passes all four
+  assertions (registry-manifest set equality; per-entry shape walk;
+  mass-copy uniqueness; policy-hash snapshot equality).
+- §8.1 redaction-policy unit tests pass, including coverage of
+  `list[BaseModel]`, `dict[str, BaseModel]`, `tuple[BaseModel, ...]`,
+  `Optional[BaseModel]`, `Union[*, BaseModel, *]`, marker-not-first-in-
+  Annotated, duplicate-marker-error, three-level-nested redaction.
+- Every promoted tool's dispatch path validates via
+  `Model.model_validate(arguments)`; ValidationError routes to
+  `ARG_ERROR` per service.py:1836–1870; the LLM receives the
+  Tier-3 error response and continues.
+- Every manifest entry is either type-driven (with `argument_model`
+  set) or declarative (with `policy` set, never both).
+- `redaction_policy_snapshot.json` covers all manifest entries
+  (type-driven + declarative); the snapshot CI step asserts equality
+  to the committed file.
+- `composer-redaction-gate.yml` CI step passes on the Phase 2 PR
+  (label-gate succeeds because the snapshot is being added on a
+  greenfield, with a rationale section in the PR description if
+  required by branch protection).
+- `composer.redaction.summarizer_errors_total` SLO threshold is
+  asserted to be 0 in production telemetry config (§9 RSK-03).
+- compose-loop unknown-tool-name routing test confirms LLM-supplied
+  unknown tool names route to ARG_ERROR via the existing path, NOT
+  to a `MissingToolError` crash (closes plan-review M7 / W3).
+
+**Out of scope for Phase 2.** No compose-loop persistence (Phase 3 ships
+that); no frontend; no `.github/CODEOWNERS` file (label-gate is
+sufficient until org migration); promoting non-sensitive-touching
+tools to Pydantic argument models (the operator's "remove loose dicts
+is always ongoing" direction continues outside Phase 2).
 
 ### Phase 3 — Compose-loop persistence + tool-call cap
 
@@ -2904,6 +3430,38 @@ specific concern without re-reading the entire panel response.
 | Reality: sessions/service.py:283-320 misidentified | Reality check | §2 corrected (call sites are routes.py:1487, :1883) |
 | Reality: path shorthand | Reality check | Header conventions note |
 
+### 12.2 Revision 5 reviewer-finding traceability
+
+The four-reviewer plan-review pass on the rev-4-derived Phase 2 plan
+(`docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json`)
+returned `CHANGES_REQUESTED` with four BLOCKERs and twelve warnings.
+Revision 5 closes each finding at the spec level so the plan rewrite
+can be derived cleanly. Implementers should consult this table
+alongside §12.1.
+
+| Finding | Reviewer convergence | Resolved in |
+|---|---|---|
+| **B1** Class-based `ComposerTool` hierarchy is fictional; `tools.py` is six function-pointer dispatch dicts at lines 5250–5314 | reality + architecture + quality + systems (4-of-4) | Header rev-5 architectural pivot; §4.2 manifest-keyed dispatch; §4.4.1 registry-manifest set-equality assertion; §11 Phase 2 scope reshape |
+| **B2** Walker omits recursion into `list[BaseModel]` / `dict[str, BaseModel]`; adequacy guard cannot detect the gap | quality + systems (2-of-2) | §4.2.5 shared traversal iterator (one definition consumed by both); §4.4.2 per-entry shape walk uses the same iterator; §8.1 test coverage of all six container shapes |
+| **B3** Spec §4.4.1 line 649 falsely claims tools declare arguments via Pydantic `BaseModel` subclasses | reality + quality + architecture | §4.4.1 rewritten against the actual function-pointer dispatch; rev-5 architectural pivot in header makes the correction load-bearing |
+| **B4** Task 13 unconditionally invokes `gh pr create`, violating operator PR-confirmation discipline | quality | §11 Phase 2 done-when removes PR-open from scope; plan rewrite ends at "gate green; await operator PR-open instruction" (per Phase 1B/1C convention) |
+| **W1** `ComposerTool` name collides with existing `ComposerToolInvocation` / `ComposerToolStatus` / `ComposerToolRecorder` L0 family | architecture + reality | No `ComposerTool` name introduced; manifest-entry dataclass is `ToolRedaction` (§4.2.1) |
+| **W2** Calendar synchronicity at migration → 365-day mass batch expiry → date-bump ritual | systems + architecture | §4.4.4 replaces calendar-keyed review with content-hash-keyed review via the policy-hash snapshot (§4.4.3); `last_reviewed_iso` field removed from `HandlesNoSensitiveDataReason` |
+| **W3** `MissingToolError` for LLM-hallucinated tool name treats Tier-3 input as crash condition | systems | §4.2.6 walker boundary table (manifest-missing for compose-loop input is registry-consistency, not Tier-3); plan rewrite Task `compose-loop unknown-tool-name routing test` confirms ARG_ERROR routing per `service.py:1836–1870` |
+| **W4** Telemetry call is duck-typed (`telemetry=None` default with attribute access) | quality | §4.2.4 typed `RedactionTelemetry` Protocol; walker accepts a real instance, never `None` |
+| **W5** Summarizer non-string return value silently flows into Tier-1 audit row | quality | §4.2.6 walker disposition table; §9 RSK-03 amended (crash on non-`str` return) |
+| **W6** `len(repr(value))` discloses structural metadata (RSK-03 weak echo) | quality | §4.2.3 sentinel `<redacted-unknown-response-key>` is fixed-form; §4.2.6 boundary table; no length disclosure |
+| **W7** Mass-copy uniqueness check absent | quality | §4.4.4 explicit assertion in adequacy guard |
+| **W8** `Sensitive[T]` vs `ToolRedactionPolicy` precedence undefined | quality | §4.2.7 + §4.2.1 `__post_init__` makes both-shapes-set a construction-time `ValueError`; precedence cannot arise |
+| **W9** `@elspeth/security` CODEOWNERS team likely does not exist | reality + architecture + systems | §4.4.5 drops team routing; promotes label-gate CI step to primary control; no `.github/CODEOWNERS` file is created |
+| **W10** Task 9 under-scoped to a single heading covering ~30 tools across 3 signature shapes | architecture | Plan rewrite splits manifest-entry creation into discrete tasks per registry (DISCOVERY, MUTATION, BLOB-DISCOVERY, BLOB-MUTATION, SECRET-DISCOVERY, SECRET-MUTATION); the Sensitive[T] promotion wave is a separate task per promoted tool |
+| **W11** Default-form `hasattr` / `getattr` violations in plan tasks | reality | All §4.2 / §4.4 code sketches use direct typed-attribute access; `__post_init__` validators raise `ValueError` instead of catching attribute lookups; plan tasks reference these sketches verbatim |
+| **W12** Snapshot covers only legacy-policy tools; new tools have a false-pass window | systems | §4.4.3 broadened to cover every manifest entry, type-driven and declarative; bootstrap snapshot enumerates all tools at creation |
+| **M1** `test_redaction_policy.py` is *create*, not *replace* | reality | Plan rewrite says "create" |
+| **M2** `sorted()` on non-string keys may error at runtime | quality | §4.4.3 canonicalisation routes through `sorted()` only on `str`-typed key sets (manifest keys are tool names, declared `dict[str, ...]`); §4.2.1 manifest type asserts string-typed keys |
+| **M3** `redact_tool_call` double-parses JSON | systems | §4.2.6 entry points accept already-decoded `dict[str, Any]`; the compose loop decodes once at `service.py:1838` and passes the parsed structure to the walker |
+| **M4** Adequacy guard CI scaling unaddressed | systems | Plan rewrite includes a sanity-bound assertion: adequacy guard < 5 s for 37 tools (the current full set); regression budget for future expansion is filed as a follow-up issue, not Phase 2 scope |
+
 ---
 
 ## 13. Glossary
@@ -2943,16 +3501,50 @@ specific concern without re-reading the entire panel response.
   audit fails → raise (Tier-1 invariant violation). Tool fails + audit
   fails → log permitted, increment counter, let tool exception propagate.
   See §5.2.2 sync helper.
-- **`Sensitive[T]`** (rev 4). Type-driven redaction primitive. Used as
-  Pydantic field metadata via `Annotated[T, Sensitive(summarizer=...)]`.
-  The persistence layer reads field annotations and unconditionally
-  redacts marked fields. The structural Level-4 (Meadows hierarchy)
-  intervention that makes redaction mechanical rather than declarative.
-- **`ToolRedactionPolicy`** (legacy escape valve from rev 4 onward).
-  Per-tool declarative policy retained for tools that cannot use
-  `Sensitive[T]` (raw-dict arguments, third-party Pydantic models).
-  Requires `EXEMPT_FROM_TYPE_DRIVEN_REDACTION=True` ClassVar on the
-  tool class plus security CODEOWNERS approval.
+- **`Sensitive[T]`** (rev 4; rev-5 framing). Type-driven redaction
+  metadata, used as Pydantic field metadata via
+  `Annotated[T, Sensitive(summarizer=...)]` on fields of a manifest
+  entry's `argument_model` or `response_model` (§4.2.2). The walker
+  reads `model_fields[name].metadata` to detect markers; promoted
+  tools' dispatch validates `Model.model_validate(arguments)` at the
+  dispatch boundary so the model also serves as the validation gate.
+- **`ToolRedaction`** (rev 5). The manifest-entry dataclass (§4.2.1).
+  Each entry carries either an `argument_model` (type-driven shape)
+  or a `policy: ToolRedactionPolicy` (declarative shape) — exactly
+  one. Construction-time `ValueError` if both or neither is set.
+- **Manifest** (rev 5). `MANIFEST: Mapping[str, ToolRedaction]` —
+  module-level dict keyed by tool name; the single registration root
+  for redaction policy. Mirrors the `_TOOL_REQUIRED_PATHS:
+  dict[str, ...]` precedent at `service.py:702`. The adequacy guard
+  walks it; the runtime walker dispatches through it; the policy-hash
+  snapshot covers every entry.
+- **`ToolRedactionPolicy`** (rev 4; rev-5 framing). The declarative
+  manifest-entry shape (§4.2.3) for tools whose argument surface is
+  structural (graph IDs, node names, plugin-key strings). Carries
+  `sensitive_argument_keys`, `argument_summarizers`,
+  `known_response_keys`, and (when `handles_no_sensitive_data=True`)
+  a structured `HandlesNoSensitiveDataReason`. Not a "legacy" shape
+  in rev 5 — it is the correct permanent representation for tools
+  whose surface does not benefit from a redaction-bearing Pydantic
+  model.
+- **`RedactionTelemetry` Protocol** (rev 5). Typed Protocol for the
+  walker's OTel emissions (§4.2.4). Replaces rev-4's duck-typed
+  `telemetry=None` parameter. Walker accepts a real instance, never
+  `None`.
+- **Shared traversal iterator** (rev 5). The single generator
+  (§4.2.5) that yields one `TraversalNode` per field of a Pydantic
+  model schema, descending into `BaseModel`, `list[BaseModel]`,
+  `dict[str, BaseModel]`, `tuple[BaseModel, ...]`, `Optional[BaseModel]`,
+  `Union[..., BaseModel, ...]`, and `Annotated[T, *, Sensitive(), *]`
+  regardless of marker position. Consumed by both the adequacy guard
+  (CI-time) and the runtime walker (persistence-time) so they cannot
+  diverge. Closes plan-review B2 (walker-vs-guard divergence).
+- **Label-gate CI step** (rev 5). The merge control (§4.4.5) that
+  enforces `policy-strengthen` or `policy-weaken-justified` PR labels
+  on any change that flips the policy-hash snapshot. Replaces rev-4's
+  `@elspeth/security` CODEOWNERS team routing, which is non-functional
+  on `johnm-dta/elspeth` (personal-account repo; GitHub teams require
+  an organisation). Closes plan-review W9 / M10.
 - **`writer_principal`** (rev 4). Required column on `chat_messages`
   recording which subsystem wrote the row. Permitted values are
   CHECK-constrained: `compose_loop`, `route_user_message`,
@@ -2979,17 +3571,24 @@ specific concern without re-reading the entire panel response.
   variant. Triggers an `audit_access_log` row write per access.
   Considered a Tier-1 surface; access requires session ownership AND
   emits its own access log.
-- **Adequacy guard** (strengthened in rev 4). The CI-time test that
-  every tool's argument and response models are either annotated with
-  `Sensitive[T]` for any sensitive field OR covered by a legacy
-  `ToolRedactionPolicy`. The rev-4 guard recurses into nested Pydantic
-  submodels and treats `dict`, `list`, `Any`, `object`-typed fields as
-  fail-closed unless explicitly declared.
-- **Policy-hash snapshot** (rev 4). A SHA-256 hash of every legacy
-  `ToolRedactionPolicy`, committed to a JSON file under
+- **Adequacy guard** (rev 4; rev-5 framing). The CI-time test
+  (§4.4) that asserts: (1) every tool name in the six dispatch
+  registries at `tools.py:5250–5314` has exactly one `MANIFEST`
+  entry; (2) every entry's redaction declaration covers every field
+  where redaction may be required, walked via the shared traversal
+  iterator (§4.2.5); (3) no two declarative reasons are exact-match
+  copies; (4) the policy-hash snapshot equals the committed file. All
+  four assertions live in `tests/unit/web/composer/test_adequacy_guard.py`.
+- **Policy-hash snapshot** (rev 4; rev-5 broadened). A SHA-256 hash
+  per manifest entry — type-driven and declarative alike (rev-5
+  broadening; rev 4 covered only declarative). For type-driven entries
+  the hash is over the schema-walk produced by the shared iterator
+  (so a removed `Sensitive()` marker flips the hash); for declarative
+  entries the hash is over the canonical key sets plus the structured
+  reason's text hash. Committed at
   `tests/unit/web/composer/redaction_policy_snapshot.json`. Changes
-  require an explicit commit to the snapshot, routed to security review
-  via CODEOWNERS. Mechanical mitigation for policy weakening.
+  require the label-gate CI step to pass (§4.4.5). Closes plan-review
+  M9 / W12.
 - **Tool-call cap** (rev 4). Per-turn hard limit on the number of tool
   calls an assistant turn may emit. Default 16. Exceeding the cap
   raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")`

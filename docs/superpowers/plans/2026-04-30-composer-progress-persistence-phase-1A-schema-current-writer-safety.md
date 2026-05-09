@@ -3923,12 +3923,12 @@ For SQLite, the artifact set is not just `sessions.db`: the main file,
 rollback/recreate unit. Never archive or delete only the main file.
 
 **Files:**
-- Modify: `docs/guides/session-db-reset.md` (existing canonical reset runbook)
-- Optional create: `docs/runbooks/staging-session-db-recreation.md` only if the repo's runbook index requires a staging-specific wrapper; if created, it must link back to `docs/guides/session-db-reset.md` and not fork the stop/go gates.
+- Modify: `docs/runbooks/staging-session-db-recreation.md` (existing canonical reset runbook)
+- Optional create: `docs/runbooks/staging-session-db-recreation.md` only if the repo's runbook index requires a staging-specific wrapper; if created, it must link back to `docs/runbooks/staging-session-db-recreation.md` and not fork the stop/go gates.
 
 - [ ] **Step 1: Extend the existing session DB reset runbook**
 
-Start from `docs/guides/session-db-reset.md`. Keep its Landscape orphaning stop/go gates, path-resolution rules, health checks, and create-session/journal verification. Add any 1A-specific schema-cutover notes there first; do not create a second reset procedure that can drift from the existing guide.
+Start from `docs/runbooks/staging-session-db-recreation.md`. Keep its Landscape orphaning stop/go gates, path-resolution rules, health checks, and create-session/journal verification. Add any 1A-specific schema-cutover notes there first; do not create a second reset procedure that can drift from the existing guide.
 
 Update the guide's expected session-table inventory in the same edit so
 it includes the new `audit_access_log` table. `initialize_session_schema`
@@ -3939,7 +3939,7 @@ only the pre-1A tables is stale and cannot be used as cutover evidence.
 
 If the repo needs a staging-specific wrapper, create
 `docs/runbooks/staging-session-db-recreation.md` with this section and
-link it to `docs/guides/session-db-reset.md`. If any existing staging
+link it to `docs/runbooks/staging-session-db-recreation.md`. If any existing staging
 note references row-level DELETE SQL or `elspeth migrate up` for the
 session DB, replace it.
 
@@ -3969,7 +3969,7 @@ archive, deletion, and rollback.
    deployed.
 4. `deploy/elspeth-web.env` has been inspected directly for session DB
    settings without printing secret values.
-5. The stop/go gates in `docs/guides/session-db-reset.md` have been run:
+5. The stop/go gates in `docs/runbooks/staging-session-db-recreation.md` have been run:
    Landscape code/schema must not reference web-session identifiers.
 6. The pre-cutover source ref compatible with the archived DB has been
    recorded. If rollback is needed, restore that ref and the archived DB
@@ -4097,7 +4097,7 @@ If either health check fails, inspect `journalctl -u elspeth-web.service
 
 After health checks pass, create a new session through the API or UI and
 confirm no `SessionSchemaError` appears in the service journal. This is
-the existing `docs/guides/session-db-reset.md` post-reset gate and must
+the existing `docs/runbooks/staging-session-db-recreation.md` post-reset gate and must
 remain in the staging wrapper if one is created.
 
 Before handing staging back to users, verify the `user_secrets` outcome
@@ -4224,7 +4224,7 @@ available. Record in the Phase 1 PR description:
 - [ ] **Step 4: Commit before schema/current-writer cutover**
 
 ```bash
-git add docs/guides/session-db-reset.md
+git add docs/runbooks/staging-session-db-recreation.md
 # If a staging-specific wrapper was created, stage it too:
 # git add docs/runbooks/staging-session-db-recreation.md
 git commit -m "docs(runbooks): session-DB recreation procedure for staging schema changes (composer-progress-persistence phase 1)"

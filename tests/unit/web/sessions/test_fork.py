@@ -112,6 +112,7 @@ class TestForkSession:
                 source={"plugin": "csv", "options": {"path": "data.csv"}},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         # User message records pre-send state = v1
@@ -131,6 +132,7 @@ class TestForkSession:
                 nodes=[{"id": "n1", "plugin": "llm"}],
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
         await service.add_message(
             session.id,
@@ -177,6 +179,7 @@ class TestForkSession:
                 source={"plugin": "csv", "options": {"path": "a.csv"}},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
         fork_msg = await service.add_message(session_b.id, "user", "Fork me", writer_principal="route_user_message")
 
@@ -818,6 +821,7 @@ class TestForkEndpoint:
                 },
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
         msg = await service.add_message(
             session.id,
@@ -999,6 +1003,7 @@ class TestForkEndpoint:
                 },
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         current_state = await service.get_current_state(session.id)
@@ -1112,6 +1117,7 @@ class TestForkEndpoint:
                 },
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         current_state = await service.get_current_state(session.id)

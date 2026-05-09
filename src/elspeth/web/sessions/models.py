@@ -183,10 +183,13 @@ composition_states_table = Table(
     # ``provenance`` records WHY this state row was written. The CHECK
     # below is a closed enum — extending it requires design review and
     # a corresponding spec §4.1.2 amendment, not a silent value
-    # addition. Schedule 1A treats this as a DB-only audit column: it
-    # is NOT surfaced on ``CompositionStateRecord`` /
-    # ``CompositionStateResponse``. Read-side hydration is deferred to
-    # Schedule 1B+ per plan §1053-1061.
+    # addition. The Python Literal counterpart lives at
+    # ``web/sessions/protocol.py::CompositionStateProvenance``; the two
+    # are paired contracts (extending one without the other lets the
+    # writer pass while the DB rejects the row, or vice versa). Schedule
+    # 1A treats this as a DB-only audit column: it is NOT surfaced on
+    # ``CompositionStateRecord`` / ``CompositionStateResponse``.
+    # Read-side hydration is deferred to Schedule 1B+ per plan §1053-1061.
     Column("provenance", String, nullable=False),
     UniqueConstraint("session_id", "version", name="uq_composition_state_version"),
     # Composite uniqueness target for composite FKs on chat_messages /
@@ -196,63 +199,45 @@ composition_states_table = Table(
     UniqueConstraint("id", "session_id", name="uq_composition_state_id_session"),
     # Closed enum: every value corresponds to a documented writer path
     # in spec §4.1.2 (as amended by the Phase 1 plan supersession
-    # marker — ``session_fork`` is the cross-session fork-copy value,
-    # and ``session_seed`` is broadened to mean "any state row written
-    # outside the compose loop's tool-call path"). Adding a value here
-    # without amending the spec creates an untraceable writer category
-    # in the audit DB.
+    # marker — ``session_fork`` is the cross-session fork-copy value).
+    # Adding a value here without amending the spec creates an
+    # untraceable writer category in the audit DB.
     #
-    # DORMANT-VALUE FRICTION BLOCK — three of the six enum values have
-    # NO writer in Phase 1. They appear in the CHECK constraint because
-    # the column is NOT NULL and the future writer call sites are
-    # already known; the values are reserved so the Phase 3 amendment
-    # is a one-line change at each call site rather than a destructive
-    # session-DB schema reset (per ``project_db_migration_policy``,
-    # this project has no Alembic — schema changes mean operator-led
-    # session-DB recreation). The reserved-but-unwritten values are:
+    # All six values are actively written as of elspeth-obs-f217c634aa
+    # (closed by the same commit that retired the dormant-value friction
+    # block here). The previous block warned that three values
+    # (``convergence_persist``, ``plugin_crash_persist``,
+    # ``preflight_persist``) had no writer; verification revealed the
+    # call sites already existed in ``web/sessions/routes.py`` but were
+    # passing through ``save_composition_state``'s hardcoded
+    # ``"session_seed"`` label. The fix threads ``provenance`` through
+    # the public API as a required keyword argument so all four writer
+    # categories (session_seed, convergence_persist,
+    # plugin_crash_persist, preflight_persist) are distinguishable in
+    # the audit DB. Active writer map (post-fix):
     #
-    # 1. ``convergence_persist`` — Phase 3 will route
-    #    ``_handle_convergence_error`` (web/sessions/routes.py ~L1047)
-    #    to write this label when ``ComposerConvergenceError`` captured
-    #    ``partial_state``. Today that helper writes
-    #    ``provenance='session_seed'`` via ``save_composition_state``.
-    # 2. ``plugin_crash_persist`` — Phase 3 will route
-    #    ``_handle_plugin_crash`` (web/sessions/routes.py ~L1185) to
-    #    write this label when ``ComposerPluginCrashError`` captured
-    #    ``partial_state``. Today: also ``session_seed``.
-    # 3. ``preflight_persist`` — Phase 3 will route
-    #    ``_handle_runtime_preflight_failure`` (web/sessions/routes.py
-    #    ~L1335) to write this label when
-    #    ``ComposerRuntimePreflightError`` captured ``partial_state``.
-    #    Today: also ``session_seed``.
+    #   - ``tool_call``            — service.py compose-loop atomic write
+    #   - ``convergence_persist``  — routes.py _handle_convergence_error
+    #   - ``plugin_crash_persist`` — routes.py _handle_plugin_crash
+    #   - ``preflight_persist``    — routes.py _handle_runtime_preflight_failure
+    #   - ``session_seed``         — service.py create_session + set_active_state
+    #                                 (also: routes.py post-compose state advance
+    #                                  + fork source-storage rewrite — these two
+    #                                  are pre-existing mis-attributions, see the
+    #                                  comments at those call sites)
+    #   - ``session_fork``         — service.py fork_session_at_message
     #
-    # The other three values ARE actively written in Phase 1:
-    #   - ``tool_call``     — service.py:866 (compose-loop atomic write)
-    #   - ``session_seed``  — service.py:1379 / :1836 (session create,
-    #                          branch-from-message reseed)
-    #   - ``session_fork``  — service.py:2260 (cross-session fork-copy)
-    #
-    # NO SILENT ACTIVATION OF DORMANT VALUES. Before any new writer of
-    # ``convergence_persist``, ``plugin_crash_persist``, or
-    # ``preflight_persist`` lands, the change MUST include all three of:
-    #
-    # (a) A spec amendment to §4.1.2 promoting the value from "DORMANT"
-    #     to "ACTIVE writer in Phase N", documenting the precise
-    #     committed call-site path and the audit semantics that distinguish
-    #     it from neighbouring values.
-    # (b) An integration test that drives the helper to its
-    #     persist branch and asserts the row was committed with the
-    #     correct ``provenance`` value (mirroring the
-    #     ``ck_composition_states_provenance`` CHECK contract).
-    # (c) A Filigree ticket linking the change back to this Phase 1
-    #     dormant-value declaration, so the audit history shows the
-    #     activation as a deliberate governance step rather than a
-    #     drive-by edit.
-    #
-    # The friction is the design — see the parallel pattern at the
-    # ``audit_access_log_table`` "INERT IN PHASE 1A" comment block
-    # below for the same closed-list-of-permitted-writers /
-    # no-silent-extension posture.
+    # NO SILENT EXTENSION. Adding a seventh value MUST include all three
+    # of: (a) a spec §4.1.2 amendment documenting the writer path and
+    # the audit semantics that distinguish it from neighbouring values;
+    # (b) an integration test that drives the writer and asserts the
+    # row was committed with the new ``provenance`` value; (c) a
+    # Filigree ticket linking the change back to this enum so the audit
+    # history shows the addition as a deliberate governance step rather
+    # than a drive-by edit. Mirror also goes into
+    # ``CompositionStateProvenance`` at ``protocol.py``. See the
+    # parallel ``audit_access_log_table`` "INERT IN PHASE 1A" block
+    # below for the same closed-list-of-permitted-writers posture.
     CheckConstraint(
         "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork')",
         name="ck_composition_states_provenance",

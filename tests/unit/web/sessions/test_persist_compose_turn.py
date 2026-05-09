@@ -624,7 +624,7 @@ async def test_add_message_preserves_assert_state_in_session_guard(service):
         _make_session(conn, session_id=str(sid_a))
         _make_session(conn, session_id=str(sid_b))
 
-    state_a = await service.save_composition_state(sid_a, CompositionStateData())
+    state_a = await service.save_composition_state(sid_a, CompositionStateData(), provenance="session_seed")
 
     with pytest.raises(RuntimeError, match="cross-session reference"):
         await service.add_message(

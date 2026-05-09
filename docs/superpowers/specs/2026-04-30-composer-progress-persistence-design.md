@@ -287,39 +287,43 @@ corresponding amendment of this section):
   applies: every `('tool_call', version > 0)` row MUST have a
   corresponding `chat_messages` row with `role='tool'` and matching
   `composition_state_id`. **ACTIVE writer in Phase 1.**
-- `convergence_persist` — reserved for `_handle_convergence_error`
-  (`web/sessions/routes.py` ~L1047), which today persists captured
-  `partial_state` from a `ComposerConvergenceError` via
-  `save_composition_state(..., provenance="session_seed")`. The Phase 3
-  helper amendment will switch this call site to `"convergence_persist"`
-  so the audit DB can distinguish "state recorded after a wall-clock /
-  budget timeout" from "initial seed state on session creation."
-  **DORMANT in Phase 1** — no writer yet emits this value; see
-  §4.1.2-dormant-values note in `web/sessions/models.py` for the
-  activation contract (spec amendment + test + ticket required before any
-  writer ships).
-- `plugin_crash_persist` — reserved for `_handle_plugin_crash`
-  (`web/sessions/routes.py` ~L1185), which today persists captured
-  `partial_state` from a `ComposerPluginCrashError` via
-  `save_composition_state(..., provenance="session_seed")`. The Phase 3
-  helper amendment will switch this call site to `"plugin_crash_persist"`
-  so plugin-crash partial state is distinguishable from convergence
-  partial state (different remediation: bug fix vs. retry/budget tuning).
-  **DORMANT in Phase 1** — same activation contract as above.
-- `preflight_persist` — reserved for `_handle_runtime_preflight_failure`
-  (`web/sessions/routes.py` ~L1335), which today persists captured
-  `partial_state` from a `ComposerRuntimePreflightError` via
-  `save_composition_state(..., provenance="session_seed")`. The Phase 3
-  helper amendment will switch this call site to `"preflight_persist"`
-  so preflight-detected misconfiguration is distinguishable from runtime
-  failures. **DORMANT in Phase 1** — same activation contract as above.
+- `convergence_persist` — written by `_handle_convergence_error`
+  (`web/sessions/routes.py` ~L1135) when `ComposerConvergenceError`
+  captures `partial_state` after the compose loop hits its turn budget
+  or wall-clock deadline. Distinguishes "state recorded after a
+  convergence-budget exhaustion" from "initial seed state on session
+  creation" so an auditor counting convergence failures gets the right
+  answer. **ACTIVE writer in Phase 1** (promoted from DORMANT by
+  elspeth-obs-f217c634aa: writer call site already existed but was
+  shadowing under `session_seed` due to a hardcoded label in
+  `save_composition_state`; the fix threads `provenance` through the
+  public API as a required keyword argument).
+- `plugin_crash_persist` — written by `_handle_plugin_crash`
+  (`web/sessions/routes.py` ~L1273) when `ComposerPluginCrashError`
+  captures `partial_state` after a downstream tool plugin raised mid-
+  loop. Distinguishes plugin-crash partial state from convergence
+  partial state — different remediations (bug fix vs. retry/budget
+  tuning) — so an auditor querying plugin failures gets a clean count.
+  **ACTIVE writer in Phase 1** (promoted from DORMANT by
+  elspeth-obs-f217c634aa under the same shadowing fix as above).
+- `preflight_persist` — written by `_handle_runtime_preflight_failure`
+  (`web/sessions/routes.py` ~L1500) when `ComposerRuntimePreflightError`
+  captures `partial_state` because the runtime preflight rejected the
+  composed pipeline. Distinguishes preflight-detected misconfiguration
+  from runtime execution failures so the audit DB can attribute the
+  rejection class correctly. **ACTIVE writer in Phase 1** (promoted
+  from DORMANT by elspeth-obs-f217c634aa under the same shadowing fix
+  as above).
 - `session_seed` — initial state row written when a session is created
-  with seed configuration (`SessionsService.create_session` ~L1379;
-  branch-from-message reseed ~L1836). Currently also acts as the
-  catch-all label for the three dormant route-helper persist paths
-  above; the Phase 3 amendment narrows `session_seed` back to
-  "compose-loop never ran for this row" once those helpers route to
-  their distinct values. **ACTIVE writer in Phase 1.**
+  with seed configuration (`SessionsService.create_session`;
+  branch-from-message reseed in `set_active_state`). Note: two
+  additional `routes.py` call sites continue to write `session_seed`
+  under their pre-fix behaviour (post-compose state advance in
+  `_send_message` and the fork source-storage rewrite in
+  `fork_session_at_message`). Both are pre-existing mis-attributions
+  separate from elspeth-obs-f217c634aa; relabelling them is a
+  follow-up that requires its own observation, spec amendment, and
+  governance ticket. **ACTIVE writer in Phase 1.**
 - `session_fork` — written by `SessionsService.fork_session_at_message`
   (`web/sessions/service.py` ~L2260) when a user forks a session from
   an earlier message: the helper copies the source session's state

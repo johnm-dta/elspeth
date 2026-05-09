@@ -63,8 +63,26 @@ ChatMessageWriterPrincipal = Literal[
     "session_fork",
 ]
 
+# Closed enum mirroring the ``ck_composition_states_provenance`` CHECK
+# constraint in ``web/sessions/models.py``. Same paired-contract posture as
+# ``ChatMessageWriterPrincipal``: extending one without the other lets the
+# Python writer pass while the DB rejects the row (or vice versa). Order
+# mirrors the CHECK declaration (models.py L257) for visual diff clarity.
+# Adding a value is a governance action — see the dormant-value friction
+# block at the ``composition_states_table`` definition for the activation
+# contract (spec amendment + integration test + Filigree ticket).
+CompositionStateProvenance = Literal[
+    "tool_call",
+    "convergence_persist",
+    "plugin_crash_persist",
+    "preflight_persist",
+    "session_seed",
+    "session_fork",
+]
+
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
 CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
+COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(CompositionStateProvenance))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
@@ -504,7 +522,21 @@ class SessionServiceProtocol(Protocol):
         self,
         session_id: UUID,
         state: CompositionStateData,
-    ) -> CompositionStateRecord: ...
+        *,
+        provenance: CompositionStateProvenance,
+    ) -> CompositionStateRecord:
+        """Save a new immutable composition state snapshot.
+
+        ``provenance`` MUST be one of the six values enumerated by the
+        ``ck_composition_states_provenance`` CHECK constraint and the
+        :data:`CompositionStateProvenance` Literal. It records WHY this row
+        was written and is the load-bearing discriminator for the
+        backward-direction INV-AUDIT-AHEAD invariant (§4.1.2). Implementations
+        MUST persist the value verbatim — no defaulting, no coercion: a
+        confident wrong attribution is evidence-tampering-class harm under
+        the auditability standard.
+        """
+        ...
 
     async def get_current_state(
         self,

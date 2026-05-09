@@ -70,6 +70,7 @@ class TestDatetimeTimezoneRoundTrip:
         state = await service.save_composition_state(
             session_id=session.id,
             state=CompositionStateData(source=None, nodes=[], edges=[], outputs=[], metadata_=None, is_valid=False),
+            provenance="session_seed",
         )
         run = await service.create_run(
             session_id=session.id,

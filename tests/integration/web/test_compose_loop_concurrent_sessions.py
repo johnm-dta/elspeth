@@ -375,6 +375,7 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
                     service.save_composition_state(
                         session_uuid,  # ``save_composition_state`` takes UUID
                         CompositionStateData(),
+                        provenance="session_seed",
                     )
                 )
         except Exception as e:

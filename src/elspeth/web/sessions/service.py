@@ -41,6 +41,7 @@ from elspeth.web.sessions.protocol import (
     ChatMessageRole,
     ChatMessageWriterPrincipal,
     CompositionStateData,
+    CompositionStateProvenance,
     CompositionStateRecord,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
@@ -1311,10 +1312,21 @@ class SessionServiceImpl:
         self,
         session_id: UUID,
         state: CompositionStateData,
+        *,
+        provenance: CompositionStateProvenance,
     ) -> CompositionStateRecord:
         """Save a new immutable composition state snapshot.
 
         Version is max(existing versions for session) + 1, starting at 1.
+
+        ``provenance`` is required (no default). Earlier revisions hardcoded
+        ``"session_seed"`` here, which silently conflated four distinct
+        writer paths (session create / branch reseed plus the three
+        ``_handle_*`` partial-state captures from
+        ``web/sessions/routes.py``). Threading the discriminator through
+        the public API restores the audit attribution promised by
+        §4.1.2 and the ``ck_composition_states_provenance`` CHECK
+        constraint.
         """
         state_id = uuid.uuid4()
         now = self._now()
@@ -1377,7 +1389,7 @@ class SessionServiceImpl:
                             validation_errors=deep_thaw(state.validation_errors),
                             composer_meta=_enveloped_state_column(state.composer_meta),
                             derived_from_state_id=None,
-                            provenance="session_seed",
+                            provenance=provenance,
                             created_at=now,
                         )
                     )

@@ -1132,7 +1132,11 @@ async def _handle_convergence_error(
                 initial_version=None,
                 telemetry_source="convergence",
             )
-            partial_record = await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="convergence_persist",
+            )
             persisted_state_id = partial_record.id
             state_d = exc.partial_state.to_dict()
             response_body["partial_state"] = redact_source_storage_path(state_d)
@@ -1266,7 +1270,11 @@ async def _handle_plugin_crash(
                 initial_version=None,
                 telemetry_source="plugin_crash",
             )
-            partial_record = await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="plugin_crash_persist",
+            )
             persisted_state_id_pc = partial_record.id
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — a narrow ``IntegrityError``
@@ -1489,7 +1497,11 @@ async def _handle_runtime_preflight_failure(
                 initial_version=None,
                 telemetry_source="runtime_preflight",
             )
-            partial_record = await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="preflight_persist",
+            )
             persisted_state_id_rpf = partial_record.id
         except SQLAlchemyError as save_err:
             # See sibling helpers for redaction rationale (exc_info
@@ -2142,6 +2154,17 @@ def create_session_router() -> APIRouter:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
+                        # Preserves pre-fix labelling. This call site (post-
+                        # compose path 1, send_message) wrote ``session_seed``
+                        # under the previous hardcoded label and continues to
+                        # do so here. The mismatch between this label and the
+                        # actual writer category (post-compose state advance,
+                        # not session create / branch reseed) is a SEPARATE
+                        # mis-attribution from the three handler sites that
+                        # commit elspeth-obs-f217c634aa addresses; widening
+                        # this commit to relabel post-compose paths would
+                        # require its own spec amendment + observation.
+                        provenance="session_seed",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -2592,6 +2615,11 @@ def create_session_router() -> APIRouter:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
+                        # Preserves pre-fix labelling — see the parallel
+                        # comment on the post-compose path 1 site above.
+                        # Symmetric mis-attribution; out of scope for the
+                        # f217c634aa handler-site fix.
+                        provenance="session_seed",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -3067,6 +3095,15 @@ def create_session_router() -> APIRouter:
                     copied_state = await service.save_composition_state(
                         new_session.id,
                         state_data,
+                        # Preserves pre-fix labelling. The fork-time source-
+                        # storage rewrite previously wrote ``session_seed``
+                        # under the hardcoded label and continues to do so.
+                        # Whether this row should carry ``session_fork``
+                        # (the rewrite is part of the fork operation) or a
+                        # new ``fork_storage_rewrite`` discriminator is a
+                        # separate audit-attribution question outside the
+                        # scope of elspeth-obs-f217c634aa.
+                        provenance="session_seed",
                     )
 
                     # The edited user message (last in list) still references

@@ -975,7 +975,13 @@ redacted_tool_rows = tuple(
                     validation_errors=state.validation_errors,
                     composer_meta=state.composer_meta,
                 ),
-                derived_from_state_id=outcome.pre_state_id,
+                # The pre-call state id (predecessor lineage) is
+                # supplied by the compose loop's surrounding context;
+                # ``_ToolOutcome`` itself carries ``pre_version`` /
+                # ``post_version`` for the version-advanced predicate
+                # but not the state id. Phase 3 wires the actual
+                # caller; Phase 1 surfaces the StatePayload contract.
+                derived_from_state_id=pre_state_id_for(outcome),
             )
             if outcome.post_version > outcome.pre_version
             else None

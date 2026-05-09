@@ -12,7 +12,7 @@ import pytest
 import structlog
 from sqlalchemy import text
 
-from elspeth.web.sessions._persist_payload import _StatePayload
+from elspeth.web.sessions._persist_payload import StatePayload
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web.conftest import _make_session
@@ -407,8 +407,8 @@ def test_insert_composition_state_returns_id(service):
                 conn,
                 session_id="s4",
                 # B1: no ``version=``. The helper allocates it.
-                # Phase 1B: state + lineage bundled into ``_StatePayload``.
-                payload=_StatePayload(
+                # Phase 1B: state + lineage bundled into ``StatePayload``.
+                payload=StatePayload(
                     data=CompositionStateData(
                         source={"kind": "tool_response"},
                         nodes=[],
@@ -453,7 +453,7 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
                     service._insert_composition_state(
                         conn,
                         session_id="s4_seq",
-                        payload=_StatePayload(
+                        payload=StatePayload(
                             data=CompositionStateData(),
                             derived_from_state_id=None,
                         ),
@@ -489,7 +489,7 @@ def test_session_write_lock_serializes_sqlite_same_session_state_version_allocat
                 state_id = service._insert_composition_state(
                     conn,
                     session_id="s4_state_lock",
-                    payload=_StatePayload(
+                    payload=StatePayload(
                         data=CompositionStateData(metadata_={"index": index}),
                         derived_from_state_id=None,
                     ),
@@ -532,7 +532,7 @@ def test_insert_composition_state_versions_are_per_session(service):
                 service._insert_composition_state(
                     conn,
                     session_id="s_ver_a",
-                    payload=_StatePayload(
+                    payload=StatePayload(
                         data=CompositionStateData(),
                         derived_from_state_id=None,
                     ),
@@ -546,7 +546,7 @@ def test_insert_composition_state_versions_are_per_session(service):
             service._insert_composition_state(
                 conn,
                 session_id="s_ver_b",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -569,7 +569,7 @@ def test_insert_composition_state_requires_session_write_lock(service):
             service._insert_composition_state(
                 conn,
                 session_id="s4_no_lock",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -592,7 +592,7 @@ def test_insert_composition_state_rejects_unknown_provenance(service):
             service._insert_composition_state(
                 conn,
                 session_id="s5",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -819,8 +819,8 @@ async def test_add_message_rejects_unknown_writer_principal(service):
 
 def test_persist_compose_turn_happy_path(service):
     from elspeth.web.sessions._persist_payload import (
-        _RedactedToolRow,
-        _StatePayload,
+        RedactedToolRow,
+        StatePayload,
     )
     from elspeth.web.sessions.protocol import CompositionStateData
 
@@ -832,14 +832,14 @@ def test_persist_compose_turn_happy_path(service):
         assistant_content="ok",
         redacted_assistant_tool_calls=({"id": "tc_1", "function": {"name": "set_source"}},),
         redacted_tool_rows=(
-            _RedactedToolRow(
+            RedactedToolRow(
                 tool_call_id="tc_1",
                 content='{"ok": true}',
                 # B1 (Phase 1 plan-review synthesis): no ``version=``.
                 # ``_insert_composition_state`` allocates it under the
                 # held session write lock; the assertion below pins the
                 # allocated value to 1 (first state in this session).
-                composition_state_payload=_StatePayload(
+                composition_state_payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -851,7 +851,7 @@ def test_persist_compose_turn_happy_path(service):
         plugin_crash_pending=False,
     )
 
-    # On the success path, _AuditOutcome carries the new
+    # On the success path, AuditOutcome carries the new
     # assistant_id and unwind_audit_failed=False. The old
     # tier1_violation field was removed in Stage 4 of the plan
     # revision (Tier-1 failures now raise AuditIntegrityError
@@ -885,7 +885,7 @@ def test_persist_compose_turn_zero_tool_rows(service):
     ``composition_state_payload`` to write).
 
     The zero-row case is not exercised by ``happy_path`` (which always
-    includes one ``_RedactedToolRow``), so without this regression the
+    includes one ``RedactedToolRow``), so without this regression the
     next caller migrating an assistant-only call site (Phase 3) would
     discover an off-by-one or empty-tuple bug at integration time
     rather than at the primitive's own unit boundary.
@@ -922,7 +922,7 @@ def test_persist_compose_turn_persists_raw_content(service):
     Phase 3 migrates those call sites to ``persist_compose_turn``, so
     the primitive must accept and persist the column today.
     """
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s6_raw")
@@ -932,7 +932,7 @@ def test_persist_compose_turn_persists_raw_content(service):
         assistant_content="ok (redacted)",
         raw_content="original LLM output before preflight redaction",
         redacted_assistant_tool_calls=({"id": "tc_1", "function": {"name": "f"}},),
-        redacted_tool_rows=(_RedactedToolRow(tool_call_id="tc_1", content="{}", composition_state_payload=None),),
+        redacted_tool_rows=(RedactedToolRow(tool_call_id="tc_1", content="{}", composition_state_payload=None),),
         parent_composition_state_id=None,
         expected_current_state_id=None,
         writer_principal="compose_loop",
@@ -960,7 +960,7 @@ def test_persist_compose_turn_rejects_cross_session_parent_state(service):
     diagnostic produced by ``_assert_state_in_session`` -- not a generic
     FK error.
     """
-    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions._persist_payload import StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
 
     with service._engine.begin() as conn:
@@ -970,7 +970,7 @@ def test_persist_compose_turn_rejects_cross_session_parent_state(service):
             state_a_id = service._insert_composition_state(
                 conn,
                 session_id="s_A",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -1002,7 +1002,7 @@ def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
     """B5 happy path: same-session parent state -- guard passes silently
     and the assistant row is correctly stamped with that
     ``composition_state_id``."""
-    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions._persist_payload import StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
 
     with service._engine.begin() as conn:
@@ -1011,7 +1011,7 @@ def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
             state_c_id = service._insert_composition_state(
                 conn,
                 session_id="s_C",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -1043,7 +1043,7 @@ def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
 def test_persist_compose_turn_rejects_stale_expected_current_state(service):
     """A compose turn may not persist if the session's current state
     changed while the LLM call was in flight."""
-    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions._persist_payload import StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData, StaleComposeStateError
 
     with service._engine.begin() as conn:
@@ -1052,7 +1052,7 @@ def test_persist_compose_turn_rejects_stale_expected_current_state(service):
             stale_state_id = service._insert_composition_state(
                 conn,
                 session_id="s_stale",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -1061,7 +1061,7 @@ def test_persist_compose_turn_rejects_stale_expected_current_state(service):
             current_state_id = service._insert_composition_state(
                 conn,
                 session_id="s_stale",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=stale_state_id,
                 ),
@@ -1093,7 +1093,7 @@ def test_persist_compose_turn_rejects_stale_expected_current_state(service):
 
 
 def test_persist_compose_turn_accepts_matching_expected_current_state(service):
-    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions._persist_payload import StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
 
     with service._engine.begin() as conn:
@@ -1102,7 +1102,7 @@ def test_persist_compose_turn_accepts_matching_expected_current_state(service):
             current_state_id = service._insert_composition_state(
                 conn,
                 session_id="s_current_ok",
-                payload=_StatePayload(
+                payload=StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -1150,7 +1150,7 @@ async def test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async(
     """Companion: the protocol-public async dispatcher runs the sync
     primitive in a worker thread (no running loop in that thread), so
     the guard passes."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_run_sync")
@@ -1159,7 +1159,7 @@ async def test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async(
         session_id="s_run_sync",
         assistant_content="ok",
         redacted_assistant_tool_calls=({"id": "tc_run_sync", "function": {"name": "f"}},),
-        redacted_tool_rows=(_RedactedToolRow("tc_run_sync", "{}", None),),
+        redacted_tool_rows=(RedactedToolRow("tc_run_sync", "{}", None),),
         parent_composition_state_id=None,
         expected_current_state_id=None,
         writer_principal="compose_loop",
@@ -1196,7 +1196,7 @@ def test_persist_compose_turn_rejects_missing_tool_row(service):
 
 def test_persist_compose_turn_rejects_extra_tool_row(service):
     """Q-F1 extra axis."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
@@ -1209,7 +1209,7 @@ def test_persist_compose_turn_rejects_extra_tool_row(service):
             session_id="s_extra",
             assistant_content="ok",
             redacted_assistant_tool_calls=(),
-            redacted_tool_rows=(_RedactedToolRow("tc_Y", "{}", None),),
+            redacted_tool_rows=(RedactedToolRow("tc_Y", "{}", None),),
             parent_composition_state_id=None,
             expected_current_state_id=None,
             writer_principal="compose_loop",
@@ -1222,7 +1222,7 @@ def test_persist_compose_turn_rejects_extra_tool_row(service):
 
 def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
     """Q-F1: both ``missing`` and ``extra`` axes fire simultaneously."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
@@ -1235,7 +1235,7 @@ def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
             session_id="s_mismatch",
             assistant_content="ok",
             redacted_assistant_tool_calls=({"id": "tc_A", "function": {"name": "f"}},),
-            redacted_tool_rows=(_RedactedToolRow("tc_B", "{}", None),),
+            redacted_tool_rows=(RedactedToolRow("tc_B", "{}", None),),
             parent_composition_state_id=None,
             expected_current_state_id=None,
             writer_principal="compose_loop",
@@ -1248,7 +1248,7 @@ def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
 
 def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(service):
     """Q-F1: duplicate in assistant tool_calls."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
@@ -1264,7 +1264,7 @@ def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(servic
                 {"id": "tc_D", "function": {"name": "f"}},
                 {"id": "tc_D", "function": {"name": "g"}},
             ),
-            redacted_tool_rows=(_RedactedToolRow("tc_D", "{}", None),),
+            redacted_tool_rows=(RedactedToolRow("tc_D", "{}", None),),
             parent_composition_state_id=None,
             expected_current_state_id=None,
             writer_principal="compose_loop",
@@ -1277,7 +1277,7 @@ def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(servic
 
 def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_rows(service):
     """Q-F1: duplicate in tool rows."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
@@ -1291,8 +1291,8 @@ def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_rows(service):
             assistant_content="ok",
             redacted_assistant_tool_calls=({"id": "tc_E", "function": {"name": "f"}},),
             redacted_tool_rows=(
-                _RedactedToolRow("tc_E", "{}", None),
-                _RedactedToolRow("tc_E", "{}", None),
+                RedactedToolRow("tc_E", "{}", None),
+                RedactedToolRow("tc_E", "{}", None),
             ),
             parent_composition_state_id=None,
             expected_current_state_id=None,
@@ -1325,7 +1325,7 @@ async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(ser
     import asyncio
     import threading
 
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.telemetry import observed_value
 
     with service._engine.begin() as conn:
@@ -1354,7 +1354,7 @@ async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(ser
             session_id="s_cancel",
             assistant_content="commit-wins",
             redacted_assistant_tool_calls=({"id": "tc_c1", "function": {"name": "f"}},),
-            redacted_tool_rows=(_RedactedToolRow("tc_c1", "{}", None),),
+            redacted_tool_rows=(RedactedToolRow("tc_c1", "{}", None),),
             parent_composition_state_id=None,
             expected_current_state_id=None,
             writer_principal="compose_loop",
@@ -1410,7 +1410,7 @@ def test_persist_compose_turn_integrity_error_propagates(service):
     counter increments; helper re-raises (no recovery — spec §4.5)."""
     from sqlalchemy.exc import IntegrityError
 
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.telemetry import observed_value
 
     with service._engine.begin() as conn:
@@ -1421,7 +1421,7 @@ def test_persist_compose_turn_integrity_error_propagates(service):
         session_id="s7",
         assistant_content="",
         redacted_assistant_tool_calls=({"id": "dup", "function": {"name": "x"}},),
-        redacted_tool_rows=(_RedactedToolRow("dup", "{}", None),),
+        redacted_tool_rows=(RedactedToolRow("dup", "{}", None),),
         parent_composition_state_id=None,
         expected_current_state_id=None,
         writer_principal="compose_loop",
@@ -1440,7 +1440,7 @@ def test_persist_compose_turn_integrity_error_propagates(service):
             session_id="s7",
             assistant_content="",
             redacted_assistant_tool_calls=({"id": "dup", "function": {"name": "x"}},),
-            redacted_tool_rows=(_RedactedToolRow("dup", "{}", None),),
+            redacted_tool_rows=(RedactedToolRow("dup", "{}", None),),
             parent_composition_state_id=None,
             expected_current_state_id=None,
             writer_principal="compose_loop",
@@ -1460,7 +1460,7 @@ def test_persist_compose_turn_integrity_error_propagates(service):
 #
 # - role enum violation — persist_compose_turn hardcodes
 #   'assistant'/'tool'.
-# - **uq_composition_state_version — closed by B1.** _StatePayload no
+# - **uq_composition_state_version — closed by B1.** StatePayload no
 #   longer carries caller-supplied version; _insert_composition_state
 #   allocates under _session_write_lock. Constraint is structurally
 #   unreachable. The replacement test
@@ -1497,7 +1497,7 @@ def test_persist_compose_turn_integrity_error_matrix(
     constraint name appears in the raised exception message."""
     from sqlalchemy.exc import IntegrityError
 
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.telemetry import observed_value
 
     with service._engine.begin() as conn:
@@ -1509,7 +1509,7 @@ def test_persist_compose_turn_integrity_error_matrix(
         "session_id": f"s_{scenario_name}",
         "assistant_content": "",
         "redacted_assistant_tool_calls": ({"id": f"{scenario_name}_tc", "function": {"name": "f"}},),
-        "redacted_tool_rows": (_RedactedToolRow(f"{scenario_name}_tc", "{}", None),),
+        "redacted_tool_rows": (RedactedToolRow(f"{scenario_name}_tc", "{}", None),),
         "parent_composition_state_id": None,
         "expected_current_state_id": None,
         "writer_principal": "compose_loop",
@@ -1533,7 +1533,7 @@ def test_persist_compose_turn_rejects_missing_parent_state_before_insert(service
     before the assistant row INSERT. The audit-integrity counter must
     not move because no DB constraint fired and no Tier-1 audit
     corruption was observed."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.telemetry import observed_value
 
     with service._engine.begin() as conn:
@@ -1552,7 +1552,7 @@ def test_persist_compose_turn_rejects_missing_parent_state_before_insert(service
             session_id="s_missing_parent",
             assistant_content="",
             redacted_assistant_tool_calls=({"id": "missing_parent_tc", "function": {"name": "f"}},),
-            redacted_tool_rows=(_RedactedToolRow("missing_parent_tc", "{}", None),),
+            redacted_tool_rows=(RedactedToolRow("missing_parent_tc", "{}", None),),
             parent_composition_state_id="doesnotexist",
             expected_current_state_id=None,
             writer_principal="compose_loop",
@@ -1568,17 +1568,17 @@ def test_persist_compose_turn_state_versions_do_not_collide(service):
     version-collision constraint.
 
     Pre-B1 a draft of this test asserted the counter SHOULD increment
-    when _StatePayload(version=1) was supplied twice. **That codified
+    when StatePayload(version=1) was supplied twice. **That codified
     the fabrication vector B1 closes** — every IntegrityError increment
     on uq_composition_state_version was structurally a contention loss
     masquerading as a Tier-1 audit-integrity violation.
 
-    Post-B1 _StatePayload has no version field; _insert_composition_state
+    Post-B1 StatePayload has no version field; _insert_composition_state
     allocates versions under _session_write_lock. Two successive turns
     get [1, 2] (contiguous), counter MUST stay at starting."""
     from sqlalchemy import text
 
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
+    from elspeth.web.sessions._persist_payload import RedactedToolRow, StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
     from elspeth.web.sessions.telemetry import observed_value
 
@@ -1592,10 +1592,10 @@ def test_persist_compose_turn_state_versions_do_not_collide(service):
         assistant_content="",
         redacted_assistant_tool_calls=({"id": "tc_v1", "function": {"name": "f"}},),
         redacted_tool_rows=(
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_v1",
                 "{}",
-                _StatePayload(
+                StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -1621,10 +1621,10 @@ def test_persist_compose_turn_state_versions_do_not_collide(service):
         assistant_content="",
         redacted_assistant_tool_calls=({"id": "tc_v2", "function": {"name": "f"}},),
         redacted_tool_rows=(
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_v2",
                 "{}",
-                _StatePayload(
+                StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),

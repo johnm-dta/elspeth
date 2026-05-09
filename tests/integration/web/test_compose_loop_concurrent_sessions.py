@@ -24,7 +24,7 @@ import structlog
 from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
-from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
+from elspeth.web.sessions._persist_payload import RedactedToolRow, StatePayload
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -85,7 +85,7 @@ def _worker(
                 assistant_content=f"turn {i}",
                 redacted_assistant_tool_calls=({"id": tool_call_id, "function": {"name": "f"}},),
                 redacted_tool_rows=(
-                    _RedactedToolRow(
+                    RedactedToolRow(
                         tool_call_id,
                         "{}",
                         None,
@@ -312,7 +312,7 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
     ``tool_row_integrity_violation_total`` counter (the false-positive
     Tier-1 alert) on the persist path.
     """
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.service import StaleComposeStateError
     from elspeth.web.sessions.telemetry import observed_value
 
@@ -351,7 +351,7 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
                     redacted_assistant_tool_calls=({"id": tool_call_id, "function": {"name": "f"}},),
                     redacted_tool_rows=(
                         # B1: no ``version=``; helper allocates under lock.
-                        _RedactedToolRow(tool_call_id, "{}", _StatePayload(data=CompositionStateData(), derived_from_state_id=None)),
+                        RedactedToolRow(tool_call_id, "{}", StatePayload(data=CompositionStateData(), derived_from_state_id=None)),
                     ),
                     parent_composition_state_id=None,
                     expected_current_state_id=expected_current_state_id,
@@ -424,7 +424,7 @@ def test_concurrent_persist_compose_turn_same_state_stale_rejects_without_integr
 
     Closes B1 and the compose-vs-revert stale-state race from the Phase 1
     plan-review synthesis."""
-    from elspeth.web.sessions._persist_payload import _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import RedactedToolRow
     from elspeth.web.sessions.service import StaleComposeStateError
     from elspeth.web.sessions.telemetry import observed_value
 
@@ -448,10 +448,10 @@ def test_concurrent_persist_compose_turn_same_state_stale_rejects_without_integr
                 assistant_content="ok",
                 redacted_assistant_tool_calls=({"id": tool_call_id, "function": {"name": "f"}},),
                 redacted_tool_rows=(
-                    _RedactedToolRow(
+                    RedactedToolRow(
                         tool_call_id,
                         "{}",
-                        _StatePayload(
+                        StatePayload(
                             data=CompositionStateData(),
                             derived_from_state_id=None,
                         ),

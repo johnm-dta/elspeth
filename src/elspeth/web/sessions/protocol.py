@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # runtime. The async dispatcher signature on
     # ``SessionServiceProtocol.persist_compose_turn_async`` only needs
     # the names for type-checker resolution.
-    from elspeth.web.sessions._persist_payload import _AuditOutcome, _RedactedToolRow
+    from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 
 ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
 # ``audit`` is an internal-only role for breadcrumb rows that have no real
@@ -653,12 +653,12 @@ class SessionServiceProtocol(Protocol):
         assistant_content: str,
         raw_content: str | None = None,
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
         writer_principal: str,
         plugin_crash_pending: bool,
-    ) -> _AuditOutcome:
+    ) -> AuditOutcome:
         """Persist one compose turn (assistant + tool rows + per-tool
         composition states) atomically.
 

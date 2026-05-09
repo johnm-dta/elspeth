@@ -9,7 +9,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 
-from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
+from elspeth.web.sessions._persist_payload import RedactedToolRow, StatePayload
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -63,12 +63,12 @@ def test_backward_direction_holds_after_successful_persist(service):
         assistant_content="ok",
         redacted_assistant_tool_calls=({"id": "tc_a", "function": {"name": "f"}},),
         redacted_tool_rows=(
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_a",
                 '{"r": 1}',
                 # B1 (Phase 1 plan-review synthesis): no ``version=``;
                 # ``_insert_composition_state`` allocates under the lock.
-                _StatePayload(
+                StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -97,11 +97,11 @@ def test_backward_direction_holds_after_integrity_error_rollback(service):
         assistant_content="",
         redacted_assistant_tool_calls=({"id": "tc_x", "function": {"name": "f"}},),
         redacted_tool_rows=(
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_x",
                 "{}",
                 # B1: no ``version=``; helper allocates under the lock.
-                _StatePayload(
+                StatePayload(
                     data=CompositionStateData(),
                     derived_from_state_id=None,
                 ),
@@ -130,11 +130,11 @@ def test_backward_direction_holds_after_integrity_error_rollback(service):
             assistant_content="",
             redacted_assistant_tool_calls=({"id": "tc_x", "function": {"name": "f"}},),
             redacted_tool_rows=(
-                _RedactedToolRow(
+                RedactedToolRow(
                     "tc_x",
                     "{}",
                     # B1: no ``version=``.
-                    _StatePayload(
+                    StatePayload(
                         data=CompositionStateData(),
                         derived_from_state_id=None,
                     ),
@@ -197,20 +197,20 @@ def test_get_messages_orders_assistant_before_tool_rows_within_one_turn(service)
         # ``_insert_composition_state`` allocates per-session contiguous
         # versions (1, 2, 3) under _session_write_lock.
         redacted_tool_rows=(
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_a",
                 "{}",
-                _StatePayload(data=CompositionStateData(), derived_from_state_id=None),
+                StatePayload(data=CompositionStateData(), derived_from_state_id=None),
             ),
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_b",
                 "{}",
-                _StatePayload(data=CompositionStateData(), derived_from_state_id=None),
+                StatePayload(data=CompositionStateData(), derived_from_state_id=None),
             ),
-            _RedactedToolRow(
+            RedactedToolRow(
                 "tc_c",
                 "{}",
-                _StatePayload(data=CompositionStateData(), derived_from_state_id=None),
+                StatePayload(data=CompositionStateData(), derived_from_state_id=None),
             ),
         ),
         parent_composition_state_id=None,

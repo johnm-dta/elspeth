@@ -16,7 +16,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 
-from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
+from elspeth.web.sessions._persist_payload import RedactedToolRow, StatePayload
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -53,10 +53,10 @@ def _build_turn(turn: int):
     Extracted so the warm-up and measured loops share identical
     construction, removing one variable from the timing comparison."""
     rows = tuple(
-        _RedactedToolRow(
+        RedactedToolRow(
             f"turn_{turn}_tc_{i}",
             '{"ok": true}',
-            _StatePayload(
+            StatePayload(
                 data=CompositionStateData(),
                 derived_from_state_id=None,
             ),

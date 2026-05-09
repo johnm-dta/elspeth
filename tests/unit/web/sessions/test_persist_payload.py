@@ -5,16 +5,16 @@ from __future__ import annotations
 import pytest
 
 from elspeth.web.sessions._persist_payload import (
-    _AuditOutcome,
-    _RedactedToolRow,
-    _StatePayload,
+    AuditOutcome,
+    RedactedToolRow,
+    StatePayload,
     _ToolOutcome,
 )
 
 
 def test_audit_outcome_success_shape():
     """Success: assistant_id set, no unwind failure."""
-    outcome = _AuditOutcome(
+    outcome = AuditOutcome(
         assistant_id="abc",
         unwind_audit_failed=False,
     )
@@ -25,7 +25,7 @@ def test_audit_outcome_success_shape():
 def test_audit_outcome_unwind_failure_shape():
     """Tool failed AND audit unwind failed: assistant_id=None,
     flag set. Caller will raise the captured plugin crash."""
-    outcome = _AuditOutcome(
+    outcome = AuditOutcome(
         assistant_id=None,
         unwind_audit_failed=True,
     )
@@ -39,7 +39,7 @@ def test_audit_outcome_rejects_ambiguous_shape():
     assistant message could have been produced. The dataclass rejects
     the combination at construction time."""
     with pytest.raises(ValueError, match="incompatible"):
-        _AuditOutcome(
+        AuditOutcome(
             assistant_id="abc",  # produced by a successful path
             unwind_audit_failed=True,  # claimed by an unwind path
         )
@@ -51,17 +51,17 @@ def test_audit_outcome_no_tier1_violation_field():
     AuditIntegrityError directly. Closes finding H1."""
     import dataclasses
 
-    fields = {f.name for f in dataclasses.fields(_AuditOutcome)}
+    fields = {f.name for f in dataclasses.fields(AuditOutcome)}
     assert fields == {"assistant_id", "unwind_audit_failed"}
 
 
 def test_redacted_tool_row_with_state_advance():
     from elspeth.web.sessions.protocol import CompositionStateData
 
-    row = _RedactedToolRow(
+    row = RedactedToolRow(
         tool_call_id="tc_1",
         content='{"ok": true}',
-        composition_state_payload=_StatePayload(
+        composition_state_payload=StatePayload(
             # B1 (Phase 1 plan-review synthesis): no ``version=``.
             # Version is allocated inside _session_write_lock by
             # ``_insert_composition_state`` (Task 10), not supplied by
@@ -86,7 +86,7 @@ def test_redacted_tool_row_with_state_advance():
 
 
 def test_state_payload_has_no_version_field():
-    """B1 (Phase 1 plan-review synthesis): ``_StatePayload`` MUST NOT
+    """B1 (Phase 1 plan-review synthesis): ``StatePayload`` MUST NOT
     carry a caller-supplied ``version`` field. Version is allocated
     inside _session_write_lock by
     ``_insert_composition_state`` via
@@ -108,13 +108,13 @@ def test_state_payload_has_no_version_field():
     the contract so a refactor that re-adds the field fails fast."""
     import dataclasses
 
-    fields = {f.name for f in dataclasses.fields(_StatePayload)}
+    fields = {f.name for f in dataclasses.fields(StatePayload)}
     assert "version" not in fields, (
-        "B1 regression: _StatePayload must not carry a caller-supplied "
+        "B1 regression: StatePayload must not carry a caller-supplied "
         "version field — version is allocated by "
         "_insert_composition_state under _session_write_lock"
     )
-    assert fields == {"data", "derived_from_state_id"}, f"unexpected _StatePayload fields: {fields}"
+    assert fields == {"data", "derived_from_state_id"}, f"unexpected StatePayload fields: {fields}"
 
 
 def test_tool_outcome_state_unchanged_when_pre_eq_post():

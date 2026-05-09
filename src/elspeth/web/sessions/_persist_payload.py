@@ -16,7 +16,7 @@ from elspeth.web.sessions.protocol import CompositionStateData
 
 
 @dataclass(frozen=True, slots=True)
-class _StatePayload:
+class StatePayload:
     """Snapshot of a CompositionState ready for insertion.
 
     Composes the existing :class:`CompositionStateData` input DTO (which
@@ -63,7 +63,7 @@ class _StatePayload:
     (function body starts at 948) writes
     each column individually via a method-local ``_enveloped(...)`` helper
     and ``deep_thaw(...)`` patterns. Task 10 extracts that rule to the
-    shared ``_enveloped_state_column(...)`` helper. ``_StatePayload``
+    shared ``_enveloped_state_column(...)`` helper. ``StatePayload``
     mirrors that real schema by reusing :class:`CompositionStateData` rather than
     duplicating its fields and freeze-guard machinery.
 
@@ -76,7 +76,7 @@ class _StatePayload:
     Note on freeze-fields. ``derived_from_state_id`` is a scalar (or
     ``None``); ``data`` is a frozen ``CompositionStateData`` with its own
     ``freeze_fields`` discipline. No ``__post_init__`` is required on
-    ``_StatePayload`` itself — ``frozen=True`` is sufficient because
+    ``StatePayload`` itself — ``frozen=True`` is sufficient because
     every remaining field is either scalar or an already-frozen
     dataclass. (Removing ``version`` did not change this analysis;
     ``version: int`` was scalar too.)
@@ -120,16 +120,16 @@ class _ToolOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class _RedactedToolRow:
+class RedactedToolRow:
     """One persisted tool row, with redactions already applied."""
 
     tool_call_id: str
     content: str  # JSON-serialised redacted response
-    composition_state_payload: _StatePayload | None  # set iff state advanced
+    composition_state_payload: StatePayload | None  # set iff state advanced
 
 
 @dataclass(frozen=True, slots=True)
-class _AuditOutcome:
+class AuditOutcome:
     """Disposition returned by SessionServiceImpl.persist_compose_turn (§5.2.2).
 
     Two outcome shapes:
@@ -175,7 +175,7 @@ class _AuditOutcome:
         # Reject any combination that would make the outcome ambiguous.
         if self.assistant_id is not None and self.unwind_audit_failed:
             raise ValueError(
-                "_AuditOutcome: unwind_audit_failed=True is incompatible with "
+                "AuditOutcome: unwind_audit_failed=True is incompatible with "
                 "assistant_id being set; the unwind path cannot have produced "
                 "an assistant id"
             )

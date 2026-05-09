@@ -25,7 +25,7 @@ from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
-from elspeth.web.sessions._persist_payload import _AuditOutcome, _RedactedToolRow, _StatePayload
+from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
@@ -165,7 +165,7 @@ def _assert_parent_assistant_message(
 def _validate_tool_call_id_set_equality(
     *,
     redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-    redacted_tool_rows: tuple[_RedactedToolRow, ...],
+    redacted_tool_rows: tuple[RedactedToolRow, ...],
 ) -> None:
     """Raise ``ToolCallIDMismatchError`` if the assistant's
     ``tool_calls`` IDs and the tool rows' ``tool_call_id`` values are
@@ -598,7 +598,7 @@ class SessionServiceImpl:
         conn: Connection,
         *,
         session_id: str,
-        payload: _StatePayload,
+        payload: StatePayload,
         provenance: str,
         created_at: datetime | None = None,
         state_id: str | None = None,
@@ -606,14 +606,14 @@ class SessionServiceImpl:
         """Single-row insert into composition_states with per-session
         version allocation under _session_write_lock.
 
-        Phase 1B refactor: takes a single :class:`_StatePayload` carrying
+        Phase 1B refactor: takes a single :class:`StatePayload` carrying
         ``data`` (a :class:`CompositionStateData`) and
         ``derived_from_state_id`` rather than two separate keyword
         arguments. Bundling the two coheres with B1 — the payload object
         is the unit of state-advance, so a helper that takes it as a
         unit prevents future callers from passing inconsistent
         ``(state, derived_from_state_id)`` pairs. Critically,
-        ``_StatePayload`` does NOT carry a caller-supplied ``version``;
+        ``StatePayload`` does NOT carry a caller-supplied ``version``;
         version allocation remains inside this helper, under the held
         lock (see B1 below).
 
@@ -725,12 +725,12 @@ class SessionServiceImpl:
         assistant_content: str,
         raw_content: str | None = None,
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
         writer_principal: str,
         plugin_crash_pending: bool,
-    ) -> _AuditOutcome:
+    ) -> AuditOutcome:
         """Synchronous, single-transaction persistence of one compose turn.
 
         Spec §5.2.2. Concrete sync primitive. Production async callers MUST
@@ -881,7 +881,7 @@ class SessionServiceImpl:
                             created_at=now,
                         )
 
-                return _AuditOutcome(
+                return AuditOutcome(
                     assistant_id=assistant_id,
                     unwind_audit_failed=False,
                 )
@@ -907,7 +907,7 @@ class SessionServiceImpl:
             #    + slog (the slog call is permitted under CLAUDE.md
             #    primacy because the audit system itself failed —
             #    telemetry has nowhere to write the structured event)
-            #    and return ``_AuditOutcome(unwind_audit_failed=True)``
+            #    and return ``AuditOutcome(unwind_audit_failed=True)``
             #    so the caller can raise the captured plugin
             #    exception while still surfacing that the unwind
             #    audit row could not be persisted.
@@ -933,7 +933,7 @@ class SessionServiceImpl:
                     session_id=session_id,
                     audit_exc_class=type(audit_exc).__name__,
                 )
-                return _AuditOutcome(
+                return AuditOutcome(
                     assistant_id=None,
                     unwind_audit_failed=True,
                 )
@@ -951,12 +951,12 @@ class SessionServiceImpl:
         assistant_content: str,
         raw_content: str | None = None,
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-        redacted_tool_rows: tuple[_RedactedToolRow, ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
         writer_principal: str,
         plugin_crash_pending: bool,
-    ) -> _AuditOutcome:
+    ) -> AuditOutcome:
         """Async dispatcher for :meth:`persist_compose_turn`.
 
         Bridges to the sync primitive via ``_run_sync``, which dispatches
@@ -971,7 +971,7 @@ class SessionServiceImpl:
 
         1. The transaction commits — the assistant + tool rows are durably
            persisted; the caller observes ``CancelledError`` and never
-           sees the ``_AuditOutcome``. **Callers MUST NOT retry on
+           sees the ``AuditOutcome``. **Callers MUST NOT retry on
            CancelledError** — retrying risks a duplicate tool-call-ID
            INSERT that fires a fabricated Tier-1 counter increment.
         2. The transaction rolls back atomically — DB-level errors
@@ -985,7 +985,7 @@ class SessionServiceImpl:
         Pinned by ``test_persist_compose_turn_async_caller_cancellation_commits_anyway``.
         """
         return cast(
-            _AuditOutcome,
+            AuditOutcome,
             await self._run_sync(
                 self.persist_compose_turn,
                 session_id=session_id,
@@ -2241,10 +2241,10 @@ class SessionServiceImpl:
                             # invariant, not because the helper is hard-coded.
                             #
                             # Phase 1B: state + lineage are bundled into a
-                            # single ``_StatePayload`` rather than passed as
+                            # single ``StatePayload`` rather than passed as
                             # two separate kwargs (see ``_insert_composition_state``
                             # docstring for rationale).
-                            payload=_StatePayload(
+                            payload=StatePayload(
                                 data=CompositionStateData(
                                     source=source_state_record.source,
                                     nodes=source_state_record.nodes,

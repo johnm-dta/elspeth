@@ -959,7 +959,24 @@ redacted_tool_rows = tuple(
             # ``_insert_composition_state`` under the held
             # ``_session_write_lock`` via
             # ``SELECT COALESCE(MAX(version), 0) + 1 ...`` (§5.7.1).
-            StatePayload.from_composition_state(state)
+            #
+            # Direct constructor; no ``from_composition_state`` factory
+            # exists in Phase 1 because no caller needed one. A future
+            # phase MAY add ``StatePayload.from_composition_state(state)``
+            # if a use case emerges that benefits from the indirection.
+            StatePayload(
+                data=CompositionStateData(
+                    source=state.source,
+                    nodes=state.nodes,
+                    edges=state.edges,
+                    outputs=state.outputs,
+                    metadata_=state.metadata_,
+                    is_valid=state.is_valid,
+                    validation_errors=state.validation_errors,
+                    composer_meta=state.composer_meta,
+                ),
+                derived_from_state_id=outcome.pre_state_id,
+            )
             if outcome.post_version > outcome.pre_version
             else None
         ),
@@ -1668,8 +1685,8 @@ convention to mechanism via the `writer_principal` CHECK constraint
 
 #### 5.7.4 Telemetry module
 
-The `_telemetry` module-level singleton lives in
-`src/elspeth/web/composer/telemetry.py` (new), exposing the named OTel
+The `_telemetry` container lives in
+`src/elspeth/web/sessions/telemetry.py`, exposing the named OTel
 counters introduced in §1.4:
 
 - `composer.audit.tool_row_tier1_violation_total`
@@ -1679,10 +1696,18 @@ counters introduced in §1.4:
 - `composer.redaction.summarizer_errors_total`
 - `composer.redaction.unknown_response_key_total`
 
-Tests inject a fake counter via a constructor parameter on the composer
-service for assertable behaviour. The injected fake counter is itself
-asserted against by the property-test post-conditions (§8.3.2 closes
-QA F-4).
+The module is located under `web/sessions/` rather than
+`web/composer/` (the original spec path) because the audit-row
+counters live alongside their only writer (`SessionServiceImpl`).
+Co-locating the counter definitions with the writer keeps "registered"
+and "exercised" in lock-step at the ownership boundary; composer code
+that needs to read the counters imports the sessions-owned container
+from app wiring rather than the reverse direction.
+
+Tests inject a fake counter via the `telemetry=` constructor parameter
+on `SessionServiceImpl` for assertable behaviour. The injected fake
+counter is itself asserted against by the property-test post-conditions
+(§8.3.2 closes QA F-4).
 
 #### 5.7.5 `lookup_tool_class` and redaction-layer integration
 

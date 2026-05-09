@@ -1947,7 +1947,25 @@ class TestMessageRoutes:
         user_included = next(m for m in included_messages if m["role"] == "user")
         assert user_included["raw_content"] is None
 
-    def test_send_message_llm_call_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
+    def test_send_message_llm_call_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
+        """Success-path LLM-call audit-row persist failure MUST raise (Tier-1 audit corruption).
+
+        After CLAUDE.md audit-primacy enforcement, a SQLAlchemyError on the
+        success-path LLM-call audit-sidecar insert is a Tier-1 audit
+        corruption: the assistant row already exists in the audit trail but
+        the LLM-call audit row that proves what the model returned is
+        missing. ``_persist_llm_calls`` is invoked with
+        ``plugin_crash_pending=False`` on the success path; the helper
+        raises :class:`AuditIntegrityError` chained through the
+        ``OperationalError`` so the request 500s with the diagnostic visible
+        to the operator.
+
+        The "fail-soft on persist failure" behaviour previously asserted
+        here was the bug: silently swallowing the audit-row write
+        rationalised silent failure as mercy and violated CLAUDE.md
+        Auditability Standard ("'I don't know what happened' is never an
+        acceptable answer for any output").
+        """
         app, service = _make_app(tmp_path)
         composer = AsyncMock()
         composer.compose = AsyncMock(
@@ -1965,11 +1983,10 @@ class TestMessageRoutes:
         async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
             role = args[1]
             tool_calls = kwargs.get("tool_calls")
-            # Rev-4: LLM-call audit sidecars are now persisted with role="audit"
-            # (no real OpenAI tool-call identity, so the parent-CHECK
-            # biconditional rejects role="tool" here). The trigger pivots to
-            # the new storage shape so this regression remains specific to
-            # the LLM-call-audit insert path.
+            # LLM-call audit sidecars persist with role="audit" — trigger
+            # only on that specific insert so the assistant row succeeds
+            # first (which is the precondition for the Tier-1 corruption
+            # the helper now guards against).
             if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "llm_call_audit":
                 raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
             return await original_add_message(*args, **kwargs)
@@ -1980,18 +1997,19 @@ class TestMessageRoutes:
         session_id = uuid.UUID(resp.json()["id"])
         send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
 
-        assert send_resp.status_code == 200
-        assert send_resp.json()["message"]["content"] == "Assistant still saved."
+        assert send_resp.status_code == 500
 
-    def test_send_message_tool_invocation_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
-        """Symmetric to the LLM-call audit fail-soft test (plan §14.6 / §3357).
+    def test_send_message_tool_invocation_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
+        """Symmetric to the LLM-call audit Tier-1 test.
 
-        ``_persist_tool_invocations`` writes ``role="tool"`` audit breadcrumbs
-        on the success path (after the assistant message has already been
-        persisted, with ``parent_assistant_id``). An ``OperationalError``
-        from that sidecar write MUST NOT mask the primary composer outcome —
-        the user-facing message still returns 200 and the structured log
-        carries only the exception class.
+        ``_persist_tool_invocations`` writes ``role="tool"`` audit
+        breadcrumbs on the success path (with ``parent_assistant_id`` and
+        ``plugin_crash_pending=False``). A SQLAlchemyError from that
+        sidecar insert is a Tier-1 audit corruption (assistant row exists,
+        tool row missing) — the helper raises
+        :class:`AuditIntegrityError` and the request 500s. This replaces
+        the pre-fix "fail-soft" expectation; see the LLM-call sibling
+        test above for the full doctrine link.
         """
         app, service = _make_app(tmp_path)
         invocation = ComposerToolInvocation(
@@ -2027,9 +2045,6 @@ class TestMessageRoutes:
         async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
             role = args[1]
             tool_calls = kwargs.get("tool_calls")
-            # Trigger only on the parented tool-invocation audit breadcrumb
-            # (role="tool" with audit envelope). Assistant/user/system writes
-            # must succeed so the primary outcome is observable.
             if role == "tool" and tool_calls and tool_calls[0].get("_kind") == "audit":
                 raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
             return await original_add_message(*args, **kwargs)
@@ -2040,8 +2055,7 @@ class TestMessageRoutes:
         session_id = uuid.UUID(resp.json()["id"])
         send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
 
-        assert send_resp.status_code == 200
-        assert send_resp.json()["message"]["content"] == "Assistant still saved."
+        assert send_resp.status_code == 500
 
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:

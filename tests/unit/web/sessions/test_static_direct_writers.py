@@ -865,21 +865,27 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
     # ------ tests/unit/web/sessions/test_routes.py — OperationalError canaries ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_routes.py",
-        enclosing_symbol="TestMessageRoutes.test_send_message_llm_call_persistence_failure_does_not_mask_success.flaky_add_message",
-        table="chat_messages",
-        operation="raw_string_in_OperationalError",
-        purpose="OperationalError canary (line 1889): SQL string is the OperationalError statement param, not an executed query",
-    ),
-    ReviewedWriter(
-        path="tests/unit/web/sessions/test_routes.py",
-        enclosing_symbol="TestMessageRoutes.test_send_message_tool_invocation_persistence_failure_does_not_mask_success.flaky_add_message",
+        enclosing_symbol="TestMessageRoutes.test_send_message_llm_call_persistence_failure_raises_on_success_path.flaky_add_message",
         table="chat_messages",
         operation="raw_string_in_OperationalError",
         purpose=(
-            "Task 14 fail-soft regression (plan §3357-3363): symmetric to the "
-            "LLM-call-audit canary above. The OperationalError's statement string "
-            "carries 'INSERT INTO chat_messages' to make the simulated failure "
-            "look like a real DB write error; not an executed query"
+            "Tier-1 audit-corruption regression: the OperationalError's "
+            "statement string carries 'INSERT INTO chat_messages' to make "
+            "the simulated failure look like a real DB write error; the "
+            "test asserts the success-path helper raises AuditIntegrityError "
+            "(500) rather than swallowing the failure. Not an executed query"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_routes.py",
+        enclosing_symbol="TestMessageRoutes.test_send_message_tool_invocation_persistence_failure_raises_on_success_path.flaky_add_message",
+        table="chat_messages",
+        operation="raw_string_in_OperationalError",
+        purpose=(
+            "Symmetric to the LLM-call Tier-1 canary above. Statement string "
+            "is the OperationalError param to simulate a real chat_messages "
+            "INSERT failure; the test asserts the success-path tool-invocation "
+            "helper raises AuditIntegrityError (500). Not an executed query"
         ),
     ),
     ReviewedWriter(

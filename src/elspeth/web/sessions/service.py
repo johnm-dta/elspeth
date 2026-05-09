@@ -47,6 +47,7 @@ from elspeth.web.sessions.protocol import (
     SessionRecord,
     SessionRunStatus,
     StaleComposeStateError,
+    ToolCallIDMismatchError,
 )
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
@@ -158,43 +159,6 @@ def _assert_parent_assistant_message(
         raise RuntimeError(
             f"{caller}: parent_assistant_id={parent_assistant_id!r} must reference "
             f"an assistant message in session={session_id!r}; got role={role!r}"
-        )
-
-
-class ToolCallIDMismatchError(RuntimeError):
-    """Assistant ``tool_calls`` and persisted tool rows disagreed on
-    the set of tool-call IDs for one compose turn.
-
-    Carries the four mutually-exclusive failure axes (missing, extra,
-    duplicate-in-assistant, duplicate-in-rows) so the diagnostic
-    string identifies WHICH violation fired without forcing the
-    caller to re-derive it.
-
-    Defined here on the service module because the error shape is
-    internal to ``persist_compose_turn``; callers either catch it as
-    a contract violation or do not catch it at all.
-    """
-
-    def __init__(
-        self,
-        *,
-        missing: frozenset[str],
-        extra: frozenset[str],
-        duplicates_in_assistant: frozenset[str],
-        duplicates_in_rows: frozenset[str],
-    ) -> None:
-        self.missing = missing
-        self.extra = extra
-        self.duplicates_in_assistant = duplicates_in_assistant
-        self.duplicates_in_rows = duplicates_in_rows
-        super().__init__(
-            "persist_compose_turn: assistant tool_calls and tool rows "
-            "disagree on the tool-call ID set "
-            f"(missing={sorted(missing)!r}, extra={sorted(extra)!r}, "
-            f"duplicates_in_assistant={sorted(duplicates_in_assistant)!r}, "
-            f"duplicates_in_rows={sorted(duplicates_in_rows)!r}). "
-            "Refusing to persist a turn that would leave the audit "
-            "trail with an asymmetric assistant/tool transcript."
         )
 
 

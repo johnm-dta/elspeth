@@ -386,6 +386,45 @@ class StaleComposeStateError(RuntimeError):
     """
 
 
+class ToolCallIDMismatchError(RuntimeError):
+    """Assistant ``tool_calls`` and persisted tool rows disagreed on
+    the set of tool-call IDs for one compose turn.
+
+    Carries the four mutually-exclusive failure axes (missing, extra,
+    duplicate-in-assistant, duplicate-in-rows) so the diagnostic
+    string identifies WHICH violation fired without forcing the
+    caller to re-derive it.
+
+    Defined on the protocol module alongside
+    :class:`StaleComposeStateError` because both are pre-DB exceptions
+    referenced by ``SessionServiceProtocol.persist_compose_turn_async``.
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing: frozenset[str],
+        extra: frozenset[str],
+        duplicates_in_assistant: frozenset[str],
+        duplicates_in_rows: frozenset[str],
+    ) -> None:
+        self.missing = missing
+        self.extra = extra
+        self.duplicates_in_assistant = duplicates_in_assistant
+        self.duplicates_in_rows = duplicates_in_rows
+        super().__init__(
+            "persist_compose_turn: assistant tool_calls and tool rows "
+            "disagree on the tool-call ID set "
+            f"(missing={sorted(missing)!r}, extra={sorted(extra)!r}, "
+            f"duplicates_in_assistant={sorted(duplicates_in_assistant)!r}, "
+            f"duplicates_in_rows={sorted(duplicates_in_rows)!r}). "
+            "Refusing to persist a turn that would leave the audit "
+            "trail with an asymmetric assistant/tool transcript."
+        )
+
+
 @runtime_checkable
 class SessionServiceProtocol(Protocol):
     """Protocol for session persistence operations."""
@@ -630,8 +669,8 @@ class SessionServiceProtocol(Protocol):
 
         Raises :class:`StaleComposeStateError` when the session's current
         composition state changed between the LLM call and the persist
-        attempt. Raises ``ToolCallIDMismatchError`` (defined on
-        ``service.py``) when the assistant ``tool_calls`` IDs and the
-        tool rows' ``tool_call_id`` values are not the same unique set.
+        attempt. Raises :class:`ToolCallIDMismatchError` when the
+        assistant ``tool_calls`` IDs and the tool rows'
+        ``tool_call_id`` values are not the same unique set.
         """
         ...

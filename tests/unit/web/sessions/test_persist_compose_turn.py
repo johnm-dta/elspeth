@@ -1171,7 +1171,7 @@ async def test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async(
 
 def test_persist_compose_turn_rejects_missing_tool_row(service):
     """Q-F1 missing axis."""
-    from elspeth.web.sessions.service import ToolCallIDMismatchError
+    from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_missing")
@@ -1197,7 +1197,7 @@ def test_persist_compose_turn_rejects_missing_tool_row(service):
 def test_persist_compose_turn_rejects_extra_tool_row(service):
     """Q-F1 extra axis."""
     from elspeth.web.sessions._persist_payload import _RedactedToolRow
-    from elspeth.web.sessions.service import ToolCallIDMismatchError
+    from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_extra")
@@ -1223,7 +1223,7 @@ def test_persist_compose_turn_rejects_extra_tool_row(service):
 def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
     """Q-F1: both ``missing`` and ``extra`` axes fire simultaneously."""
     from elspeth.web.sessions._persist_payload import _RedactedToolRow
-    from elspeth.web.sessions.service import ToolCallIDMismatchError
+    from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_mismatch")
@@ -1249,7 +1249,7 @@ def test_persist_compose_turn_rejects_mismatched_tool_call_ids(service):
 def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(service):
     """Q-F1: duplicate in assistant tool_calls."""
     from elspeth.web.sessions._persist_payload import _RedactedToolRow
-    from elspeth.web.sessions.service import ToolCallIDMismatchError
+    from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_dup_assist")
@@ -1278,7 +1278,7 @@ def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_assistant(servic
 def test_persist_compose_turn_rejects_duplicate_tool_call_id_in_rows(service):
     """Q-F1: duplicate in tool rows."""
     from elspeth.web.sessions._persist_payload import _RedactedToolRow
-    from elspeth.web.sessions.service import ToolCallIDMismatchError
+    from elspeth.web.sessions.protocol import ToolCallIDMismatchError
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_dup_rows")

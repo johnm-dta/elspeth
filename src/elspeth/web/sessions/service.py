@@ -19,7 +19,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
@@ -944,6 +944,37 @@ class SessionServiceImpl:
                 f"persist_compose_turn: audit insert failed for "
                 f"session_id={session_id!r} with tool succeeded — "
                 f"Tier-1 audit corruption (no recovery)"
+            ) from audit_exc
+        except SQLAlchemyError as audit_exc:
+            # Spec §5.2.2 / §5.5 row 9: any non-Integrity, non-Operational
+            # SQLAlchemyError (DataError, DatabaseError, ProgrammingError,
+            # InterfaceError, DBAPIError siblings) on the audit insert
+            # path is a Tier-1 audit corruption — the audit system
+            # itself failed in an unforeseen way that the IntegrityError
+            # / OperationalError dispositions above were not designed to
+            # handle. The previous narrow catch let these subclasses
+            # propagate uncaught past the disposition logic, leaving the
+            # tool_row_tier1_violation_total counter dark on the
+            # SLO=0 dashboard while the audit row was lost.
+            #
+            # Disposition matches the OperationalError success-path arm
+            # (plugin_crash_pending=False): increment the Tier-1 counter
+            # and raise AuditIntegrityError chained through the
+            # SQLAlchemyError. Unlike OperationalError, this branch is
+            # NOT asymmetric on plugin_crash_pending — there is no
+            # established recovery shape for arbitrary SQLAlchemyError
+            # subclasses. If a future caller's audit row fails with
+            # DataError on the unwind path, masking the audit failure
+            # to "preserve" a primary plugin error would be silently
+            # losing a Tier-1 corruption signal; the Tier-1 raise is
+            # what spec §5.5 row 9 prescribes.
+            self._telemetry.tool_row_tier1_violation_total.add(1)
+            raise AuditIntegrityError(
+                f"persist_compose_turn: audit insert failed for "
+                f"session_id={session_id!r} with non-Integrity, "
+                f"non-Operational SQLAlchemyError "
+                f"({type(audit_exc).__name__}) — Tier-1 audit "
+                f"corruption (no recovery)"
             ) from audit_exc
 
     async def persist_compose_turn_async(

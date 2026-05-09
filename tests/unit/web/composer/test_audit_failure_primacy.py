@@ -174,3 +174,137 @@ def test_audit_fail_during_plugin_crash_records_unwind_failure(service):
     assert outcome.assistant_id is None
     assert outcome.unwind_audit_failed is True
     assert observed_value(service._telemetry.tool_row_persist_failed_during_unwind_total) == starting + 1
+
+
+@contextlib.contextmanager
+def _force_non_integrity_non_operational_sqlalchemy_error(engine: Engine) -> Iterator[None]:
+    """Inject a non-Integrity, non-Operational ``SQLAlchemyError`` on the
+    next COMMIT.
+
+    Mirrors the ``_force_commit_failure`` shape but raises
+    :class:`sqlalchemy.exc.DataError` from the dialect-level commit hook.
+    SQLAlchemy wraps the underlying DB-API exception class; here we raise
+    the SQLAlchemy-side ``DataError`` directly because the dialect hook
+    is the rewrap site itself, and we want the
+    ``persist_compose_turn`` outer ``except SQLAlchemyError`` branch to
+    fire on a class that is neither ``IntegrityError`` nor
+    ``OperationalError``.
+
+    ``DataError`` is the spec-§5.5-row-9 representative for "audit
+    raised non-Integrity error" — any DBAPIError sibling (DatabaseError,
+    InterfaceError, ProgrammingError) would exercise the same code
+    path; the test pins one specific class to keep the assertion
+    grounded.
+    """
+    from sqlalchemy.exc import DataError
+
+    original_do_commit = engine.dialect.do_commit
+    fired = False
+
+    def _fail_once(dbapi_conn: object) -> None:
+        nonlocal fired
+        if not fired:
+            fired = True
+            raise DataError(
+                "simulated commit-time DataError (test injection)",
+                {},
+                Exception("underlying DBAPI cause"),
+            )
+        original_do_commit(dbapi_conn)
+
+    engine.dialect.do_commit = _fail_once
+    try:
+        yield
+    finally:
+        engine.dialect.do_commit = original_do_commit
+
+
+def test_audit_fail_non_integrity_non_operational_raises_audit_integrity_error(service):
+    """Spec §5.2.2 / §5.5 row 9: a non-Integrity, non-Operational
+    ``SQLAlchemyError`` on the audit insert path is a Tier-1 audit
+    corruption and MUST raise :class:`AuditIntegrityError` chained
+    through the original SQLAlchemyError, with the
+    ``tool_row_tier1_violation_total`` counter incremented.
+
+    Before the catch was broadened, ``DataError`` /
+    ``DatabaseError`` / ``DBAPIError`` siblings propagated uncaught
+    past the disposition logic and the Tier-1 counter never fired —
+    silently breaking the SLO=0 contract the spec asserts. This
+    regression also tests that the disposition is NOT asymmetric on
+    ``plugin_crash_pending`` for this branch (unlike OperationalError):
+    arbitrary SQLAlchemyError subclasses have no established recovery
+    shape and masking the audit failure to "preserve" a primary error
+    would silently lose a Tier-1 corruption signal.
+    """
+    from sqlalchemy.exc import DataError, SQLAlchemyError
+
+    from elspeth.contracts.errors import TIER_1_ERRORS, AuditIntegrityError
+    from elspeth.web.sessions.telemetry import observed_value
+
+    _make_session(service, "p3")
+    starting_tier1 = observed_value(service._telemetry.tool_row_tier1_violation_total)
+    starting_unwind = observed_value(service._telemetry.tool_row_persist_failed_during_unwind_total)
+
+    with (
+        _force_non_integrity_non_operational_sqlalchemy_error(service._engine),
+        pytest.raises(AuditIntegrityError) as exc_info,
+    ):
+        service.persist_compose_turn(
+            session_id="p3",
+            assistant_content="hi",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    # Cause is the simulated DataError (a SQLAlchemyError that is
+    # neither IntegrityError nor OperationalError).
+    assert exc_info.value.__cause__ is not None
+    assert isinstance(exc_info.value.__cause__, DataError)
+    assert isinstance(exc_info.value.__cause__, SQLAlchemyError)
+
+    # Tier-1 counter incremented; unwind counter untouched (no asymmetry
+    # for this branch — see test docstring).
+    assert observed_value(service._telemetry.tool_row_tier1_violation_total) == starting_tier1 + 1
+    assert observed_value(service._telemetry.tool_row_persist_failed_during_unwind_total) == starting_unwind
+
+    # Tier-1 registration prevents accidental swallowing.
+    assert isinstance(exc_info.value, TIER_1_ERRORS)
+
+
+def test_audit_fail_non_integrity_non_operational_raises_even_on_unwind_path(service):
+    """Companion to
+    ``test_audit_fail_non_integrity_non_operational_raises_audit_integrity_error``:
+    on the unwind path (``plugin_crash_pending=True``), arbitrary
+    SQLAlchemyError subclasses STILL raise AuditIntegrityError. This
+    is the deliberate asymmetry vs. OperationalError documented in
+    the broadened catch — there is no established recovery shape for
+    DataError / ProgrammingError / DBAPIError siblings, and silently
+    swallowing them to preserve a primary plugin error would lose the
+    Tier-1 corruption signal the spec § 5.5 row 9 demands.
+    """
+    from sqlalchemy.exc import DataError
+
+    from elspeth.contracts.errors import AuditIntegrityError
+
+    _make_session(service, "p4")
+
+    with (
+        _force_non_integrity_non_operational_sqlalchemy_error(service._engine),
+        pytest.raises(AuditIntegrityError) as exc_info,
+    ):
+        service.persist_compose_turn(
+            session_id="p4",
+            assistant_content="hi",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=None,
+            expected_current_state_id=None,
+            writer_principal="compose_loop",
+            plugin_crash_pending=True,
+        )
+
+    assert isinstance(exc_info.value.__cause__, DataError)

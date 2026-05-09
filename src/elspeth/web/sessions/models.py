@@ -201,6 +201,58 @@ composition_states_table = Table(
     # outside the compose loop's tool-call path"). Adding a value here
     # without amending the spec creates an untraceable writer category
     # in the audit DB.
+    #
+    # DORMANT-VALUE FRICTION BLOCK — three of the six enum values have
+    # NO writer in Phase 1. They appear in the CHECK constraint because
+    # the column is NOT NULL and the future writer call sites are
+    # already known; the values are reserved so the Phase 3 amendment
+    # is a one-line change at each call site rather than a destructive
+    # session-DB schema reset (per ``project_db_migration_policy``,
+    # this project has no Alembic — schema changes mean operator-led
+    # session-DB recreation). The reserved-but-unwritten values are:
+    #
+    # 1. ``convergence_persist`` — Phase 3 will route
+    #    ``_handle_convergence_error`` (web/sessions/routes.py ~L1047)
+    #    to write this label when ``ComposerConvergenceError`` captured
+    #    ``partial_state``. Today that helper writes
+    #    ``provenance='session_seed'`` via ``save_composition_state``.
+    # 2. ``plugin_crash_persist`` — Phase 3 will route
+    #    ``_handle_plugin_crash`` (web/sessions/routes.py ~L1185) to
+    #    write this label when ``ComposerPluginCrashError`` captured
+    #    ``partial_state``. Today: also ``session_seed``.
+    # 3. ``preflight_persist`` — Phase 3 will route
+    #    ``_handle_runtime_preflight_failure`` (web/sessions/routes.py
+    #    ~L1335) to write this label when
+    #    ``ComposerRuntimePreflightError`` captured ``partial_state``.
+    #    Today: also ``session_seed``.
+    #
+    # The other three values ARE actively written in Phase 1:
+    #   - ``tool_call``     — service.py:866 (compose-loop atomic write)
+    #   - ``session_seed``  — service.py:1379 / :1836 (session create,
+    #                          branch-from-message reseed)
+    #   - ``session_fork``  — service.py:2260 (cross-session fork-copy)
+    #
+    # NO SILENT ACTIVATION OF DORMANT VALUES. Before any new writer of
+    # ``convergence_persist``, ``plugin_crash_persist``, or
+    # ``preflight_persist`` lands, the change MUST include all three of:
+    #
+    # (a) A spec amendment to §4.1.2 promoting the value from "DORMANT"
+    #     to "ACTIVE writer in Phase N", documenting the precise
+    #     committed call-site path and the audit semantics that distinguish
+    #     it from neighbouring values.
+    # (b) An integration test that drives the helper to its
+    #     persist branch and asserts the row was committed with the
+    #     correct ``provenance`` value (mirroring the
+    #     ``ck_composition_states_provenance`` CHECK contract).
+    # (c) A Filigree ticket linking the change back to this Phase 1
+    #     dormant-value declaration, so the audit history shows the
+    #     activation as a deliberate governance step rather than a
+    #     drive-by edit.
+    #
+    # The friction is the design — see the parallel pattern at the
+    # ``audit_access_log_table`` "INERT IN PHASE 1A" comment block
+    # below for the same closed-list-of-permitted-writers /
+    # no-silent-extension posture.
     CheckConstraint(
         "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork')",
         name="ck_composition_states_provenance",

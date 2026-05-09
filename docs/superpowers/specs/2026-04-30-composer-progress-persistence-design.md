@@ -269,30 +269,67 @@ composition_states_table = Table(
     # ... existing constraints ...
     CheckConstraint(                                                            # NEW (rev 4)
         "provenance IN ('tool_call', 'convergence_persist', "
-        "'plugin_crash_persist', 'preflight_persist', 'session_seed')",
+        "'plugin_crash_persist', 'preflight_persist', "
+        "'session_seed', 'session_fork')",
         name="ck_composition_states_provenance",
     ),
 )
 ```
 
-`provenance` records which code path committed the row. Permitted values:
+`provenance` records which code path committed the row. Permitted values
+(the CHECK constraint is the closed enum — extending it requires a
+corresponding amendment of this section):
 
-- `tool_call` — written by `_compose_loop` as part of the atomic per-tool
-  write (assistant + tool + state rows in one transaction). This is the
-  ONLY value for which the backward-direction INV-AUDIT-AHEAD invariant
-  applies: every `('tool_call', version > 0)` row MUST have a corresponding
-  `chat_messages` row with `role='tool'` and matching `composition_state_id`.
-- `convergence_persist` — written by `_handle_convergence_error` route
-  helper after a wall-clock timeout or budget exhaustion captured
-  `partial_state` from a `ComposerConvergenceError`.
-- `plugin_crash_persist` — written by `_handle_plugin_crash` route helper
-  after a `ComposerPluginCrashError` captured `partial_state`.
-- `preflight_persist` — written by `_handle_runtime_preflight_failure`
-  route helper after a `ComposerRuntimePreflightError`.
+- `tool_call` — written by `SessionsService._persist_compose_turn`
+  (`web/sessions/service.py` ~L866) as part of the atomic per-tool write
+  (assistant + tool + state rows in one transaction). This is the ONLY
+  value for which the backward-direction INV-AUDIT-AHEAD invariant
+  applies: every `('tool_call', version > 0)` row MUST have a
+  corresponding `chat_messages` row with `role='tool'` and matching
+  `composition_state_id`. **ACTIVE writer in Phase 1.**
+- `convergence_persist` — reserved for `_handle_convergence_error`
+  (`web/sessions/routes.py` ~L1047), which today persists captured
+  `partial_state` from a `ComposerConvergenceError` via
+  `save_composition_state(..., provenance="session_seed")`. The Phase 3
+  helper amendment will switch this call site to `"convergence_persist"`
+  so the audit DB can distinguish "state recorded after a wall-clock /
+  budget timeout" from "initial seed state on session creation."
+  **DORMANT in Phase 1** — no writer yet emits this value; see
+  §4.1.2-dormant-values note in `web/sessions/models.py` for the
+  activation contract (spec amendment + test + ticket required before any
+  writer ships).
+- `plugin_crash_persist` — reserved for `_handle_plugin_crash`
+  (`web/sessions/routes.py` ~L1185), which today persists captured
+  `partial_state` from a `ComposerPluginCrashError` via
+  `save_composition_state(..., provenance="session_seed")`. The Phase 3
+  helper amendment will switch this call site to `"plugin_crash_persist"`
+  so plugin-crash partial state is distinguishable from convergence
+  partial state (different remediation: bug fix vs. retry/budget tuning).
+  **DORMANT in Phase 1** — same activation contract as above.
+- `preflight_persist` — reserved for `_handle_runtime_preflight_failure`
+  (`web/sessions/routes.py` ~L1335), which today persists captured
+  `partial_state` from a `ComposerRuntimePreflightError` via
+  `save_composition_state(..., provenance="session_seed")`. The Phase 3
+  helper amendment will switch this call site to `"preflight_persist"`
+  so preflight-detected misconfiguration is distinguishable from runtime
+  failures. **DORMANT in Phase 1** — same activation contract as above.
 - `session_seed` — initial state row written when a session is created
-  with seed configuration (existing path; covered by the value set so that
-  legacy rows do not violate the new CHECK after the staging DELETE/recreate
-  step described in the §3 Migration ADR row).
+  with seed configuration (`SessionsService.create_session` ~L1379;
+  branch-from-message reseed ~L1836). Currently also acts as the
+  catch-all label for the three dormant route-helper persist paths
+  above; the Phase 3 amendment narrows `session_seed` back to
+  "compose-loop never ran for this row" once those helpers route to
+  their distinct values. **ACTIVE writer in Phase 1.**
+- `session_fork` — written by `SessionsService.fork_session_at_message`
+  (`web/sessions/service.py` ~L2260) when a user forks a session from
+  an earlier message: the helper copies the source session's state
+  forward into the new session under this distinct label. Cross-session
+  copy-forward is meaningfully distinct from intra-session reseed, and
+  the audit DB needs to tell them apart (`session_seed` is a single-
+  session originating event; `session_fork` derives from another
+  session's prior state). **ACTIVE writer in Phase 1.** Added in the
+  Phase 1 plan supersession marker; this revision of §4.1.2 closes the
+  drift between that addition and the spec text.
 
 **Why this is the load-bearing addition.** Without `provenance`, the
 backward-direction INV-AUDIT-AHEAD post-condition ("every committed
@@ -336,7 +373,7 @@ CREATE UNIQUE INDEX uq_chat_messages_tool_call_id
 - `(session_id, sequence_no)` is unique — every row in a session has a unique sequence number, monotonically increasing in commit order. **Sequence numbers are ordering keys, not counts.** Gaps are permitted (e.g., when an atomic-pair transaction rolls back after the next free sequence number was reserved). The property test post-condition asserts strict monotonicity within a session, NOT density. Closes architect H-3.
 - `(session_id, tool_call_id)` is unique among `role='tool'` rows. Cross-turn collisions (same `tool_call_id` reused by the LLM provider in a different turn) are rejected as a Tier-3 input-validation failure: the compose loop crashes the request rather than silently mis-correlating.
 - `writer_principal` is one of the four enumerated values; the database refuses any other string at write time.
-- `composition_states.provenance` is one of the five enumerated values; backward-direction INV-AUDIT-AHEAD applies only to rows with `provenance='tool_call'`.
+- `composition_states.provenance` is one of the six enumerated values (see §4.1.2); backward-direction INV-AUDIT-AHEAD applies only to rows with `provenance='tool_call'`.
 
 `composition_state_id` FK behaviour — see §4.5.
 

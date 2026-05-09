@@ -670,32 +670,34 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
     # handover pitfall §5).
     ReviewedWriter(
         path="src/elspeth/web/sessions/service.py",
-        enclosing_symbol="SessionServiceImpl.save_composition_state._try_insert_state",
+        enclosing_symbol="SessionServiceImpl.save_composition_state._sync",
         table="composition_states",
         operation="sqlalchemy_insert_call",
         purpose=(
-            "save_composition_state retry inner writer; Task 10 lock-retrofits "
+            "save_composition_state inline writer; Task 10 lock-retrofits "
             "in place (NOT helper-routed) per plan §2128-2133 — uniform "
-            "helper-routing would either lose the retry semantics (race risk) "
-            "or grow per-site escape hatches. The SELECT-MAX + INSERT region "
-            "is wrapped in ``_session_write_lock`` so the existing inline "
-            "allocation runs under the same per-session write discipline as "
-            "``_insert_composition_state``. Retry loop kept as "
-            "belt-and-suspenders; provably unreachable post-lock — slated for "
-            "removal in OQ-3-followup once shaken out in staging"
+            "helper-routing would either lose the per-site retry semantics "
+            "(race risk) or grow per-site escape hatches. The SELECT-MAX + "
+            "INSERT region is wrapped in ``_session_write_lock`` so the "
+            "inline allocation runs under the same per-session write "
+            "discipline as ``_insert_composition_state``. The B3 "
+            "belt-and-suspenders retry loop was deleted: under CLAUDE.md "
+            "No Legacy Code Policy a 'slated for removal' shim is "
+            "forbidden, and the loop's RuntimeError fallback masked the "
+            "uq_composition_state_version IntegrityError chain that names "
+            "any future lock-discipline regression directly"
         ),
     ),
     ReviewedWriter(
         path="src/elspeth/web/sessions/service.py",
-        enclosing_symbol="SessionServiceImpl.set_active_state._try_insert_revert",
+        enclosing_symbol="SessionServiceImpl.set_active_state._sync",
         table="composition_states",
         operation="sqlalchemy_insert_call",
         purpose=(
-            "set_active_state retry inner writer; Task 10 lock-retrofits in "
-            "place (NOT helper-routed) per plan §2128-2133 — same shape and "
-            "rationale as save_composition_state above. Retry loop kept as "
-            "belt-and-suspenders; provably unreachable post-lock — slated for "
-            "removal in OQ-3-followup once shaken out in staging"
+            "set_active_state inline writer; same lock-retrofit-in-place "
+            "discipline as save_composition_state above. The B3 "
+            "belt-and-suspenders retry loop was deleted with the same "
+            "rationale (No Legacy Code Policy + diagnostic-preservation)"
         ),
     ),
     ReviewedWriter(

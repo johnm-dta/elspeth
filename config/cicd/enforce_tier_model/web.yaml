@@ -966,16 +966,6 @@ allow_hits:
   safety: Raises TypeError with explicit error message naming the invariant violation;
     no silent fallback or coerced default
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:save_composition_state:_sync:fp=fb3d55365649510d
-  owner: web-sessions
-  reason: IntegrityError on duplicate version is expected race condition
-  safety: Upsert-or-skip
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:set_active_state:_sync:fp=7bcc9fbbdd2f18f4
-  owner: web-sessions
-  reason: IntegrityError on duplicate active state is expected race condition
-  safety: Upsert-or-skip
-  expires: null
 - key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=9efcce3bebe32a0d
   owner: web-sessions
   reason: Narrow OSError during staged blob-directory restore after archive rollback

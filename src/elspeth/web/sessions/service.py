@@ -1333,42 +1333,16 @@ class SessionServiceImpl:
         sid = str(session_id)
 
         def _sync() -> int:
-            # B3 belt-and-suspenders — unreachable post-lock; remove in
-            # OQ-3-followup. With ``_session_write_lock`` held inside
-            # ``_try_insert_state``, the SELECT-MAX-then-INSERT sequence is
-            # serialised against every other writer for this session_id on
-            # both PostgreSQL (advisory lock) and SQLite (process-wide
-            # per-session RLock). The retry loop's ``IntegrityError`` arm is
-            # therefore provably unreachable in normal operation; keeping it
-            # as belt-and-suspenders bounds the blast radius if a future
-            # refactor accidentally drops the lock acquisition. Slated for
-            # removal once the new lock discipline has shaken out in staging.
-            for _attempt in range(3):
-                try:
-                    return _try_insert_state()
-                except IntegrityError:
-                    continue
-            raise RuntimeError(f"Failed to allocate version for session {sid} after 3 attempts")
-
-        def _try_insert_state() -> int:
+            # The per-session write lock makes the SELECT-MAX +
+            # INSERT sequence atomic against every other writer for
+            # this session_id on both PostgreSQL (advisory lock) and
+            # SQLite (process-wide per-session RLock). If the lock
+            # invariant is ever broken in a refactor, the
+            # IntegrityError on uq_composition_state_version names the
+            # constraint directly — no retry layer is permitted to
+            # consume that diagnostic before it reaches the operator
+            # (CLAUDE.md No Legacy Code Policy: no belt-and-suspenders).
             with self._engine.begin() as conn:
-                # B3 (Phase 1 plan-review synthesis): wrap SELECT-MAX +
-                # INSERT in the per-session write lock as the FIRST
-                # operation inside the transaction. Without this, this
-                # writer races against ``_insert_composition_state`` (and
-                # any future helper-routed writer) for the same session_id.
-                # The handler that fires on ``uq_composition_state_version``
-                # increments a Tier-1 audit-integrity counter; under
-                # ELSPETH's auditability standard, fabricating a Tier-1
-                # alert from a benign contention loss is evidence-tampering-
-                # class harm. The lock makes the SELECT-MAX-then-INSERT
-                # sequence atomic against every other writer on both
-                # PostgreSQL (advisory lock) and SQLite (per-session
-                # RLock). Plan §2128-2133 explicitly chose lock-retrofit-
-                # in-place over helper-routing here because consolidating
-                # this site through ``_insert_composition_state`` would
-                # either lose the retry semantics or grow per-site escape
-                # hatches in the helper signature.
                 with self._session_write_lock(conn, sid):
                     result = conn.execute(
                         select(func.max(composition_states_table.c.version)).where(composition_states_table.c.session_id == sid)
@@ -1766,30 +1740,17 @@ class SessionServiceImpl:
         now = self._now()
 
         def _sync() -> tuple[Any, int]:
-            # B3 belt-and-suspenders — unreachable post-lock; remove in
-            # OQ-3-followup. With ``_session_write_lock`` held inside
-            # ``_try_insert_revert``, the SELECT-MAX-then-INSERT sequence is
-            # serialised against every other writer for this session_id. The
-            # retry loop's ``IntegrityError`` arm is therefore provably
-            # unreachable in normal operation; same rationale as
-            # ``save_composition_state._sync`` above.
-            for _attempt in range(3):
-                try:
-                    return _try_insert_revert()
-                except IntegrityError:
-                    continue
-            raise RuntimeError(f"Failed to allocate version for session {sid} after 3 attempts")
-
-        def _try_insert_revert() -> tuple[Any, int]:
+            # The per-session write lock makes the prior-row SELECT +
+            # SELECT-MAX + INSERT atomic against every other writer for
+            # this session_id (advisory lock on Postgres, per-session
+            # RLock on SQLite). If the lock invariant is ever broken in
+            # a refactor, the IntegrityError on
+            # uq_composition_state_version names the constraint
+            # directly — no retry layer is permitted to consume that
+            # diagnostic before it reaches the operator (CLAUDE.md No
+            # Legacy Code Policy: no belt-and-suspenders). Same
+            # discipline as save_composition_state._sync above.
             with self._engine.begin() as conn:
-                # B3 (Phase 1 plan-review synthesis): wrap prior-row SELECT
-                # + SELECT-MAX + INSERT in the per-session write lock as
-                # the FIRST operation inside the transaction. Same shape
-                # and rationale as ``save_composition_state._try_insert_state``;
-                # plan §2128-2133 chose lock-retrofit-in-place over
-                # helper-routing here so the per-site retry semantics are
-                # preserved without growing escape hatches in
-                # ``_insert_composition_state``.
                 with self._session_write_lock(conn, sid):
                     prior_row = conn.execute(
                         select(composition_states_table).where(composition_states_table.c.id == str(state_id))

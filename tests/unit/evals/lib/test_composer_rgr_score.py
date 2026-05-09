@@ -16,9 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from evals.lib.composer_rgr_score import score
-
 
 # --------------------------------------------------------------------------
 # Fixtures

@@ -34,10 +34,12 @@ class ComposerResult:
             triggered (e.g. the state was unchanged and no preview
             preflight was available to reuse).
         raw_assistant_content: The model's pre-synthesis prose whenever
-            ``runtime_preflight`` is non-None and not ``is_valid``,
-            regardless of whether ``message`` is an augmentation or a
-            replacement. ``None`` when ``message`` is the verbatim LLM
-            response (preflight passed or was skipped).
+            ``runtime_preflight`` is non-None and not ``is_valid``.
+            ``message`` is always an augmentation of this prose (issue
+            elspeth-9cfbad6901 unified the policy after the
+            replacement-on-non-empty-state branch was found to discard
+            substantive model disclosure). ``None`` when ``message`` is
+            the verbatim LLM response (preflight passed or was skipped).
 
     Field-pairing invariant:
         ``raw_assistant_content`` is non-None **iff** ``runtime_preflight``
@@ -48,37 +50,34 @@ class ComposerResult:
         or lose the original LLM output when the gate actually did
         intervene.
 
-    Augmentation-vs-replacement discriminator:
+    Augmentation shape contract:
         Producers (see ``service._finalize_no_tool_response``) emit
-        three shapes when preflight is invalid:
+        three augmentation shapes when preflight is invalid:
 
         1. No-mutation empty-state augmentation —
            ``message == raw_assistant_content + operator_suffix``.
         2. Preflight-invalid empty-state augmentation — same shape as 1.
-        3. Replacement (preflight-invalid non-empty state) —
-           ``message`` is synthetic preflight-failure text;
-           ``raw_assistant_content`` is the model's overruled
-           completion claim.
+        3. Preflight-invalid non-empty-state augmentation — same
+           shape as 1 and 2 (post-elspeth-9cfbad6901); the prose is
+           preserved with a system-attributed suffix naming the
+           validator's specific objection.
 
-        The augmentation-vs-replacement distinction is not stored on
-        this record; consumers (see
-        ``routes._composer_history_content``) determine it
-        *structurally* at read time via
-        ``message.startswith(raw_assistant_content)``.
+        All shapes satisfy the structural rule
+        ``message.startswith(raw_assistant_content)``. Consumers (see
+        ``routes._composer_history_content``) rely on this rule to
+        strip the operator-facing suffix from LLM history.
 
     Producer contract (mechanical):
-        Augmentation paths (1, 2): ``message`` MUST start with
-        ``raw_assistant_content``. Enforced at construction by
-        ``service._enforce_augmentation_prefix_invariant``.
-        Replacement path (3): ``message`` MUST NOT start with
-        ``raw_assistant_content``. Enforced at construction by
-        ``service._enforce_replacement_non_prefix_invariant``.
-        Together the guards guarantee the consumer-side discriminator
-        only ever sees structurally classifiable shapes; a producer
-        that violates either contract crashes with
-        ``AuditIntegrityError`` rather than commit a corrupt audit row.
-        The field-level decoupling that would obviate the contract is
-        tracked at ``elspeth-7ae1732ab2``.
+        ``message`` MUST start with ``raw_assistant_content`` for every
+        shape above. Enforced at construction by
+        ``service._enforce_augmentation_prefix_invariant``; a producer
+        that violates the contract crashes rather than commit a
+        corrupt audit row. The read-side discriminator
+        (``routes._composer_history_content``) defensively raises
+        ``AuditIntegrityError`` if a non-augmentation row reaches it,
+        catching contract drift introduced by future code or
+        pre-migration rows. The field-level decoupling that would
+        obviate the contract is tracked at ``elspeth-7ae1732ab2``.
     """
 
     message: str

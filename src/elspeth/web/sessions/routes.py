@@ -430,7 +430,7 @@ def _safe_frame_strings(
     structured server log must not retain them. File paths reference
     the on-disk source tree, which the operator already has access to
     under ELSPETH's single-operator deployment model (see the
-    ``_runtime_preflight_failure_message`` comment in
+    ``_compose_preflight_failure_message`` comment in
     ``web/composer/service.py`` for the deployment-shape caveat).
 
     Frames are emitted in walked order — outermost frame of the original
@@ -570,13 +570,6 @@ def _record_composer_request_terminal(
     _COMPOSER_REQUEST_TERMINAL_COUNTER.add(1, {"endpoint": endpoint, "status": status})
 
 
-_INTERCEPTED_ASSISTANT_HISTORY_PREFIX = (
-    "[ELSPETH composer note: Your previous assistant response was intercepted "
-    "by runtime preflight and replaced before it was shown to the user. The "
-    "visible replacement below is authoritative; continue from it and do not "
-    "assume the original completion claim succeeded.]\n\n"
-)
-
 _COMPOSER_EXCEPTION_CLASS_BUCKETS = frozenset(
     {
         "AttributeError",
@@ -634,52 +627,51 @@ def _record_composer_authoring_validation_telemetry(
 def _composer_history_content(message: ChatMessageRecord) -> str:
     """Return the content sent back to the composer LLM for a stored message.
 
-    Two assistant-augmentation shapes exist (see service._finalize_no_tool_response):
+    All composer synthesis shapes are augmentations (see
+    service._finalize_no_tool_response). The model's prose is preserved
+    verbatim with an operator-facing suffix appended; ``content`` starts
+    with ``raw_content``. The LLM should see its own prose unmodified
+    on subsequent turns; the operator-facing suffix stays out of the
+    prompt history.
 
-    1. **Augmentation** — empty-state passes the model's prose through and
-       appends a system-attributed suffix. ``content`` starts with
-       ``raw_content``. The LLM should see its own prose unmodified on
-       subsequent turns; the suffix is operator-facing only.
-
-    2. **Replacement** — false-completion-claim path replaces the model's
-       prose with a synthetic preflight-failed message. ``content`` is
-       unrelated to ``raw_content``. The LLM must be told its completion
-       claim was overruled (via ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX``)
-       so it does not re-claim completion.
-
-    Discriminator is structural (``content.startswith(raw_content)``) so
-    the policy survives suffix-string evolution without code changes.
     Equality (``content == raw_content``) is augmentation with an empty
     suffix and returns ``raw_content`` unchanged. Empty ``raw_content``
-    (the no-mutation and preflight-invalid empty-state augmentation
-    branches in ``service._finalize_no_tool_response``) is augmentation
-    by the structural rule: the model produced no prose and the
-    operator-facing suffix replaces nothing — so the LLM sees an empty
-    prior turn and the operator-facing suffix stays out of the prompt
-    history.
+    (the no-mutation, preflight-invalid empty-state, and
+    preflight-invalid non-empty-state augmentation branches in
+    ``service._finalize_no_tool_response`` when the model emitted no
+    prose) is augmentation by the structural rule: the model produced
+    no prose and the operator-facing suffix replaces nothing — so the
+    LLM sees an empty prior turn and the operator-facing suffix stays
+    out of the prompt history.
 
     The structural rule's correctness depends on the producer never
-    emitting a replacement-shape message that startswith
-    ``raw_content``. This is mechanically enforced at construction
-    time by symmetric producer-side guards in
-    ``service._finalize_no_tool_response`` —
-    ``_enforce_augmentation_prefix_invariant`` (augmentation MUST
-    startswith) and ``_enforce_replacement_non_prefix_invariant``
-    (replacement MUST NOT startswith). Together they guarantee that
-    every audit row reaching this discriminator is structurally
-    classifiable. The field-level overloading that makes the
-    discriminator necessary at all is tracked as architectural debt at
+    emitting a non-augmentation shape (``content`` not starting with
+    ``raw_content``). This is mechanically enforced at construction by
+    ``service._enforce_augmentation_prefix_invariant``. A row reaching
+    this discriminator that violates the contract is an audit-integrity
+    violation and crashes here rather than silently misroute. The
+    field-level overloading that makes the structural discriminator
+    necessary at all is tracked as architectural debt at
     ``elspeth-7ae1732ab2`` (introduce a producer-side discriminator
     field on the record).
     """
     if message.role == "assistant" and message.raw_content is not None:
-        if message.content.startswith(message.raw_content):
-            # Augmentation (incl. equality and empty raw_content): emit
-            # unmodified model prose. The operator-facing suffix stays
-            # out of LLM history.
-            return message.raw_content
-        # Replacement: emit synthetic content with interception prefix.
-        return _INTERCEPTED_ASSISTANT_HISTORY_PREFIX + message.content
+        if not message.content.startswith(message.raw_content):
+            raise AuditIntegrityError(
+                "Tier 1: composer chat row violates augmentation prefix "
+                "invariant on the read path. content does not start with "
+                "raw_content. All synthesis shapes are augmentations "
+                "post-elspeth-9cfbad6901; a row reaching this discriminator "
+                "that breaks the contract is an audit-integrity violation. "
+                "Fix the producer (service._finalize_no_tool_response) "
+                "or the row (drop the audit DB if the row predates the "
+                "augmentation-only migration; per project_db_migration_policy, "
+                "operator deletes the old DB on schema-shape changes)."
+            )
+        # Augmentation (incl. equality and empty raw_content): emit
+        # unmodified model prose. The operator-facing suffix stays
+        # out of LLM history.
+        return message.raw_content
     return message.content
 
 
@@ -737,21 +729,12 @@ def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[s
     """Convert persisted session messages to LLM chat history.
 
     ``raw_content`` is attribution/audit data and feeds the LLM-context
-    decision in ``_composer_history_content``. Two assistant-augmentation
-    shapes flow through here (see
-    ``service._finalize_no_tool_response`` and
-    ``_composer_history_content`` for the policy):
-
-    1. **Augmentation** — empty-state branches pass the model's prose
-       through and append an operator-facing suffix. The LLM sees its
-       own prose unmodified on subsequent turns; the suffix stays out
-       of the prompt.
-    2. **Replacement** — false-completion-claim path replaces the
-       model's prose with a synthetic preflight-failed message. The LLM
-       receives the synthetic content prefixed with
-       ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX`` so it understands why
-       its apparent prior answer changed and does not re-claim
-       completion.
+    decision in ``_composer_history_content``. All assistant-synthesis
+    shapes are augmentations (see ``service._finalize_no_tool_response``
+    and ``_composer_history_content`` for the policy): the model's
+    prose is preserved verbatim and an operator-facing suffix is
+    appended. The LLM sees its own prose unmodified on subsequent
+    turns; the suffix stays out of the prompt.
 
     Composer tool-call audit rows are persisted as ``role="tool"`` messages so
     the session record retains the dispatch trail. They are not prior LLM

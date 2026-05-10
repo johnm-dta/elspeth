@@ -4239,31 +4239,6 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.raw_assistant_content is None
         assert result.runtime_preflight is passed_preflight
 
-    def test_runtime_preflight_failure_message_uses_failed_check_when_errors_empty(self) -> None:
-        result = ValidationResult(
-            is_valid=False,
-            checks=[
-                ValidationCheck(
-                    name="graph_structure",
-                    passed=False,
-                    detail="Graph has no path from source to sink",
-                )
-            ],
-            errors=[],
-        )
-
-        message = ComposerServiceImpl._runtime_preflight_failure_message(result)
-
-        assert "runtime preflight failed" in message
-        assert "Graph has no path from source to sink" in message
-
-    def test_runtime_preflight_failure_message_has_bare_fallback(self) -> None:
-        result = ValidationResult(is_valid=False, checks=[], errors=[])
-
-        message = ComposerServiceImpl._runtime_preflight_failure_message(result)
-
-        assert message == "I cannot mark this pipeline complete yet because runtime preflight failed."
-
     @pytest.mark.asyncio
     async def test_unexpected_preflight_exception_preserves_partial_state(self) -> None:
         catalog = _mock_catalog()
@@ -4430,58 +4405,6 @@ class TestEmptyStateFinalizePassthrough:
         assert "no_mutation_empty_state_augmentation" in message
         assert "augmentation" in message
         assert "discriminator" in message
-
-    def test_enforce_replacement_non_prefix_invariant_accepts_unrelated_content(self) -> None:
-        """Replacement is structurally distinct from augmentation: the synthetic
-        message must NOT have the model's prose as a prefix. The contract holds
-        when the two strings share no prefix relationship.
-        """
-        from elspeth.web.composer.service import _enforce_replacement_non_prefix_invariant
-
-        _enforce_replacement_non_prefix_invariant(
-            branch="preflight_invalid_non_empty_state_replacement",
-            content="The pipeline is complete and valid.",
-            replacement="[ELSPETH-SYSTEM] preflight failed: schema: Field required",
-        )
-
-    def test_enforce_replacement_non_prefix_invariant_raises_on_empty_content(self) -> None:
-        """The most common ambiguous shape: empty content + non-empty replacement.
-        Every non-empty string startswith "", so the consumer-side discriminator
-        would misclassify the row as empty-prose augmentation and emit "" to LLM
-        history, hiding the [INTERCEPTED] annotation. Crash producer-side rather
-        than commit the ambiguous audit row.
-        """
-        from elspeth.contracts.errors import AuditIntegrityError
-        from elspeth.web.composer.service import _enforce_replacement_non_prefix_invariant
-
-        with pytest.raises(AuditIntegrityError) as exc_info:
-            _enforce_replacement_non_prefix_invariant(
-                branch="preflight_invalid_non_empty_state_replacement",
-                content="",
-                replacement="[ELSPETH-SYSTEM] preflight failed: schema: Field required",
-            )
-        message = str(exc_info.value)
-        assert "Tier 1" in message
-        assert "preflight_invalid_non_empty_state_replacement" in message
-        assert "replacement" in message
-        assert "elspeth-7ae1732ab2" in message
-
-    def test_enforce_replacement_non_prefix_invariant_raises_on_accidental_prefix(self) -> None:
-        """A replacement that accidentally startswith content (e.g., the
-        synthesizer template was edited to surface the model's prose at the
-        start) would silently misroute through the consumer's augmentation
-        branch. Crash on the contradiction.
-        """
-        from elspeth.contracts.errors import AuditIntegrityError
-        from elspeth.web.composer.service import _enforce_replacement_non_prefix_invariant
-
-        with pytest.raises(AuditIntegrityError) as exc_info:
-            _enforce_replacement_non_prefix_invariant(
-                branch="preflight_invalid_non_empty_state_replacement",
-                content="Done.",
-                replacement="Done. But preflight failed: schema: Field required",
-            )
-        assert "Tier 1" in str(exc_info.value)
 
     # ── End-to-end through _finalize_no_tool_response ────────────────────
 

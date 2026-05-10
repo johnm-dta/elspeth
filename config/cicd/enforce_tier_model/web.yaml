@@ -1,4 +1,12 @@
 allow_hits:
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=1c7c9f6e216882eb
+  owner: composer-guided
+  reason: Protocol boundary validator — isinstance(turn_type, TurnType) at Tier 3 entry
+    point where untrusted payloads arrive from client, distinguishes valid TurnType
+    enum member from arbitrary string to reject malformed protocol messages early
+  safety: Raises ValueError if turn_type is not a known TurnType; callers are expected
+    to handle this exception or pass verified types only
+  expires: null
 - key: web/catalog/routes.py:R1:get_schema:fp=bc80b0854f0cb34e
   owner: web-catalog
   reason: Tier 3 boundary — plugin_type from URL path parameter, lookup in constant

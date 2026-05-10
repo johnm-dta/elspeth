@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from elspeth.web.composer.guided.protocol import (
     ControlSignal,
     InspectAndConfirmPayload,
@@ -128,3 +130,59 @@ class TestTurn:
         }
         assert turn["type"] == "single_select"
         assert turn["step_index"] == 1
+
+
+class TestLegalTurnMatrix:
+    def test_step_1_legal_types(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
+
+        legal = legal_turn_types_for(GuidedStep.STEP_1_SOURCE)
+        assert TurnType.INSPECT_AND_CONFIRM in legal
+        assert TurnType.SINGLE_SELECT in legal
+        assert TurnType.SCHEMA_FORM in legal
+        assert TurnType.PROPOSE_CHAIN not in legal
+
+    def test_step_2_legal_types(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
+
+        legal = legal_turn_types_for(GuidedStep.STEP_2_SINK)
+        assert TurnType.SINGLE_SELECT in legal
+        assert TurnType.MULTI_SELECT_WITH_CUSTOM in legal
+        assert TurnType.SCHEMA_FORM in legal
+
+    def test_step_2_5_recipe_offer_only(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
+
+        legal = legal_turn_types_for(GuidedStep.STEP_2_5_RECIPE_MATCH)
+        assert legal == frozenset({TurnType.RECIPE_OFFER})
+
+    def test_step_3_legal_types(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
+
+        legal = legal_turn_types_for(GuidedStep.STEP_3_TRANSFORMS)
+        assert TurnType.PROPOSE_CHAIN in legal
+        assert TurnType.SINGLE_SELECT in legal
+
+
+class TestPayloadValidation:
+    def test_validate_single_select_ok(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        ok = validate_payload(
+            TurnType.SINGLE_SELECT,
+            {"question": "Q?", "options": [], "allow_custom": False},
+        )
+        assert ok is None
+
+    def test_validate_single_select_missing_field(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(TurnType.SINGLE_SELECT, {"question": "Q?"})
+        assert err is not None
+        assert "options" in err
+
+    def test_validate_unknown_turn_type_rejected(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        with pytest.raises(ValueError):
+            validate_payload("not_a_turn_type", {})  # type: ignore[arg-type]

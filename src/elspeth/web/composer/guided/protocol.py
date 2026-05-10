@@ -99,3 +99,74 @@ class Turn(TypedDict):
     type: str  # TurnType value
     step_index: int
     payload: Mapping[str, Any]
+
+
+class GuidedStep(StrEnum):
+    """Wizard step pointer."""
+
+    STEP_1_SOURCE = "step_1_source"
+    STEP_2_SINK = "step_2_sink"
+    STEP_2_5_RECIPE_MATCH = "step_2_5_recipe_match"
+    STEP_3_TRANSFORMS = "step_3_transforms"
+
+
+_LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {
+    GuidedStep.STEP_1_SOURCE: frozenset(
+        {
+            TurnType.INSPECT_AND_CONFIRM,
+            TurnType.SINGLE_SELECT,
+            TurnType.SCHEMA_FORM,
+        }
+    ),
+    GuidedStep.STEP_2_SINK: frozenset(
+        {
+            TurnType.SINGLE_SELECT,
+            TurnType.MULTI_SELECT_WITH_CUSTOM,
+            TurnType.SCHEMA_FORM,
+        }
+    ),
+    GuidedStep.STEP_2_5_RECIPE_MATCH: frozenset({TurnType.RECIPE_OFFER}),
+    GuidedStep.STEP_3_TRANSFORMS: frozenset(
+        {
+            TurnType.PROPOSE_CHAIN,
+            TurnType.SINGLE_SELECT,
+        }
+    ),
+}
+
+
+def legal_turn_types_for(step: GuidedStep) -> frozenset[TurnType]:
+    """Return the frozen set of TurnType values legal at the given step."""
+    return _LEGAL_TURN_MATRIX[step]
+
+
+_REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
+    TurnType.INSPECT_AND_CONFIRM: frozenset({"observed"}),
+    TurnType.SINGLE_SELECT: frozenset({"question", "options", "allow_custom"}),
+    TurnType.MULTI_SELECT_WITH_CUSTOM: frozenset(
+        {
+            "question",
+            "options",
+            "default_chosen",
+            "escape_label",
+        }
+    ),
+    TurnType.SCHEMA_FORM: frozenset({"plugin", "schema_block", "prefilled"}),
+    TurnType.PROPOSE_CHAIN: frozenset({"steps", "why", "blockers"}),
+    TurnType.RECIPE_OFFER: frozenset({"recipe_name", "slots", "alternatives"}),
+}
+
+
+def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | None:
+    """Validate that *payload* satisfies the schema for *turn_type*.
+
+    Returns None on success, or a human-readable error string on failure.
+    Raises ValueError if turn_type is not a known TurnType.
+    """
+    if not isinstance(turn_type, TurnType):
+        raise ValueError(f"unknown turn type: {turn_type!r}")
+    required = _REQUIRED_KEYS[turn_type]
+    missing = required - payload.keys()
+    if missing:
+        return f"payload for {turn_type.value} missing required keys: {sorted(missing)}"
+    return None

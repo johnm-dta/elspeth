@@ -239,6 +239,63 @@ describe("RunOutputsPanel", () => {
     );
   });
 
+  it("renders jsonl preview with each line in a single cell (no comma fragmentation)", async () => {
+    // Regression for Codex P2 finding: TabularPreview previously called
+    // `line.split(",")` for both csv and jsonl. For jsonl, that fragments
+    // each JSON object across cells (e.g. `{"a":1,"b":2}` splits into
+    // `{"a":1` / `"b":2}`). Each line must remain intact in a single cell.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact({ path_or_uri: "file:///data/outputs/results.jsonl" })]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({
+        content_type: "jsonl",
+        preview_text: '{"a":1,"b":2}\n{"a":3,"b":4}\n',
+      }),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    // The full JSON object is present in the rendered output rather than
+    // any of its fragments. If the comma-split bug had survived,
+    // {"a":1 and "b":2} would appear as separate cell text and
+    // {"a":1,"b":2} (the whole object) would not be queryable as a unit.
+    await waitFor(() =>
+      expect(screen.getByText('{"a":1,"b":2}')).toBeInTheDocument(),
+    );
+    expect(screen.getByText('{"a":3,"b":4}')).toBeInTheDocument();
+  });
+
+  it("renders TSV preview (content_type=csv, tab-separated) with tab delimiter sniffing", async () => {
+    // Regression for Codex P2 finding: backend tags both `.csv` and
+    // `.tsv` files as content_type "csv" (web/execution/preview.py
+    // _CSV_EXTENSIONS), so a tab-separated blob arrives at TabularPreview
+    // with content_type="csv". A literal `split(",")` collapses the
+    // entire row into one cell. The renderer must sniff the first line
+    // for tab vs comma and use whichever is more frequent.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact({ path_or_uri: "file:///data/outputs/results.tsv" })]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({
+        content_type: "csv",
+        preview_text: "id\tname\tvalue\n1\tAlice\t9.99\n2\tBob\t19.95\n",
+      }),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    // Each header and data cell is its own queryable element. Before the
+    // fix, "id\tname\tvalue" rendered as a single cell.
+    await waitFor(() => expect(screen.getByText("id")).toBeInTheDocument());
+    expect(screen.getByText("name")).toBeInTheDocument();
+    expect(screen.getByText("value")).toBeInTheDocument();
+    expect(screen.getByText("Alice")).toBeInTheDocument();
+    expect(screen.getByText("19.95")).toBeInTheDocument();
+  });
+
   it("transitions to 'no longer available on disk' on artifact_purged_or_moved race", async () => {
     (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
       manifest([fileArtifact()]),

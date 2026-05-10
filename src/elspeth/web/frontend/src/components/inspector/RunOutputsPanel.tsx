@@ -422,11 +422,10 @@ function ArtifactPreviewView({
       </div>
     );
   }
-  const isTabular = preview.content_type === "csv" || preview.content_type === "jsonl";
   return (
     <div style={{ marginTop: 6 }}>
-      {isTabular ? (
-        <TabularPreview text={preview.preview_text} />
+      {preview.content_type === "csv" || preview.content_type === "jsonl" ? (
+        <TabularPreview text={preview.preview_text} contentType={preview.content_type} />
       ) : (
         <pre
           style={{
@@ -477,18 +476,40 @@ function ArtifactPreviewView({
 
 interface TabularPreviewProps {
   text: string;
+  contentType: "csv" | "jsonl";
 }
 
-function TabularPreview({ text }: TabularPreviewProps) {
-  // Minimal CSV parser for the preview pane. Tolerant of malformed
-  // rows: anything that doesn't split cleanly is rendered as a single
-  // cell. This is deliberately not a full CSV parser (no quoted-comma
+function TabularPreview({ text, contentType }: TabularPreviewProps) {
+  // Minimal tabular renderer for the preview pane. Tolerant of malformed
+  // rows. This is deliberately not a full CSV parser (no quoted-comma
   // handling) — preview is best-effort, not a data-loading path.
+  //
+  // Two content types feed this component:
+  //   * csv  — backend tags both `.csv` and `.tsv` files as content_type
+  //            "csv" (see web/execution/preview._CSV_EXTENSIONS), so we
+  //            sniff the first line for tab vs comma rather than
+  //            hardcoding `,`. Without this, TSV rows collapse into a
+  //            single column.
+  //   * jsonl — each line is a JSON object that must NOT be split on
+  //             commas (that fragments the JSON across cells). Each line
+  //             is rendered as a single-column row, no header styling.
   const lines = text.split("\n").filter((line) => line.length > 0);
   if (lines.length === 0) {
     return null;
   }
-  const rows = lines.map((line) => line.split(","));
+  let rows: string[][];
+  let hasHeader: boolean;
+  if (contentType === "jsonl") {
+    rows = lines.map((line) => [line]);
+    hasHeader = false;
+  } else {
+    const firstLine = lines[0];
+    const tabCount = (firstLine.match(/\t/g) ?? []).length;
+    const commaCount = (firstLine.match(/,/g) ?? []).length;
+    const delimiter = tabCount > commaCount ? "\t" : ",";
+    rows = lines.map((line) => line.split(delimiter));
+    hasHeader = true;
+  }
   const columnCount = Math.max(...rows.map((row) => row.length));
   return (
     <div
@@ -520,8 +541,8 @@ function TabularPreview({ text }: TabularPreviewProps) {
                     padding: "2px 6px",
                     overflowWrap: "anywhere",
                     backgroundColor:
-                      rowIdx === 0 ? "var(--color-surface-hover)" : "transparent",
-                    fontWeight: rowIdx === 0 ? 600 : 400,
+                      hasHeader && rowIdx === 0 ? "var(--color-surface-hover)" : "transparent",
+                    fontWeight: hasHeader && rowIdx === 0 ? 600 : 400,
                   }}
                 >
                   {row[colIdx] ?? ""}

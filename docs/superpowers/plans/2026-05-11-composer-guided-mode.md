@@ -12,6 +12,153 @@
 
 ---
 
+## Errata & Post-Review Corrections (2026-05-11, rev 2)
+
+**Status:** This plan was reviewed against the actual source tree on 2026-05-11. The architectural shape, phase ordering, and pure-data tasks (Phases 1–2) are correct. **The HTTP routing layer, tool-handler signatures, audit interface, and frontend conventions are wrong in the original draft.** Read this errata block before starting any task. Each correction is referenced inline in the affected tasks below with the marker **[ERRATA Cn — see top of file]**.
+
+Until the inline tasks are revised, treat the errata block as authoritative when the two disagree.
+
+### C1. `_execute_*` tool-handler signatures — all task descriptions in Phases 3 and 4 are wrong
+
+Plan writes `new_state, tool_result = _execute_set_source(state, payload)`. Actual signature (`tools.py:2371`) is:
+
+```python
+def _execute_set_source(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult: ...
+```
+
+Every `_execute_*` function in `tools.py` follows the `(args: dict, state, catalog, data_dir, **kwargs)` pattern. `ToolResult` (defined at `tools.py:347`) is a single dataclass — `result.success`, `result.updated_state`, `result.validation`, `result.affected_nodes`, `result.data`, `result.prior_validation`, `result.runtime_preflight` — NOT a `(state, result)` tuple.
+
+Step handlers in `composer/guided/steps.py` must (a) accept `catalog: CatalogService` and `data_dir: str | None` parameters passed in from the route handler, and (b) construct the `args` dict and read `ToolResult` attributes correctly. Tasks 3.1, 3.2, 3.3, 4.4 affected.
+
+### C2. Use `_execute_apply_pipeline_recipe`, not raw `apply_recipe` + `_execute_set_pipeline`
+
+`tools.py:3748` already wraps recipe application with full validation, audit emission via `ComposerToolInvocation`, and a `replaced_pipeline_note`. Task 3.3 (`handle_step_2_5_recipe_apply`) calls:
+
+```python
+result = _execute_apply_pipeline_recipe(
+    {"recipe_name": match.recipe_name, "slots": dict(match.slots)},
+    state, catalog, data_dir,
+    session_engine=session_engine, session_id=session_id,
+)
+```
+
+Reusing the canonical executor — not a two-step manual application — means audit records emit automatically through existing plumbing.
+
+### C3. HTTP routes live in `sessions/routes.py`, not `service.py`; prefix is `/api/sessions/{session_id}/...`
+
+The plan's "`@router.post` decorators in `service.py`" pattern is wrong:
+
+- `service.py` contains `ComposerServiceImpl` (a service class). No routing decorators.
+- Composer routes are mounted by `src/elspeth/web/sessions/routes.py:1499` under `APIRouter(prefix="/api/sessions", tags=["sessions"])`. The freeform chat endpoint is `POST /api/sessions/{session_id}/messages` at line 1629.
+- Composer state loads via `service.get_current_state(session.id)`; new sessions construct `CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)` — required-arg constructor, NOT the no-arg `CompositionState()` the plan's tests assume.
+
+Phase 3 tasks 3.4 and 3.5 must mount:
+- `POST /api/sessions/{session_id}/guided/start` (likely redundant per C7; see below)
+- `POST /api/sessions/{session_id}/guided/respond`
+
+…and reuse `_verify_session_ownership`, `_get_session_compose_lock_registry`, and the rate limiter — the same dependency-injection block as `send_message`. Test URLs prefixed `/composer/sessions/...` and `/composer/guided/...` throughout Phase 3, 5, 9 must become `/api/sessions/.../guided/...`.
+
+### C4. Audit emission: reuse `ComposerToolInvocation` with `tool_name` discriminator (Option A)
+
+The plan invents `BufferingRecorder.record_guided_event(GuidedAuditEvent(...))`. This method doesn't exist. `BufferingRecorder` (audit.py:179) only has `record(ComposerToolInvocation)` and `record_llm_call(ComposerLLMCall)`. Persistence routes through `audit_envelope` into the `tool_calls` JSON column on the assistant message row.
+
+**Decision: Option A — reuse `ComposerToolInvocation` with a `tool_name` discriminator.** The four event types become four `tool_name` values: `guided_turn_emitted`, `guided_turn_answered`, `guided_step_advanced`, `guided_dropped_to_freeform`. Payloads slot into the existing `arguments` / `result` fields. No contract type changes, no schema migration. Task 1.6 must construct `ComposerToolInvocation` records and call `recorder.record(invocation)` — there is no `record_guided_event` method.
+
+If the audit consumer side ever needs richer guided-specific replay than `ComposerToolInvocation` exposes, split a `GuidedTurnInvocation` sibling contract type later; not v1.
+
+### C5. Frontend API client is module-level `export async function`, not a class
+
+`src/elspeth/web/frontend/src/api/client.ts` exports `export async function fetchSessions()`, `createSession()`, etc. — no class. Phase 6 task 6.2 needs:
+
+```typescript
+export async function postGuidedStart(sessionId: string): Promise<GuidedStartResponse> { ... }
+export async function postGuidedRespond(sessionId: string, turnResponse: TurnResponse): Promise<GuidedRespondResponse> { ... }
+```
+
+Vitest mocks become `vi.spyOn(api, "postGuidedStart")` (import-namespace), not `vi.spyOn(apiClient, "postGuidedStart")` (class-method).
+
+### C6. `sessionStore`: single `guidedTurn` atomic object, not separate `guidedSession` + `guidedNextTurn`
+
+The plan ends with two store fields (`guidedSession` and `guidedNextTurn`) plus comments admitting the awkwardness — the server response is atomic, so the store should be too. Collapse into one:
+
+```typescript
+interface GuidedTurnState {
+  session: GuidedSession;
+  next_turn: Turn | null;
+  terminal: TerminalState | null;
+}
+
+interface GuidedSlice {
+  guidedTurn: GuidedTurnState | null;
+  startGuided: (sessionId: string) => Promise<void>;
+  respondGuided: (turnResponse: TurnResponse) => Promise<void>;
+  exitToFreeform: () => Promise<void>;
+}
+```
+
+Every server response replaces `guidedTurn` atomically; `compositionState` updates alongside it. ChatPanel reads `guidedTurn` once instead of three separate fields. Affects Phase 6 task 6.3 and Phase 8 task 8.1.
+
+### C7. New sessions default to guided per spec §5.2 — remove `/guided/start` endpoint
+
+The plan adds an explicit `POST .../guided/start` RPC. Spec §5.2 says guided is the default for new sessions: `composition_state.guided_session = GuidedSession.initial()` is attached at session-create time. The two are inconsistent.
+
+**Decision: default-guided.** Modify the session-create route (`sessions/routes.py:1501`) to attach `GuidedSession.initial()` to the freshly-constructed `CompositionState`. The frontend renders guided UI when `composition_state.guided_session != null`. The `/guided/start` endpoint becomes unnecessary; remove from Phase 3 task 3.4 and from the frontend store's `startGuided` action.
+
+The session-create change is one Python edit at line ~1663 (passing `guided_session=GuidedSession.initial()` to the `CompositionState` constructor); add it as the first sub-step of Phase 3 task 3.4 (which becomes "wire `/guided/respond` only — `/guided/start` is dropped").
+
+### C8. Recipe-match predicates must be derived from actual recipe slot schemas
+
+Phase 2 task 2.3 invents predicates from prose. The three registered recipes are in `composer/recipes.py`:
+- `_build_classify_recipe` (line 236) — slots include prompt_template, model, csv_blob_id, output_path, output_field
+- `_build_threshold_recipe` (line 337) — slots include threshold, field_to_check, above/below output paths
+- `_build_fork_coalesce_truncate_recipe` (line 472) — fork shape, truncate-arm config, jsonl outputs
+
+Task 2.3 must add a Step 0: read each recipe's `_build_*` function and its `SlotSpec` declarations to identify which slots are required vs optional, then design predicates whose `slot_resolver` maps observed (Source, Sink) state to exactly the required slot set. Predicates that cannot resolve a required slot from observed state must return `False`. The plan's invented predicates (`_classify_predicate`, `_split_threshold_predicate`) are placeholders only — the implementation must verify against the actual `SlotSpec` lists.
+
+### C9. Step 1 handler must run `inspect_blob_content` before emitting `inspect_and_confirm`
+
+The plan describes the inspection turn but doesn't call out the inspection call. Actual function: `inspect_blob_content(content, filename, mime_type, blob_id=...)` in `composer/source_inspection.py:80` returns `SourceInspectionFacts`. Task 3.1 must:
+1. Before emitting `inspect_and_confirm`, read the attached blob (via existing blob-store API) and call `inspect_blob_content(...)`.
+2. Package the resulting `SourceInspectionFacts` (columns, sample rows, warnings) into the turn's `payload.observed`.
+3. If no blob is attached, emit `schema_form` (manual options) or `single_select` (pick plugin) instead — the inspection path is conditional on blob presence.
+
+### C10. Test fixture inventory check before Phase 3 begins
+
+The plan references `composer_test_client`, `audit_recorder`, and `chaosllm_stub` fixtures. Actual state:
+- `tests/fixtures/chaosllm.py:223` defines `chaosllm_server` (note the fixture name — `chaosllm_server`, not `chaosllm_stub`).
+- No `composer_test_client` or `audit_recorder` fixture exists yet. The closest existing pattern lives in `tests/unit/web/composer/test_route_integration.py` (TestClient construction + recorder wiring). Read this before writing new fixtures.
+
+Add a Phase 3 prerequisite task (3.0): "Read `tests/unit/web/composer/test_route_integration.py` for the established FastAPI TestClient + recorder fixture pattern; create `tests/integration/web/composer/guided/conftest.py` with `composer_test_client` and `audit_recorder` fixtures matching that pattern."
+
+### Phase-level corrections summary
+
+| Phase | Status | Reason |
+|---|---|---|
+| 1 | Keep, fold C4 + C5 (CompositionState construction) | Audit module reuses `ComposerToolInvocation`; state field add still correct |
+| 2 | Keep, fold C8 (read recipes first) | Recipe predicates need real slot schemas |
+| 3 | **Revise** per C1, C2, C3, C7, C9, C10 | Tool signatures, routing layer, source inspection, fixtures |
+| 4 | Keep, fold C1 (handler signatures) | Chain solver structure correct; commit path needs handler-signature fix |
+| 5 | Keep | Auto-drop, progressive disclosure, audit emission test correct |
+| 6 | **Revise** per C5, C6 | Module-level api fns, single atomic store object |
+| 7 | Keep | Widget specs correct |
+| 8 | Revise per C6 | Single guidedTurn read |
+| 9 | Keep, fix URL prefixes per C3 | E2E flows valid; URLs were `/composer/...` instead of `/api/sessions/...` |
+| 10 | Keep | Docs |
+
+### Two pre-flight decisions confirmed (do not relitigate)
+
+1. **C4 Option A — reuse `ComposerToolInvocation` with `tool_name` discriminator.** Cheapest path; ships sooner; replay tooling already understands it.
+2. **C7 default-guided.** Matches spec §5.2; removes `/guided/start` endpoint and `startGuided` store action; new sessions begin in guided mode.
+
+If either decision needs reopening, do it via a plan revision PR before implementation starts.
+
+---
+
 ## Pre-Flight: File Structure Map
 
 ### New files (backend)

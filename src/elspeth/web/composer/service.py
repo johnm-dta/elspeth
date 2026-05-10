@@ -1350,15 +1350,27 @@ class ComposerServiceImpl:
            model's next ``preview_pipeline`` call.
 
         When preflight is valid (or skipped because state did not
-        change and ``last_runtime_preflight`` is ``None``) the response
-        passes through unchanged and ``raw_assistant_content`` is left
-        unset.
+        change and ``last_runtime_preflight`` is ``None``) the
+        ``check_state_claim_grounding`` content check runs to detect
+        un-grounded prose (state-field contradictions or unmotivated
+        action claims — see issues elspeth-c028f7d186 and
+        elspeth-905fe2a3d8). When the check returns violations, the
+        response is augmented with an ``[ELSPETH-SYSTEM]`` correction
+        suffix and ``raw_assistant_content`` carries the unaugmented
+        prose. Otherwise the response passes through unchanged and
+        ``raw_assistant_content`` is left unset.
 
-        Gate logic (no regex on natural-language text):
+        Gate logic (no regex on natural-language text governs the
+        routing-shape decision):
         - If ``state.version > initial_version`` (state changed this turn),
           run ``_cached_runtime_preflight`` for the current state.
         - Otherwise, reuse ``last_runtime_preflight`` from the most recent
           ``preview_pipeline`` call (may be ``None``).
+        - Whichever of the two paths populated ``runtime_result``, the
+          state-claim grounding check runs after preflight-invalid
+          branches are dispatched. The grounding check's regex
+          patterns are content-grounding (additive correction suffix),
+          not routing-shape decisions.
 
         Args:
             content: The model's assistant prose for this turn.
@@ -1427,10 +1439,7 @@ class ComposerServiceImpl:
                 llm_calls=llm_calls,
             )
 
-        if runtime_result is None:
-            return ComposerResult(message=content, state=state, tool_invocations=tool_invocations, llm_calls=llm_calls)
-
-        if not runtime_result.is_valid:
+        if runtime_result is not None and not runtime_result.is_valid:
             # Two finalize shapes for invalid preflight, dispatched on
             # state structure. Both augment — the difference is suffix
             # wording (issue elspeth-9cfbad6901 unified the policy after
@@ -1492,15 +1501,31 @@ class ComposerServiceImpl:
                 llm_calls=llm_calls,
             )
 
-        # State-claim grounding correction (Path 3 of issue elspeth-c028f7d186).
-        # State has reached passing preflight with non-empty contents. The
-        # model's prose may still contradict that state — claiming a field
-        # has its old value when the mutation already landed (T4 forward
-        # contradiction), or claiming a fresh action when state was
-        # unchanged this turn (T5 backward contradiction). Detect and
-        # append an [ELSPETH-SYSTEM] correction so amateur personas
-        # (compliance, marketing-ops) cannot read confidently-wrong prose
-        # as authoritative.
+        # State-claim grounding correction (Path 3 of issue elspeth-c028f7d186,
+        # widened by issue elspeth-905fe2a3d8 to also catch verbal
+        # acknowledgement without state mutation). The check runs in both
+        # of the remaining cases:
+        #
+        #   - runtime_result is_valid: state has reached passing preflight
+        #     with non-empty contents (T4 forward-contradiction case
+        #     covered here).
+        #   - runtime_result is None: state did not change AND no
+        #     preview_pipeline was called this turn. Without grounding,
+        #     the prior version of this function bare-passed-through —
+        #     the panel-evals T5 case (model said "I just fixed it" with
+        #     state unchanged from T4) and the cells #2/#4 cases (model
+        #     said "you're right, I'll change that" with no mutation
+        #     tool call) both landed in this hole. Running the grounding
+        #     check here is what closes both bugs.
+        #
+        # The model's prose may contradict state — claiming a field has
+        # its old value when the mutation already landed (forward
+        # contradiction), claiming a fresh action when state was
+        # unchanged (backward contradiction), or agreeing with the user
+        # without acting (verbal acknowledgement). Detect and append an
+        # [ELSPETH-SYSTEM] correction so amateur personas (compliance,
+        # marketing-ops) cannot read confidently-wrong prose as
+        # authoritative.
         #
         # Augmentation shape preserves the model's prose verbatim per the
         # ``_enforce_augmentation_prefix_invariant`` contract; the
@@ -1508,8 +1533,8 @@ class ComposerServiceImpl:
         # LLM history-replay path (consistent with the empty-state
         # augmentation branches above). The natural-language regex used
         # by ``check_state_claim_grounding`` is content-grounding, not
-        # gate routing — the gate decision (state non-empty + preflight
-        # valid) was already taken above without consulting prose.
+        # gate routing — the gate decision (state non-empty, preflight
+        # not failed) was already taken above without consulting prose.
         grounding_violations = check_state_claim_grounding(
             prose=content,
             state=state,

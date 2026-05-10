@@ -1,16 +1,22 @@
 """Tests for the state-claim grounding detector.
 
-Reproduces the panel-evals T4/T5 corpus from issue
-``elspeth-c028f7d186`` (boolean_routing__p1_compliance cell):
+Reproduces three panel-evals corpora:
 
 - T4 prose: "still uses on_validation_failure: discard" while state has
-  ``rejected_records`` — forward contradiction.
+  ``rejected_records`` — forward contradiction (issue
+  ``elspeth-c028f7d186``, boolean_routing__p1_compliance cell).
 - T5 prose: "I just fixed it" while state was unchanged from T4 —
-  backward contradiction.
+  backward contradiction (same issue, same cell).
+- Cells #2/#4 prose: "you're right, I'll change that" /
+  "I fixed the workflow behavior so source validation is no longer
+  silently dropping rows" while no mutation tool was called this turn
+  (issue ``elspeth-905fe2a3d8``).
 
 Plus edge cases that protect against false positives (matching claims,
 missing source, paraphrases that legitimately discuss state, multi-
-output configurations).
+output configurations, bare past tense without consequence clauses,
+present-perfect with negation/progressive, references to earlier
+turns).
 """
 
 from __future__ import annotations
@@ -222,6 +228,216 @@ class TestExtractActionClaims:
         claims = extract_action_claims(prose)
         verbs = {c.verb for c in claims}
         assert verbs == {"fixed", "updated"}
+
+
+class TestExtractActionClaimsAgreementPromise:
+    """Agreement-opener + first-person commitment detection.
+
+    Closes the panel-smoke cells #2/#4 case (issue
+    ``elspeth-905fe2a3d8``) — the model agrees verbally without calling
+    a mutation tool. Verbs surface in past tense even though the
+    matched prose is in base/future form, so ``verify_action_claims``
+    can dedupe across patterns on the same verb identity."""
+
+    def test_extract_youre_right_ill_change(self) -> None:
+        prose = "You're right, I'll change that to rejected_records."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "changed" in verbs
+
+    def test_extract_yes_i_can_fix(self) -> None:
+        prose = "Yes, I can fix that for you."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "fixed" in verbs
+
+    def test_extract_good_catch_ill_switch(self) -> None:
+        prose = "Good catch — I'll switch the routing."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "switched" in verbs
+
+    def test_extract_absolutely_ill_update(self) -> None:
+        prose = "Absolutely, I will update the source."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "updated" in verbs
+
+    def test_extract_as_you_asked_i_should_remove(self) -> None:
+        prose = "As you asked, I should remove that node."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "removed" in verbs
+
+    def test_no_extract_for_agreement_without_action_verb(self) -> None:
+        # "Yes, I see what you mean" — agreement opener but no action
+        # verb in the closed list. No match.
+        prose = "Yes, I see what you mean."
+        claims = extract_action_claims(prose)
+        assert claims == ()
+
+    def test_no_extract_for_action_verb_without_agreement_opener(self) -> None:
+        # "I'll change that" without a leading agreement opener does
+        # not match this pattern (other patterns may catch it but the
+        # agreement-promise pattern alone is conservative).
+        prose = "I'll change that."
+        claims = extract_action_claims(prose)
+        # The bare-past pattern requires consequence; present-perfect
+        # requires "have/'ve"; just-pattern requires "just". None
+        # match either.
+        assert claims == ()
+
+
+class TestExtractActionClaimsPresentPerfect:
+    """Present-perfect detection ("I've fixed", "I have changed").
+
+    Less ambiguous than bare simple past — present perfect English
+    usage strongly implies "before now, possibly just now". Negation
+    and progressive forms are excluded by negative lookahead."""
+
+    def test_extract_ive_fixed(self) -> None:
+        prose = "I've fixed the schema for you."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "fixed" in verbs
+
+    def test_extract_i_have_updated(self) -> None:
+        prose = "I have updated the source."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "updated" in verbs
+
+    def test_extract_ive_configured(self) -> None:
+        prose = "I've configured the output to write JSON lines."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "configured" in verbs
+
+    def test_no_extract_for_negated_present_perfect(self) -> None:
+        prose = "I have not changed the source configuration."
+        claims = extract_action_claims(prose)
+        # The just-pattern requires "just" (no), the agreement-promise
+        # requires an opener (no), the bare-past requires consequence
+        # (no), and the present-perfect explicitly excludes "not".
+        assert claims == ()
+
+    def test_no_extract_for_havent_contraction(self) -> None:
+        prose = "I haven't changed the source yet."
+        claims = extract_action_claims(prose)
+        # Note: ``I haven't`` parses as ``I + 've + n't`` under typical
+        # tokenisation. The negative lookahead rejects ``n't`` after
+        # the present-perfect anchor. Confirm no match.
+        assert claims == ()
+
+    def test_no_extract_for_progressive_present_perfect(self) -> None:
+        prose = "I have been adjusting the schema across turns."
+        claims = extract_action_claims(prose)
+        # Present-perfect progressive ("have been <verb-ing>") refers
+        # to ongoing or intermittent action, not a fresh completion.
+        # Negative lookahead rejects "been".
+        assert claims == ()
+
+
+class TestExtractActionClaimsBarePastWithConsequence:
+    """Bare simple past followed by a present-tense consequence clause.
+
+    Closes the panel-smoke T5 case (issue ``elspeth-c028f7d186``,
+    backward-contradiction shape with bare "I fixed" instead of "I
+    just fixed"). The consequence clause is the disambiguator — a
+    reference to an earlier-turn action would not narrate a fresh
+    present-tense consequence."""
+
+    def test_extract_t5_corpus_so_clause(self) -> None:
+        # Exact T5 prose from boolean_routing__p1_compliance cell.
+        prose = "I fixed the workflow behavior so source validation is no longer silently dropping rows from the record set."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "fixed" in verbs
+
+    def test_extract_and_now_clause(self) -> None:
+        prose = "I changed the routing and now everything goes to rejected_records."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "changed" in verbs
+
+    def test_extract_is_now_consequence(self) -> None:
+        prose = "I configured the source. I updated the output and the pipeline is now writing CSV."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        # "I updated the output and ... is now writing" matches the
+        # bare-past + consequence pattern. "I configured the source."
+        # alone has no consequence clause and so does not match.
+        assert "updated" in verbs
+
+    def test_no_extract_for_bare_past_without_consequence(self) -> None:
+        # Bare "I fixed it" without a consequence clause remains
+        # ambiguous in multi-turn dialogue (could refer to an earlier
+        # turn). Conservative detector does not flag.
+        prose = "I fixed it."
+        claims = extract_action_claims(prose)
+        assert claims == ()
+
+    def test_no_extract_for_earlier_turn_reference(self) -> None:
+        # The consequence clause requires present-tense narration that
+        # a prior-turn reference would not produce.
+        prose = "As I mentioned earlier, I changed that already."
+        claims = extract_action_claims(prose)
+        assert claims == ()
+
+    def test_no_extract_for_consequence_without_determiner(self) -> None:
+        # Pattern requires a determiner (the/that/this/it/your) after
+        # the verb to anchor the object. Bare "I fixed everything so
+        # things work" lacks a determiner.
+        prose = "I fixed everything so things work."
+        claims = extract_action_claims(prose)
+        assert claims == ()
+
+    def test_no_extract_for_consequence_across_sentence_boundary(self) -> None:
+        # The consequence-clause search uses [^.!?] so it does not
+        # cross sentence boundaries. A bare past in one sentence and
+        # a "now" claim in the next does not match.
+        prose = "I fixed the source. The pipeline is now valid."
+        claims = extract_action_claims(prose)
+        assert claims == ()
+
+
+class TestExtractActionClaimsCrossPattern:
+    """Pattern overlap and verb de-duplication across the four
+    detector categories."""
+
+    def test_just_and_present_perfect_dedupe_on_verb(self) -> None:
+        # "I've fixed" matches present-perfect; "I just fixed" matches
+        # the just-pattern. Both surface verb "fixed". The verifier
+        # dedupes — at most one violation per verb per turn.
+        prose = "I've fixed the source. I just fixed the output."
+        claims = extract_action_claims(prose)
+        violations = verify_action_claims(
+            claims,
+            mutation_success_seen=False,
+            state_changed=False,
+        )
+        assert len(violations) == 1
+        assert violations[0].claimed_value == "fixed"
+
+    def test_agreement_promise_normalises_to_past_tense(self) -> None:
+        # Base-form verbs from agreement-promise pattern surface as
+        # past-tense in ActionClaim.verb so dedup across patterns
+        # works on a single verb identity.
+        prose = "Yes, I'll change that."
+        claims = extract_action_claims(prose)
+        assert any(c.verb == "changed" for c in claims)
+        assert all(c.verb != "change" for c in claims)
+
+    def test_distinct_verbs_across_patterns_all_surface(self) -> None:
+        prose = "Yes, I'll change the routing. I've fixed the output. I configured the source so it now uses rejected_records."
+        claims = extract_action_claims(prose)
+        violations = verify_action_claims(
+            claims,
+            mutation_success_seen=False,
+            state_changed=False,
+        )
+        verbs = {v.claimed_value for v in violations}
+        assert verbs == {"changed", "fixed", "configured"}
 
 
 class TestVerifyStateClaims:
@@ -436,6 +652,64 @@ class TestCheckGroundingTopLevel:
             state=state,
             mutation_success_seen=False,
             state_changed=False,
+        )
+        assert violations == ()
+
+    def test_panel_smoke_cell_2_corpus(self) -> None:
+        # Issue elspeth-905fe2a3d8 — model agrees verbally without
+        # calling a mutation tool. State unchanged, no mutation seen.
+        prose = "You're right, I'll change that to rejected_records."
+        state = _state_with_source(on_validation_failure="discard")
+        violations = check_state_claim_grounding(
+            prose=prose,
+            state=state,
+            mutation_success_seen=False,
+            state_changed=False,
+        )
+        assert any(v.kind == "action_claim" and v.claimed_value == "changed" for v in violations)
+
+    def test_panel_smoke_t5_corpus_widened(self) -> None:
+        # Issue elspeth-c028f7d186 — exact T5 prose without "just".
+        # Caught by the bare-past + consequence pattern.
+        prose = "I fixed the workflow behavior so source validation is no longer silently dropping rows from the record set."
+        state = _state_with_source(on_validation_failure="rejected_records")
+        violations = check_state_claim_grounding(
+            prose=prose,
+            state=state,
+            mutation_success_seen=False,
+            state_changed=False,
+        )
+        assert len(violations) == 1
+        assert violations[0].kind == "action_claim"
+        assert violations[0].claimed_value == "fixed"
+
+    def test_present_perfect_completion_with_mutation_is_not_flagged(self) -> None:
+        # The verifier gate protects truthful turns: "I've fixed it"
+        # paired with a successful mutation produces no violation
+        # regardless of which pattern matched.
+        prose = "I've fixed the source so it now uses rejected_records."
+        state = _state_with_source(on_validation_failure="rejected_records")
+        violations = check_state_claim_grounding(
+            prose=prose,
+            state=state,
+            mutation_success_seen=True,
+            state_changed=True,
+        )
+        # State claim "rejected_records" matches actual; action claim
+        # is gated out by mutation_success_seen.
+        assert violations == ()
+
+    def test_agreement_acknowledgement_with_mutation_is_not_flagged(self) -> None:
+        # Same gate protection for the agreement-promise pattern:
+        # "Yes, I'll change that" paired with a successful mutation
+        # this turn does not produce a violation.
+        prose = "Yes, I'll change that to rejected_records."
+        state = _state_with_source(on_validation_failure="rejected_records")
+        violations = check_state_claim_grounding(
+            prose=prose,
+            state=state,
+            mutation_success_seen=True,
+            state_changed=True,
         )
         assert violations == ()
 

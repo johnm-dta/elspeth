@@ -4682,7 +4682,11 @@ class TestEmptyStateFinalizePassthrough:
 
         assert result.message.startswith(unmotivated_prose)
         assert "[ELSPETH-SYSTEM]" in result.message
-        assert "no successful mutation tool was called this turn" in result.message
+        # Explanation wording is pattern-agnostic across the four
+        # action-claim pattern categories (issue elspeth-905fe2a3d8
+        # widened the detector beyond "I just <verb>"). The shared
+        # phrasing covers all four pattern shapes uniformly.
+        assert "no mutation tool succeeded this turn" in result.message
         assert result.raw_assistant_content == unmotivated_prose
 
     @pytest.mark.asyncio
@@ -4731,6 +4735,202 @@ class TestEmptyStateFinalizePassthrough:
         # Verbatim pass-through; no augmentation; no raw_assistant_content set.
         assert result.message == grounded_prose
         assert "[ELSPETH-SYSTEM]" not in result.message
+        assert result.raw_assistant_content is None
+
+    @pytest.mark.asyncio
+    async def test_state_claim_grounding_runs_when_runtime_result_is_none_agreement_language(self) -> None:
+        """Bypass-fix coverage for issue elspeth-905fe2a3d8.
+
+        Previously, when state did not change AND no preview_pipeline was
+        called this turn, ``_finalize_no_tool_response`` early-returned with
+        bare passthrough at the ``runtime_result is None`` branch — the
+        state-claim grounding check at the bottom of the function was
+        unreachable on that control-flow path. Cells #2/#4 of the
+        panel-smoke-2026-05-10 cohort landed in that hole: the model
+        agreed verbally ("you're right, I'll change that") without
+        calling any mutation tool, and the augmentation never fired.
+
+        After restructure: grounding runs even when ``runtime_result is None``
+        (state non-empty, no preview), and the agreement-promise pattern
+        category catches the prose."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="rows",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="discard",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        agreement_prose = "You're right, I'll change that to rejected_records."
+
+        with patch.object(service, "_runtime_preflight") as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=agreement_prose,
+                state=state,
+                initial_version=state.version,  # unchanged → no mutation
+                user_id="user-1",
+                last_runtime_preflight=None,  # no preview was called
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=False,
+            )
+
+        # The grounding correction must fire — the prior bare passthrough
+        # would have returned the prose verbatim with no [ELSPETH-SYSTEM]
+        # block.
+        assert result.message.startswith(agreement_prose)
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "no mutation tool succeeded this turn" in result.message
+        assert result.raw_assistant_content == agreement_prose
+        # No preflight was rerun (state unchanged); the existing
+        # branch-skip behaviour for preflight is preserved.
+        mock_preflight.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_state_claim_grounding_runs_when_runtime_result_is_none_t5_widened(self) -> None:
+        """Bypass-fix coverage for issue elspeth-c028f7d186 (T5 widened).
+
+        The T5 cell prose ("I fixed the workflow behavior so source
+        validation is no longer silently dropping rows...") would land
+        on the same previously-bypassed control-flow path: state didn't
+        change after the T4 mutation, and the model didn't preview on
+        T5 either. The bare-past-with-consequence pattern category
+        added in this fix flags the prose; restructured grounding plumb
+        ensures the check actually runs."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="rows",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="rejected_records",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        t5_prose = "I fixed the workflow behavior so source validation is no longer silently dropping rows from the record set."
+
+        with patch.object(service, "_runtime_preflight") as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=t5_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=False,
+            )
+
+        assert result.message.startswith(t5_prose)
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert result.raw_assistant_content == t5_prose
+        mock_preflight.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_grounding_correction_when_runtime_result_is_none_and_prose_is_innocuous(self) -> None:
+        """Negative control: the bypass-fix restructure must NOT regress
+        the bare-passthrough behaviour for prose that contains no
+        action claim.
+
+        Pins the contract that grounding is additive — it only augments
+        when violations are detected, never in the no-violation case.
+        Companion test to ``test_unchanged_text_without_preview_does_not_run_preflight``
+        which exercises the same control-flow path with empty state."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="rows",
+                options={"path": "/data/inputs/in.csv"},
+                on_validation_failure="rejected_records",
+            )
+        )
+        # Bare past tense without a consequence clause — deliberately
+        # below the conservative-anchoring threshold of every action
+        # pattern. The detector must NOT flag this.
+        innocuous_prose = "I fixed it."
+
+        with patch.object(service, "_runtime_preflight") as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=innocuous_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=False,
+            )
+
+        assert result.message == innocuous_prose
+        assert result.raw_assistant_content is None
+        mock_preflight.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_grounding_correction_when_mutation_succeeded_this_turn(self) -> None:
+        """Verifier-gate protection on the bypass-fix path.
+
+        Even when the agreement-promise pattern matches, the verifier
+        gate (``mutation_success_seen or state_changed``) suppresses
+        the violation if a mutation tool actually succeeded. Critical
+        to avoid corrupting honest reports where the model agreed AND
+        acted in the same turn."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="rows",
+                options={"path": "/data/inputs/in.csv"},
+                on_validation_failure="rejected_records",
+            )
+        )
+        agreement_prose = "You're right, I'll change that to rejected_records."
+
+        with patch.object(service, "_runtime_preflight"):
+            result = await service._finalize_no_tool_response(
+                content=agreement_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=True,  # the model DID act
+            )
+
+        # No augmentation: the verifier gate suppresses the action-claim
+        # violation. Prose passes through verbatim.
+        assert result.message == agreement_prose
         assert result.raw_assistant_content is None
 
 

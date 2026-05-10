@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.composer.state import CompositionState, NodeSpec, SourceSpec
@@ -65,6 +66,9 @@ class ExecutionFanoutRisk:
     risk_level: _RiskLevel
     message: str
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "upstream_fanout")
+
     def to_dict(self) -> ExecutionFanoutRiskPayload:
         return {
             "node_id": self.node_id,
@@ -87,6 +91,9 @@ class ExecutionFanoutGuard:
     risk_level: _RiskLevel
     summary: str
     risks: Sequence[ExecutionFanoutRisk]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "risks")
 
     def to_dict(self) -> ExecutionFanoutGuardPayload:
         return {

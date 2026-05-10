@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -54,6 +55,9 @@ class _QualityStats:
     observed_type_counts: Mapping[str, int]
     valid_values: tuple[object, ...]
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "observed_type_counts", "valid_values")
+
     @property
     def observed_count(self) -> int:
         return sum(self.observed_type_counts.values())
@@ -91,7 +95,7 @@ class BatchDataQualityReport(BaseTransform):
 
     name = "batch_data_quality_report"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:732ed1d012c5f982"
+    source_file_hash: str | None = "sha256:c9e49d03239b8195"
     config_model = BatchDataQualityReportConfig
     is_batch_aware = True
 

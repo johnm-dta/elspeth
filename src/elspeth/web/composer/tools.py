@@ -1964,6 +1964,9 @@ class _ResolvedSourceBlob:
     options: Mapping[str, Any]
     payload: SourceBlobPayload
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options")
+
 
 def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
     """Serialize a validated blobs row to the tool-layer dict shape."""

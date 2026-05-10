@@ -737,6 +737,9 @@ class TerminalPairFieldConstraints:
     exact: Mapping[str, object] = field(default_factory=dict)
     forbidden: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "exact")
+
 
 _DISCRIMINATOR_FIELDS = (
     "sink_name",

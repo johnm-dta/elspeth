@@ -122,15 +122,15 @@ class ChatMessageRecord:
     ``?include_raw_content=true``; otherwise the response field is
     ``null`` (the field is always present in the response shape).
 
-    Producer contract: when raw_content is set on an augmentation row,
-    ``content`` MUST start with raw_content; on a replacement row,
-    content MUST NOT start with raw_content. Mechanically enforced at
-    producer construction by
-    ``web.composer.service._enforce_augmentation_prefix_invariant`` and
-    ``_enforce_replacement_non_prefix_invariant``. Consumers (notably
-    ``routes._composer_history_content``) rely on the contract to
-    classify the row structurally without a field-level discriminator;
-    the field-level decoupling is tracked at ``elspeth-7ae1732ab2``.
+    Producer contract: when raw_content is set, ``content`` MUST start
+    with raw_content (all composer synthesis shapes are augmentations
+    post-elspeth-9cfbad6901). Mechanically enforced at producer
+    construction by
+    ``web.composer.service._enforce_augmentation_prefix_invariant``.
+    Consumers (notably ``routes._composer_history_content``) rely on
+    the contract to detect synthesis structurally without a field-level
+    discriminator; the field-level decoupling is tracked at
+    ``elspeth-7ae1732ab2``.
     """
 
     id: UUID

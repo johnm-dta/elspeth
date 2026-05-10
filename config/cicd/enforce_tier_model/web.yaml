@@ -1086,7 +1086,7 @@ allow_hits:
     periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
   expires: null
-- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=617365ac6c45895a
+- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=f27d833f9650dafd
   owner: composer-audit
   reason: Audit-system-failure exemption (logging-telemetry-policy permits slog when
     audit DB itself fails). Per-tool-call audit row persistence is best-effort — a
@@ -1098,7 +1098,7 @@ allow_hits:
     gap is observable on read-back by comparing tool-row count against the parent
     assistant message's reported tool_invocations count.
   expires: null
-- key: web/sessions/routes.py:R6:_persist_llm_calls:fp=61d4cc6981e69907
+- key: web/sessions/routes.py:R6:_persist_llm_calls:fp=7f671a896e0e7fff
   owner: composer-audit
   reason: Audit-system-failure exemption (logging-telemetry-policy permits slog when
     audit DB itself fails). Per-LLM-call audit row persistence is best-effort — a
@@ -1272,7 +1272,7 @@ allow_hits:
     by check-and-crash
   safety: Missing key raises RuntimeError immediately; no silent default
   expires: null
-- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=12379b77e06e61bf
+- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=0bff594ec03859a4
   owner: web-sessions
   reason: Convergence partial-state save may fail — catch covers the full SQLAlchemyError
     family (IntegrityError, OperationalError for lock timeout or pool disconnect,
@@ -1288,7 +1288,7 @@ allow_hits:
     carry the exception class name only — no SQL statement, no bound parameters, no
     __cause__ text.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=37cf20ba4b750216
+- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=8d657157fdaa9ead
   owner: web-sessions
   reason: Plugin-crash partial-state save may fail — catch covers the full SQLAlchemyError
     family. A narrow IntegrityError catch would let OperationalError, ProgrammingError,
@@ -1302,7 +1302,7 @@ allow_hits:
     policy as the convergence path). Original plugin crash still propagates via the
     outer `raise HTTPException(...) from crash.original_exc`.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=ed956ce449f63a48
+- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=e9908b3f36af186f
   owner: web-sessions
   reason: Runtime-preflight partial-state save may fail — catch covers the full SQLAlchemyError
     family, structurally identical to the sibling _handle_plugin_crash and _handle_convergence_error
@@ -1319,46 +1319,46 @@ allow_hits:
     Original runtime-preflight cause still propagates via the outer `raise HTTPException(...)
     from rpf_exc.original_exc` at the call site.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=7371817ba5b2b7c4
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=17333444fb57e819
   owner: web-sessions
   reason: isinstance check on deserialized composition state source — Tier 3 boundary.
   safety: Validates structure from persisted state
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=043d550e939b767b
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=5d9b35be30667109
   owner: web-sessions
   reason: source_dict.get() on Tier 3 composition state — optional source options.
   safety: Returns None on miss, and the blob rewrite path is skipped
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=ca8f55b122a55b48
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=16b9b2e125fe99f8
   owner: web-sessions
   reason: isinstance(options, dict) validates persisted source.options before mutating
     nested fields during fork blob rewrite
   safety: Non-dict raises AuditIntegrityError immediately; no silent skip or coercion
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=101eff16c1a9fe1e
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=a3b85c271c321d75
   owner: web-sessions
   reason: options.get() on Tier 3 state source — blob_ref is optional.
   safety: Returns None on miss, handled by conditional below
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=3fd27f21dd0cc79e
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=a2b66d5064762486
   owner: web-sessions
   reason: isinstance check on blob_ref — may be str or UUID from persisted state.
   safety: Tier 3 boundary — persisted blob_ref type is not guaranteed
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=9e08003f3a7dce74
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=6c5cdc4243cb89ca
   owner: web-sessions
   reason: blob_map.get() on copied blob UUID — not every source reference is guaranteed
     to have a copied blob target, so fork rewrite falls back to path/file matching
   safety: None result only triggers the secondary path/file rewrite probe; no fabricated
     blob mapping is introduced
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=ff814e0992d6f197
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=f4dcdbc81dc03ba8
   owner: web-sessions
   reason: options.get(path_key) on persisted source options — path/file keys are optional
     and used only for fallback blob rewrite
   safety: None result skips that fallback key and continues scanning remaining candidates
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=ec4472a1447fc4b4
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=39150539f64a5590
   owner: web-sessions
   reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string
     persisted path/file values
@@ -1366,7 +1366,7 @@ allow_hits:
     remain unchanged and can still fail later validation instead of being silently
     coerced
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=912b0fbaa94d1e6f
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=8e9d56460634cd2b
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in
     the BlobQuotaExceededError path — DB/IO faults expected during cleanup; programmer
@@ -1375,7 +1375,7 @@ allow_hits:
     that propagates; orphan sessions.id flagged for manual cleanup; user-facing 413
     response remains intact even when cleanup fails
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=d267f676cb066f2b
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=b23d0900b09f19a7
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in
     the generic except Exception path — DB/IO faults expected during cleanup; programmer
@@ -1440,7 +1440,7 @@ allow_hits:
     change
   safety: Falls back to unredacted source_data (less privacy, not less safety)
   expires: null
-- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=f3e7f1107ced0b46
+- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=7550128d639f0273
   owner: web-sessions
   reason: isinstance(runtime_preflight, _RuntimePreflightFailed) dispatches the _RuntimePreflightOutcome
     union type — sentinel, ValidationResult, and None are the three legal values;
@@ -1449,7 +1449,7 @@ allow_hits:
   safety: Exhaustive dispatch with ValueError for invalid combinations; no silent
     default
   expires: null
-- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=048a7103542e87c1
+- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=555266b38fd7bd01
   owner: web-sessions
   reason: state.validate() may fail on structurally damaged partial-state from LLM
     convergence/crash — catch (ValueError, TypeError, KeyError) mirrors the pre-existing
@@ -1458,7 +1458,7 @@ allow_hits:
   safety: Falls back to ValidationSummary(is_valid=False) with a generic error entry;
     does not swallow the damage, just allows persistence to proceed
   expires: null
-- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=198b85f2e78b5b2e
+- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=f2253230e2d45ff7
   owner: web-sessions
   reason: isinstance(runtime, ValidationResult) dispatches the _RuntimePreflightOutcome
     union type to emit telemetry — sentinel and ValidationResult must be distinguished
@@ -1702,7 +1702,7 @@ allow_hits:
     future's eventual exception via add_done_callback so asyncio's GC handler cannot
     fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=1f4c930224de7822
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=1c4e54a89f43f66f
   owner: web-sessions
   reason: contextlib.suppress(asyncio.CancelledError) wraps the shielded cancelled-LLM-call
     audit persistence in the send_message cancellation handler. asyncio.shield re-raises
@@ -1714,7 +1714,7 @@ allow_hits:
     with class-name-only slog. The explicit raise after the progress publish preserves
     the cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d25b8d35355cf55e
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=39dfcb6381860680
   owner: web-sessions
   reason: contextlib.suppress(asyncio.CancelledError) wraps the shielded progress
     publish in the send_message cancellation handler — asyncio.shield re-raises CancelledError
@@ -1727,7 +1727,7 @@ allow_hits:
     is preserved by the explicit ``raise`` that follows, so no real cancellation is
     silently dropped — only the duplicate re-raise from the shield is suppressed.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=333c0fd588d833aa
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=759d0321844796a0
   owner: web-sessions
   reason: Mirror of the send_message cancelled-LLM-call audit persistence suppress
     above — recompose has the same cancellation and audit-sidecar contract.
@@ -1735,7 +1735,7 @@ allow_hits:
     is best-effort, sanitized, and followed by an explicit re-raise that preserves
     cancellation semantics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=0c3be5ef66ca8ad6
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=47395e8d06359ae1
   owner: web-sessions
   reason: Mirror of the send_message cancellation handler above — same shielded-publish
     pattern in the recompose route so cancellation behaviour cannot drift between
@@ -2304,91 +2304,91 @@ allow_hits:
   safety: Malformed shapes become structured argument errors returned to the LLM,
     not crashes or silent tool execution.
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=fca266425eeb1831
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=ee45a7ef20e6e248
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=471049fc5cee0515
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=4f73f5c829e2f862
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=db0f56236380eed9
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=9f4489a004a5722e
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=847aab8609439be9
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=c5eee98b7f106fb8
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=baa6a5eb549b7fab
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=6051df645b26b9af
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider
     failures are converted into structured composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures
     are audited and returned as bounded tool results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=d990c1c51860c4eb
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=b8b21ea56f873034
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider
     failures are converted into structured composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures
     are audited and returned as bounded tool results.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=826a1f372c8468d4
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=4f0fa60fae1c3c45
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=6e85f0c1c62a3ec2
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=73cb467bd2726216
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=95e2da7226f58930
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=ed4c61c1761c3718
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2064568867c07127
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=604d96c7f5ded948
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=3b6fe7e83bd7c65c
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=5a710005dd5a2f85
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=6a9fb4dbd4f9ab9a
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=ffeaf8f3fd1edd46
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=eca3581db63a1b6a
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=68d3c369d9c85db8
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.

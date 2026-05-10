@@ -813,7 +813,6 @@ _AugmentationBranch = Literal[
     "preflight_invalid_non_empty_state_augmentation",
     "state_claim_grounding_correction",
 ]
-_ReplacementBranch = Literal["preflight_invalid_non_empty_state_replacement"]
 
 
 def _enforce_augmentation_prefix_invariant(
@@ -824,27 +823,19 @@ def _enforce_augmentation_prefix_invariant(
 ) -> None:
     """Mechanically enforce the producer-side augmentation prefix contract.
 
-    The consumer-side discriminator at ``routes._composer_history_content``
-    distinguishes augmentation from replacement *structurally*, via
-    ``message.startswith(raw_content)``. That structural property is an
-    audit-integrity contract: a producer that breaks it silently misroutes
-    augmented LLM history into the replacement path
-    (``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX`` ends up prefixed onto the
-    model's own prose). Crash here rather than commit a corrupt audit row.
+    All composer synthesis shapes are augmentations — the consumer-side
+    discriminator at ``routes._composer_history_content`` strips the
+    operator-facing suffix from LLM history by detecting the structural
+    property ``message.startswith(raw_content)``. A producer that breaks
+    the prefix property would emit a row whose suffix cannot be
+    distinguished from the model's own prose at read time; the LLM
+    would see synthesized operator-facing text in its prior-turn
+    history. Crash here rather than commit a corrupt audit row.
 
-    Empty ``content`` is permitted — ``"".startswith("")`` is trivially True
-    and the empty-state augmentation builder degenerates to suffix-only
-    output for empty inputs. Non-empty ``content`` MUST appear at the start
-    of ``augmented``.
-
-    Note: this guard cannot, on its own, distinguish empty-content
-    augmentation from empty-content replacement at the consumer site
-    (both satisfy ``startswith("")``). The complementary
-    ``_enforce_replacement_non_prefix_invariant`` enforces the
-    replacement side of that contract (replacement MUST NOT
-    ``startswith`` raw_content), so the consumer-side discriminator at
-    ``routes._composer_history_content`` only ever sees structurally
-    classifiable shapes.
+    Empty ``content`` is permitted — ``"".startswith("")`` is trivially
+    True and the augmentation builders degenerate to suffix-only output
+    for empty inputs. Non-empty ``content`` MUST appear at the start of
+    ``augmented``.
     """
     if not augmented.startswith(content):
         _COMPOSER_AUDIT_INTEGRITY_VIOLATION_COUNTER.add(1, {"invariant": "augmentation_prefix", "branch": branch})
@@ -853,59 +844,12 @@ def _enforce_augmentation_prefix_invariant(
             "Producer constructed an augmented message that does not have the "
             "model's pre-synthesis prose as a strict prefix. The consumer-side "
             "discriminator at routes._composer_history_content uses "
-            "content.startswith(raw_content) to distinguish augmentation from "
-            "replacement; a producer that breaks the prefix property silently "
-            "misroutes augmented LLM history through the replacement path "
-            "([INTERCEPTED] prefixed onto the model's own prose). Fix the "
-            "augmented-message constructor so the prose appears verbatim at the "
-            "start of message."
-        )
-
-
-def _enforce_replacement_non_prefix_invariant(
-    *,
-    branch: _ReplacementBranch,
-    content: str,
-    replacement: str,
-) -> None:
-    """Mechanically enforce the producer-side replacement non-prefix contract.
-
-    Symmetric counterpart to ``_enforce_augmentation_prefix_invariant``.
-    The consumer-side discriminator at ``routes._composer_history_content``
-    classifies messages where ``message.startswith(raw_content)`` as
-    augmentation. A replacement-shape ``ComposerResult`` that satisfies
-    the prefix property would silently misroute through the augmentation
-    branch, hiding the ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX``
-    annotation from LLM history — the model would not learn that its
-    completion claim was overruled and could re-claim completion on
-    the next turn.
-
-    Crash on the contradiction. The most common trigger is empty
-    ``content`` (the LLM emitted no assistant text while state was
-    non-empty and preflight invalid): every non-empty replacement
-    string trivially ``startswith("")``, so the consumer-side
-    discriminator would misclassify the row as empty-prose augmentation
-    and emit ``""`` to the LLM history channel. The field-level
-    decoupling that would let the consumer disambiguate this case is
-    tracked at ``elspeth-7ae1732ab2``; until paid down, the producer
-    refuses to emit ambiguous shapes.
-    """
-    if replacement.startswith(content):
-        _COMPOSER_AUDIT_INTEGRITY_VIOLATION_COUNTER.add(1, {"invariant": "replacement_non_prefix", "branch": branch})
-        raise AuditIntegrityError(
-            f"Tier 1: composer replacement contract violated on branch={branch!r}. "
-            "Producer constructed a replacement message that startswith the "
-            "model's pre-synthesis prose. The consumer-side discriminator at "
-            "routes._composer_history_content uses "
-            "content.startswith(raw_content) to distinguish augmentation from "
-            "replacement; a replacement that satisfies the prefix property "
-            "silently misroutes through the augmentation branch (the model's "
-            "completion claim is not annotated with [INTERCEPTED] in LLM "
-            "history). Most common trigger: empty content "
-            "(every non-empty string startswith ''). Refusing to emit the "
-            "ambiguous audit row; pay down the field-level discriminator "
-            "(elspeth-7ae1732ab2) to permit this shape, or fix the producer "
-            "so content and replacement do not share a prefix."
+            "content.startswith(raw_content) to detect synthesis and strip "
+            "the operator-facing suffix from LLM history; a producer that "
+            "breaks the prefix property misroutes synthesized operator-facing "
+            "text into the model's prior-turn history. Fix the augmented-"
+            "message constructor so the prose appears verbatim at the start "
+            "of message."
         )
 
 
@@ -978,6 +922,20 @@ def _compose_preflight_failure_message(content: str, *, runtime_result: Validati
             optional ``suggestion`` populate the suffix; falls back to
             the first failed check's ``detail``; falls back to the bare
             template when the result has neither.
+
+    Boundary contract: the suffix is echoed verbatim into chat history
+    and the OpenAI-format chat completion. Secrets are guaranteed
+    absent because validate_pipeline() resolves secret refs before
+    settings load and validation errors are derived from typed plugin
+    configs, never from raw secret values. However, the suffix MAY
+    carry operator-supplied path fragments (the operator's own
+    configured CSV paths, sink output paths) and exception text that
+    names plugin config field values — both surface verbatim from
+    ``ValidationError.message`` / ``ValidationCheck.detail``. In the
+    current single-operator deployment model this is acceptable: the
+    operator already knows their own paths and config. If ELSPETH ever
+    takes a multi-tenant deployment shape, the suffix builder must be
+    sanitized before merge.
     """
     detail: str | None = None
     suggestion: str | None = None
@@ -1264,36 +1222,6 @@ class ComposerServiceImpl:
             )
         _RUNTIME_PREFLIGHT_COUNTER.add(1, {"outcome": "success"})
         return entry
-
-    @staticmethod
-    def _runtime_preflight_failure_message(result: ValidationResult) -> str:
-        """Compose a synthetic user-visible message for a failed runtime preflight.
-
-        Prefers the first ValidationError's message and suggestion, falls back
-        to the first failed check's detail, then to a bare fallback if the
-        ValidationResult carries neither.
-
-        Boundary contract: the message is echoed verbatim into chat history
-        and the OpenAI-format chat completion. Secrets are guaranteed absent
-        because validate_pipeline() resolves secret refs before settings load
-        and validation errors are derived from typed plugin configs, never
-        from raw secret values. However, the message MAY carry operator-
-        supplied path fragments (the operator's own configured CSV paths,
-        sink output paths) and exception text that names plugin config field
-        values — both are surfaced verbatim from ValidationError.message and
-        ValidationCheck.detail. In the current single-operator deployment
-        model this is acceptable: the operator already knows their own
-        paths and config. If ELSPETH ever takes a multi-tenant deployment
-        shape, this synthesizer must be sanitized before merge.
-        """
-        if result.errors:
-            first = result.errors[0]
-            suggestion = f" Suggested fix: {first.suggestion}" if first.suggestion else ""
-            return f"I cannot mark this pipeline complete yet because runtime preflight failed: {first.message}.{suggestion}"
-        failed_checks = [check for check in result.checks if not check.passed]
-        if failed_checks:
-            return f"I cannot mark this pipeline complete yet because runtime preflight failed: {failed_checks[0].detail}."
-        return "I cannot mark this pipeline complete yet because runtime preflight failed."
 
     def _attempt_proof_repair(
         self,

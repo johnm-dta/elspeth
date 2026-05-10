@@ -366,7 +366,7 @@ allow_hits:
   reason: Tier 3 boundary — JWT claims dict .get() for optional iat claim
   safety: Missing iat returns None; no fabrication
   expires: null
-- key: web/composer/state.py:R5:_declared_input_fields_option:fp=fb4067e05511aaff
+- key: web/composer/state.py:R5:_declared_input_fields_option:fp=502f741cded36b7f
   owner: web-composer
   reason: Composer state options are Tier 3 LLM/user-supplied plugin config; wrapper-shaped
     aggregation options may carry an optional nested options mapping that must be
@@ -375,7 +375,7 @@ allow_hits:
     validation reports malformed aggregation wrapper options as blocking ValidationEntry
     results, while top-level required_input_fields is still rejected
   expires: null
-- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=c74f6ddd778da661
+- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=d1a169d5f9065034
   owner: web-composer
   reason: Composer state options are Tier 3 LLM/user-supplied plugin config; the rule
     inspects web_scrape's options.http.abuse_contact at composer-validate time,
@@ -399,7 +399,7 @@ allow_hits:
     shape matches and the domain is reserved, returns a high-severity blocking
     ValidationEntry naming the node and field, rendering the pipeline invalid.
   expires: null
-- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=37164e1dc3371406
+- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=1506b9194afa9cb9
   owner: web-composer
   reason: Same Tier-3 boundary as the paired R5 entry above; the helper uses
     options.get('http') and http.get('abuse_contact') because the composer
@@ -415,7 +415,7 @@ allow_hits:
     defect. The rule's own error path fires only when the value is shape-valid
     AND the domain is reserved.
   expires: null
-- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=2362eadcc48b831e
+- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=26c535468a0fea7b
   owner: web-composer
   reason: Composer preview classifies only known plugin config/probe exception types
     while probing plugin-computed output contracts for shape-changing transforms.
@@ -429,7 +429,7 @@ allow_hits:
     for known pass-through plugins, which then forces Stage 1 rejection) instead of
     crashing or fabricating a stronger contract
   expires: null
-- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=db82467039a016c0
+- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=a7ff000684d2eac3
   owner: web-composer
   reason: _producer_emit_set looks up a producer's NodeSpec in node_by_id; sources
     have producer_id == "source" which is not a node, so the lookup may legitimately
@@ -456,7 +456,7 @@ allow_hits:
     translates to SemanticOutcome.UNKNOWN; FAIL-policy consumers then emit a structured
     error naming only the requirement_code and plugin names, never the exception text.
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=9b74c6ec125d8740
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=1125db8205b802bf
   owner: web-composer
   reason: Contract helper ValueError (consumer required-fields parse) is intentionally
     converted into a blocking ValidationEntry on the consumer node instead of raising
@@ -464,7 +464,7 @@ allow_hits:
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     consumer edge
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=2f7d16a3b98bb83e
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=fe41814a7ca029fc
   owner: web-composer
   reason: _consumer_locked_input_set ValueError (consumer schema parse) is intentionally
     converted into a blocking ValidationEntry on the consumer node instead of raising
@@ -474,14 +474,14 @@ allow_hits:
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     consumer edge and Rule A is short-circuited for that consumer
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=adc1dd434b1fd56b
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=0515578db03f0f64
   owner: web-composer
   reason: Producer contract parse failures are intentionally converted into blocking
     ValidationEntry results and the producer is marked uncheckable
   safety: The invalid producer blocks validation and suppresses downstream edge contracts
     instead of silently continuing
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=65ab7638ce2f6df1
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=abc96077d0216880
   owner: web-composer
   reason: Rule A producer-emit ValueError swallowed silently because _effective_producer_guarantees
     has already raised the same producer parse error above and surfaced it as a blocking
@@ -490,14 +490,14 @@ allow_hits:
   safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
     call; pipeline remains invalid; Rule A is correctly skipped for this edge
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=7ec00da0ef61c90a
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=6cc4d5a150857308
   owner: web-composer
   reason: Sink contract parse failures are intentionally converted into blocking ValidationEntry
     results on the output
   safety: The pipeline remains invalid and the sink edge contract is skipped rather
     than fabricated
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=8e75d0a874bd2398
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=1051492e9c40cb3c
   owner: web-composer
   reason: _sink_locked_input_set ValueError (sink schema parse) is intentionally converted
     into a blocking ValidationEntry on the output. Mirrors the sink required-fields
@@ -506,14 +506,14 @@ allow_hits:
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     sink and Rule B is short-circuited for that output
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=47a8ea15bb1f8a69
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=43b5b8f01a4c357f
   owner: web-composer
   reason: Sink-side producer parse failures are intentionally converted into blocking
     ValidationEntry results and the producer is marked uncheckable
   safety: The pipeline remains invalid and downstream sink contract evidence is suppressed
     for the bad producer
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=6e3a1b6e628fd390
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=27259f3e3d303e40
   owner: web-composer
   reason: 'Rule B producer-emit ValueError swallowed silently because _effective_producer_guarantees
     has already raised the same producer parse error above and surfaced it as a blocking
@@ -523,7 +523,7 @@ allow_hits:
   safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
     call; pipeline remains invalid; Rule B is correctly skipped for this edge
   expires: null
-- key: web/composer/state.py:R1:_check_schema_contracts:fp=7f788bd20677fb7e
+- key: web/composer/state.py:R1:_check_schema_contracts:fp=f69bad753b005c9c
   owner: web-composer
   reason: Rule C reads field_mapper's select_only flag from raw Tier-3 user/LLM-supplied
     options. dict.get with default False matches FieldMapperConfig.select_only's pydantic
@@ -534,7 +534,7 @@ allow_hits:
     because select_only=False puts field_mapper into the additive/loose-bound regime
     that Rule C explicitly does not adjudicate
   expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=9bde8ab7cd932a09
+- key: web/composer/state.py:R6:CompositionState:validate:fp=c26ba18c5c5ef7c2
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into
     a blocking ValidationEntry so composer rejects malformed trigger.condition values
@@ -2063,7 +2063,7 @@ allow_hits:
   safety: Only suppresses signal exceptions; all other exceptions logged as last-resort
     diagnostic
   expires: null
-- key: web/composer/state.py:R5:_is_static_contract_probe_exception:fp=ba1a951f96628d16
+- key: web/composer/state.py:R5:_is_static_contract_probe_exception:fp=df312727f02279b0
   owner: web-composer
   reason: Composer static-contract probes instantiate draft plugins while the user/LLM
     may still be filling options. Known config/probe exception classes are classified
@@ -2608,7 +2608,7 @@ allow_hits:
     Download button. The audit trail still shows the artifact's recorded path_or_uri,
     exists_now, and content_hash. No bytes are served on a False result.
   expires: null
-- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=320551bb03e05601
+- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=b18e4e501177b46d
   owner: web-composer
   reason: Tier 3 boundary — LLM/operator-supplied node options may shape `http` as
     a non-Mapping (e.g., null, list). Validator returns None on shape mismatch and
@@ -2617,7 +2617,7 @@ allow_hits:
   safety: Returns None; downstream plugin schema rule reports the malformed http block
     as a separate ValidationEntry.
   expires: null
-- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=9158c77d7a443d63
+- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=54928459e9ddb422
   owner: web-composer
   reason: Tier 3 boundary — abuse_contact is an optional sub-key of the operator-supplied
     http options block. Missing key is a documented optional configuration, not an

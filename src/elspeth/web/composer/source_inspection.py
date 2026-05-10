@@ -109,7 +109,12 @@ def inspect_blob_content(
     kind = _detect_kind(filename, mime_type, inspected)
 
     if kind == "csv":
-        return _inspect_csv(inspected, redacted_identity, byte_range)
+        # Per `_detect_kind`, both `.csv` and `.tsv` map to `kind="csv"`.
+        # Use a tab delimiter for TSV so the row structure parses correctly;
+        # otherwise default to comma. The chosen delimiter is recorded as a
+        # warning so the operator/composer LLM can see it in the audit trail.
+        delimiter = "\t" if filename.lower().endswith(".tsv") else ","
+        return _inspect_csv(inspected, redacted_identity, byte_range, delimiter=delimiter)
     if kind == "jsonl":
         return _inspect_jsonl(inspected, redacted_identity, byte_range)
     if kind == "json":
@@ -209,10 +214,12 @@ def _inspect_csv(
     sample: bytes,
     redacted_identity: dict[str, str],
     byte_range: tuple[int, int],
+    *,
+    delimiter: str = ",",
 ) -> SourceInspectionFacts:
     text = _safe_decode(sample)
     decode_replacements = _count_replacement_chars(text)
-    reader = csv.reader(io.StringIO(text))
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     rows: list[list[str]] = []
     try:
         for i, row in enumerate(reader):
@@ -246,6 +253,17 @@ def _inspect_csv(
     headers = tuple(h.strip() for h in rows[0])
     data_rows = rows[1:]
     warnings: list[str] = []
+
+    if delimiter != ",":
+        # Surface the delimiter so the audit trail (and the composer LLM
+        # reading the inspection facts) sees that this CSV-classified blob
+        # was actually parsed with a non-default separator. Tab is the only
+        # alternate delimiter currently dispatched (`.tsv`); this branch
+        # keeps the surface honest if more are added later.
+        delimiter_label = "tab" if delimiter == "\t" else repr(delimiter)
+        warnings.append(
+            f"csv_non_default_delimiter: parsed with {delimiter_label} delimiter (source_kind reported as 'csv'); confirm downstream csv source plugin uses the same delimiter"
+        )
 
     if decode_replacements:
         # `errors="replace"` swapped malformed bytes for U+FFFD. Surface the

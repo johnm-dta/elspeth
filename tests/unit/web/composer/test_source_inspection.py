@@ -90,6 +90,24 @@ class TestCsvInspection:
         assert f.observed_headers == ("id", "name", "price")
         assert f.sample_row_count == 2
 
+    def test_tsv_parses_with_tab_delimiter(self) -> None:
+        # `.tsv` files dispatch to `_inspect_csv` (kind="csv"), but their
+        # content is tab-separated. Without a tab-delimiter override, the
+        # whole row collapses into a single column and observed_headers /
+        # inferred_types / sample_row_count are derived from malformed
+        # row structure. Regression for Codex P2 finding.
+        f = inspect_blob_content(
+            content=b"id\tname\tprice\n1\tAlice\t9.99\n2\tBob\t19.95\n",
+            filename="data.tsv",
+            mime_type="application/octet-stream",
+        )
+        assert f.observed_headers == ("id", "name", "price")
+        assert f.sample_row_count == 2
+        assert f.inferred_types == {"id": "int", "name": "str", "price": "float"}
+        # Non-default delimiter must surface in the audit-visible warnings
+        # so the operator/composer LLM sees how the blob was actually parsed.
+        assert any("csv_non_default_delimiter" in w and "tab" in w for w in f.warnings), f.warnings
+
     def test_inferred_types(self) -> None:
         f = inspect_blob_content(
             content=b"id,name,price,active\n1,Alice,9.99,true\n2,Bob,19.95,false\n",

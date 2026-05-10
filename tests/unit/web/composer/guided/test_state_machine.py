@@ -8,6 +8,7 @@ import pytest
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
+    SourceResolved,
     TerminalKind,
     TerminalReason,
     TerminalState,
@@ -92,8 +93,8 @@ class TestGuidedSession:
 def _make_response(
     *,
     control_signal: str | None = None,
-    edited_values: dict | None = None,
-    chosen: list | None = None,
+    edited_values: dict[str, object] | None = None,
+    chosen: list[str] | None = None,
 ) -> TurnResponse:
     return TurnResponse(
         chosen=chosen,
@@ -161,3 +162,100 @@ class TestStepAdvance:
         assert next_turn is None
         assert terminal is None
         assert directives == []
+
+    # ---------------------------------------------------------------------------
+    # Task 2.2 tests: Step 2 → Step 2.5 branch
+    # ---------------------------------------------------------------------------
+
+    def test_step_2_advances_after_required_fields_declared(self) -> None:
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_SINK,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a", "b"),
+                sample_rows=({"a": "1", "b": "2"},),
+            ),
+            step_2_result=None,
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response: TurnResponse = {
+            "chosen": None,
+            "edited_values": {
+                "outputs": [
+                    {
+                        "plugin": "json",
+                        "options": {"path": "out.jsonl"},
+                        "required_fields": ["a"],
+                        "schema_mode": "fixed",
+                    },
+                ],
+            },
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": None,
+        }
+
+        new_sess, _next, terminal, _events = step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+
+        assert new_sess.step is GuidedStep.STEP_2_5_RECIPE_MATCH
+        assert new_sess.step_2_result is not None
+        assert len(new_sess.step_2_result.outputs) == 1
+        assert terminal is None
+
+    def test_step_2_let_source_decide_sets_observed_mode(self) -> None:
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_SINK,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a", "b"),
+                sample_rows=({},),
+            ),
+            step_2_result=None,
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response: TurnResponse = {
+            "chosen": None,
+            "edited_values": {
+                "outputs": [
+                    {
+                        "plugin": "json",
+                        "options": {"path": "out.jsonl"},
+                        "required_fields": [],
+                        "schema_mode": "observed",
+                    },
+                ],
+            },
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": None,
+        }
+        new_sess, _next, _terminal, _events = step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+        assert new_sess.step_2_result is not None
+        assert new_sess.step_2_result.outputs[0].schema_mode == "observed"
+
+    def test_step_2_without_edited_values_raises(self) -> None:
+        """edited_values=None on a MULTI_SELECT_WITH_CUSTOM response must raise ValueError."""
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_SINK,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=None,
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response = _make_response(edited_values=None)
+        with pytest.raises(ValueError, match="multi_select_with_custom"):
+            step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)

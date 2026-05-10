@@ -287,7 +287,48 @@ def _advance_step_2(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    raise NotImplementedError("step 2 advance — implemented in Task 2.2")
+    """Handle a Step 2 (sink) response.
+
+    Only ``MULTI_SELECT_WITH_CUSTOM`` causes a step transition; all other Step 2
+    turn types are intra-step turns that do not advance the wizard.
+
+    The ``edited_values["outputs"]`` list is Tier-3 external data: each field
+    is coerced at this boundary (``str``, ``dict``, ``tuple``, ``str``) before
+    being stored in the audit-tier ``SinkOutputResolved`` dataclass.
+    """
+    if turn_type is not TurnType.MULTI_SELECT_WITH_CUSTOM:
+        return (session, None, None, [])
+
+    edited = response["edited_values"]
+    if edited is None:
+        raise ValueError("multi_select_with_custom response must carry edited_values")
+    raw_outputs = edited["outputs"]
+    outputs = tuple(
+        SinkOutputResolved(
+            plugin=str(o["plugin"]),
+            options=dict(o["options"]),
+            required_fields=tuple(o["required_fields"]),
+            schema_mode=str(o["schema_mode"]),
+        )
+        for o in raw_outputs
+    )
+    sink = SinkResolved(outputs=outputs)
+    directives = [
+        GuidedAuditDirective(
+            tool_name="guided_step_advanced",
+            arguments={
+                "prev_step": GuidedStep.STEP_2_SINK.value,
+                "next_step": GuidedStep.STEP_2_5_RECIPE_MATCH.value,
+                "reason": "user_advanced",
+            },
+        ),
+    ]
+    new_sess = replace(
+        session,
+        step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+        step_2_result=sink,
+    )
+    return (new_sess, None, None, directives)
 
 
 def _advance_step_2_5(

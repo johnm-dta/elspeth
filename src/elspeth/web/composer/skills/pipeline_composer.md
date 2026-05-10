@@ -1597,14 +1597,38 @@ There are **two ways a secret value can appear in YAML**, and only one of them i
 
 | Form | What it is | Audit/resolver behaviour |
 |------|------------|-------------------------|
-| `{secret_ref: "OPENROUTER_API_KEY"}` (mapping marker) | A **wired secret reference**, produced only by the `wire_secret_ref` tool. | Resolved at execution time via `WebSecretResolver` with full audit/fingerprint trail. |
+| `{secret_ref: "OPENROUTER_API_KEY"}` (mapping marker) | A **wired secret reference**. Produced either inline (in node options when calling `set_pipeline` / `upsert_node` for new nodes) or post-hoc (via `wire_secret_ref` for nodes already in state). | Resolved at execution time via `WebSecretResolver` with full audit/fingerprint trail. |
 | `"${OPENROUTER_API_KEY}"` (literal string) | A **raw env interpolation**. Not a wired reference. | Expanded directly from `os.environ` at settings load. Bypasses the secret resolver and the API/composer secret-availability contract. |
 
 **Rules:**
 
-1. **Always use the `wire_secret_ref` tool** to attach a secret to a plugin option. Never emit a literal `${VAR}` string and call it wired.
-2. **Discovery order:** call `list_secret_refs` first to see what's actually configured, then `validate_secret_ref` for the chosen name, then `wire_secret_ref` to attach it. The composer's secret-availability view and the runtime resolver agree only when the marker form is used.
-3. If you see a `${VAR}` literal in existing YAML, treat it as an unmigrated artifact: replace it via `wire_secret_ref` rather than carrying it forward.
+1. **For new nodes — pass the `{secret_ref: NAME}` marker inline in the node's options when calling `set_pipeline` or `upsert_node`.** This is the only path that works for new-node creation: `set_pipeline` is atomic, so a node whose required credential field is missing fails pydantic validation and the whole mutation rolls back. The inline marker is stripped from options before pydantic validation and resolved at execution time, which means the node lands in state with the secret already wired. Discovery order: call `list_secret_refs` first to see what's actually configured, then `validate_secret_ref` for the chosen name, then emit the marker inline.
+
+   ```yaml
+   # Worked example — canonical demo (web_scrape -> llm -> json sink).
+   # Pass api_key as a secret_ref marker directly in the llm transform's options.
+   nodes:
+     - id: classify
+       node_type: transform
+       plugin: llm
+       input: source_out
+       on_success: out
+       options:
+         provider: openrouter
+         model: openai/gpt-4o-mini
+         api_key: {secret_ref: OPENROUTER_API_KEY}   # <-- inline marker
+         template: "Summarise: {{content}}"
+         schema: {mode: observed}
+   ```
+
+   Equivalent JSON form for the `set_pipeline` tool call:
+
+   ```json
+   {"options": {"api_key": {"secret_ref": "OPENROUTER_API_KEY"}, ...}}
+   ```
+
+2. **For nodes that already exist in state** — call `wire_secret_ref` to attach the marker post-hoc. Discovery order: `list_secret_refs` → `validate_secret_ref(name)` → `wire_secret_ref(node="<id>", field="<credential_field>", ref="<NAME>")`. This path only works *after* the node has landed in state via a successful `upsert_node`/`set_pipeline` call.
+3. **Never emit a literal `${VAR}` string** and call it wired. The `${VAR}` form bypasses the secret resolver and produces an audit gap. If you see a `${VAR}` literal in existing YAML, treat it as an unmigrated artifact: replace it with the inline `{secret_ref: NAME}` marker.
 4. The `validate_secret_ref` tool answers "is this name resolvable in the current environment?" — if it says unavailable, the marker form will fail at execution, and the `${VAR}` form will silently pick up `os.environ` and produce an audit gap. Either way, surface the unavailability to the user; do not pick the bypass path.
 
 ### LLM Providers
@@ -1625,7 +1649,7 @@ There are **two ways a secret value can appear in YAML**, and only one of them i
 | `chroma_sink` | None (persistent mode) or host/port (client mode) | No API key for local persistent mode |
 | `database` | Embedded in connection URL | e.g., `postgresql://user:pass@host/db` — see note below <!-- secret-scan: allow-this-line: documented placeholder, not a real credential --> |
 
-**Database URLs containing inline credentials must be wired via `wire_secret_ref`.** The `DatabaseSinkConfig` has a single `url` field; embedding a literal `postgresql://user:pass@host/db` would put the password in the YAML. <!-- secret-scan: allow-this-line: documented placeholder, not a real credential --> Wire the whole URL as a secret ref — audit visibility into the database identity is preserved separately by `SanitizedDatabaseUrl` (the audit trail logs the host/database/user but never the password). Workflow: `list_secret_refs` → `validate_secret_ref(name)` → `wire_secret_ref(node="<sink_name>", field="url", ref="<NAME>")`.
+**Database URLs containing inline credentials must be wired as a secret_ref.** The `DatabaseSinkConfig` has a single `url` field; embedding a literal `postgresql://user:pass@host/db` would put the password in the YAML. <!-- secret-scan: allow-this-line: documented placeholder, not a real credential --> Wire the whole URL as a secret ref — audit visibility into the database identity is preserved separately by `SanitizedDatabaseUrl` (the audit trail logs the host/database/user but never the password). For new sinks: pass `url: {secret_ref: DATABASE_URL}` directly in the sink's options when calling `set_pipeline` or `set_output`. For existing sinks: `list_secret_refs` → `validate_secret_ref(name)` → `wire_secret_ref(node="<sink_name>", field="url", ref="<NAME>")`.
 
 Always check `list_secret_refs` to see what secrets the user has configured before choosing a provider.
 

@@ -1758,7 +1758,23 @@ def _credential_wiring_contract_failure(
     component_type: str,
     options: Any,
 ) -> ToolResult | None:
-    """Reject literal credentials before a mutation writes them into state."""
+    """Reject literal credentials before a mutation writes them into state.
+
+    The returned message advertises the *inline* secret_ref form first
+    because that is the only path that works for new nodes:
+
+    - ``set_pipeline`` is atomic, so a node whose options omit a required
+      credential field fails pydantic validation and the whole mutation
+      rolls back — meaning ``wire_secret_ref`` cannot be used to attach
+      the secret post-hoc (the node never lands in state).
+    - ``collect_credential_field_violations`` short-circuits on
+      ``{secret_ref: NAME}`` markers and ``set_pipeline`` strips those
+      markers before pydantic validation, so passing the marker inline
+      in the node's options is the supported new-node path.
+
+    The post-hoc ``wire_secret_ref`` sequence is still documented as
+    the secondary path for nodes that already exist in state.
+    """
     fields = tuple(dict.fromkeys(collect_credential_field_violations(options)))
     if not fields:
         return None
@@ -1767,10 +1783,16 @@ def _credential_wiring_contract_failure(
     field_list = ", ".join(credential_fields)
     repair_sequence = ("list_secret_refs", "validate_secret_ref", "wire_secret_ref")
     repair_text = "list_secret_refs -> validate_secret_ref -> wire_secret_ref"
+    inline_instruction = (
+        "Set `<field>: {secret_ref: NAME}` directly in the node's options "
+        "when calling set_pipeline / upsert_node. (The marker is stripped "
+        "before option validation and resolved at execution time.)"
+    )
+    post_hoc_instruction = f"Alternatively, after the node already exists in state, call {repair_text} to attach the marker post-hoc."
     error_msg = (
         f"Credential field(s) contain literal value(s): {field_list}. "
-        "Literal credential values were not stored. "
-        f"Use {repair_text} to attach a deferred {{secret_ref: NAME}} marker."
+        f"Literal credential values were not stored. {inline_instruction} "
+        f"{post_hoc_instruction}"
     )
     # Symmetric with _failure_result: lead validation.errors with the
     # rejection reason so LLMs reading the array in order see the
@@ -1792,11 +1814,14 @@ def _credential_wiring_contract_failure(
                 },
             ),
             "repair": {
-                "required_tool_sequence": repair_sequence,
-                "instruction": (
-                    "List available secret refs, validate the chosen name, then wire it "
-                    "to the named credential field. Do not type credential values into options."
-                ),
+                "inline_form": {
+                    "instruction": inline_instruction,
+                    "example_options": {field: {"secret_ref": "<NAME>"} for field in fields},
+                },
+                "post_hoc_form": {
+                    "instruction": post_hoc_instruction,
+                    "tool_sequence": repair_sequence,
+                },
             },
         },
     )
@@ -4628,6 +4653,42 @@ _VALIDATION_ERROR_PATTERNS: list[tuple[str, str, str]] = [
 ]
 
 
+def _extract_validator_expected_hint(error_text: str) -> str | None:
+    """Pull the ``Expected ...`` span out of a validator error string.
+
+    Pydantic and our schema-spec validators frequently emit errors like
+    ``"Field spec at index 0 is a dict with 2 keys. Expected single-key
+    dict like {'field_name': 'type'} or a string like 'field_name: type'."``.
+    The static catalogue fix below the substring discards that hint, so
+    the model only sees ``"Use get_pipeline_state ... patch_source_options"``
+    — which doesn't tell it what shape to actually emit. Returning the
+    ``Expected ...`` span verbatim lets the caller append it to
+    ``suggested_fix`` so the model can copy the shape directly.
+
+    The hint terminates at the next sentence boundary (``.`` followed by
+    whitespace or end-of-string) so a trailing ``"Got X. Other noise."``
+    doesn't get swept up.
+    """
+    idx = error_text.find("Expected ")
+    if idx == -1:
+        return None
+    rest = error_text[idx:]
+    end = len(rest)
+    for i, ch in enumerate(rest):
+        if ch == "." and (i + 1 == len(rest) or rest[i + 1].isspace()):
+            end = i + 1
+            break
+    return rest[:end].strip()
+
+
+def _augment_with_expected_hint(fix: str, error_text: str) -> str:
+    """Append the validator ``Expected ...`` hint to ``fix`` when present."""
+    hint = _extract_validator_expected_hint(error_text)
+    if hint is None:
+        return fix
+    return f"{fix} {hint}"
+
+
 def _execute_explain_validation_error(
     args: dict[str, Any],
     state: CompositionState,
@@ -4646,7 +4707,7 @@ def _execute_explain_validation_error(
                 data={
                     "error_text": error_text,
                     "explanation": explanation,
-                    "suggested_fix": fix,
+                    "suggested_fix": _augment_with_expected_hint(fix, error_text),
                 },
             )
     # No match — return a generic response
@@ -4658,7 +4719,10 @@ def _execute_explain_validation_error(
         data={
             "error_text": error_text,
             "explanation": "This error is not in the known pattern catalogue.",
-            "suggested_fix": "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+            "suggested_fix": _augment_with_expected_hint(
+                "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+                error_text,
+            ),
         },
     )
 

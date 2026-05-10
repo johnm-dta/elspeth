@@ -31,6 +31,7 @@ from elspeth.web.composer.tools import (
     ToolResult,
     _apply_merge_patch,
     _compute_validation_delta,
+    _credential_wiring_contract_failure,
     _failure_result,
     _inject_prior_validation,
     _prevalidate_plugin_options,
@@ -5236,6 +5237,110 @@ def _assert_secret_wiring_contract_failure(
     assert literal_value not in repr(result.to_dict())
 
 
+class TestCredentialRejectionAdvertisesInlineForm:
+    """Lock the credential-rejection error contract for elspeth-85ae8972b0.
+
+    The cheap composer model (gpt-5.x-mini class) cannot create a new node
+    that has a required credential field because:
+
+    - ``set_pipeline`` is atomic, so a node with ``api_key`` missing fails
+      pydantic validation and the whole mutation rolls back.
+    - ``wire_secret_ref`` requires the node to already exist in state.
+    - A literal credential value is rejected by this helper.
+
+    The escape hatch is to pass ``{secret_ref: NAME}`` *inline* as the
+    value of the credential field — supported by ``secrets.py`` and
+    stripped before pydantic validation in tools.py — but the rejection
+    message historically only advertised the ``wire_secret_ref`` tool
+    sequence (which is unusable for new nodes). This locks in the
+    inline-form-first messaging.
+    """
+
+    def test_error_message_contains_inline_form(self) -> None:
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="my_llm",
+            component_type="transform",
+            options={"api_key": "literal-secret"},
+        )
+        assert result is not None
+        assert result.success is False
+        error = result.data["error"]
+        # Inline form must appear (and appear before the post-hoc form).
+        assert "secret_ref" in error
+        assert "{secret_ref: NAME}" in error or "{secret_ref:" in error
+        # Inline form must be the lead — operator should see it before
+        # the post-hoc tool sequence.
+        inline_idx = error.find("set_pipeline")
+        post_hoc_idx = error.find("list_secret_refs -> validate_secret_ref -> wire_secret_ref")
+        assert inline_idx != -1, "inline form must reference set_pipeline / upsert_node"
+        assert post_hoc_idx != -1, "post-hoc form must remain documented"
+        assert inline_idx < post_hoc_idx, (
+            "Inline form must lead — model reads top-down and the wire_secret_ref path is unusable for new nodes."
+        )
+
+    def test_repair_payload_splits_inline_and_post_hoc(self) -> None:
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="my_llm",
+            component_type="transform",
+            options={"api_key": "literal-secret"},
+        )
+        assert result is not None
+        repair = result.data["repair"]
+        # Old key must be gone — no compatibility shim per CLAUDE.md.
+        assert "required_tool_sequence" not in repair
+        # New shape: two separately-keyed forms.
+        assert "inline_form" in repair
+        assert "post_hoc_form" in repair
+        inline = repair["inline_form"]
+        post_hoc = repair["post_hoc_form"]
+        # Inline form carries an example the model can copy verbatim.
+        assert "instruction" in inline
+        assert "example_options" in inline
+        assert inline["example_options"] == {"api_key": {"secret_ref": "<NAME>"}}
+        # Post-hoc form carries the tool sequence.
+        assert "instruction" in post_hoc
+        assert tuple(post_hoc["tool_sequence"]) == (
+            "list_secret_refs",
+            "validate_secret_ref",
+            "wire_secret_ref",
+        )
+
+    def test_existing_helper_assertion_still_holds(self) -> None:
+        """The legacy ``_assert_secret_wiring_contract_failure`` helper
+        looks for the post-hoc tool-sequence substring — keep it intact
+        so existing rejection-shape tests continue to lock in the
+        contract from the post-hoc side."""
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="my_llm",
+            component_type="transform",
+            options={"api_key": "literal-secret"},
+        )
+        assert result is not None
+        assert "list_secret_refs -> validate_secret_ref -> wire_secret_ref" in result.data["error"]
+
+    def test_multiple_fields_listed_with_single_inline_example_form(self) -> None:
+        """When multiple credential fields are violated, the example_options
+        payload should enumerate all of them so the model sees the inline
+        form for each one."""
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="db",
+            component_type="sink",
+            options={"api_key": "literal-1", "password": "literal-2"},
+        )
+        assert result is not None
+        example = result.data["repair"]["inline_form"]["example_options"]
+        assert set(example.keys()) == {"api_key", "password"}
+        assert all(v == {"secret_ref": "<NAME>"} for v in example.values())
+
+
 class TestSetPipelineSchemaShape:
     """Lock the ``set_pipeline`` schema shape so the elspeth-4e79436719 Bug A
     regression cannot return via a future schema edit.
@@ -6168,6 +6273,88 @@ class TestExplainValidationError:
         assert "patch_output_options" in result.data["suggested_fix"]
         assert "patch_source_options" in result.data["suggested_fix"]
         assert "patch_node_options" in result.data["suggested_fix"]
+
+    # ---------------------------------------------------------------------
+    # "Expected ..." hint surfacing — observation elspeth-obs-eb4509376c.
+    #
+    # The validator catches schema-spec mistakes and produces strings
+    # like ``"... Expected single-key dict like {'field_name': 'type'} ..."``.
+    # The handler used to throw away that hint entirely. These tests lock
+    # in that the hint is echoed verbatim into ``suggested_fix``.
+    # ---------------------------------------------------------------------
+
+    def test_surfaces_expected_hint_when_pattern_matches(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # The "Invalid options for source 'csv'" prefix matches an
+        # existing pattern; the inner "Expected ..." span is the actionable
+        # hint that the catalogue's static fix doesn't carry.
+        error_text = (
+            "Invalid options for source 'csv': Field spec at index 0 is a "
+            "dict with 2 keys. Expected single-key dict like "
+            "{'field_name': 'type'} or a string like 'field_name: type'."
+        )
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": error_text},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # Catalogue fix (from the matched pattern) is preserved.
+        assert "patch_source_options" in result.data["suggested_fix"]
+        # And the validator hint is appended verbatim.
+        assert ("Expected single-key dict like {'field_name': 'type'} or a string like 'field_name: type'.") in result.data["suggested_fix"]
+
+    def test_surfaces_expected_hint_when_no_pattern_matches(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        error_text = (
+            "Field spec at index 0 is a dict with 2 keys. Expected "
+            "single-key dict like {'field_name': 'type'} or a string "
+            "like 'field_name: type'."
+        )
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": error_text},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # Falls through to generic explanation but still surfaces the hint.
+        assert "not in the known pattern" in result.data["explanation"]
+        assert ("Expected single-key dict like {'field_name': 'type'} or a string like 'field_name: type'.") in result.data["suggested_fix"]
+
+    def test_no_hint_appended_when_expected_substring_absent(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "No source configured."},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # Without "Expected " the catalogue fix should be returned
+        # unchanged — no synthetic hint, no trailing whitespace artifacts.
+        assert result.data["suggested_fix"] == ("Use set_source to configure a source plugin (e.g. csv, json, dataverse).")
+
+    def test_expected_hint_stops_at_sentence_boundary(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        error_text = "Some preamble. Expected an integer. Got a string. Other noise."
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": error_text},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # The first sentence after "Expected " is what we surface.
+        # Trailing "Got a string. Other noise." should not be included.
+        assert "Expected an integer." in result.data["suggested_fix"]
+        assert "Got a string" not in result.data["suggested_fix"]
+        assert "Other noise" not in result.data["suggested_fix"]
 
 
 # ---------------------------------------------------------------------------

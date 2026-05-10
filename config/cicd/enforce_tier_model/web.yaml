@@ -745,28 +745,28 @@ allow_hits:
   safety: None branch raises RecipeValidationError listing available recipe names;
     never silently fabricates a recipe or coerces a missing entry.
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=eccc733dc0a2259d
+- key: web/execution/validation.py:R5:validate_pipeline:fp=6f4e67822581fe4b
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to extract
     plugin_name attribute
   safety: Type dispatch for error formatting, not contract masking; both branches
     produce validation checks
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=792e5fc1d3fa7443
+- key: web/execution/validation.py:R5:validate_pipeline:fp=f0ed91863378771b
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to prefer
     cause detail over generic str(exc)
   safety: Type dispatch for error formatting, not contract masking; both branches
     produce validation checks
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=a67556432afa3053
+- key: web/execution/validation.py:R1:validate_pipeline:fp=c6903597690d892e
   owner: web-execution
   reason: Validation checks optional source path/file keys supplied by composition
     state
   safety: Absent keys are treated honestly as 'no path provided' and the check is
     recorded as skipped/passed
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=84abeadcab507108
+- key: web/execution/validation.py:R1:validate_pipeline:fp=be655085e074f73a
   owner: web-execution
   reason: Validation checks optional output path/file keys supplied by composition
     state
@@ -898,30 +898,30 @@ allow_hits:
 
     '
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=610cbc29f4b0fb63
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=c9f04d71c92aa668
   owner: web-execution
   reason: Tree-walk — isinstance(Mapping) dispatches dict/list/scalar branches in
     recursive config traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=05a762ffc5978bb9
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=016598c8c3151d58
   owner: web-execution
   reason: Tree-walk — isinstance(ref, str) validates secret_ref marker value type
   safety: Non-string ref is silently skipped (malformed marker); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=7a556be625d846c3
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=d3d34fed237ded0f
   owner: web-execution
   reason: Tree-walk — isinstance() dispatches list/tuple branch in recursive config
     traversal
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=e3fce5e73dff4772
+- key: web/execution/validation.py:R5:validate_pipeline:fp=b7d91134b5bfc706
   owner: web-execution
   reason: isinstance(config_dict, dict) validates YAML parse output before resolve_secret_refs
     — yaml.safe_load can return non-dict for malformed input
   safety: Raises TypeError with diagnostic message; no error suppression
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=a5417f29ec9b9e2c
+- key: web/execution/validation.py:R5:validate_pipeline:fp=10045d5841840f5d
   owner: web-execution
   reason: EdgeContractError is the schema-validation subtype carrying component attribution
     and LLM repair suggestion data.
@@ -1465,7 +1465,7 @@ allow_hits:
     to record pass/fail vs exception metrics correctly.
   safety: Read-only dispatch for telemetry emission; no state mutation
   expires: null
-- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=f0cc44f1d6c44627
+- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
   owner: web-validation
   reason: Union type dispatch — function receives PluginNotFoundError | PluginConfigError,
     isinstance needed to read component_type attribute only present on PluginConfigError

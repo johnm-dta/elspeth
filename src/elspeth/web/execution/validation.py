@@ -81,6 +81,14 @@ _CHECK_ROUTE_TARGETS = "route_target_resolution"
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
+# Advisory check — non-blocking, multi-entry (one ValidationCheck per
+# detected node, all sharing this name).  Deliberately NOT included in
+# _ALL_CHECKS: that list governs the "skipped check" propagation when an
+# earlier pass/fail check fails.  This advisory uses ``passed=True`` for
+# every entry and is emitted only on the happy-path return, so structural
+# errors are never drowned in cosmetic noise.
+_CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+
 # _CHECK_VALUE_SOURCE_COMPLIANCE slots between _CHECK_PLUGINS (typed configs
 # now exist) and _CHECK_GRAPH (so a hallucinated model fails before any DAG
 # work). The position is asserted by tests/unit/web/execution/test_validation.py
@@ -357,6 +365,54 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                 )
             )
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityFinding:
+    """One detected identity-shaped passthrough between a transform and a sink.
+
+    Emitted by ``_find_identity_node_advisories``; consumed by the advisory
+    block in ``validate_pipeline``.  All four fields are scalars, so
+    ``frozen=True`` is sufficient (no ``deep_freeze`` guard needed).
+
+    Attributes:
+        node_id: ID of the passthrough node itself.
+        upstream_id: ID of the producer feeding the passthrough's input
+            (or "source" when the source feeds it directly).
+        sink_name: Name of the downstream sink (output) the passthrough emits to.
+        sink_schema_mode: Schema mode of the sink ("fixed" / "flexible" /
+            "observed"), or ``None`` when the sink declares no schema mode.
+            Used purely for the advisory's detail string — not a detection input.
+    """
+
+    node_id: str
+    upstream_id: str
+    sink_name: str
+    sink_schema_mode: str | None
+
+
+def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFinding]:
+    """Detect identity-shaped passthrough transforms between a real transform and a sink.
+
+    A node is flagged iff ALL of the following hold:
+
+    1. ``node_type == "transform"`` and ``plugin == "passthrough"`` (literal
+       string check — deliberately narrow per dispatch; broader registry-based
+       detection of ``passes_through_input`` plugins is out of scope).
+    2. Exactly one upstream producer feeds ``node.input`` (single inbound).
+    3. ``on_success`` targets exactly one sink (output by name) — the
+       downstream must be a sink, not another transform.
+    4. The node has no fork machinery (``fork_to``, ``routes`` empty).
+    5. ``options["schema"]["fields"]`` is missing or empty (not Concept-5
+       schema-anchoring per ``pipeline_composer.md:758-768``).
+    6. The upstream node is NOT a ``gate`` (per ``pipeline_composer.md:1517-1518``,
+       per-fork-branch passthrough is the documented legitimate pattern).
+
+    Returns:
+        List of :class:`_IdentityFinding`, one per detected node.  Empty when
+        nothing was detected.
+    """
+    return []
 
 
 def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[str]:

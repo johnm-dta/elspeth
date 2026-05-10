@@ -382,4 +382,99 @@ def _advance_step_3(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    raise NotImplementedError("step 3 advance — implemented in Task 2.5")
+    """Handle a Step 3 (transform chain) response.
+
+    Acceptance/rejection of a chain proposal is interpreted by the endpoint
+    handler (Task 4.4), which runs preview_pipeline and commits via tools.py.
+    step_advance is pure and does not mutate state on accept; the handler does.
+
+    Two legal turn types at Step 3:
+    - PROPOSE_CHAIN: The LLM has proposed a chain. Accept/reject is decided
+      by the endpoint handler after running preview_pipeline. step_advance
+      passes through unchanged.
+    - SINGLE_SELECT: A clarifying question was answered — no step change.
+      The handler interprets the response and either re-emits propose_chain
+      or asks another question.
+
+    Any other turn type is a protocol violation — raises ValueError.
+    """
+    if turn_type is TurnType.PROPOSE_CHAIN:
+        return (session, None, None, [])
+    if turn_type is TurnType.SINGLE_SELECT:
+        # Clarifying question answered — no step change. The handler interprets
+        # the response and either re-emits propose_chain or asks another question.
+        return (session, None, None, [])
+    raise ValueError(f"unexpected turn_type at step 3: {turn_type}")
+
+
+# ---------------------------------------------------------------------------
+# Terminal-failure helpers — standalone endpoint helpers for spec §5.4
+# ---------------------------------------------------------------------------
+
+
+def mark_solver_exhausted(
+    session: GuidedSession,
+    *,
+    validation_result: Mapping[str, Any] | None,
+) -> tuple[GuidedSession, TerminalState, list[GuidedAuditDirective]]:
+    """Endpoint helper: stamp the session as solver-exhausted and emit a directive.
+
+    Called by the Step 3 endpoint handler after repair attempt + advisor
+    consultation both fail (spec §5.4). Pure function; the route handler
+    fans the directive out to emit_dropped_to_freeform.
+
+    Returns ``(new_session, terminal, directives)`` where ``directives`` is
+    a ``list[GuidedAuditDirective]`` carrying the ``guided_dropped_to_freeform``
+    event (Errata C4). The route handler maps each directive to the matching
+    ``emit_*`` helper in ``composer/guided/audit.py``.
+    """
+    directives: list[GuidedAuditDirective] = [
+        GuidedAuditDirective(
+            tool_name="guided_dropped_to_freeform",
+            arguments={
+                "prev_step": session.step.value,
+                "drop_reason": TerminalReason.SOLVER_EXHAUSTED.value,
+                "validation_result": (dict(validation_result) if validation_result is not None else None),
+            },
+        ),
+    ]
+    terminal = TerminalState(
+        kind=TerminalKind.EXITED_TO_FREEFORM,
+        reason=TerminalReason.SOLVER_EXHAUSTED,
+        pipeline_yaml=None,
+    )
+    new_sess = replace(session, terminal=terminal)
+    return (new_sess, terminal, directives)
+
+
+def mark_protocol_violation(
+    session: GuidedSession,
+) -> tuple[GuidedSession, TerminalState, list[GuidedAuditDirective]]:
+    """Endpoint helper: stamp the session as protocol-violated and emit a directive.
+
+    Called by the route handler after the LLM emits an illegal turn type
+    twice in a row (spec §5.4). ``validation_result`` is ``None`` — the
+    violation is at the turn-type level, not the schema level.
+
+    Returns ``(new_session, terminal, directives)`` where ``directives`` is
+    a ``list[GuidedAuditDirective]`` carrying the ``guided_dropped_to_freeform``
+    event (Errata C4). The route handler maps each directive to the matching
+    ``emit_*`` helper in ``composer/guided/audit.py``.
+    """
+    directives: list[GuidedAuditDirective] = [
+        GuidedAuditDirective(
+            tool_name="guided_dropped_to_freeform",
+            arguments={
+                "prev_step": session.step.value,
+                "drop_reason": TerminalReason.PROTOCOL_VIOLATION.value,
+                "validation_result": None,
+            },
+        ),
+    ]
+    terminal = TerminalState(
+        kind=TerminalKind.EXITED_TO_FREEFORM,
+        reason=TerminalReason.PROTOCOL_VIOLATION,
+        pipeline_yaml=None,
+    )
+    new_sess = replace(session, terminal=terminal)
+    return (new_sess, terminal, directives)

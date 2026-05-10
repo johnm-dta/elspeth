@@ -7,6 +7,7 @@ import pytest
 
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
+    ChainProposal,
     GuidedSession,
     SinkOutputResolved,
     SinkResolved,
@@ -15,6 +16,8 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalReason,
     TerminalState,
     TurnRecord,
+    mark_protocol_violation,
+    mark_solver_exhausted,
     step_advance,
 )
 
@@ -371,3 +374,100 @@ class TestStepAdvance:
         response = _make_response(chosen=["nonsense"])
         with pytest.raises(ValueError, match="unexpected chosen for recipe_offer"):
             step_advance(sess, response, current_turn_type=TurnType.RECIPE_OFFER)
+
+    # ---------------------------------------------------------------------------
+    # Task 2.5 tests: Step 3 accept/edit/reject + terminal-failure paths
+    # ---------------------------------------------------------------------------
+
+    def test_step_3_accept_chain_marks_session_with_proposal(self) -> None:
+        """PROPOSE_CHAIN at STEP_3: step_advance is a no-op; handler interprets.
+
+        The session must pass through unchanged (step_advance is pure; the
+        endpoint handler runs preview_pipeline and commits via tools.py).
+        The step_3_proposal must remain on the session if it was already set.
+        """
+        proposal = ChainProposal(
+            steps=({"plugin": "rename", "options": {}, "rationale": "normalise names"},),
+            why="The source columns need renaming before sink.",
+        )
+        sess = GuidedSession(
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=SinkResolved(outputs=()),
+            step_3_proposal=proposal,
+            terminal=None,
+        )
+        response = _make_response()
+        new_sess, next_turn, terminal, directives = step_advance(
+            sess,
+            response,
+            current_turn_type=TurnType.PROPOSE_CHAIN,
+        )
+        assert new_sess is sess  # pure: no state change
+        assert new_sess.step_3_proposal is proposal
+        assert next_turn is None
+        assert terminal is None
+        assert directives == []
+
+    def test_step_3_unexpected_turn_type_raises(self) -> None:
+        """Any turn type other than PROPOSE_CHAIN or SINGLE_SELECT at Step 3 is a ValueError."""
+        sess = GuidedSession(
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=SinkResolved(outputs=()),
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response = _make_response()
+        with pytest.raises(ValueError, match="unexpected turn_type at step 3"):
+            step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+
+
+# ---------------------------------------------------------------------------
+# Task 2.5 tests: standalone terminal-failure helpers (spec §5.4)
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalHelpers:
+    def test_mark_solver_exhausted_sets_terminal_and_emits_directive(self) -> None:
+        sess = GuidedSession.initial()
+        new_sess, terminal, directives = mark_solver_exhausted(
+            sess,
+            validation_result={"errors": ["..."]},
+        )
+        assert new_sess.terminal is terminal
+        assert terminal.kind is TerminalKind.EXITED_TO_FREEFORM
+        assert terminal.reason is TerminalReason.SOLVER_EXHAUSTED
+        assert terminal.pipeline_yaml is None
+        # freeze_fields deep-freezes the arguments Mapping: list → tuple.
+        # The stored validation_result is MappingProxyType({'errors': ('...',)}).
+        assert any(
+            d.tool_name == "guided_dropped_to_freeform"
+            and d.arguments["drop_reason"] == "solver_exhausted"
+            and d.arguments["validation_result"] == {"errors": ("...",)}
+            for d in directives
+        )
+
+    def test_mark_solver_exhausted_with_none_validation(self) -> None:
+        sess = GuidedSession.initial()
+        _, _, directives = mark_solver_exhausted(sess, validation_result=None)
+        assert directives[0].arguments["validation_result"] is None
+
+    def test_mark_protocol_violation_sets_terminal_and_emits_directive(self) -> None:
+        sess = GuidedSession.initial()
+        _new_sess, terminal, directives = mark_protocol_violation(sess)
+        assert terminal.kind is TerminalKind.EXITED_TO_FREEFORM
+        assert terminal.reason is TerminalReason.PROTOCOL_VIOLATION
+        assert any(d.tool_name == "guided_dropped_to_freeform" and d.arguments["drop_reason"] == "protocol_violation" for d in directives)

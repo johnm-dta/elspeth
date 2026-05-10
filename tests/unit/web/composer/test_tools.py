@@ -2195,6 +2195,7 @@ class TestToolRegistry:
             "explain_validation_error",
             "get_plugin_assistance",
             "list_models",
+            "get_audit_info",
             "list_recipes",
             "get_pipeline_state",
             "preview_pipeline",
@@ -6221,6 +6222,100 @@ class TestListModels:
         providers = result.data.get("providers", {})
         # Must not contain the non-round-trippable "(no provider)" label
         assert "(no provider)" not in providers
+
+
+# ---------------------------------------------------------------------------
+# get_audit_info tool tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetAuditInfo:
+    """``get_audit_info`` returns CONSTANT facts about the Landscape audit.
+
+    The audit backend is operator-managed (``WebSettings.get_landscape_url()``)
+    and intentionally not composer-controllable (security fix S1, see
+    ``web/composer/yaml_generator.py:179``). This tool exists so the LLM can
+    answer "is audit on, can I configure it?" without inventing a backend
+    type and without leaking operator-internal config (URL, encryption key)
+    into chat. These tests pin down both behaviours.
+    """
+
+    def test_returns_enabled_true_and_not_modifiable(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        assert result.success is True
+        assert result.data["enabled"] is True
+        assert result.data["composer_modifiable"] is False
+
+    def test_summary_fields_present_and_non_empty(self) -> None:
+        """The model paraphrases ``summary``; an empty string here would let it invent text."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        assert isinstance(result.data["summary"], str) and result.data["summary"].strip()
+        assert isinstance(result.data["audit_export_summary"], str) and result.data["audit_export_summary"].strip()
+
+    def test_payload_never_leaks_operator_internal_fields(self) -> None:
+        """Regression guard: never expose URL/DSN/path/encryption-key fields.
+
+        If a future edit adds any of these as a top-level key OR embeds them
+        into one of the existing string fields, this test fails. The audit
+        URL is operator-internal — surfacing it to the LLM would defeat the
+        purpose of S1 (the LLM might echo it back to the user, log it to
+        chat history, or use it to construct a sink shape).
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        forbidden_keys = {
+            "url",
+            "dsn",
+            "path",
+            "database_url",
+            "landscape_url",
+            "encryption_key",
+            "encryption_key_env",
+            "passphrase",
+            "backend",
+        }
+        assert forbidden_keys.isdisjoint(result.data.keys()), (
+            f"get_audit_info leaked operator-internal keys into payload: {forbidden_keys & result.data.keys()}"
+        )
+
+        # Also string-scan the values: a future change might inline a path
+        # into the summary text. Catch obvious DSN / sqlite path patterns.
+        joined_text = " ".join(v for v in result.data.values() if isinstance(v, str)).lower()
+        for forbidden_substring in ("sqlite:///", "postgresql://", "postgres://", ".db", "/audit", "audit.db"):
+            assert forbidden_substring not in joined_text, (
+                f"get_audit_info summary text contains forbidden DSN/path substring "
+                f"{forbidden_substring!r} — operator-internal config must not be "
+                f"echoed into the LLM context (security fix S1)."
+            )
+
+    def test_state_is_unchanged(self) -> None:
+        """Discovery tool MUST NOT mutate state — updated_state is the same instance."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        assert result.updated_state is state
+
+    def test_is_registered_as_cacheable_discovery(self) -> None:
+        """Result is constant per compose call — should be cacheable."""
+        from elspeth.web.composer.tools import (
+            is_cacheable_discovery_tool,
+            is_discovery_tool,
+        )
+
+        assert is_discovery_tool("get_audit_info")
+        assert is_cacheable_discovery_tool("get_audit_info")
+
+    def test_appears_in_tool_definitions(self) -> None:
+        """The tool must be advertised in the LLM-visible function list."""
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        names = {defn["name"] for defn in get_tool_definitions()}
+        assert "get_audit_info" in names
 
 
 # ---------------------------------------------------------------------------

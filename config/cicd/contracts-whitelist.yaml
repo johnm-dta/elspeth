@@ -644,6 +644,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_execute_explain_validation_error:args"
   - "src/elspeth/web/composer/tools.py:_execute_get_plugin_assistance:args"
   - "src/elspeth/web/composer/tools.py:_execute_list_models:args"
+  - "src/elspeth/web/composer/tools.py:_execute_get_audit_info:args"
   - "src/elspeth/web/composer/tools.py:_execute_preview_pipeline:args"
   - "src/elspeth/web/composer/tools.py:diff_states:return"
   - "src/elspeth/web/composer/redaction.py:redact_source_storage_path:state_dict"

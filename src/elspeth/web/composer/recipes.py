@@ -403,6 +403,189 @@ def _build_threshold_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Recipe 3: fork-coalesce-truncate-jsonl
+#
+#   csv source (blob)  →  fork gate (routes:{all:fork}, fork_to:[a_in, b_in])
+#                       →  passthrough (path A)        + truncate (path B)
+#                       →  coalesce (merge=nested, keys=key_a/key_b)
+#                       →  jsonl sink (one merged output)
+#
+# Wiring discipline (gate.fork_to ↔ path.input/on_success ↔ coalesce.branches)
+# is encoded once here so the LLM agent never has to maintain it. Slot-fillable
+# axes: which CSV blob, which field to truncate, max length, suffix, output
+# path, and the two top-level merge keys. Path A is fixed as ``passthrough``
+# because the canonical use case is "keep the original row alongside a
+# transformed copy"; alternative path-A transforms would be a different
+# recipe.
+# ---------------------------------------------------------------------------
+
+
+_RECIPE3_SLOTS: Final[dict[str, SlotSpec]] = {
+    "source_blob_id": SlotSpec(
+        slot_type="blob_id",
+        description="UUID of the operator-supplied CSV blob (use create_blob to wrap inline content first)",
+    ),
+    "truncate_field": SlotSpec(
+        slot_type="str",
+        description="Name of the row field that path B truncates (e.g., 'description'). Path A leaves the row unchanged.",
+    ),
+    "max_chars": SlotSpec(
+        slot_type="int",
+        description=(
+            "Maximum length of the truncated field on path B (suffix counts toward this length, "
+            "so it must be strictly greater than the suffix length)."
+        ),
+    ),
+    "truncation_suffix": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="...",
+        description="Suffix appended when truncation occurs on path B (e.g., '...').",
+    ),
+    "output_path": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="outputs/merged.jsonl",
+        description="JSONL output path for the merged rows.",
+    ),
+    "key_a": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="path_a",
+        description="Top-level field in each merged output row that holds the unchanged-path row body.",
+    ),
+    "key_b": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="path_b",
+        description="Top-level field in each merged output row that holds the truncated-path row body.",
+    ),
+}
+
+
+def _build_fork_coalesce_truncate_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
+    """Build set_pipeline args for the fork-coalesce-truncate-jsonl recipe.
+
+    Path A is ``passthrough`` (row unchanged); path B is ``truncate`` with the
+    operator-named field clipped to ``max_chars`` (with optional suffix). The
+    coalesce node merges both paths under operator-supplied keys via
+    ``merge: nested``, so the output rows are ``{key_a: <full row>, key_b:
+    <truncated row>}``.
+
+    Wiring discipline: ``coalesce.branches`` is list-form (``NodeSpec.branches``
+    is ``tuple[str, ...]``), so branch names ARE the connection names. With
+    ``merge: nested`` those branch names become the top-level keys of the
+    merged output row — meaning the operator-supplied ``key_a`` / ``key_b``
+    drive both (a) the path-transform ``on_success`` connection names and
+    (b) the merged-row output keys. The gate's ``fork_to`` uses an ``_in``
+    suffix on the same names to differentiate the upstream-of-path connection
+    from the downstream-of-path connection.
+    """
+    key_a = slots["key_a"]
+    key_b = slots["key_b"]
+    truncate_field = slots["truncate_field"]
+    max_chars = slots["max_chars"]
+    suffix = slots["truncation_suffix"]
+    branch_a_input = f"{key_a}_in"
+    branch_b_input = f"{key_b}_in"
+    return {
+        "source": {
+            "plugin": "csv",
+            "blob_id": slots["source_blob_id"],
+            "on_success": "rows",
+            "options": {
+                "schema": {"mode": "observed"},
+            },
+            "on_validation_failure": "discard",
+        },
+        "nodes": [
+            {
+                "id": "fork_gate",
+                "node_type": "gate",
+                "input": "rows",
+                # validate_boolean_routes contract: routes must have at least one
+                # entry; for fork the canonical form is a single entry routing
+                # the literal "all" predicate to the literal "fork" destination.
+                "routes": {"all": "fork"},
+                # fork_to publishes one connection per branch. Path-transforms
+                # consume these as their `input`. Names are recipe-private —
+                # the operator does not see them and the LLM never authors them.
+                "fork_to": [branch_a_input, branch_b_input],
+            },
+            {
+                "id": "path_a_passthrough",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": branch_a_input,
+                # Publishes connection named `key_a`; coalesce.branches lists
+                # this name and `merge: nested` keys the output by it.
+                "on_success": key_a,
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                },
+            },
+            {
+                "id": "path_b_truncate",
+                "node_type": "transform",
+                "plugin": "truncate",
+                "input": branch_b_input,
+                "on_success": key_b,
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "fields": {truncate_field: max_chars},
+                    "suffix": suffix,
+                },
+            },
+            {
+                "id": "merge_paths",
+                "node_type": "coalesce",
+                # ``input`` is required by NodeSpec for every node, but the
+                # producer-resolver special-cases coalesce (it walks
+                # ``branches`` for routing, not ``input``). The literal
+                # sentinel ``"branches"`` is the established convention
+                # (see tests/unit/web/composer/test_producer_resolver.py).
+                "input": "branches",
+                # List form: branch names == connection names == output
+                # keys (under ``merge: nested``). NodeSpec.branches is
+                # ``tuple[str, ...]`` so dict form is not representable
+                # at the composer layer.
+                "branches": [key_a, key_b],
+                "policy": "require_all",
+                "merge": "nested",
+                "on_success": "merged_rows",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "merged_rows",
+                "plugin": "json",
+                "options": {
+                    "path": slots["output_path"],
+                    "format": "jsonl",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {
+            "name": "fork-coalesce-truncate-jsonl",
+            "description": (
+                f"Fork+coalesce: each row produces one merged output row with "
+                f"'{key_a}' (unchanged) and '{key_b}' (field '{truncate_field}' "
+                f"truncated to {max_chars} chars with suffix {suffix!r}); "
+                f"written to {slots['output_path']}"
+            ),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -431,6 +614,22 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE2_SLOTS,
         build=_build_threshold_recipe,
+    ),
+    "fork-coalesce-truncate-jsonl": RecipeSpec(
+        name="fork-coalesce-truncate-jsonl",
+        description=(
+            "Fork+coalesce: process each CSV row two ways in parallel and "
+            "merge into a single output row. Path A keeps the row unchanged; "
+            "path B truncates a named field to a maximum length (with optional "
+            "suffix). The merged output row exposes both paths as named "
+            "top-level fields. Use for: 'process each row two ways and combine', "
+            "'keep the original alongside a truncated copy', 'fan out then "
+            "rejoin under separate keys'. Wiring (gate.fork_to ↔ path.on_success "
+            "↔ coalesce.branches naming invariants) is server-side and not the "
+            "agent's responsibility."
+        ),
+        slots=_RECIPE3_SLOTS,
+        build=_build_fork_coalesce_truncate_recipe,
     ),
 }
 

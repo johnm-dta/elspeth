@@ -573,7 +573,7 @@ ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 35 tools: 11 discovery + 13 mutation + 7 blob tools + 3 secret
+    Returns 39 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
     tools + 1 advisor tool. ``request_advisor_hint`` is the only tool that
     is filtered out of the LLM-visible list when the operator's
     ``composer_advisor_enabled`` flag is False (the default) — see
@@ -1274,6 +1274,21 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 },
                 "required": [],
             },
+        },
+        {
+            "name": "get_audit_info",
+            "description": (
+                "Return facts about ELSPETH's Landscape audit trail. Call this BEFORE "
+                "answering any user question that mentions audit logging, audit "
+                "database, SQLite/Postgres audit, audit backend, audit export, "
+                "Landscape, or 'how do I record what the pipeline did'. Audit is "
+                "mandatory and operator-managed; the composer cannot configure the "
+                "backend (security boundary — see yaml_generator.py:179, fix S1). "
+                "Returns enabled status, composer_modifiable flag, and a canonical "
+                "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
+                "that is operator-internal and intentionally not surfaced to the LLM."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
         {
             "name": "preview_pipeline",
@@ -4733,6 +4748,53 @@ def _execute_get_plugin_assistance(
     return _discovery_result(state, payload)
 
 
+def _execute_get_audit_info(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return constant facts about the Landscape audit trail.
+
+    Audit is mandatory (`LandscapeSettings` rejects `enabled=false` at
+    config validation time) and the backend URL is operator-managed via
+    `WebSettings.get_landscape_url()` — security fix S1, see
+    `web/composer/yaml_generator.py:179`. Letting the composer set the
+    audit backend would let a user prompt redirect the audit trail to an
+    attacker DB, disable encryption, or split audit across stores.
+
+    The returned payload is a constant — no `WebSettings` access — so
+    operator-internal config (URL, backend type, encryption-key env var)
+    never reaches the LLM context. The model paraphrases `summary`; it
+    does not need the URL itself.
+    """
+    payload = {
+        "enabled": True,
+        "composer_modifiable": False,
+        "summary": (
+            "Landscape audit is mandatory and always on for every pipeline run. "
+            "The audit backend (database type, location, encryption) is configured "
+            "by the operator at deploy time and is intentionally NOT addressable "
+            "from the composer — letting the composer set it would be a security "
+            "regression (audit-DSN injection, encryption bypass, audit split-brain). "
+            "When a user asks for 'audit logging', 'SQLite audit', or similar: "
+            "acknowledge that audit is already enabled for every run, do NOT add a "
+            "sink shape for it, and do NOT silently remove an audit-shaped node by "
+            "treating it as 'unconnected'. To inspect past runs, point the user at "
+            "the Landscape MCP forensic tools."
+        ),
+        "audit_export_summary": (
+            "A separate optional feature ('landscape.export') can copy each run's "
+            "audit data to an additional sink for offline review. This is also "
+            "operator-configured and is not currently composer-controllable. If a "
+            "user asks for 'export the audit data to a file', explain that this is "
+            "an operator-side configuration and is not part of the pipeline the "
+            "composer is building."
+        ),
+    }
+    return _discovery_result(state, payload)
+
+
 def _execute_list_models(
     args: dict[str, Any],
     state: CompositionState,
@@ -5288,6 +5350,7 @@ _DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "explain_validation_error": _execute_explain_validation_error,
     "get_plugin_assistance": _execute_get_plugin_assistance,
     "list_models": _execute_list_models,
+    "get_audit_info": _execute_get_audit_info,
     "list_recipes": _execute_list_recipes,
     "get_pipeline_state": _execute_get_pipeline_state,
     "preview_pipeline": _execute_preview_pipeline,

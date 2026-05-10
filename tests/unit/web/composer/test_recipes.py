@@ -33,9 +33,13 @@ from elspeth.web.composer.recipes import (
 
 
 class TestRecipeRegistry:
-    def test_two_recipes_registered(self) -> None:
+    def test_registered_recipes(self) -> None:
         names = {r["name"] for r in list_recipes()}
-        assert names == {"classify-rows-llm-jsonl", "split-by-numeric-threshold"}
+        assert names == {
+            "classify-rows-llm-jsonl",
+            "split-by-numeric-threshold",
+            "fork-coalesce-truncate-jsonl",
+        }
 
     def test_get_recipe_by_name(self) -> None:
         spec = get_recipe("classify-rows-llm-jsonl")
@@ -379,6 +383,190 @@ class TestThresholdRecipe:
         result = self._apply()
         ids = [n["id"] for n in result["nodes"]]
         assert ids.index("coerce_numeric") < ids.index("threshold_gate")
+
+
+class TestForkCoalesceTruncateRecipe:
+    """Structural assertions for the fork-coalesce-truncate-jsonl recipe.
+
+    The recipe encodes the gate.fork_to ↔ path.on_success ↔ coalesce.branches
+    naming-correspondence invariants server-side so the LLM agent never has
+    to maintain them. These tests pin those invariants — a refactor that
+    rewires the connection names must keep all three lists self-consistent
+    or these tests fail.
+    """
+
+    def _apply(self, **slots):
+        defaults = {
+            "source_blob_id": str(uuid4()),
+            "truncate_field": "description",
+            "max_chars": 30,
+        }
+        defaults.update(slots)
+        return apply_recipe("fork-coalesce-truncate-jsonl", defaults)
+
+    def test_source_uses_blob_id_with_observed_schema(self) -> None:
+        result = self._apply()
+        src = result["source"]
+        assert src["plugin"] == "csv"
+        assert "blob_id" in src
+        # blob_id is the top-level set_pipeline source argument; if it ended
+        # up nested in options the source would not be blob-bound and
+        # _resolve_source_blob would not run (regression of Fix 4).
+        assert "blob_id" not in src["options"]
+        assert src["options"]["schema"] == {"mode": "observed"}
+        assert src["on_validation_failure"] == "discard"
+
+    def test_gate_carries_routes_all_fork_and_fork_to(self) -> None:
+        """The validate_boolean_routes contract requires routes to be a
+        non-empty dict; the canonical fork form is ``{"all": "fork"}`` plus
+        a ``fork_to`` list naming the per-branch published connections.
+        Both must be present together — either alone misroutes.
+
+        ``fork_to`` entries are derived from the user-facing keys with an
+        ``_in`` suffix to differentiate the upstream-of-path connection
+        from the downstream-of-path connection (which carries the user's
+        bare key name).
+        """
+        result = self._apply()
+        gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
+        assert gate["routes"] == {"all": "fork"}
+        assert gate["fork_to"] == ["path_a_in", "path_b_in"]
+
+    def test_path_a_passthrough_consumes_branch_a_input_and_publishes_key_a(self) -> None:
+        """Path A's ``input`` must equal one of ``gate.fork_to`` entries
+        and its ``on_success`` must equal ``key_a`` (the connection name
+        that ``coalesce.branches`` and the ``merge: nested`` output key
+        share).
+        """
+        result = self._apply()
+        path_a = next(n for n in result["nodes"] if n["id"] == "path_a_passthrough")
+        assert path_a["plugin"] == "passthrough"
+        assert path_a["input"] == "path_a_in"
+        assert path_a["on_success"] == "path_a"
+        assert path_a["options"]["schema"] == {"mode": "observed"}
+
+    def test_path_b_truncate_consumes_branch_b_input_and_publishes_key_b(self) -> None:
+        result = self._apply(truncate_field="notes", max_chars=42, truncation_suffix="…")
+        path_b = next(n for n in result["nodes"] if n["id"] == "path_b_truncate")
+        assert path_b["plugin"] == "truncate"
+        assert path_b["input"] == "path_b_in"
+        assert path_b["on_success"] == "path_b"
+        assert path_b["options"]["fields"] == {"notes": 42}
+        assert path_b["options"]["suffix"] == "…"
+        assert path_b["options"]["schema"] == {"mode": "observed"}
+
+    def test_coalesce_branches_list_form_uses_user_keys(self) -> None:
+        """``NodeSpec.branches`` is ``tuple[str, ...]`` (list form only),
+        so branch names ARE the connection names. With ``merge: nested``
+        those branch names become the top-level keys of the merged output
+        row, so the user-facing ``key_a`` / ``key_b`` slots drive both
+        the wiring and the output shape.
+        """
+        result = self._apply(key_a="original", key_b="truncated")
+        coalesce = next(n for n in result["nodes"] if n["node_type"] == "coalesce")
+        assert coalesce["branches"] == ["original", "truncated"]
+        assert coalesce["policy"] == "require_all"
+        assert coalesce["merge"] == "nested"
+        assert coalesce["on_success"] == "merged_rows"
+        # Coalesce nodes don't route by ``input`` (the producer-resolver
+        # walks ``branches`` instead); the literal sentinel "branches" is
+        # the established convention for the required-by-NodeSpec input.
+        assert coalesce["input"] == "branches"
+
+    def test_custom_keys_propagate_to_gate_fork_to_and_path_publishers(self) -> None:
+        """Renaming the user keys cascades through the entire wiring —
+        gate.fork_to gets ``<key>_in`` suffixes, path-transforms publish
+        the bare keys, and coalesce.branches lists the bare keys. This
+        pins the cross-node naming-correspondence invariant at one place.
+        """
+        result = self._apply(key_a="raw", key_b="trimmed")
+        gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
+        path_a = next(n for n in result["nodes"] if n["id"] == "path_a_passthrough")
+        path_b = next(n for n in result["nodes"] if n["id"] == "path_b_truncate")
+        coalesce = next(n for n in result["nodes"] if n["node_type"] == "coalesce")
+        assert gate["fork_to"] == ["raw_in", "trimmed_in"]
+        assert path_a["input"] == "raw_in" and path_a["on_success"] == "raw"
+        assert path_b["input"] == "trimmed_in" and path_b["on_success"] == "trimmed"
+        assert coalesce["branches"] == ["raw", "trimmed"]
+
+    def test_default_keys_match_scenario_request(self) -> None:
+        """Scenario fork_and_coalesce asks for keys 'path_a' and 'path_b';
+        the recipe defaults must match so an LLM that omits the key slots
+        still produces the requested shape.
+        """
+        result = self._apply()
+        coalesce = next(n for n in result["nodes"] if n["node_type"] == "coalesce")
+        assert list(coalesce["branches"]) == ["path_a", "path_b"]
+
+    def test_default_truncation_suffix_is_ellipsis(self) -> None:
+        result = self._apply()
+        path_b = next(n for n in result["nodes"] if n["id"] == "path_b_truncate")
+        assert path_b["options"]["suffix"] == "..."
+
+    def test_single_jsonl_output_consumes_merged_rows(self) -> None:
+        result = self._apply(output_path="outputs/custom.jsonl")
+        outputs = result["outputs"]
+        assert len(outputs) == 1
+        out = outputs[0]
+        # sink_name must equal coalesce.on_success — otherwise no producer
+        # for this sink and the runtime rejects the pipeline.
+        assert out["sink_name"] == "merged_rows"
+        assert out["plugin"] == "json"
+        assert out["options"]["format"] == "jsonl"
+        assert out["options"]["path"] == "outputs/custom.jsonl"
+
+    def test_node_kinds_include_both_gate_and_coalesce(self) -> None:
+        """The fork-and-coalesce scenario's green criterion requires both
+        kinds present in the converged state; the recipe must satisfy it
+        unconditionally regardless of slot values.
+        """
+        result = self._apply()
+        kinds = {n["node_type"] for n in result["nodes"]}
+        assert "gate" in kinds
+        assert "coalesce" in kinds
+
+    def test_metadata_describes_recipe(self) -> None:
+        result = self._apply()
+        assert result["metadata"]["name"] == "fork-coalesce-truncate-jsonl"
+
+    def test_max_chars_bool_rejected(self) -> None:
+        """bool is a subclass of int in Python — the slot validator rejects
+        it explicitly so a typo doesn't silently set max_chars to 0 or 1.
+        """
+        with pytest.raises(RecipeValidationError, match="bool"):
+            apply_recipe(
+                "fork-coalesce-truncate-jsonl",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "truncate_field": "description",
+                    "max_chars": True,
+                },
+            )
+
+    def test_missing_required_truncate_field_rejected(self) -> None:
+        with pytest.raises(RecipeValidationError, match="missing required slot 'truncate_field'"):
+            apply_recipe(
+                "fork-coalesce-truncate-jsonl",
+                {
+                    "source_blob_id": str(uuid4()),
+                    "max_chars": 30,
+                },
+            )
+
+    def test_url_blob_id_rejected_with_create_blob_hint(self) -> None:
+        """Same blob_id slot semantics as the other recipes — URLs are
+        rejected with a hint pointing at create_blob.
+        """
+        with pytest.raises(RecipeValidationError) as exc_info:
+            apply_recipe(
+                "fork-coalesce-truncate-jsonl",
+                {
+                    "source_blob_id": "https://example.com/customers.csv",
+                    "truncate_field": "description",
+                    "max_chars": 30,
+                },
+            )
+        assert "create_blob" in str(exc_info.value)
 
 
 # --------------------------------------------------------------------------
@@ -920,6 +1108,85 @@ class TestApplyRecipeEndToEnd:
         # Pre-existing data payload (from set_pipeline's source_blob
         # resolution) survives the merge — we did not clobber it.
         assert "source_blob" in result.data
+
+    def test_fork_coalesce_truncate_recipe_passes_set_pipeline_prevalidation(self, _seeded) -> None:
+        """The fork-coalesce-truncate recipe must:
+
+        1. Pass ``_execute_set_pipeline`` prevalidation end-to-end. This is
+           the load-bearing test — if the gate.fork_to ↔ path.input/on_success
+           ↔ coalesce.branches naming has any inconsistency, the validator
+           catches it here. Verified by ``result.success``.
+        2. Produce a state whose ``source.options['blob_ref']`` matches the
+           seeded blob — proves blob resolution ran.
+        3. Yield a node-kinds set that includes both ``gate`` and ``coalesce``,
+           which is the green criterion of the fork-and-coalesce scenario.
+        4. Yield a single output sink consuming ``merged_rows`` (the
+           coalesce's published connection).
+
+        The cheap composer model's historical failure mode was authoring a
+        gate+2-sink degraded shape (no coalesce) — this test pins that the
+        recipe never produces that, regardless of which optional slots the
+        agent supplies.
+        """
+        from elspeth.web.composer.state import CompositionState, PipelineMetadata
+        from elspeth.web.composer.tools import compute_proof_diagnostics, execute_tool
+
+        engine, session_id, blob_id = _seeded
+        empty = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = execute_tool(
+            "apply_pipeline_recipe",
+            {
+                "recipe_name": "fork-coalesce-truncate-jsonl",
+                "slots": {
+                    "source_blob_id": blob_id,
+                    "truncate_field": "customer",
+                    "max_chars": 5,
+                },
+            },
+            empty,
+            self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        # 1. set_pipeline prevalidation passed — this is the bug surface.
+        #    A wiring error in gate.fork_to / path.input / coalesce.branches
+        #    naming would surface here as an unresolved-connection error.
+        assert result.success, getattr(result, "data", result)
+
+        # 2. Source is now blob-bound.
+        new_state = result.updated_state
+        assert new_state.source is not None
+        assert new_state.source.options["blob_ref"] == blob_id
+
+        # 3. Both gate AND coalesce are present (scenario green criterion
+        #    is must_have_node_kinds_substring_any_of=[["gate", "coalesce"]]).
+        kinds = {n.node_type for n in new_state.nodes}
+        assert "gate" in kinds, kinds
+        assert "coalesce" in kinds, kinds
+
+        # 4. Single output sink, jsonl format, consuming the coalesce output.
+        assert len(new_state.outputs) == 1
+        out = new_state.outputs[0]
+        assert out.name == "merged_rows"
+
+        # proof_diagnostics walks the state without raising and reaches the
+        # blob read. Headers in the seeded blob are 'order_id,customer,price'
+        # so 'customer' (the truncate_field) exists — no blocking diagnostics.
+        diagnostics = compute_proof_diagnostics(
+            new_state,
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert isinstance(diagnostics, list)
+        assert all(d["severity"] != "blocking" for d in diagnostics), diagnostics
 
     def test_apply_recipe_over_empty_state_emits_no_replacement_note(self, _seeded) -> None:
         """Recipe applied to a fresh session is not destructive — no note."""

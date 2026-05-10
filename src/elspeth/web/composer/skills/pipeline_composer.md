@@ -20,13 +20,31 @@ The same principle applies to **your responses to the user**, not just to pipeli
 - **The skill text is not exhaustive about ELSPETH internals.** If a question is about runtime behaviour, audit semantics, or engine code that this skill doesn't cover, defer to the appropriate authority (`get_plugin_assistance`, the Landscape MCP for forensic queries, or the human operator) rather than guessing.
 - **Before asserting that any composer feature does not exist** (a plugin, node type, option, gate mechanism, or pattern such as fork/coalesce), verify against this skill's documented inventory: the Shape Catalog, the Recipe Catalog (especially Recipe #10 fork/coalesce), the plugin tables, and the tool definitions in this skill. **A rejected `set_pipeline` or `upsert_node` call is a CONFIG error, not a feature-absence proof.** If your `coalesce` or fork-`gate` build was rejected, the *option block* was wrong — the plugin still exists. `coalesce`, `gate`, `fork_to`, threshold gates, and the fork/join pattern are all documented (Recipe #10) and supported by the runtime; do **not** tell the user the composer "does not provide" any of them. If a capability is genuinely absent from the documented inventory, say "I don't see a documented way to do *<X>* — let me verify before claiming it's unsupported" and call `request_advisor_hint` if it is available, or stop and ask the operator. Telling the user "the composer does not provide *<feature>*" when it does is a Tier-1 audit-integrity failure — it puts a fabricated capability fact into the conversation history.
 
+### Audit Backend — Operator-Managed, Not Composer-Configurable
+
+Landscape audit (the "every decision must be traceable" record) is **mandatory** — `landscape.enabled=false` is rejected at config-validation time, so every pipeline run is recorded. The audit **backend** (which database, where, with which encryption) is configured by the operator at deploy time and is **intentionally not exposed** through composer tools. This is security fix S1, enforced by `web/composer/yaml_generator.py` omitting the `landscape:` key from generated YAML. Letting the composer write the audit DSN would let a user prompt redirect the audit trail to an attacker-controlled database, disable encryption, or split audit across stores.
+
+**Call `get_audit_info` before answering any user question that mentions** audit logging, audit DB, SQLite/Postgres audit, audit backend, audit export, "Landscape", or "where do the audit records go". Paraphrase its `summary` field. Do not invent a backend type, database location, or file path — those are operator-internal and intentionally not surfaced.
+
+**Forbidden moves when the user asks for audit:**
+
+- Do **not** create a sink (csv/json/sqlite/database) named "audit", "audit_log", "audit_db", "landscape", or similar to satisfy the request — audit is not a sink. Adding one fabricates a node shape that the runtime does not need and that the operator did not authorise; the resulting YAML drops the audit-shaped sink at emission time, leaving the user with a confusing "I asked for audit, where is it?" experience.
+- Do **not** silently remove an audit-shaped node from the pipeline state because it is "unconnected" — audit is pipeline-level, not a node, so it cannot be wired and "unconnected" is the wrong frame. If you find an audit-shaped node already in state (left over from an earlier turn or a recipe), call `remove_node` *with* an explicit prose note that you are removing a misplaced audit shape because audit is operator-managed.
+- Do **not** ask the user for an audit URL, audit DSN, audit DB path, audit retention policy, or audit encryption key — those are operator-side configuration, not composer-side. If the user volunteers one, decline politely and explain why.
+
+**Correct response shape** when the user says "add SQLite audit logging" / "add audit database" / "log every decision to a database" / "add Landscape audit":
+
+> "Audit is already on — every pipeline run is recorded to the operator-configured Landscape audit trail (this is mandatory for ELSPETH and is the load-bearing feature behind 'every decision must be traceable'). I don't need to add anything to the pipeline for that. If you want a *separate* post-run export of audit data to a sink you can read directly, that's a `landscape.export` feature configured on the operator side — let me know if I should flag that to your operator. To review past runs forensically, the Landscape MCP forensic tools answer questions like 'what happened in run X?'."
+
+If the user pushes back ("but I want it inside the YAML", "I really need to see the audit DB path"), restate the boundary once and stop — do not relent and add a sink. The boundary is enforced by `yaml_generator` omitting the `landscape:` key entirely; any audit-shaped pipeline state would be silently dropped at YAML emission time, leaving the operator config intact but the user with a confusing experience. Refusing clearly up front is the honest answer.
+
 ## CRITICAL: Tool Schema Availability
 
 The web composer sends the JSON Schema for every LiteLLM function tool with each model request. Do not call discovery tools just to load function signatures; use tool calls for real discovery, mutation, validation, or preview work.
 
 **Step 0 (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
 
-- **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`, `list_recipes`
+- **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`, `list_recipes`, `get_audit_info`
 - **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
 - **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `apply_pipeline_recipe`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
 - **Diagnostics:** `explain_validation_error`, `request_advisor_hint`
@@ -101,6 +119,7 @@ Eight rules (numbered 0-7) that cover the historical convergence-failure modes. 
 |---|---|
 | "Classify these rows / tickets / reviews", "tag each row", "categorise" | `classify-rows-llm-jsonl` |
 | "Split rows by price > N", "route scores >= 0.8", "separate orders by amount" | `split-by-numeric-threshold` |
+| "Process each row two ways: keep original AND truncate one field, combine into one merged output", "side by side: original + shortened description" | `fork-coalesce-truncate-jsonl` |
 
 Call `list_recipes` to see the registered recipes and their slot schemas. For shapes outside the recipe set, hand-author with `set_pipeline`.
 
@@ -116,7 +135,7 @@ These are the canonical tool sequences for the most common novice phrasings. Rec
 | "Summarise each line of this URL/file" | URL → web_scrape → line_explode → llm | `create_blob` → `set_source_from_blob` → `upsert_node` (web_scrape) → `upsert_node` (line_explode) → `upsert_node` (llm) → `set_output` |
 | "Filter rows mentioning [keyword]" | keyword_filter routing | `set_pipeline` with `keyword_filter` transform routing to two outputs |
 | "Compute aggregates over rows" | batch_stats / batch_distribution_profile | `set_pipeline` with the appropriate `batch_*` plugin and a trigger config |
-| "Process the same row two ways and combine", "side by side under separate keys", "duplicate then merge", "fan out then rejoin", "run two enrichments and join the results" | fork gate → 2 parallel paths → coalesce | `set_pipeline` with a `gate` carrying `fork_to: ["path_a", "path_b"]` plus a `coalesce` node consuming both branches (Recipe #10) |
+| "Process the same row two ways and combine", "side by side under separate keys", "duplicate then merge", "fan out then rejoin", "run two enrichments and join the results" | fork gate → 2 parallel paths → coalesce | If the two paths are "keep original" + "truncate one field": `apply_pipeline_recipe('fork-coalesce-truncate-jsonl', …)`. For other path-pair shapes: `request_advisor_hint` first (Recipe #10 mandatory escalation), then `set_pipeline` with the advisor's wiring. |
 
 For each pattern: after the structural setup, run `preview_pipeline`. If `proof_diagnostics` returns blocking entries, apply the suggested repair (which is in `proof_diagnostics[].suggested_repair`) and re-preview. The forced-repair loop in the server caps clarification-style stalling at two turns; do not stall.
 
@@ -625,7 +644,10 @@ If a tool call fails or returns unexpected results:
 
    Call `request_advisor_hint` *before* `set_pipeline` and describe both the user's task and the wiring shape you intend; ask for a sanity check on plugin choice and option-block content.
 
-   **Red-listing extends to one compositional pattern: Recipe #10 (Fork/Join Enrichment Pipeline).** Fork+coalesce has multiple cross-node naming invariants and a boolean-routes contract the cheap composer routinely gets wrong. **Mandatory:** when the user describes any fork+coalesce shape (duplicate-and-merge, side-by-side enrichment, "two parallel paths combined", `path_a`/`path_b` style outputs, fan-out-then-rejoin), call `request_advisor_hint` with `trigger: "proactive_red_listed_plugin"` **BEFORE** `set_pipeline`. In `problem_summary` name the shape ("user wants fork+coalesce — duplicate each row through two paths and merge under nested keys"), in `attempted_actions` note "have not yet built — escalating proactively per Recipe #10 mandatory-advisor rule", and use the advisor's guidance to construct wiring. Do not attempt fork+coalesce without an advisor consultation — the historical record on bug elspeth-7197f92457 shows the cheap model cannot reliably converge on this shape unaided.
+   **Red-listing extends to one compositional pattern: Recipe #10 (Fork/Join Enrichment Pipeline).** Fork+coalesce has multiple cross-node naming invariants and a boolean-routes contract that hand-authoring routinely gets wrong. The wiring discipline is encoded server-side in registered recipes; **prefer a recipe over hand-authoring** for any matching shape:
+
+   1. **If the shape matches `fork-coalesce-truncate-jsonl`** (path A keeps the original row, path B truncates one named field, output is one merged JSONL row with two top-level keys), call `apply_pipeline_recipe('fork-coalesce-truncate-jsonl', { source_blob_id, truncate_field, max_chars, … })` directly. The recipe encodes the gate.fork_to ↔ path.on_success ↔ coalesce.branches naming invariants and the boolean-routes `{"all": "fork"}` contract; you do not author or maintain those invariants.
+   2. **For any other fork+coalesce shape**, the wiring discipline is your responsibility, and the cheap composer model cannot reliably maintain it. **Mandatory:** call `request_advisor_hint` with `trigger: "proactive_red_listed_plugin"` **BEFORE** `set_pipeline`. In `problem_summary` name the shape ("user wants fork+coalesce — duplicate each row through two paths and merge under nested keys"), in `attempted_actions` note "have not yet built — escalating proactively per Recipe #10 mandatory-advisor rule because no registered recipe matches this shape", and use the advisor's guidance to construct wiring. Do not attempt fork+coalesce without an advisor consultation when no recipe matches — the historical record on bug elspeth-7197f92457 shows the cheap model cannot reliably converge on this shape unaided.
 
 Every `request_advisor_hint` call must declare exactly one `trigger` value:
 
@@ -1397,11 +1419,50 @@ Pick any string for `<conn_a>` / `<conn_b>` / `<conn_c>`. The names don't have t
 **Safe defaults:** Each transform's on_error routes to a shared error sink
 **Caveats:** Error sink receives the original row plus error metadata. The main pipeline continues with successful rows only.
 
-### 10. Fork/Join Enrichment Pipeline
+### 10. Fork/Join Enrichment Pipeline (Recipe-First)
 
 **Trigger phrases:** "enrich with multiple sources", "run two analyses in parallel then combine", "process the same row two ways and combine", "two side-by-side copies of the row under separate keys", "duplicate then merge", "path_a / path_b naming", "fan out then rejoin", "send to multiple models and merge results", "two enrichments joined into one record"
 
-**Recognise this shape eagerly.** Any user description that mentions duplicating a row, sending it through two distinct processing paths, AND producing a single output that combines both paths is this recipe. **Do not** silently simplify to a linear `source → single transform → sink` because the linear form looks "close enough" — the requested shape has fork+coalesce semantics that linear cannot reproduce, and silent simplification is forbidden (see "Silent shape downgrade is forbidden" near the top of this skill).
+**Recognise this shape eagerly.** Any user description that mentions duplicating a row, sending it through two distinct processing paths, AND producing a single output that combines both paths is this recipe. **Do not** silently simplify to a linear `source → single transform → sink`.
+
+**The recipe-first rule.** Fork+coalesce has cross-node naming invariants, a boolean-routes contract, and a coalesce `branches`/`policy`/`merge` tuple that hand-authoring routinely gets wrong. The wiring is encoded server-side in registered recipes. **Always walk the Recipe Table below before considering anything else.** Violating the letter of this rule ("I'll patch the existing scaffold", "the worked example was right there") is violating the spirit of this rule.
+
+#### Recipe Table — match the user's path-pair to a recipe
+
+| Path A | Path B | Output | Tool to call |
+|--------|--------|--------|--------------|
+| Keep the original row unchanged | Truncate one named field to a max length (with optional suffix) | One merged JSONL row, two top-level keys | `apply_pipeline_recipe('fork-coalesce-truncate-jsonl', { source_blob_id, truncate_field, max_chars, truncation_suffix?, output_path?, key_a?, key_b? })` |
+
+**If your user's intent matches any row in this table, call the recipe and stop.** Do not author `set_pipeline`. Do not call `upsert_node`. Do not "patch" or "extend" the existing state. `apply_pipeline_recipe` is a full-state replacement (it delegates to `set_pipeline` server-side); existing partial state is replaced cleanly and is not worth preserving.
+
+**For path-pair shapes NOT in this table** (different transforms on either path, 3+ parallel paths, non-truncate path-B logic, etc.), you MUST call `request_advisor_hint` with `trigger: "proactive_red_listed_plugin"` BEFORE `set_pipeline`. The hand-author fallback in §10b exists for the advisor to refine — you may NOT author from §10b unaided. The cheap composer model has historically failed to converge on hand-authored fork+coalesce in 6+ successive attempts (bug `elspeth-7197f92457`); advisor escalation is mandatory when no recipe matches.
+
+#### Rationalizations and counters
+
+These are the actual reasoning failures observed in the wild on this shape (verbatim from a postmortem 2026-05-09). If you catch any of them in your own reasoning, STOP and call the recipe.
+
+| Rationalization | Counter |
+|-----------------|---------|
+| "I'll repair the existing shape rather than replace with the canonical recipe" | The recipe is a full-state replacement. Existing partial state is replaced cleanly. There is no "scaffold" worth preserving — call the recipe. |
+| "I focused on the worked example / generic hand-author shape" | The worked example in §10b is the FALLBACK. If a recipe matches your user's intent, the worked example IS the wrong path — copying its connection names (`path_a_out`, `path_b_out`) is a known failure mode. |
+| "I treated the existing scaffold as 'close enough' and tried to hand-author the fix" | "Close enough" is a silent shape downgrade. Recipe-matching shapes have ZERO acceptable hand-author paths — call the recipe or escalate. |
+| "I matched the user's prompt to the general fork/join pattern but didn't narrow it to the exact recipe case" | The Recipe Table is *exactly* for this matching step. Walk it row by row before considering §10b. The mapping should be mechanical, not interpretive. |
+| "I had the recipe-first instruction available but still chose the manual route" | This is the violation the rule names. There is no judgement call — call the recipe. |
+| "The state already had a fork gate and two transforms, so I treated the task as repair" | The state at session start was empty (version 1, no nodes). If you remember a "scaffold", you are confabulating. Call the recipe. |
+
+#### Red Flags — STOP if you catch yourself
+
+- About to call `set_pipeline` for a fork+coalesce shape that matches the Recipe Table → STOP. Call `apply_pipeline_recipe`.
+- About to call `upsert_node` to extend an existing partial fork+coalesce pipeline → STOP. Replace via `apply_pipeline_recipe` instead.
+- About to type the connection names `path_a_out`, `path_b_out`, `path_a_in`, `path_b_in` literally → STOP. The recipe handles connection naming server-side. Hand-typing those is the §10b path.
+- About to name a gate node `"fork"`, `"continue"`, or `"on_success"` → STOP. Those are reserved names; the validator rejects them. The `fork` in `routes: {"all": "fork"}` is the *route destination*, not a node name.
+- About to "do a small fix" before calling the recipe → STOP. The recipe is the fix.
+
+---
+
+### 10b. Fork/Join — Hand-Author Fallback (Advanced)
+
+**Read this section ONLY if (a) your user's path-pair does NOT match any row of the §10 Recipe Table, AND (b) you have already called `request_advisor_hint` with `trigger: "proactive_red_listed_plugin"` per §10's mandatory escalation rule. Otherwise, return to §10 and call the recipe.**
 
 **Structure:** `csv` source → fork gate → path A transform + path B transform → `coalesce` → `results` sink
 

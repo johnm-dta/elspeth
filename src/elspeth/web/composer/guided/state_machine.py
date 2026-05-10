@@ -1,9 +1,10 @@
-"""Guided-mode state machine: audit-tier (Tier 1) dataclasses.
+"""Guided-mode state-machine data: GuidedSession, TerminalState, TurnRecord.
 
-Frozen dataclasses representing session state at the SDA wizard boundary.
-Every field is immutable. Container fields undergo deep-freeze in __post_init__.
+See docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md §5.
 
-See docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md §3.
+Trust tier: Tier 1 (audit). Coercion forbidden — every field crashes on
+malformed input. The freeze_fields contract applies because these structures
+are persisted and re-read across the audit trail.
 """
 
 from __future__ import annotations
@@ -14,48 +15,43 @@ from enum import StrEnum
 from typing import Any
 
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnResponse
+from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
 
 
 class TerminalKind(StrEnum):
-    """The outcome classification when a guided session ends."""
-
     COMPLETED = "completed"
     EXITED_TO_FREEFORM = "exited_to_freeform"
-    FAILED = "failed"
 
 
 class TerminalReason(StrEnum):
-    """The reason a guided session ended."""
-
-    USER_CHOSE_FREEFORM = "user_chose_freeform"
-    USER_REJECTED_PROPOSAL = "user_rejected_proposal"
-    RECIPE_NOT_FOUND = "recipe_not_found"
-    SOLVER_ERROR = "solver_error"
-    STEP_HANDLER_ERROR = "step_handler_error"
+    USER_PRESSED_EXIT = "user_pressed_exit"
+    PROTOCOL_VIOLATION = "protocol_violation"
+    SOLVER_EXHAUSTED = "solver_exhausted"
 
 
 @dataclass(frozen=True, slots=True)
 class TerminalState:
-    """Marks the end of a guided session.
+    """Outcome of a guided session.
 
-    Frozen, audit-tier. Persisted in GuidedSession.terminal.
+    `reason` is None when `kind == COMPLETED`; required when
+    `kind == EXITED_TO_FREEFORM`. `pipeline_yaml` is set only on COMPLETED.
+    Callers must construct consistently — invariants enforced by step_advance().
     """
 
     kind: TerminalKind
     reason: TerminalReason | None
+    pipeline_yaml: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class TurnRecord:
-    """A single turn in the guided-mode dialog.
+    """One emitted turn + its (optional) user response, recorded for audit."""
 
-    Frozen, audit-tier. Appended to GuidedSession.history.
-    Carries both the wizard turn (what was emitted) and the user's response.
-    """
-
-    turn: Turn
-    response: TurnResponse
+    step: GuidedStep
+    turn_type: TurnType
+    payload_hash: str
+    response_hash: str | None
+    emitter: str  # "server" | "llm"
 
 
 @dataclass(frozen=True, slots=True)

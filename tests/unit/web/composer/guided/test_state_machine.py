@@ -1,4 +1,5 @@
-"""Tests for guided-mode state machine dataclasses."""
+# tests/unit/web/composer/guided/test_state_machine.py
+"""Tests for GuidedSession, TerminalState, TurnRecord — state machine data."""
 
 from __future__ import annotations
 
@@ -16,99 +17,67 @@ from elspeth.web.composer.guided.state_machine import (
 
 class TestTerminalState:
     def test_completed_kind_has_no_reason(self) -> None:
-        ts = TerminalState(kind=TerminalKind.COMPLETED, reason=None)
-        assert ts.kind == TerminalKind.COMPLETED
-        assert ts.reason is None
+        t = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="pipeline:\n")
+        assert t.kind is TerminalKind.COMPLETED
+        assert t.reason is None
 
     def test_exited_to_freeform_requires_reason(self) -> None:
-        ts = TerminalState(
+        t = TerminalState(
             kind=TerminalKind.EXITED_TO_FREEFORM,
-            reason=TerminalReason.USER_CHOSE_FREEFORM,
+            reason=TerminalReason.USER_PRESSED_EXIT,
+            pipeline_yaml=None,
         )
-        assert ts.kind == TerminalKind.EXITED_TO_FREEFORM
-        assert ts.reason == TerminalReason.USER_CHOSE_FREEFORM
+        assert t.reason is TerminalReason.USER_PRESSED_EXIT
 
     def test_terminal_state_is_frozen(self) -> None:
-        ts = TerminalState(kind=TerminalKind.COMPLETED, reason=None)
+        t = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=None)
         with pytest.raises(AttributeError):
-            ts.kind = TerminalKind.EXITED_TO_FREEFORM  # type: ignore[misc]
+            t.kind = TerminalKind.EXITED_TO_FREEFORM  # type: ignore[misc]
 
 
 class TestTurnRecord:
     def test_turn_record_carries_emitted_and_response(self) -> None:
-        from elspeth.web.composer.guided.protocol import Turn, TurnResponse
-
-        turn: Turn = {
-            "type": TurnType.SINGLE_SELECT,
-            "step_index": 0,
-            "payload": {
-                "question": "Choose a plugin",
-                "options": [{"id": "csv", "label": "CSV", "hint": None}],
-                "allow_custom": False,
-            },
-        }
-        response: TurnResponse = {
-            "chosen": ["csv"],
-            "edited_values": None,
-            "custom_inputs": None,
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        }
-        rec = TurnRecord(turn=turn, response=response)
-        assert rec.turn == turn
-        assert rec.response == response
+        rec = TurnRecord(
+            step=GuidedStep.STEP_1_SOURCE,
+            turn_type=TurnType.SINGLE_SELECT,
+            payload_hash="abc123",
+            response_hash="def456",
+            emitter="server",
+        )
+        assert rec.emitter == "server"
 
     def test_turn_record_frozen(self) -> None:
-        from elspeth.web.composer.guided.protocol import Turn, TurnResponse
-
-        turn: Turn = {
-            "type": TurnType.SINGLE_SELECT,
-            "step_index": 0,
-            "payload": {
-                "question": "Choose a plugin",
-                "options": [{"id": "csv", "label": "CSV", "hint": None}],
-                "allow_custom": False,
-            },
-        }
-        response: TurnResponse = {
-            "chosen": ["csv"],
-            "edited_values": None,
-            "custom_inputs": None,
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        }
-        rec = TurnRecord(turn=turn, response=response)
+        rec = TurnRecord(
+            step=GuidedStep.STEP_1_SOURCE,
+            turn_type=TurnType.SINGLE_SELECT,
+            payload_hash="abc",
+            response_hash=None,
+            emitter="server",
+        )
         with pytest.raises(AttributeError):
-            rec.turn = turn  # type: ignore[misc]
+            rec.emitter = "llm"  # type: ignore[misc]
 
 
 class TestGuidedSession:
     def test_initial_session_at_step_1(self) -> None:
-        sess = GuidedSession.initial()
-        assert sess.step == GuidedStep.STEP_1_SOURCE
-        assert sess.history == ()
-        assert sess.step_1_result is None
-        assert sess.step_2_result is None
-        assert sess.step_3_proposal is None
-        assert sess.terminal is None
+        s = GuidedSession.initial()
+        assert s.step is GuidedStep.STEP_1_SOURCE
+        assert s.terminal is None
+        assert s.history == ()
 
     def test_session_history_is_immutable_tuple(self) -> None:
-        sess = GuidedSession.initial()
-        assert isinstance(sess.history, tuple)
+        s = GuidedSession.initial()
         with pytest.raises(AttributeError):
-            sess.history = ()  # type: ignore[misc]
+            s.history.append(None)  # type: ignore[attr-defined]
 
     def test_session_with_terminal_set(self) -> None:
-        term = TerminalState(kind=TerminalKind.COMPLETED, reason=None)
-        sess = GuidedSession(
+        s = GuidedSession(
             step=GuidedStep.STEP_3_TRANSFORMS,
+            terminal=TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="x:\n"),
             history=(),
             step_1_result=None,
             step_2_result=None,
             step_3_proposal=None,
-            terminal=term,
         )
-        assert sess.terminal is term
-        assert sess.terminal.kind == TerminalKind.COMPLETED
+        assert s.terminal is not None
+        assert s.terminal.kind is TerminalKind.COMPLETED

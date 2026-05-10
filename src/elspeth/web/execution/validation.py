@@ -412,7 +412,87 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         List of :class:`_IdentityFinding`, one per detected node.  Empty when
         nothing was detected.
     """
-    return []
+    findings: list[_IdentityFinding] = []
+
+    output_by_name = {output.name: output for output in state.outputs}
+    nodes_by_id = {node.id: node for node in state.nodes}
+
+    # Producer index: maps a connection-target name (the value carried by an
+    # upstream's on_success / on_error / route value / fork_to entry) back to
+    # the producer node id.  Used to find a node's upstream by matching its
+    # input field.  Explicit "if key not in dict" preserves first-writer-wins
+    # semantics; the schema validator rejects duplicate connection targets
+    # earlier in the pipeline so collisions here would already have surfaced.
+    producer_by_target: dict[str, str] = {}
+
+    def _record(target: str, producer_id: str) -> None:
+        if target not in producer_by_target:
+            producer_by_target[target] = producer_id
+
+    if state.source is not None and state.source.on_success:
+        producer_by_target[state.source.on_success] = "source"
+    for upstream in state.nodes:
+        if upstream.on_success:
+            _record(upstream.on_success, upstream.id)
+        if upstream.on_error:
+            _record(upstream.on_error, upstream.id)
+        if upstream.routes:
+            for route_target in upstream.routes.values():
+                _record(route_target, upstream.id)
+        if upstream.fork_to:
+            for fork_target in upstream.fork_to:
+                _record(fork_target, upstream.id)
+
+    for node in state.nodes:
+        # Rule 1: identity passthrough plugin (literal name).
+        if node.node_type != "transform" or node.plugin != "passthrough":
+            continue
+        # Rule 4: no fork machinery on the node itself.
+        if node.fork_to or node.routes:
+            continue
+        # Rule 3: on_success must point to exactly one sink (output).
+        if node.on_success is None or node.on_success not in output_by_name:
+            continue
+        sink = output_by_name[node.on_success]
+        # Rule 2: must have an upstream producer.  Absence means the pipeline
+        # has a dangling input ref, which a structural check will already have
+        # surfaced; the advisory simply skips the node.
+        if node.input not in producer_by_target:
+            continue
+        upstream_id = producer_by_target[node.input]
+        # Rule 6: upstream is not a gate (per skill lines 1517-1518 —
+        # per-fork-branch passthrough is the documented legitimate pattern).
+        # ``upstream_id == "source"`` is not in nodes_by_id; the source is
+        # never a gate, so falling through is correct.
+        if upstream_id in nodes_by_id and nodes_by_id[upstream_id].node_type == "gate":
+            continue
+        # Rule 5: passthrough has no schema.fields anchor (Concept-5 exemption
+        # per skill lines 758-768).  ``options`` values are Tier-3 (LLM- or
+        # operator-supplied), so isinstance() dispatches the optional schema
+        # block legitimately — a non-Mapping value means "no schema declared".
+        schema_block = node.options.get("schema")
+        if isinstance(schema_block, Mapping):
+            fields = schema_block.get("fields")
+            if isinstance(fields, (list, tuple)) and len(fields) > 0:
+                continue
+        # Compute sink schema mode for the advisory's detail string.  Same
+        # Tier-3 dispatch: sink options are operator-supplied, schema may be
+        # absent or shaped differently than expected.
+        sink_schema_mode: str | None = None
+        sink_schema_block = sink.options.get("schema")
+        if isinstance(sink_schema_block, Mapping):
+            mode = sink_schema_block.get("mode")
+            if isinstance(mode, str):
+                sink_schema_mode = mode
+        findings.append(
+            _IdentityFinding(
+                node_id=node.id,
+                upstream_id=upstream_id,
+                sink_name=sink.name,
+                sink_schema_mode=sink_schema_mode,
+            )
+        )
+    return findings
 
 
 def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[str]:

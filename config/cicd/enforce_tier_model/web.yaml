@@ -928,6 +928,69 @@ allow_hits:
   safety: Type dispatch only selects richer error formatting; all GraphValidationError
     cases still append a failed validation check and surface to the caller.
   expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=307627249b718317
+  owner: web-execution
+  reason: Tier-3 inspection — node.options is operator/LLM-supplied (Mapping[str, Any]);
+    options['schema'] is optional and absent for transforms with no declared schema.
+    .get() returns None honestly when the key is missing; treated as "no schema declared".
+  safety: Absence is a meaningful state (no Concept-5 anchor); no error is suppressed,
+    no value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=cc2f6dfb9e7c9e5a
+  owner: web-execution
+  reason: Tier-3 dispatch — schema_block came from a node.options['schema'] value (Any
+    type); isinstance(Mapping) discriminates well-formed schema dict from malformed
+    or absent input. Same pattern as _collect_secret_refs.
+  safety: Non-Mapping value falls through to "no schema fields found"; structural
+    validators elsewhere catch malformed schema declarations.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=1074192e98f892c5
+  owner: web-execution
+  reason: 'Tier-3 inspection — schema_block[''fields''] is optional inside the schema
+    block; absent for schema declarations that only specify mode (e.g., {mode: observed}).
+    .get() returns None honestly; treated as "no fields declared".'
+  safety: Absence is a meaningful state; the surrounding rule treats no-fields as
+    "not Concept-5 anchoring" and proceeds to flag the node.
+  expires: null
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=2b37c14cbc4c50b7
+  owner: web-execution
+  reason: Tier-3 dispatch — fields value came from schema_block['fields'] (Any type);
+    isinstance((list, tuple)) discriminates a real fields sequence from a malformed
+    scalar/dict value.
+  safety: Non-sequence value falls through to "not Concept-5 anchoring"; the advisory
+    fires (operator gets visibility into a misshapen schema).
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=ed973530b03f9d8b
+  owner: web-execution
+  reason: Tier-3 inspection — sink.options is operator-supplied (Mapping[str, Any]);
+    options['schema'] is optional and absent for sinks that don't declare a schema.
+    .get() returns None honestly.
+  safety: Absence yields sink_schema_mode=None; advisory detail string omits the mode
+    suffix.
+  expires: null
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=529465d7847d0b95
+  owner: web-execution
+  reason: Tier-3 dispatch — sink_schema_block came from sink.options['schema'] (Any
+    type); isinstance(Mapping) discriminates a well-formed schema dict from a malformed
+    or absent value.
+  safety: Non-Mapping value yields sink_schema_mode=None; advisory still emits with
+    no mode suffix, and the operator can investigate the malformed schema separately.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=4d6d9875290c5253
+  owner: web-execution
+  reason: Tier-3 inspection — sink_schema_block['mode'] is optional inside the schema
+    block; .get() returns None honestly when the key is missing.
+  safety: Absence yields sink_schema_mode=None and an advisory detail string with no
+    mode suffix; no value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=b4fb2c8e991b71f9
+  owner: web-execution
+  reason: Tier-3 dispatch — mode value came from sink_schema_block['mode'] (Any type);
+    isinstance(str) discriminates a real mode string from a malformed value (e.g., dict,
+    int).
+  safety: Non-str value yields sink_schema_mode=None; advisory still emits with no
+    mode suffix.
+  expires: null
 - key: web/app.py:R1:create_app:fp=afce9c1b36c2a3b4
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var

@@ -219,6 +219,13 @@ _ACTION_VERBS_PAST: Final[tuple[str, ...]] = (
     "modified",
     "corrected",
     "repaired",
+    # Epistemic completion verb. Issue elspeth-905fe2a3d8 cites
+    # "I confirmed" as one of the three example phrases the detector
+    # must catch. Treated symmetrically with the action verbs because
+    # the operator-trust harm of a false "I confirmed X" is the same
+    # ("the change is in place") regardless of whether the model
+    # claims to have written X or to have verified X.
+    "confirmed",
 )
 _ACTION_VERBS_BASE: Final[tuple[str, ...]] = (
     "fix",
@@ -235,6 +242,7 @@ _ACTION_VERBS_BASE: Final[tuple[str, ...]] = (
     "modify",
     "correct",
     "repair",
+    "confirm",
 )
 _BASE_TO_PAST: Final[dict[str, str]] = dict(zip(_ACTION_VERBS_BASE, _ACTION_VERBS_PAST, strict=True))
 

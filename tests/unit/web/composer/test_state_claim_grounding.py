@@ -269,6 +269,16 @@ class TestExtractActionClaimsAgreementPromise:
         verbs = {c.verb for c in claims}
         assert "removed" in verbs
 
+    def test_extract_yes_i_can_confirm(self) -> None:
+        # Issue elspeth-905fe2a3d8 lists "I confirmed" as one of three
+        # example phrases the detector must catch. The base-form
+        # variant in agreement context exercises both the verb-list
+        # entry and the base-to-past normalisation.
+        prose = "Yes, I can confirm that change."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "confirmed" in verbs
+
     def test_no_extract_for_agreement_without_action_verb(self) -> None:
         # "Yes, I see what you mean" — agreement opener but no action
         # verb in the closed list. No match.
@@ -312,6 +322,17 @@ class TestExtractActionClaimsPresentPerfect:
         claims = extract_action_claims(prose)
         verbs = {c.verb for c in claims}
         assert "configured" in verbs
+
+    def test_extract_i_confirmed_present_perfect(self) -> None:
+        # Issue elspeth-905fe2a3d8 lists "I confirmed" as one of three
+        # example phrases the detector must catch. Also covers the
+        # bare past form via the bare-past + consequence pattern when
+        # paired with a consequence clause (separate test below); this
+        # one pins the present-perfect variant.
+        prose = "I have confirmed the change to rejected_records."
+        claims = extract_action_claims(prose)
+        verbs = {c.verb for c in claims}
+        assert "confirmed" in verbs
 
     def test_no_extract_for_negated_present_perfect(self) -> None:
         prose = "I have not changed the source configuration."
@@ -667,6 +688,24 @@ class TestCheckGroundingTopLevel:
             state_changed=False,
         )
         assert any(v.kind == "action_claim" and v.claimed_value == "changed" for v in violations)
+
+    def test_issue_905fe2a3d8_third_example_phrase(self) -> None:
+        # Issue elspeth-905fe2a3d8 names three example phrases the
+        # detector must catch: "you're right", "I confirmed",
+        # "yes I can change that". The first is exercised by
+        # ``test_panel_smoke_cell_2_corpus`` above; the third by
+        # ``test_extract_yes_i_can_fix`` (same shape with verb=fix).
+        # This pins the literal "I confirmed" example from the issue
+        # text — present-perfect path, state unchanged, no mutation.
+        prose = "I have confirmed the change to rejected_records."
+        state = _state_with_source(on_validation_failure="rejected_records")
+        violations = check_state_claim_grounding(
+            prose=prose,
+            state=state,
+            mutation_success_seen=False,
+            state_changed=False,
+        )
+        assert any(v.kind == "action_claim" and v.claimed_value == "confirmed" for v in violations)
 
     def test_panel_smoke_t5_corpus_widened(self) -> None:
         # Issue elspeth-c028f7d186 — exact T5 prose without "just".

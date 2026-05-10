@@ -6,6 +6,7 @@ properly configured and the session creation endpoint works end-to-end.
 
 from __future__ import annotations
 
+from elspeth.web.composer.audit import BufferingRecorder
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -26,15 +27,12 @@ class TestFixtureSmoke:
 
     def test_audit_recorder_is_present(self, composer_test_client: TestClient) -> None:
         """App state has composer_recorder fixture."""
-        app = composer_test_client.app
-        assert hasattr(app.state, "composer_recorder")
-        assert app.state.composer_recorder is not None
+        recorder = composer_test_client.app.state.composer_recorder
+        assert recorder is not None
 
-    def test_audit_recorder_fixture_accessible(self, audit_recorder) -> None:
-        """audit_recorder fixture yields a BufferingRecorder."""
-        from elspeth.web.composer.audit import BufferingRecorder
-
-        assert isinstance(audit_recorder, BufferingRecorder)
+    def test_audit_recorder_fixture_accessible(self, audit_recorder: BufferingRecorder) -> None:
+        """audit_recorder fixture yields a BufferingRecorder with empty initial state."""
+        assert audit_recorder.invocations == ()
 
     def test_session_list_works(self, composer_test_client: TestClient) -> None:
         """GET /api/sessions returns list of sessions."""

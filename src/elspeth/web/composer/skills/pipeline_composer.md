@@ -596,6 +596,45 @@ This is not optional padding; it is the user's first chance to notice that the p
 
 The principle: **make every data-loss path visible in the summary**. Silent data loss with a complete audit trail is still silent data loss from the user's UX perspective.
 
+#### Build Summary Discipline — Disclose Implicit Authoring Decisions
+
+Data-loss paths are not the only operator-invisible decisions in a built pipeline. Every plugin option you chose for the operator — every model name, every default scheme, every header value, every collision policy — represents a decision *you* made on the operator's behalf. The operator must be able to see those decisions before they execute the pipeline. The principle is the same as the data-loss disclosure above: silent decisions with a complete audit trail are still silent decisions from the operator's UX perspective.
+
+**Required:** at the end of every successful build, after the data-loss disclosures, include a section (heading or labelled paragraph) titled "Decisions I made on your behalf" that enumerates every plugin option the operator did not explicitly specify. List, at minimum, every chosen value in the categories below; mark each as `(default)`, `(picked for X reason)`, `(deployment-identity)`, or `(operator-supplied)` so the operator can see the provenance.
+
+| Category | Examples of options to disclose | Why disclosure matters |
+|----------|---------------------------------|------------------------|
+| **Identity values that ship to third parties** | `web_scrape.http.abuse_contact`, `web_scrape.http.scraping_reason`, custom `User-Agent` headers | The receiving host is the operator's reputational counterparty. Every fabricated identity value is an audit-integrity defect — see the `web_scrape.http` rule. |
+| **Model / provider / cost choices** | `llm.provider`, `llm.model`, `llm.temperature`, `llm.pool_size`, retry counts | Quality, cost, audit determinism, and rate-limit footprint are operator concerns. |
+| **Output shape and routing** | `json.collision_policy`, `json.format` (json vs jsonl), sink filenames and paths | Operator must know which file holds the final results. |
+| **Format / extraction choices** | `web_scrape.format` (markdown / text / raw), CSV delimiter, schema mode (fixed / observed / flexible) | Affects what downstream consumers see and what the audit trail records. |
+| **Allowlist / safety defaults** | `web_scrape.http.allowed_hosts`, `${VAR}` vs `secret://name` resolution mode | Safety- and audit-relevant; operator must consent to the boundary. |
+| **Operator-input rewrites (if any survived)** | URL scheme prefixing, hostname lowercasing, path normalisation | Per the input-fidelity rule above these should normally be eliminated; if any survived (because the operator confirmed it or you inserted a named `value_transform`), name them explicitly here so the audit story is complete. |
+
+The disclosure may be brief — one short bullet per row, with the chosen value and a parenthetical reason. Example shape:
+
+> **Decisions I made on your behalf** — change any and I'll rebuild:
+> - `llm.provider = openrouter`, `llm.model = anthropic/claude-sonnet-4` (picked for cost/quality balance — Azure available if you prefer).
+> - `llm.temperature = 0` (picked for audit determinism).
+> - `llm.pool_size = 1` (default — sequential; raise to 3–5 if you need throughput).
+> - `web_scrape.format = markdown` (picked for LLM extraction — `text` available if you want raw line-framed content).
+> - `web_scrape.http.abuse_contact = ops@example-deployment.gov.au` (deployment-identity).
+> - `web_scrape.http.scraping_reason = "Front-page summarisation of three .gov.au sites"` (operator-supplied).
+> - `web_scrape.http.allowed_hosts = public_only` (default — safe).
+> - `json.collision_policy = auto_increment` (default).
+
+Tail-offers of follow-up work are still forbidden (see the existing prohibition under "Tool Failure Recovery") — the disclosure is a list of decisions the operator can react to, not a series of "if you want, I can…" prompts.
+
+The disclosure is a property of the build summary surface; mirroring it into persisted session state (so post-hoc auditors can reconstruct what was decided silently) is an engine-side concern tracked separately. Until that hook lands, ensuring the disclosure appears verbatim in the assistant reply is sufficient — the conversation transcript is captured, so the disclosure is recoverable.
+
+**Mental checklist before ending a build turn:**
+- Did I disclose every `discard` data-loss path? (existing rule — error/failure routing)
+- Did I disclose every option I chose that the operator did not specify? (this rule)
+- Did I preserve operator-supplied strings verbatim? (input-fidelity rule)
+- For wire-visible identity fields (`abuse_contact`, `scraping_reason`), did I source them from the operator or deployment identity — never from a fabricated default?
+
+If any answer is "no" or "I'm not sure", do not end your turn — fix the gap first.
+
 #### Tool Failure Recovery
 
 If a tool call fails or returns unexpected results:
@@ -1077,12 +1116,16 @@ Required options (all must appear in the `set_pipeline` payload — `url_field` 
 - `fingerprint_field`: name of the field where the content hash lands (canonical default: `"content_fingerprint"`).
 - `format`: extraction format — `"text"` (preserves whitespace, use for line-framed pipelines), `"markdown"` (default for LLM extraction), or `"raw"` (raw HTML bytes as text).
 - `text_separator`: required when `format: "text"` and downstream is `line_explode`. Canonical default: `"\n"`.
-- `http`: nested object with three required keys:
-  - `abuse_contact`: a contact email for abuse reports (e.g., `"compliance@example.com"` for testing — operator overrides for production).
-  - `scraping_reason`: one-line human-readable reason for the scrape (e.g., `"Download a public text file and split it into individual lines"`).
+- `http`: nested object with three required keys.
+  - `abuse_contact`: a contact email for abuse reports. **This value ships on every outbound request as an HTTP header to the scraped host — the receiving operator (e.g. a `.gov.au` webmaster) will see exactly the string you write here.** You MUST NOT invent a value for this field. There is no defensible skill-time default for "who should the target operator contact about our scraping" — every fabricated value is a Tier-1 audit-integrity defect (it puts a confident wrong answer onto the wire to a third party we have no relationship with). Resolution order, in priority:
+    1. Operator-supplied — the operator wrote the email in their prompt or earlier in the conversation.
+    2. Deployment-identity record — if a `get_deployment_identity` tool is available, call it and use its `abuse_contact` field.
+    3. Otherwise, **ask the operator** before calling `set_pipeline` and stop. Do not proceed with a placeholder you intend to "fix later", an example-domain address (`example.com` / `example.org` / `example.net` / `*.test` / `*.invalid` / `localhost` are all rejected by `composer/validate`), or any address you have not been explicitly authorised to use.
+  - `scraping_reason`: one-line human-readable reason for the scrape. **Also wire-visible** — the receiving host sees it. Same resolution order: operator-supplied, then deployment-identity, then ask. Do not paraphrase the operator's intent into a one-liner they did not actually write — quoting back to a third party words the operator never said is fabrication.
   - `allowed_hosts`: SSRF-mode — usually `"public_only"`. See Security Boundaries above.
 
-**Canonical full options block:**
+**Canonical full options block** — the `http.abuse_contact` and `http.scraping_reason` slots show the angle-bracket sentinel `<OPERATOR_REQUIRED>` because there is *no skill-time-correct value*. The sentinel is a documentation device only — replace both placeholders via the resolution order above **before** calling `set_pipeline`. The `composer/validate` placeholder rule will reject any pipeline that still contains `<…>` placeholders, so leaving a sentinel in by accident fails loudly rather than shipping silently.
+
 ```json
 {
   "schema": {"mode": "fixed", "fields": ["url: str"]},
@@ -1092,14 +1135,14 @@ Required options (all must appear in the `set_pipeline` payload — `url_field` 
   "format": "text",
   "text_separator": "\n",
   "http": {
-    "abuse_contact": "compliance@example.com",
-    "scraping_reason": "Fetch the URL and process its content",
+    "abuse_contact": "<OPERATOR_REQUIRED>",
+    "scraping_reason": "<OPERATOR_REQUIRED>",
     "allowed_hosts": "public_only"
   }
 }
 ```
 
-Use this as the starting point and adjust `format` / `schema` / `text_separator` / `scraping_reason` per pipeline. **Do not omit `content_field`, `fingerprint_field`, or `http` — they are not optional, and their omission produces "Field required" runtime-preflight errors that have caused convergence failures empirically.**
+Use this as the starting point and adjust `format` / `schema` / `text_separator` per pipeline. **Replace both `<OPERATOR_REQUIRED>` sentinels in the `http` block via the resolution order above before calling `set_pipeline`.** Do not omit `content_field`, `fingerprint_field`, or `http` — they are not optional, and their omission produces "Field required" runtime-preflight errors that have caused convergence failures empirically.
 
 Gotchas:
 - See the SSRF and prompt-injection rules in "Security Boundaries" above before wiring `web_scrape` into a pipeline.
@@ -1259,11 +1302,13 @@ This is the canonical way to handle inline/literal data. There is no separate "i
 
 The very first tool call for a URL-input pipeline must be `create_blob` with the URL string as the blob's content. Then `set_source_from_blob` (or use `set_pipeline` with `source.inline_blob`) — never `set_source` with `path: "<the URL>"`. The user has already authorized this work by asking for the pipeline; you do NOT need to ask permission to use the blob system. Just do it.
 
+**HARD RULE — operator input is preserved verbatim.** When the operator gives you a URL, hostname, file path, or any other string value, copy it character-for-character into the blob content, source options, transform inputs, and downstream plugin arguments. Do **not** add a scheme prefix (e.g. prepending `https://` to `www.finance.gov.au`), strip a trailing slash, lowercase a hostname, normalise a path separator, or perform any other "helpful" rewrite. The blob and YAML are the audit record of *what the operator said*; a silent prefix or normalisation turns that record into a fabricated approximation, and a downstream auditor asking "what URL did the operator request?" will receive a string the operator never wrote. If the downstream plugin requires a particular form (e.g. `web_scrape` requires absolute URLs with a scheme), surface the friction explicitly: either ask the operator to confirm the rewrite ("you wrote `www.finance.gov.au` — should I treat that as `https://www.finance.gov.au` or `http://`?") and only proceed once they answer, or insert a recorded normalisation step (`value_transform` with an explicit operation, or equivalent) so the rewrite appears in the YAML and is named in the build summary disclosure. **Never** silently mutate operator-supplied strings between their prompt and the blob/YAML.
+
 **Examples:**
 - User says "use this URL: https://example.com" — a URL is a **reference to remote content, not inline content**. Putting the URL in a `text` source carries the URL as a column value, but it does NOT fetch the URL. To actually download the URL's contents you MUST add a `web_scrape` transform between the source and any downstream processing. Canonical 3-step setup:
   1. `create_blob(filename="input.txt", mime_type="text/plain", content="https://example.com")`
   2. `set_source_from_blob({blob_id, on_success: "url_rows", on_validation_failure: "discard", options: {column: "url", schema: {mode: "fixed", fields: ["url: str"]}}})`
-  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "url_rows", on_success: "scraped_content", options: {schema: {mode: "fixed", fields: ["url: str"]}, url_field: "url", content_field: "content", fingerprint_field: "content_fingerprint", format: "text", text_separator: "\n", http: {abuse_contact: "compliance@example.com", scraping_reason: "Download a public URL and process its content", allowed_hosts: "public_only"}}})`
+  3. `upsert_node({id: "fetch", node_type: "transform", plugin: "web_scrape", input: "url_rows", on_success: "scraped_content", options: {schema: {mode: "fixed", fields: ["url: str"]}, url_field: "url", content_field: "content", fingerprint_field: "content_fingerprint", format: "text", text_separator: "\n", http: {abuse_contact: "<OPERATOR_REQUIRED>", scraping_reason: "<OPERATOR_REQUIRED>", allowed_hosts: "public_only"}}})` — replace both `<OPERATOR_REQUIRED>` sentinels per the `web_scrape.http` rule above (operator-supplied → deployment-identity → ask) before calling. Do not invent values for these fields; they ship as HTTP headers to the scraped host.
   ⚠ Skipping step 3 means the pipeline emits the URL string itself, not the URL's content. Downstream transforms like `line_explode` or `llm` will see the URL text instead of what was at the URL, and the validator will reject the pipeline. See Pattern 1 (`URL → Scrape → Extract → JSON`) and Pattern 1b (`URL → Download → Split into Lines → JSON`) under "Common Pipeline Patterns" for full chains.
 - User provides JSON data → `create_blob(filename="data.json", mime_type="application/json", content='[{"id": 1, "name": "test"}]')` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`
 - User provides CSV rows → `create_blob(filename="data.csv", mime_type="text/csv", content="name,age\nAlice,30\nBob,25")` then `set_source_from_blob({blob_id, on_success, options: {schema: {mode: "observed"}}})`

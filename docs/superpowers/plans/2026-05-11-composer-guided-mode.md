@@ -4744,4 +4744,3 @@ No spec sections without tasks.
 ---
 
 **End of plan.**
-

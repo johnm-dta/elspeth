@@ -72,3 +72,30 @@ class RecipeOfferPayload(TypedDict):
     recipe_name: str
     slots: Mapping[str, Any]
     alternatives: Sequence[str]
+
+
+class ControlSignal(StrEnum):
+    """Out-of-band signals carried in a TurnResponse instead of (or alongside) data."""
+
+    EXIT_TO_FREEFORM = "exit_to_freeform"
+    REQUEST_ADVISOR = "request_advisor"
+    REJECT = "reject"
+
+
+class TurnResponse(TypedDict):
+    """The user's typed response to a turn."""
+
+    chosen: Sequence[str] | None
+    edited_values: Mapping[str, Any] | None
+    custom_inputs: Sequence[str] | None
+    accepted_step_index: int | None
+    edit_step_index: int | None
+    control_signal: str | None  # ControlSignal value, or None
+
+
+class Turn(TypedDict):
+    """A turn emitted to the user (server-emitted or LLM-emitted)."""
+
+    type: str  # TurnType value
+    step_index: int
+    payload: Mapping[str, Any]

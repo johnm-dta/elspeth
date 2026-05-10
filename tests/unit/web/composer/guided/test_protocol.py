@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from elspeth.web.composer.guided.protocol import (
+    ControlSignal,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
     ProposeChainPayload,
     RecipeOfferPayload,
     SchemaFormPayload,
     SingleSelectPayload,
+    Turn,
+    TurnResponse,
     TurnType,
 )
 
@@ -79,3 +82,49 @@ class TestPayloadShapes:
             "alternatives": [],
         }
         assert payload["recipe_name"] == "classify-rows-llm-jsonl"
+
+
+class TestTurnResponse:
+    def test_control_signal_values(self) -> None:
+        assert {s.value for s in ControlSignal} == {
+            "exit_to_freeform",
+            "request_advisor",
+            "reject",
+        }
+
+    def test_turn_response_minimal(self) -> None:
+        resp: TurnResponse = {
+            "chosen": ["jsonl"],
+            "edited_values": None,
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": None,
+        }
+        assert resp["chosen"] == ["jsonl"]
+
+    def test_turn_response_with_control_signal(self) -> None:
+        resp: TurnResponse = {
+            "chosen": None,
+            "edited_values": None,
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": ControlSignal.EXIT_TO_FREEFORM.value,
+        }
+        assert resp["control_signal"] == "exit_to_freeform"
+
+
+class TestTurn:
+    def test_turn_carries_type_and_payload(self) -> None:
+        turn: Turn = {
+            "type": "single_select",
+            "step_index": 1,
+            "payload": {
+                "question": "X?",
+                "options": [],
+                "allow_custom": False,
+            },
+        }
+        assert turn["type"] == "single_select"
+        assert turn["step_index"] == 1

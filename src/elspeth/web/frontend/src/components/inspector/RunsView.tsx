@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { ProgressView } from "@/components/execution/ProgressView";
+import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
 import type { RunAccounting, RunDiagnostics, RunDiagnosticsWorkingView, RunProgress, RunStatus } from "@/types/index";
 
 // ── Status badge CSS class mapping ───────────────────────────────────────────
@@ -99,12 +100,15 @@ function buildVisibleEvidence(diagnostics: RunDiagnostics): string[] {
     evidence.push(operationSummary);
   }
 
-  diagnostics.artifacts.slice(0, 3).forEach((artifact) => {
-    evidence.push(`Saved output is visible at ${artifact.path_or_uri}.`);
-  });
+  // Saved-output evidence is now surfaced through the dedicated
+  // RunOutputsPanel (full manifest + downloads + previews), not as a
+  // bullet in the diagnostics evidence list. Keeping the bullet would
+  // double-report the same information once the operator expands the
+  // row, and the diagnostics version was capped at 3 — strictly
+  // inferior to the new panel's unbounded list.
 
   if (evidence.length === 0) {
-    evidence.push("No tokens, operations, or saved outputs are visible yet.");
+    evidence.push("No tokens or operations are visible yet.");
   }
   return evidence;
 }
@@ -435,16 +439,19 @@ export function RunsView() {
                 className="run-diagnostics"
               >
                 {expandedRunId === run.id && (
-                  <RunDiagnosticsPanel
-                    diagnostics={diagnosticsByRunId[run.id]}
-                    error={diagnosticsErrorByRunId[run.id] ?? null}
-                    explanation={diagnosticsExplanationByRunId[run.id] ?? null}
-                    isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
-                    isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
-                    workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
-                    onExplain={() => void evaluateRunDiagnostics(run.id)}
-                    onRefresh={() => void loadRunDiagnostics(run.id)}
-                  />
+                  <>
+                    <RunDiagnosticsPanel
+                      diagnostics={diagnosticsByRunId[run.id]}
+                      error={diagnosticsErrorByRunId[run.id] ?? null}
+                      explanation={diagnosticsExplanationByRunId[run.id] ?? null}
+                      isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
+                      isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
+                      workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
+                      onExplain={() => void evaluateRunDiagnostics(run.id)}
+                      onRefresh={() => void loadRunDiagnostics(run.id)}
+                    />
+                    <RunOutputsPanel runId={run.id} />
+                  </>
                 )}
               </div>
             </div>
@@ -564,15 +571,14 @@ function RunDiagnosticsPanel({
             </div>
           )}
 
-          {diagnostics.artifacts.length > 0 && (
-            <div style={{ display: "grid", gap: 4, marginBottom: 8 }}>
-              {diagnostics.artifacts.map((artifact) => (
-                <span key={artifact.artifact_id} style={{ overflowWrap: "anywhere" }}>
-                  {artifact.path_or_uri}
-                </span>
-              ))}
-            </div>
-          )}
+          {/*
+            Artifacts are now surfaced through the dedicated
+            RunOutputsPanel mounted alongside this panel — see the
+            outer expanded-row block in RunsView. The panel renders the
+            full unbounded manifest with download anchors and a
+            preview pane, superseding the line-list rendering that
+            used to live here.
+          */}
         </>
       )}
 

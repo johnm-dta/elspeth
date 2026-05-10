@@ -10,6 +10,16 @@ vi.mock("@/api/client", () => ({
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
   evaluateRunDiagnostics: vi.fn(),
+  // RunOutputsPanel mounts whenever a row is expanded — give it an empty
+  // manifest by default so tests that don't care about outputs don't fail
+  // on an unmocked fetch. Tests that DO care override this.
+  fetchRunOutputs: vi.fn().mockResolvedValue({
+    run_id: "run-1",
+    landscape_run_id: "run-1",
+    artifacts: [],
+  }),
+  fetchRunOutputPreview: vi.fn(),
+  downloadRunOutputContent: vi.fn(),
 }));
 
 function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run {
@@ -255,8 +265,30 @@ describe("RunsView", () => {
   });
 
   it("shows token states and artifacts when diagnostics are opened", async () => {
-    const { fetchRunDiagnostics } = await import("@/api/client");
+    const { fetchRunDiagnostics, fetchRunOutputs } = await import("@/api/client");
     (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    // Artifact rendering moved from the diagnostics panel (capped at 3,
+    // text-only) to the new RunOutputsPanel (full manifest + actions).
+    // The manifest call returns the same artifact the diagnostics
+    // payload used to surface, so the visible string assertion still
+    // proves the output is reachable through the expanded row.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue({
+      run_id: "run-1",
+      landscape_run_id: "run-1",
+      artifacts: [
+        {
+          artifact_id: "artifact-1",
+          sink_node_id: "json_out",
+          artifact_type: "file",
+          path_or_uri: "file:///tmp/out.json",
+          content_hash: "a".repeat(64),
+          size_bytes: 42,
+          created_at: "2026-04-26T05:31:59.000Z",
+          exists_now: true,
+          downloadable: true,
+        },
+      ],
+    });
     useExecutionStore.setState({
       runs: [makeRun({ status: "running", error: null })],
     });
@@ -266,7 +298,10 @@ describe("RunsView", () => {
 
     expect(await screen.findByText("token-1")).toBeInTheDocument();
     expect(screen.getByText(/extract completed/)).toBeInTheDocument();
-    expect(screen.getByText("/tmp/out.json")).toBeInTheDocument();
+    // Outputs panel renders the basename, not the full path, with a
+    // Download anchor available.
+    expect(await screen.findByText("out.json")).toBeInTheDocument();
+    expect(screen.getByText("Download")).toBeInTheDocument();
   });
 
   it("renders the LLM explanation for diagnostics", async () => {

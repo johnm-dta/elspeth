@@ -23,6 +23,8 @@ import type {
   Run,
   RunDiagnostics,
   RunDiagnosticsEvaluation,
+  RunOutputArtifactPreview,
+  RunOutputsResponse,
   SecretInventoryItem,
   Session,
   UserProfile,
@@ -530,6 +532,65 @@ export async function evaluateRunDiagnostics(
     },
   );
   return parseResponse<RunDiagnosticsEvaluation>(response);
+}
+
+/**
+ * Fetch the FULL audit-evidence manifest of every sink-write artefact
+ * for a run. Distinct from `fetchRunDiagnostics`, whose `artifacts`
+ * field is capped at 20 for operator-UI pacing — this endpoint is
+ * unbounded and intended for the per-run Outputs section.
+ */
+export async function fetchRunOutputs(runId: string): Promise<RunOutputsResponse> {
+  const response = await fetch(`/api/runs/${runId}/outputs`, {
+    headers: authHeaders(),
+  });
+  return parseResponse<RunOutputsResponse>(response);
+}
+
+/**
+ * Fetch a bounded head-of-file preview of one sink-write artefact.
+ * Bounded to 256 KiB or 100 rows server-side.
+ */
+export async function fetchRunOutputPreview(
+  runId: string,
+  artifactId: string,
+): Promise<RunOutputArtifactPreview> {
+  const response = await fetch(
+    `/api/runs/${runId}/outputs/${encodeURIComponent(artifactId)}/preview`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<RunOutputArtifactPreview>(response);
+}
+
+/**
+ * Fetch the full bytes of an artefact and return them as a Blob plus
+ * the server-suggested filename (parsed from Content-Disposition).
+ *
+ * IMPORTANT: this can NOT be a plain `<a href download>` link. The
+ * `/content` endpoint requires `Authorization: Bearer ${token}` and
+ * the browser does NOT attach localStorage values to top-level
+ * navigations. The same fetch-then-objectURL pattern is used for
+ * `downloadBlobContent` — see `blobStore.downloadBlob` for the
+ * caller-side trigger.
+ */
+export async function downloadRunOutputContent(
+  runId: string,
+  artifactId: string,
+): Promise<{ data: Blob; filename: string }> {
+  const response = await fetch(
+    `/api/runs/${runId}/outputs/${encodeURIComponent(artifactId)}/content`,
+    { headers: authHeaders() },
+  );
+  if (!response.ok) {
+    await parseResponse<never>(response);
+  }
+  const disposition = response.headers.get("Content-Disposition");
+  const filenameMatch = disposition?.match(/filename="(.+)"/);
+  const filename = filenameMatch?.[1] ?? "download";
+  const data = await response.blob();
+  return { data, filename };
 }
 
 // ── Blobs ──────────────────────────────────────────────────────────────────

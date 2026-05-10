@@ -217,14 +217,19 @@ def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_recor
     travels in the ``CompletedData.status`` discriminator so the frontend
     can render the widened taxonomy without re-deriving from row counts.
     """
-    if current.status in ("completed", "completed_with_failures", "empty"):
+    completion_status = current.status
+    if (
+        completion_status == "completed"
+        or completion_status == "completed_with_failures"
+        or completion_status == "empty"
+    ):
         if current.landscape_run_id is None:
             raise RuntimeError(f"Completed run {current.run_id} has no landscape_run_id — Tier 1 anomaly (audit trail incomplete)")
         if current.accounting is None:
             raise RuntimeError(f"Completed run {current.run_id} has no accounting — Tier 1 anomaly (audit trail incomplete)")
         try:
             payload: CompletedData | FailedData | CancelledData = CompletedData(
-                status=current.status,
+                status=completion_status,
                 accounting=current.accounting,
                 landscape_run_id=current.landscape_run_id,
             )

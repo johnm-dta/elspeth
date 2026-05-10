@@ -10,12 +10,12 @@ are persisted and re-read across the audit trail.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnResponse, TurnType
 
 
 class TerminalKind(StrEnum):
@@ -139,3 +139,168 @@ class GuidedSession:
             step_3_proposal=None,
             terminal=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# GuidedAuditDirective — L3-internal coordination type
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class GuidedAuditDirective:
+    """Pure-function directive: "fire this guided audit event."
+
+    ``step_advance()`` is pure (no uuid, no clock, no recorder), so it
+    cannot construct ``ComposerToolInvocation`` records directly — those
+    need a tool_call_id, timestamps, version snapshot, and operator
+    actor that only the route handler has. Instead, step_advance returns
+    a list of directives; the route handler (Phase 3) maps each
+    directive's ``tool_name`` to the corresponding ``emit_*`` helper in
+    ``composer/guided/audit.py`` and calls it with the live recorder,
+    composition version, and actor.
+
+    Per Errata C4: no new audit primitive at L0. ``GuidedAuditDirective``
+    is L3-internal coordination only. The on-the-wire record is still
+    ``ComposerToolInvocation``.
+
+    Allowed ``tool_name`` values (closed list):
+    - ``guided_turn_emitted``
+    - ``guided_turn_answered``
+    - ``guided_step_advanced``
+    - ``guided_dropped_to_freeform``
+
+    ``arguments`` is a payload dict; the Phase 3 route handler will
+    translate it into the matching ``emit_*`` keyword arguments.
+    """
+
+    tool_name: str  # one of: guided_turn_emitted, guided_turn_answered,
+    #                          guided_step_advanced, guided_dropped_to_freeform
+    arguments: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "arguments")
+
+
+# ---------------------------------------------------------------------------
+# step_advance — pure function, no I/O, no clock, no uuid
+# ---------------------------------------------------------------------------
+
+_StepAdvanceResult = tuple[GuidedSession, Turn | None, TerminalState | None, list[GuidedAuditDirective]]
+
+
+def step_advance(
+    session: GuidedSession,
+    response: TurnResponse,
+    *,
+    current_turn_type: TurnType,
+) -> _StepAdvanceResult:
+    """Apply *response* to *session*. Pure function (no I/O, no clock, no uuid).
+
+    Returns ``(new_session, next_turn_or_None, terminal_or_None, directives)``.
+    The caller (route handler) emits each directive via the matching
+    ``emit_*`` helper in ``composer.guided.audit``.
+
+    Per spec §5.3:
+    - A ``control_signal`` of ``"exit_to_freeform"`` terminates the wizard with
+      ``TerminalKind.EXITED_TO_FREEFORM / TerminalReason.USER_PRESSED_EXIT``
+      and produces a ``guided_dropped_to_freeform`` directive.
+    - Otherwise, the current ``session.step`` selects the branch handler.
+    """
+    directives: list[GuidedAuditDirective] = []
+
+    if response["control_signal"] == "exit_to_freeform":
+        directives.append(
+            GuidedAuditDirective(
+                tool_name="guided_dropped_to_freeform",
+                arguments={
+                    "prev_step": session.step.value,
+                    "drop_reason": TerminalReason.USER_PRESSED_EXIT.value,
+                    "validation_result": None,
+                },
+            )
+        )
+        terminal = TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=TerminalReason.USER_PRESSED_EXIT,
+            pipeline_yaml=None,
+        )
+        return (replace(session, terminal=terminal), None, terminal, directives)
+
+    if session.step is GuidedStep.STEP_1_SOURCE:
+        return _advance_step_1(session, response, current_turn_type)
+    if session.step is GuidedStep.STEP_2_SINK:
+        return _advance_step_2(session, response, current_turn_type)
+    if session.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+        return _advance_step_2_5(session, response, current_turn_type)
+    if session.step is GuidedStep.STEP_3_TRANSFORMS:
+        return _advance_step_3(session, response, current_turn_type)
+    raise AssertionError(f"unhandled step: {session.step}")
+
+
+def _advance_step_1(
+    session: GuidedSession,
+    response: TurnResponse,
+    turn_type: TurnType,
+) -> _StepAdvanceResult:
+    """Handle a Step 1 (source) response.
+
+    Only ``INSPECT_AND_CONFIRM`` causes a step transition; all other Step 1
+    turn types (``SINGLE_SELECT`` for plugin selection, ``SCHEMA_FORM`` for
+    options) are intra-step turns that do not advance the wizard. Those
+    branches emit the next intra-step turn and are out of scope here.
+    """
+    if turn_type is not TurnType.INSPECT_AND_CONFIRM:
+        # Intra-step turns (plugin select, options form) — do not advance.
+        # Tasks 2.2+ wire these when the full intra-step flow is added.
+        return (session, None, None, [])
+
+    edited = response["edited_values"]
+    if edited is None:
+        raise ValueError("inspect_and_confirm response must carry edited_values; got None")
+
+    source = SourceResolved(
+        plugin=str(edited["plugin"]),
+        options=dict(edited["options"]),
+        observed_columns=tuple(edited["observed_columns"]),
+        sample_rows=tuple(dict(r) for r in edited["sample_rows"]),
+    )
+    directives: list[GuidedAuditDirective] = [
+        GuidedAuditDirective(
+            tool_name="guided_step_advanced",
+            arguments={
+                "prev_step": GuidedStep.STEP_1_SOURCE.value,
+                "next_step": GuidedStep.STEP_2_SINK.value,
+                "reason": "user_advanced",
+            },
+        ),
+    ]
+    new_sess = replace(
+        session,
+        step=GuidedStep.STEP_2_SINK,
+        step_1_result=source,
+    )
+    return (new_sess, None, None, directives)
+
+
+def _advance_step_2(
+    session: GuidedSession,
+    response: TurnResponse,
+    turn_type: TurnType,
+) -> _StepAdvanceResult:
+    raise NotImplementedError("step 2 advance — implemented in Task 2.2")
+
+
+def _advance_step_2_5(
+    session: GuidedSession,
+    response: TurnResponse,
+    turn_type: TurnType,
+) -> _StepAdvanceResult:
+    raise NotImplementedError("step 2.5 advance — implemented in Task 2.4")
+
+
+def _advance_step_3(
+    session: GuidedSession,
+    response: TurnResponse,
+    turn_type: TurnType,
+) -> _StepAdvanceResult:
+    raise NotImplementedError("step 3 advance — implemented in Task 2.5")

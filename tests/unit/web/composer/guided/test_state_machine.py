@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
     TerminalKind,
     TerminalReason,
     TerminalState,
     TurnRecord,
+    step_advance,
 )
 
 
@@ -81,3 +82,82 @@ class TestGuidedSession:
         )
         assert s.terminal is not None
         assert s.terminal.kind is TerminalKind.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Helper: build a minimal TurnResponse
+# ---------------------------------------------------------------------------
+
+
+def _make_response(
+    *,
+    control_signal: str | None = None,
+    edited_values: dict | None = None,
+    chosen: list | None = None,
+) -> TurnResponse:
+    return TurnResponse(
+        chosen=chosen,
+        edited_values=edited_values,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=control_signal,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 2.1 tests: step_advance dispatcher + Step 1 → Step 2 branch
+# ---------------------------------------------------------------------------
+
+
+class TestStepAdvance:
+    def test_initial_session_advances_after_source_confirmed(self) -> None:
+        """INSPECT_AND_CONFIRM with valid edited_values advances to STEP_2_SINK."""
+        session = GuidedSession.initial()
+        response = _make_response(
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": "/data/input.csv"},
+                "observed_columns": ["id", "name", "score"],
+                "sample_rows": [{"id": 1, "name": "Alice", "score": 99}],
+            },
+        )
+        new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+        assert new_sess.step is GuidedStep.STEP_2_SINK
+        assert new_sess.step_1_result is not None
+        assert new_sess.step_1_result.plugin == "csv"
+        assert terminal is None
+        assert next_turn is None
+        assert any(d.tool_name == "guided_step_advanced" for d in directives)
+
+    def test_inspect_and_confirm_without_edited_values_raises(self) -> None:
+        """edited_values=None on an INSPECT_AND_CONFIRM response must raise ValueError."""
+        session = GuidedSession.initial()
+        response = _make_response(edited_values=None)
+        with pytest.raises(ValueError, match="inspect_and_confirm"):
+            step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+
+    def test_exit_to_freeform_terminates_with_user_pressed_exit(self) -> None:
+        """control_signal='exit_to_freeform' produces USER_PRESSED_EXIT terminal."""
+        session = GuidedSession.initial()
+        response = _make_response(control_signal="exit_to_freeform")
+        _new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.SINGLE_SELECT)
+        assert terminal is not None
+        assert terminal.kind is TerminalKind.EXITED_TO_FREEFORM
+        assert terminal.reason is TerminalReason.USER_PRESSED_EXIT
+        assert terminal.pipeline_yaml is None
+        assert next_turn is None
+        assert any(d.tool_name == "guided_dropped_to_freeform" for d in directives)
+        # The directive must record the drop_reason value so Phase 3 can reconstruct it
+        drop_directive = next(d for d in directives if d.tool_name == "guided_dropped_to_freeform")
+        assert drop_directive.arguments["drop_reason"] == "user_pressed_exit"
+
+    def test_step_1_non_inspect_turn_does_not_advance(self) -> None:
+        """A SINGLE_SELECT response in Step 1 is an intra-step turn — no advance."""
+        session = GuidedSession.initial()
+        response = _make_response(chosen=["csv"])
+        new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.SINGLE_SELECT)
+        assert new_sess is session  # same object — no state change
+        assert next_turn is None
+        assert terminal is None
+        assert directives == []

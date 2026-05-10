@@ -98,8 +98,15 @@ def validate_url_scheme(url: str) -> None:
         SSRFBlockedError: If scheme is not in allowlist
     """
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        raise SSRFBlockedError(f"Forbidden scheme: {parsed.scheme}")
+    scheme = parsed.scheme.lower()
+    if scheme in ALLOWED_SCHEMES:
+        return
+    if not scheme:
+        raise SSRFBlockedError(
+            f"URL is missing a scheme (expected 'https://' or 'http://' prefix); "
+            f"got {url!r}. Add the scheme to the input value, e.g. 'https://{url}'."
+        )
+    raise SSRFBlockedError(f"Forbidden URL scheme {parsed.scheme!r} — only http and https are allowed; got {url!r}.")
 
 
 def _resolve_hostname(hostname: str) -> list[str]:

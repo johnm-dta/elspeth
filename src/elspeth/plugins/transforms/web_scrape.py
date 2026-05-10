@@ -122,7 +122,16 @@ class WebScrapeHTTPConfig(BaseModel):
 class WebScrapeConfig(TransformDataConfig):
     """Configuration for web scrape transform."""
 
-    url_field: str
+    url_field: str = Field(
+        description=(
+            "Name of the row field whose value is the absolute URL to fetch. "
+            "Values MUST include an explicit 'http://' or 'https://' scheme; "
+            "bare hostnames (e.g. 'www.example.gov.au') are rejected at fetch "
+            "time by the SSRF guard. If the upstream source emits scheme-less "
+            "values, normalize them in the source data or add an upstream "
+            "value_transform that prepends 'https://' before this transform."
+        ),
+    )
     content_field: str
     fingerprint_field: str
     format: Literal["markdown", "text", "raw"] = "markdown"
@@ -282,7 +291,12 @@ class WebScrapeTransform(BaseTransform):
     - Fingerprinting: Change detection with normalization
 
     Configuration:
-        url_field: Field containing URL to fetch
+        url_field: Field containing URL to fetch. Values MUST include an
+            explicit 'http://' or 'https://' scheme; bare hostnames such as
+            'www.example.gov.au' are rejected by the SSRF guard with
+            ``SSRFBlockedError: URL is missing a scheme``. If the source
+            emits scheme-less values, fix them in the source data or
+            prepend the scheme via an upstream value_transform.
         content_field: Field to store extracted content
         fingerprint_field: Field to store content fingerprint
         format: Output format ("markdown", "text", "raw")
@@ -316,7 +330,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b1339397350c2ffc"
+    source_file_hash: str | None = "sha256:c63323732f35c0f4"
     config_model = WebScrapeConfig
     passes_through_input = True
 

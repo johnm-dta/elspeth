@@ -1,7 +1,7 @@
 """SQLAlchemy Core table definitions for the session database.
 
-Tables: sessions, chat_messages, composition_states, runs, run_events,
-blobs, blob_run_links.
+Tables: sessions, chat_messages, composition_states, runs, blobs,
+blob_run_links, user_secrets.
 
 Current schema bootstrap lives in ``sessions/schema.py``. Pre-release
 session databases are created from this metadata and stale runtime DBs
@@ -251,26 +251,6 @@ blob_run_links_table = Table(
 )
 Index("ix_blob_run_links_blob_id", blob_run_links_table.c.blob_id)
 Index("ix_blob_run_links_run_id", blob_run_links_table.c.run_id)
-
-run_events_table = Table(
-    "run_events",
-    metadata,
-    Column("id", String, primary_key=True),
-    Column(
-        "run_id",
-        String,
-        ForeignKey("runs.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    ),
-    Column("timestamp", DateTime(timezone=True), nullable=False),
-    Column("event_type", String, nullable=False),
-    Column("data", JSON, nullable=False),
-    CheckConstraint(
-        "event_type IN ('progress', 'error', 'completed', 'cancelled', 'failed')",
-        name="ck_run_events_type",
-    ),
-)
 
 user_secrets_table = Table(
     "user_secrets",

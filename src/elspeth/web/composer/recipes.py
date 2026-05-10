@@ -128,6 +128,12 @@ def _coerce_slot(name: str, spec: SlotSpec, raw: Any) -> Any:
         # str entries — no string-splitting, because a single comma-separated
         # value would be ambiguous (is "a,b" one field or two?). The slot
         # caller is the LLM agent, which can construct lists natively.
+        #
+        # Returns a tuple, not a list: the coerced value may end up in a
+        # ``SlotSpec.default`` on a ``frozen=True`` dataclass, where a
+        # mutable list would silently bypass the frozen contract. Recipes
+        # that need a list rebind via ``list(...)`` at the build-function
+        # boundary (see _build_classify_recipe).
         if not isinstance(raw, (list, tuple)):
             raise RecipeValidationError(f"slot '{name}' must be a JSON array of strings (got type {type(raw).__name__})")
         items: list[str] = []
@@ -135,7 +141,7 @@ def _coerce_slot(name: str, spec: SlotSpec, raw: Any) -> Any:
             if not isinstance(item, str):
                 raise RecipeValidationError(f"slot '{name}'[{index}] must be a string (got type {type(item).__name__})")
             items.append(item)
-        return items
+        return tuple(items)
 
     raise RecipeValidationError(f"recipe slot type {spec.slot_type!r} is not implemented")
 

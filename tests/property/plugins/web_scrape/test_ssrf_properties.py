@@ -367,8 +367,15 @@ class TestSchemeValidation:
     )
     @settings(max_examples=50)
     def test_forbidden_schemes_rejected(self, scheme: str) -> None:
-        """Property: Non-http(s) schemes always rejected."""
-        with pytest.raises(SSRFBlockedError, match="Forbidden scheme"):
+        """Property: Non-http(s) schemes always rejected.
+
+        The error message must name the offending scheme (case-preserved) so the
+        operator can tell from /diagnostics what they sent vs what was allowed.
+        """
+        # urlparse normalises the scheme to lowercase before reporting it, so
+        # the operator-visible message will name the lowercase form regardless
+        # of the input casing.
+        with pytest.raises(SSRFBlockedError, match=rf"Forbidden URL scheme '{scheme.lower()}'"):
             validate_url_scheme(f"{scheme}://payload")
 
 

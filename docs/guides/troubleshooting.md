@@ -53,7 +53,7 @@ export ELSPETH_ALLOW_RAW_SECRETS=true
 ```bash
 docker run --rm \
   -e ELSPETH_FINGERPRINT_KEY="your-key" \
-  ghcr.io/johnm-dta/elspeth:v0.5.0 \
+  ghcr.io/johnm-dta/elspeth:v0.5.1 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -243,13 +243,13 @@ uv pip install 'elspeth[tracing-langfuse]'
 
 2. For PostgreSQL, check the connection string:
    ```bash
-   export DATABASE_URL="postgresql://user:pass@localhost:5432/elspeth"
+   export DATABASE_URL="postgresql://<user>:<password>@localhost:5432/elspeth"  # secret-scan: allow-this-line
    ```
 
 3. In Docker Compose, use service names not `localhost`:
    ```yaml
    environment:
-     - DATABASE_URL=postgresql://user:pass@db:5432/elspeth  # 'db' is the service name
+     - DATABASE_URL=postgresql://<user>:<password>@db:5432/elspeth  # 'db' is the service name; secret-scan: allow-this-line
    ```
 
 4. Verify the database server is running:
@@ -271,7 +271,7 @@ uv pip install 'elspeth[tracing-langfuse]'
 2. For concurrent workloads, switch to PostgreSQL:
    ```yaml
    landscape:
-     url: postgresql://user:pass@localhost:5432/elspeth
+     url: postgresql://<user>:<password>@localhost:5432/elspeth  # secret-scan: allow-this-line
    ```
 
 3. If a process crashed, check for stale locks:
@@ -297,7 +297,7 @@ uv pip install 'elspeth[tracing-langfuse]'
    ```bash
    docker run --rm \
      -v $(pwd)/input:/app/input:ro \
-     ghcr.io/johnm-dta/elspeth:v0.5.0 \
+     ghcr.io/johnm-dta/elspeth:v0.5.1 \
      ls /app/input
    ```
 

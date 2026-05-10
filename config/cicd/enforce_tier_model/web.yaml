@@ -367,7 +367,47 @@ allow_hits:
     validation reports malformed aggregation wrapper options as blocking ValidationEntry
     results, while top-level required_input_fields is still rejected
   expires: null
-- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=fb06a652afdd77f4
+- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=c74f6ddd778da661
+  owner: web-composer
+  reason: Composer state options are Tier 3 LLM/user-supplied plugin config; the rule
+    inspects web_scrape's options.http.abuse_contact at composer-validate time,
+    which means traversing an opaque dict whose internal shape is only constrained
+    by the plugin's own pydantic schema. isinstance(options, Mapping) and
+    isinstance(http, Mapping) and isinstance(abuse_contact, str) are early-return
+    shape guards at this Tier 3 boundary so the rule short-circuits cleanly when
+    plugin schema validation will already reject the malformed shape elsewhere
+    (missing http block, non-string abuse_contact like a {secret_ref:...} dict).
+    The rule fires only when the value is a real-shaped email and exists to reject
+    RFC 2606/6761 reserved-domain emails (example.com/.org/.net, *.test, *.invalid,
+    *.localhost, *.example) as fabricated wire-visible identity values that ship
+    as HTTP headers to scraped third parties — a Tier-1 audit-integrity defect.
+    Backstops the skill-prompt rule in pipeline_composer.md (web_scrape.http
+    section) introduced in commit 848ec5a1; observation obs-69697091d9 predicted
+    the need for this mechanical rule after a fresh dashboard test on session
+    3dda63b9 showed the prompt rule alone was insufficient.
+  safety: All three isinstance early-returns yield None (no error reported); the
+    plugin's pydantic schema is the authoritative reporter for missing/malformed
+    http or abuse_contact, so silence here does not mask any defect. When the
+    shape matches and the domain is reserved, returns a high-severity blocking
+    ValidationEntry naming the node and field, rendering the pipeline invalid.
+  expires: null
+- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=37164e1dc3371406
+  owner: web-composer
+  reason: Same Tier-3 boundary as the paired R5 entry above; the helper uses
+    options.get('http') and http.get('abuse_contact') because the composer
+    state's options dict is an opaque LLM/user-supplied mapping whose internal
+    keys may legitimately be absent (a web_scrape transform under construction
+    may not yet have an http block, or an http block under construction may not
+    yet have abuse_contact set). The plugin's pydantic schema reports the
+    absence elsewhere; this rule short-circuits with None when the key is
+    missing, deferring to that authoritative reporter rather than double-
+    surfacing the same defect.
+  safety: Missing-key paths return None (no error reported), letting the
+    plugin's pydantic schema validator surface the missing-required-field
+    defect. The rule's own error path fires only when the value is shape-valid
+    AND the domain is reserved.
+  expires: null
+- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=2362eadcc48b831e
   owner: web-composer
   reason: Composer preview classifies only known plugin config/probe exception types
     while probing plugin-computed output contracts for shape-changing transforms.
@@ -381,7 +421,7 @@ allow_hits:
     for known pass-through plugins, which then forces Stage 1 rejection) instead of
     crashing or fabricating a stronger contract
   expires: null
-- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=98e84993c1a9ddb8
+- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=db82467039a016c0
   owner: web-composer
   reason: _producer_emit_set looks up a producer's NodeSpec in node_by_id; sources
     have producer_id == "source" which is not a node, so the lookup may legitimately
@@ -408,7 +448,7 @@ allow_hits:
     translates to SemanticOutcome.UNKNOWN; FAIL-policy consumers then emit a structured
     error naming only the requirement_code and plugin names, never the exception text.
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=5e86ee2c15ad2f70
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=9b74c6ec125d8740
   owner: web-composer
   reason: Contract helper ValueError (consumer required-fields parse) is intentionally
     converted into a blocking ValidationEntry on the consumer node instead of raising
@@ -416,7 +456,7 @@ allow_hits:
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     consumer edge
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=3fbb09e52d2068a5
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=2f7d16a3b98bb83e
   owner: web-composer
   reason: _consumer_locked_input_set ValueError (consumer schema parse) is intentionally
     converted into a blocking ValidationEntry on the consumer node instead of raising
@@ -426,14 +466,14 @@ allow_hits:
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     consumer edge and Rule A is short-circuited for that consumer
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=b184673721480f77
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=adc1dd434b1fd56b
   owner: web-composer
   reason: Producer contract parse failures are intentionally converted into blocking
     ValidationEntry results and the producer is marked uncheckable
   safety: The invalid producer blocks validation and suppresses downstream edge contracts
     instead of silently continuing
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=7f602ac43c393cdc
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=65ab7638ce2f6df1
   owner: web-composer
   reason: Rule A producer-emit ValueError swallowed silently because _effective_producer_guarantees
     has already raised the same producer parse error above and surfaced it as a blocking
@@ -442,14 +482,14 @@ allow_hits:
   safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
     call; pipeline remains invalid; Rule A is correctly skipped for this edge
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=f44f58dba3e5b4a0
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=7ec00da0ef61c90a
   owner: web-composer
   reason: Sink contract parse failures are intentionally converted into blocking ValidationEntry
     results on the output
   safety: The pipeline remains invalid and the sink edge contract is skipped rather
     than fabricated
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=066e7ad1ae2a6deb
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=8e75d0a874bd2398
   owner: web-composer
   reason: _sink_locked_input_set ValueError (sink schema parse) is intentionally converted
     into a blocking ValidationEntry on the output. Mirrors the sink required-fields
@@ -458,14 +498,14 @@ allow_hits:
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     sink and Rule B is short-circuited for that output
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=9ccc77d318c856b5
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=47a8ea15bb1f8a69
   owner: web-composer
   reason: Sink-side producer parse failures are intentionally converted into blocking
     ValidationEntry results and the producer is marked uncheckable
   safety: The pipeline remains invalid and downstream sink contract evidence is suppressed
     for the bad producer
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=752e1ba42c071fe8
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=6e3a1b6e628fd390
   owner: web-composer
   reason: 'Rule B producer-emit ValueError swallowed silently because _effective_producer_guarantees
     has already raised the same producer parse error above and surfaced it as a blocking
@@ -475,7 +515,7 @@ allow_hits:
   safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
     call; pipeline remains invalid; Rule B is correctly skipped for this edge
   expires: null
-- key: web/composer/state.py:R1:_check_schema_contracts:fp=3c5fca0a15573042
+- key: web/composer/state.py:R1:_check_schema_contracts:fp=7f788bd20677fb7e
   owner: web-composer
   reason: Rule C reads field_mapper's select_only flag from raw Tier-3 user/LLM-supplied
     options. dict.get with default False matches FieldMapperConfig.select_only's pydantic
@@ -486,7 +526,7 @@ allow_hits:
     because select_only=False puts field_mapper into the additive/loose-bound regime
     that Rule C explicitly does not adjudicate
   expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=fbb45ff84e2b810e
+- key: web/composer/state.py:R6:CompositionState:validate:fp=9bde8ab7cd932a09
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into
     a blocking ValidationEntry so composer rejects malformed trigger.condition values
@@ -1876,51 +1916,51 @@ allow_hits:
     at construction time
   safety: Raises ValueError on mismatch; belt-and-suspenders with before-validator
   expires: null
-- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=dbd46fa41d6b0905
+- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=10ef92b852ef494a
   owner: web-execution
   reason: Security boundary — isinstance dispatches SecretResolutionError to safe
     message (no secret name leakage)
   safety: Type dispatch for sanitization, not error suppression
   expires: null
-- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=7051b993b5f0f0c4
+- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=9c62afebfd0b8f75
   owner: web-execution
   reason: Security boundary — isinstance dispatches SecretResolutionError to safe
     message (no secret name leakage)
   safety: Type dispatch for sanitization, not error suppression
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=809af55c79e96a02
+- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=0115d0d1d1a2d2b7
   owner: web-execution
   reason: Session may never have called execute(), so no lock exists in _session_locks.
     Cleanup is called on every session delete regardless. Matches ProgressBroadcaster.cleanup_run()
     pattern.
   safety: Missing key means session was never executed against; no cleanup needed
   expires: null
-- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=129610d0eec4d682
+- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=f0ed9aa21cc55535
   owner: web-execution
   reason: Session lock map creates per-session lock lazily on first execution
   safety: Mutation is thread-safe; setdefault is atomic for dict
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=6aeb4c789842ea1a
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=2e7f484aa6c1ff08
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=e6f0a4c698ce0e82
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=3da79b9113537905
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=73d2c875061fb2d8
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=29a0072891d51984
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=17f4aff089ffcfce
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=aafa364c0343d450
   owner: web-execution
   reason: Idempotent shutdown-event cleanup on failure path
   safety: Pop is idempotent; except BaseException handler cleans up before re-raise
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=6f43afcddc17c1b9
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=a52beed30ac36c97
   owner: web-execution
   reason: Best-effort run status cleanup on setup failure — must not mask original
     exception. Narrowed from `except Exception` to `(SQLAlchemyError, OSError)` per
@@ -1929,36 +1969,36 @@ allow_hits:
     DB URLs/credentials.
   safety: Logged with slog.error; original exception always re-raised
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=db0d3c96b9faa518
+- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=aa6305046d263bf4
   owner: web-execution
   reason: Check for live shutdown event before fallback handling
   safety: Returns None if absent; no silent default
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=d1c69a4201dbbefd
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=cd83f921511a7cd3
   owner: web-execution
   reason: Tier 3 — config from YAML deserialization may be non-dict
   safety: Raises TypeError if not dict; no silent default
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=8e1bb9a98b5bb9c3
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=4f747d62fb6da925
   owner: web-execution
   reason: Scope-to-audit-source mapping — .get() on explicit mapping dict with crash-on-unknown
     guard
   safety: Unknown scope raises ValueError immediately; no silent default
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=6c96d53f6e440038
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=8beb2c9f5a68f6b1
   owner: web-execution
   reason: Progress broadcasting via call_soon_threadsafe raises RuntimeError when
     event loop is closed during shutdown
   safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical
     exc_class; pipeline continues
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=42aefce129b6a034
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=271aec51d432c0c5
   owner: web-execution
   reason: GracefulShutdownError is an expected control-flow signal from orchestrator
     cancellation
   safety: Classified as cancelled; separated from BaseException failure path
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=db15dffcade1ae7e
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=b25e3bff9dca6bff
   owner: web-execution
   reason: Signal-exception classification (KeyboardInterrupt/SystemExit) inside the
     BaseException recovery block — programmer signals must propagate; only normal
@@ -1967,7 +2007,7 @@ allow_hits:
   safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal
     exceptions become operator-visible structured failures
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=5f662279a12ae80d
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=4e8f915bcc6109bc
   owner: web-execution
   reason: 'elspeth-879f6de6bd post-completion run-state probe — catches (SQLAlchemyError,
     OSError) only, so transient audit-system degradation (DB hiccup, filesystem race)
@@ -1984,7 +2024,7 @@ allow_hits:
     ValueError surfaces Tier-1 audit corruption as required; programmer bugs (TypeError/AttributeError/RuntimeError)
     propagate
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=d992557b7ed191aa
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=af2f0ffc192fe035
   owner: web-execution
   reason: Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status
     update inside the BaseException recovery handler. Fingerprint shifted from 7edaa7aa890d4d12
@@ -1994,12 +2034,12 @@ allow_hits:
     or filesystem failures do not mask the original pipeline exception; programmer
     bugs (TypeError, AttributeError, RuntimeError) propagate
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=83b92bd18747808f
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=9e0b68ce52d4147c
   owner: web-execution
   reason: Final shutdown-event cleanup is intentionally idempotent
   safety: Pop is idempotent
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=b4126e419715d0e1
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=f1ae7cec624b5aeb
   owner: web-execution
   reason: Blob finalization before terminal broadcast — failure must not mask run
     outcome
@@ -2008,7 +2048,7 @@ allow_hits:
     excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=6b593acaf9c4c455
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=b1bc50d69bfcc26b
   owner: web-execution
   reason: Last-resort safety net — isinstance check excludes KeyboardInterrupt/SystemExit
     from diagnostic logging
@@ -2559,6 +2599,60 @@ allow_hits:
   safety: An unresolvable path produces downloadable=false; the UI suppresses the
     Download button. The audit trail still shows the artifact's recorded path_or_uri,
     exists_now, and content_hash. No bytes are served on a False result.
+  expires: null
+- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=320551bb03e05601
+  owner: web-composer
+  reason: Tier 3 boundary — LLM/operator-supplied node options may shape `http` as
+    a non-Mapping (e.g., null, list). Validator returns None on shape mismatch and
+    delegates to the plugin schema rule, which surfaces malformed `http` as a structured
+    error rather than crashing the validate path.
+  safety: Returns None; downstream plugin schema rule reports the malformed http block
+    as a separate ValidationEntry.
+  expires: null
+- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=9158c77d7a443d63
+  owner: web-composer
+  reason: Tier 3 boundary — abuse_contact is an optional sub-key of the operator-supplied
+    http options block. Missing key is a documented optional configuration, not an
+    error.
+  safety: Returns None when key is absent; reserved-domain check only fires when the
+    operator explicitly set abuse_contact.
+  expires: null
+- key: web/execution/service.py:R4:ExecutionServiceImpl:_run_pipeline:fp=be149cf5244d1481
+  owner: web-execution
+  reason: Best-effort failure-sample enrichment — Tier-1 audit DB read via load_top_failure_samples
+    may raise on malformed audit JSON or transient DB error. Degrading to bare error
+    message is preferable to losing the run-status persistence (which is the more
+    important failure-mode invariant). Audit-DB anomalies remain observable via the
+    slog warning per the audit-system-failure exemption in CLAUDE.md logging-telemetry-policy.
+  safety: samples_text falls back to empty string; the failed-requires-error invariant
+    is still satisfied via the structural failure message; slog.warning emits exc_info
+    for forensic visibility.
+  expires: null
+- key: web/execution/failure_samples.py:R1:load_top_failure_samples:fp=fdc4a3946c001515
+  owner: web-execution
+  reason: Best-effort enrichment field — error_details JSON shape varies by transform
+    (different plugins write different keys). Defaulting to "UnknownError" is the
+    documented fallback for transforms that don't write error_type. Caller wraps with
+    broad-except so any audit-shape anomaly degrades gracefully.
+  safety: Default "UnknownError" preserves rendering; missing error_type does not
+    block run-status persistence.
+  expires: null
+- key: web/execution/failure_samples.py:R1:load_top_failure_samples:fp=b09747c7efb37444
+  owner: web-execution
+  reason: Best-effort enrichment field — error_details JSON shape varies by transform.
+    The `error` key is the canonical field; some transforms write `reason` instead.
+    Two-level fallback ("error" → "reason" → "") matches both conventions without
+    crashing on either.
+  safety: Empty string when neither key is present; downstream format_failure_samples
+    handles empty messages gracefully.
+  expires: null
+- key: web/execution/failure_samples.py:R1:load_top_failure_samples:fp=1f176fb7969fbed2
+  owner: web-execution
+  reason: Inner fallback for the chained .get("error", details.get("reason", ""))
+    expression — same justification as the outer .get above; both branches converge
+    on empty string when neither key is present.
+  safety: Empty string when neither key is present; downstream format_failure_samples
+    handles empty messages gracefully.
   expires: null
 per_file_rules:
 - pattern: web/composer/tools.py

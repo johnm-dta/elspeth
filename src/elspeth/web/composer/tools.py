@@ -5149,9 +5149,11 @@ def compute_proof_diagnostics(
         return diagnostics
 
     # Only blob-backed sources are inspectable from preview_pipeline; for
-    # path-based sources we have no bytes to peek at.
-    options = source.options or {}
-    blob_id = options.get("blob_ref") if isinstance(options, Mapping) else None
+    # path-based sources we have no bytes to peek at. SourceSpec.options is
+    # internally typed as Mapping[str, Any] (Tier-1 dataclass invariant — no
+    # isinstance probe needed); see _proof_repair_is_applicable for the
+    # canonical pattern this site mirrors.
+    blob_id = source.options.get("blob_ref")
     if blob_id is None or session_engine is None or session_id is None:
         return diagnostics
 
@@ -5199,7 +5201,10 @@ def compute_proof_diagnostics(
 
     # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
     if facts.source_kind in {"csv", "json", "jsonl"}:
-        schema = options.get("schema") if isinstance(options, Mapping) else None
+        # source.options is Tier-1 (Mapping[str, Any]); the *value* at "schema"
+        # is unstructured and may be absent, so the inner shape probes below
+        # remain.
+        schema = source.options.get("schema")
         if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
             declared = schema.get("fields") or ()
             if isinstance(declared, (list, tuple)):

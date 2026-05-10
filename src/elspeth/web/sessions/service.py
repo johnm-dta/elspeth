@@ -24,7 +24,6 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
-    run_events_table,
     runs_table,
     sessions_table,
 )
@@ -317,10 +316,6 @@ class SessionServiceImpl:
             try:
                 with self._engine.begin() as conn:
                     # Delete in dependency order (children first for non-CASCADE DBs)
-                    # Get run IDs for this session to delete run_events
-                    run_ids = [r.id for r in conn.execute(select(runs_table.c.id).where(runs_table.c.session_id == sid)).fetchall()]
-                    if run_ids:
-                        conn.execute(delete(run_events_table).where(run_events_table.c.run_id.in_(run_ids)))
                     conn.execute(delete(runs_table).where(runs_table.c.session_id == sid))
                     conn.execute(delete(chat_messages_table).where(chat_messages_table.c.session_id == sid))
                     conn.execute(delete(composition_states_table).where(composition_states_table.c.session_id == sid))

@@ -706,6 +706,69 @@ def _validate_gate_expression(condition: str) -> str | None:
     return None
 
 
+# RFC 2606 / RFC 6761 reserved/special-use domain labels. Emails at these
+# domains are not deliverable to anyone; values at these domains in
+# `web_scrape.http.abuse_contact` are fabrications that ship as HTTP headers
+# to scraped third parties — a Tier-1 audit-integrity defect — regardless of
+# any prose rationale ("placeholder", "internal default") the composer LLM
+# attached to them. Mechanical backstop for the skill-prompt rule in
+# pipeline_composer.md (web_scrape.http section); pairs with the future
+# angle-bracket placeholder rule tracked in elspeth-f1efeed9c2 for layered
+# defence.
+_RFC_RESERVED_DOMAIN_LABELS: tuple[str, ...] = (
+    "example.com",
+    "example.org",
+    "example.net",
+    "example",
+    "test",
+    "invalid",
+    "localhost",
+)
+
+
+def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> ValidationEntry | None:
+    """Reject web_scrape.http.abuse_contact values at RFC-reserved domains.
+
+    abuse_contact is wire-visible: it ships as an HTTP header on every
+    outbound scrape request, and the receiving operator uses it to contact us.
+    A reserved-domain address (`example.com`, `*.test`, etc.) is not
+    deliverable and constitutes a fabricated identity on the wire.
+
+    Returns None when the field is absent, has an unexpected type, lacks an
+    `@`, or uses a real domain. Returns a high-severity ValidationEntry when
+    the domain matches one of the RFC 2606/6761 reserved labels.
+    """
+    if node.plugin != "web_scrape":
+        return None
+    # node.options is statically Mapping[str, Any]; the value at "http" is
+    # unstructured (Any) and may be absent or non-Mapping, so the inner
+    # isinstance guard below remains.
+    http = node.options.get("http")
+    if not isinstance(http, Mapping):
+        return None  # Plugin schema rule reports missing/malformed http block.
+    abuse_contact = http.get("abuse_contact")
+    if not isinstance(abuse_contact, str):
+        return None
+    if "@" not in abuse_contact:
+        return None  # Malformed email — let the plugin schema rule report it.
+    domain = abuse_contact.rsplit("@", 1)[1].strip().lower()
+    for reserved in _RFC_RESERVED_DOMAIN_LABELS:
+        if domain == reserved or domain.endswith("." + reserved):
+            return ValidationEntry(
+                component=f"node:{node.id}",
+                message=(
+                    f"web_scrape.http.abuse_contact has domain '{domain}' — RFC 2606/6761 reserves "
+                    f"'{reserved}' for documentation/test use, so the value is not deliverable to "
+                    "anyone and would ship as a fabricated identity in the HTTP header to the "
+                    "scraped host. Set abuse_contact to an operator-supplied or "
+                    "deployment-identity-sourced email (see the web_scrape.http rule in "
+                    "pipeline_composer.md)."
+                ),
+                severity="high",
+            )
+    return None
+
+
 def _locked_input_field_set(options: Mapping[str, Any], owner: str) -> frozenset[str] | None:
     """Return the consumer's accepted-input field set when its input is locked.
 
@@ -1821,6 +1884,10 @@ class CompositionState:
             batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
             if batch_required_error is not None:
                 errors.append(_err(f"node:{node.id}", batch_required_error, "high"))
+
+            abuse_contact_error = _validate_web_scrape_abuse_contact_not_reserved(node)
+            if abuse_contact_error is not None:
+                errors.append(abuse_contact_error)
 
             if node.node_type == "gate":
                 if node.condition is None:

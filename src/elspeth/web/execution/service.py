@@ -45,6 +45,7 @@ from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.failure_samples import format_failure_samples, load_top_failure_samples
 from elspeth.web.execution.fanout_guard import (
     ExecutionFanoutGuardRequired,
     annotate_pipeline_yaml_with_fanout_guard,
@@ -144,7 +145,7 @@ def _session_status_from_run_result_status(status: RunStatus) -> SessionRunStatu
         ) from exc
 
 
-def _structural_failure_message(*, rows_processed: int) -> str:
+def _structural_failure_message(*, rows_processed: int, failure_samples: str = "") -> str:
     """elspeth-0de989c56d / elspeth-5069612f3c — synthetic structural error
     for FAILED-from-row-shape after the rows_routed split.
 
@@ -159,13 +160,22 @@ def _structural_failure_message(*, rows_processed: int) -> str:
     fires only when no row reached EITHER the success-counted terminal state
     OR an intentional gate-routed sink, i.e. when every row failed terminally
     or was diverted via on_error.
+
+    ``failure_samples`` is an optional pre-formatted bullet list of the most
+    common per-row error messages (see ``failure_samples.format_failure_samples``).
+    When supplied, it is appended so the runs view shows the dominant failure
+    modes inline — the panel-expand affordance still has the full per-token
+    drill-down, but the headline already names the problem.
     """
-    return (
+    base = (
         f"No row reached a success path (rows_processed={rows_processed}, "
         f"rows_succeeded=0, rows_routed_success=0). "
         f"All rows either failed terminally or were routed via on_error to a "
-        f"failure sink. Inspect /diagnostics for per-row failure details."
+        f"failure sink."
     )
+    if failure_samples:
+        return f"{base} Top per-row failures:\n{failure_samples}"
+    return f"{base} Expand this run for per-row failure details."
 
 
 def _partial_completion_message(
@@ -174,6 +184,7 @@ def _partial_completion_message(
     rows_failed: int,
     rows_routed_failure: int,
     rows_quarantined: int,
+    failure_samples: str = "",
 ) -> str:
     """Operator-readable summary for COMPLETED_WITH_FAILURES runs.
 
@@ -187,13 +198,18 @@ def _partial_completion_message(
     non-empty ``error`` only for ``status='failed'`` — populating ``error``
     on COMPLETED_WITH_FAILURES is permitted, and the schema validators
     accept it (see tests/unit/web/execution/test_schemas.py:1156).
+
+    ``failure_samples`` mirrors the same parameter on
+    ``_structural_failure_message`` — see its docstring.
     """
-    return (
+    base = (
         f"Run completed with failures (rows_succeeded={rows_succeeded}, "
         f"rows_failed={rows_failed}, rows_routed_failure={rows_routed_failure}, "
-        f"rows_quarantined={rows_quarantined}). "
-        f"Inspect /diagnostics for per-row failure details."
+        f"rows_quarantined={rows_quarantined})."
     )
+    if failure_samples:
+        return f"{base} Top per-row failures:\n{failure_samples}"
+    return f"{base} Expand this run for per-row failure details."
 
 
 # B1 fix: RunAlreadyActiveError is NOT defined here — imported from
@@ -943,20 +959,43 @@ class ExecutionServiceImpl:
             # ``failed-requires-error`` audit invariant while remaining
             # operator-readable and free of secret/row content.
             session_error: str | None = None
-            if result.status == RunStatus.FAILED:
-                session_error = _structural_failure_message(rows_processed=result.rows_processed)
-            elif result.status == RunStatus.COMPLETED_WITH_FAILURES:
-                # Populate error with a structural summary so the frontend can
-                # render failure evidence for partial-success runs without
-                # duplicating the L0 failure_indicator predicate.  RunRecord
-                # invariant (sessions/protocol.py:237-238) permits error on
-                # any status; only FAILED *requires* it.
-                session_error = _partial_completion_message(
-                    rows_succeeded=result.rows_succeeded,
-                    rows_failed=result.rows_failed,
-                    rows_routed_failure=result.rows_routed_failure,
-                    rows_quarantined=result.rows_quarantined,
-                )
+            if result.status in (RunStatus.FAILED, RunStatus.COMPLETED_WITH_FAILURES):
+                # Enrich the structural message with the top distinct per-row
+                # failures so the runs view shows the dominant cause inline.
+                # Tier-1 read: the helper raises on malformed audit JSON. We
+                # deliberately catch and degrade here because run-status
+                # persistence is more important than enrichment — a missing
+                # sample list still satisfies the failed-requires-error
+                # invariant via the bare message. Audit-DB shape violations
+                # are still observable via the slog warning (audit-system
+                # failure exemption per CLAUDE.md logging-telemetry-policy).
+                samples_text = ""
+                if landscape_db is not None:
+                    try:
+                        samples = load_top_failure_samples(landscape_db, result.run_id)
+                        samples_text = format_failure_samples(samples)
+                    except Exception:
+                        slog.warning(
+                            "failure_sample_enrichment_failed",
+                            run_id=run_id,
+                            landscape_run_id=result.run_id,
+                            exc_info=True,
+                        )
+                if result.status == RunStatus.FAILED:
+                    session_error = _structural_failure_message(
+                        rows_processed=result.rows_processed,
+                        failure_samples=samples_text,
+                    )
+                else:
+                    # RunRecord invariant (sessions/protocol.py:237-238) permits
+                    # error on COMPLETED_WITH_FAILURES; only FAILED *requires* it.
+                    session_error = _partial_completion_message(
+                        rows_succeeded=result.rows_succeeded,
+                        rows_failed=result.rows_failed,
+                        rows_routed_failure=result.rows_routed_failure,
+                        rows_quarantined=result.rows_quarantined,
+                        failure_samples=samples_text,
+                    )
             # Cancelled-race recovery: catch only the narrow subclass.  See
             # IllegalRunTransitionError docstring for why bare ValueError must
             # propagate (Tier-1 invariant breaches must not be masked).

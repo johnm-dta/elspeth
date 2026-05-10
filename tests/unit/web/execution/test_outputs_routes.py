@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -113,6 +114,7 @@ class TestRunOutputsManifestEndpoint:
                 size_bytes=100 + i,
                 created_at=datetime.now(UTC),
                 exists_now=True,
+                downloadable=True,
             )
             for i in range(25)
         ]
@@ -208,6 +210,7 @@ class TestRunOutputContentEndpoint:
                         size_bytes=sink_file.stat().st_size,
                         created_at=datetime.now(UTC),
                         exists_now=True,
+                        downloadable=True,
                     )
                 ],
             )
@@ -264,6 +267,7 @@ class TestRunOutputContentEndpoint:
                         size_bytes=rogue_file.stat().st_size,
                         created_at=datetime.now(UTC),
                         exists_now=True,
+                        downloadable=True,
                     )
                 ],
             )
@@ -343,6 +347,7 @@ class TestRunOutputContentEndpoint:
                         size_bytes=10,
                         created_at=datetime.now(UTC),
                         exists_now=False,
+                        downloadable=False,
                     )
                 ],
             )
@@ -363,3 +368,260 @@ class TestRunOutputContentEndpoint:
 
         assert response.status_code == 410
         assert response.json()["detail"]["error_type"] == "artifact_purged_or_moved"
+
+
+# ── Preview endpoint tests ──────────────────────────────────────────
+
+
+def _file_artifact_in_outputs(
+    sink_file: Path,
+    *,
+    artifact_id: str = "art-1",
+    sink_node_id: str = "results",
+) -> RunOutputArtifact:
+    return RunOutputArtifact(
+        artifact_id=artifact_id,
+        sink_node_id=sink_node_id,
+        artifact_type="file",
+        path_or_uri=f"file://{sink_file}",
+        content_hash="a" * 64,
+        size_bytes=sink_file.stat().st_size,
+        created_at=datetime.now(UTC),
+        exists_now=True,
+        downloadable=True,
+    )
+
+
+def _install_manifest_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    artifacts: list[RunOutputArtifact],
+    run_id: UUID,
+) -> None:
+    def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+        return RunOutputsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            artifacts=artifacts,
+        )
+
+    async def fake_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+    monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+
+
+class TestRunOutputPreviewEndpoint:
+    """GET /api/runs/{run_id}/outputs/{artifact_id}/preview"""
+
+    @pytest.mark.asyncio
+    async def test_returns_csv_preview_for_small_file(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.csv"
+        sink_file.write_text("col1,col2\n1,2\n3,4\n")
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(monkeypatch, artifacts=[_file_artifact_in_outputs(sink_file)], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["content_type"] == "csv"
+        assert body["preview_text"] == "col1,col2\n1,2\n3,4\n"
+        assert body["truncated"] is False
+        assert body["row_count_preview"] == 3
+        assert body["total_size_bytes"] == sink_file.stat().st_size
+
+    @pytest.mark.asyncio
+    async def test_text_file_under_cap_returns_full_content(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "log.txt"
+        sink_file.write_text("hello world\n")
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(monkeypatch, artifacts=[_file_artifact_in_outputs(sink_file)], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["content_type"] == "text"
+        assert body["preview_text"] == "hello world\n"
+        assert body["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_binary_file_returns_binary_content_type(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "blob.bin"
+        sink_file.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 200)
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(monkeypatch, artifacts=[_file_artifact_in_outputs(sink_file)], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["content_type"] == "binary"
+        assert body["preview_text"] == ""
+
+    @pytest.mark.asyncio
+    async def test_404_when_artifact_id_not_in_run(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(monkeypatch, artifacts=[], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-missing/preview")
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["error_type"] == "artifact_not_found"
+
+    @pytest.mark.asyncio
+    async def test_403_when_path_outside_sink_allowlist(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        rogue_file = elsewhere / "rogue.csv"
+        rogue_file.write_text("escaped\n")
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        artifact = RunOutputArtifact(
+            artifact_id="art-rogue",
+            sink_node_id="rogue",
+            artifact_type="file",
+            path_or_uri=str(rogue_file),
+            content_hash="b" * 64,
+            size_bytes=rogue_file.stat().st_size,
+            created_at=datetime.now(UTC),
+            exists_now=True,
+            downloadable=False,
+        )
+        _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-rogue/preview")
+
+        assert response.status_code == 403
+        assert response.json()["detail"]["error_type"] == "output_path_outside_allowlist"
+
+    @pytest.mark.asyncio
+    async def test_410_when_file_purged_between_manifest_and_preview(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "gone.csv"
+        sink_file.write_text("data\n")
+        sink_file.unlink()
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        artifact = RunOutputArtifact(
+            artifact_id="art-purged",
+            sink_node_id="results",
+            artifact_type="file",
+            path_or_uri=str(sink_file),
+            content_hash="a" * 64,
+            size_bytes=5,
+            created_at=datetime.now(UTC),
+            exists_now=False,
+            downloadable=False,
+        )
+        _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-purged/preview")
+
+        assert response.status_code == 410
+        assert response.json()["detail"]["error_type"] == "artifact_purged_or_moved"
+
+    @pytest.mark.asyncio
+    async def test_415_when_artifact_is_object_store_uri(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        artifact = RunOutputArtifact(
+            artifact_id="art-azure",
+            sink_node_id="cloud",
+            artifact_type="webhook",
+            path_or_uri="azure://container/blob.json",
+            content_hash="c" * 64,
+            size_bytes=42,
+            created_at=datetime.now(UTC),
+            exists_now=False,
+            downloadable=False,
+        )
+        _install_manifest_loader(monkeypatch, artifacts=[artifact], run_id=run_id)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-azure/preview")
+
+        assert response.status_code == 415
+        assert response.json()["detail"]["error_type"] == "object_store_artifact_not_previewable"
+
+    @pytest.mark.asyncio
+    async def test_404_when_run_not_owned_by_user(self, monkeypatch, tmp_path) -> None:
+        # IDOR: a different user's run must look not-found, not 403.
+        run_id = uuid4()
+        svc = MagicMock()
+
+        app = _create_test_app(execution_service=svc)
+        # Force the session-ownership check to claim the run belongs to
+        # someone else by overriding the session.user_id on the mock.
+        app.state.session_service.get_session.return_value.user_id = "other-user"
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")
+
+        assert response.status_code == 404

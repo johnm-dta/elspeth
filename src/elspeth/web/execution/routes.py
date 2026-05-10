@@ -41,6 +41,7 @@ from elspeth.web.execution.outputs import (
     load_run_outputs_for_settings,
     path_or_uri_to_filesystem_path,
 )
+from elspeth.web.execution.preview import build_artifact_preview
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError
 from elspeth.web.execution.schemas import (
@@ -54,6 +55,7 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticsResponse,
     RunDiagnosticsWorkingView,
     RunEvent,
+    RunOutputArtifactPreview,
     RunOutputsResponse,
     RunResultsResponse,
     RunStatusResponse,
@@ -995,5 +997,108 @@ def create_execution_router() -> APIRouter:
             )
 
         return FileResponse(resolved, filename=resolved.name)
+
+    @router.get(
+        "/api/runs/{run_id}/outputs/{artifact_id}/preview",
+        response_model=RunOutputArtifactPreview,
+    )
+    async def get_run_output_preview(
+        run_id: UUID,
+        artifact_id: str,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
+    ) -> RunOutputArtifactPreview:
+        """Return a bounded head-of-file preview of one sink-write artefact.
+
+        Companion to ``/content``: where ``/content`` streams the full
+        file, ``/preview`` reads at most 256 KiB or 100 rows so the
+        operator UI can render an inline preview without a full
+        download. Same path-allowlist guard, same ownership check —
+        the only behavioural difference is bounded read.
+
+        Returns:
+        * 200 with ``RunOutputArtifactPreview`` on success.
+        * 403 when path is outside allowlist.
+        * 404 when artefact is not in the run's manifest.
+        * 410 when path was in-allowlist but file no longer exists
+          (frontend treats this as the "no longer available on disk"
+          state, mirroring the manifest's ``exists_now=False``).
+        * 415 when the artefact is non-file (object-store URI).
+        """
+        await _verify_run_ownership(run_id, user, request)
+        try:
+            status = await _load_run_status_with_accounting(run_id, app=request.app, service=service)
+        except _RunStatusNotFoundError:
+            raise _run_not_found_http() from None
+        except (ValidationError, _RunStatusIntegrityError) as exc:
+            raise _run_integrity_http(exc) from exc
+
+        landscape_run_id = status.landscape_run_id or status.run_id
+        try:
+            manifest = await run_sync_in_worker(
+                load_run_outputs_for_settings,
+                request.app.state.settings,
+                run_id=status.run_id,
+                landscape_run_id=landscape_run_id,
+            )
+        except RunOutputsAuditUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_type": "run_outputs_audit_unavailable",
+                    "landscape_run_id": exc.landscape_run_id,
+                    "audit_location": exc.audit_location,
+                },
+            ) from exc
+        artifact = next(
+            (a for a in manifest.artifacts if a.artifact_id == artifact_id),
+            None,
+        )
+        if artifact is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error_type": "artifact_not_found", "artifact_id": artifact_id},
+            )
+
+        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
+        if fs_path is None:
+            raise HTTPException(
+                status_code=415,
+                detail={
+                    "error_type": "object_store_artifact_not_previewable",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        resolved = fs_path.resolve()
+        data_dir = request.app.state.settings.data_dir
+        allowed = allowed_sink_directories(data_dir)
+        if not any(resolved.is_relative_to(base) for base in allowed):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_type": "output_path_outside_allowlist",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        if not resolved.exists():
+            # Manifest/preview race: file existed at manifest-load time
+            # but is gone now (purged, retention, manual delete). Match
+            # the /content endpoint's vocabulary — frontend handles either.
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error_type": "artifact_purged_or_moved",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        return await run_sync_in_worker(
+            build_artifact_preview,
+            resolved,
+            artifact_id=artifact_id,
+        )
 
     return router

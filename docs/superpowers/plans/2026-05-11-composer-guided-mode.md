@@ -590,7 +590,7 @@ class Turn(TypedDict):
 .venv/bin/python -m pytest tests/unit/web/composer/guided/test_protocol.py -v
 ```
 
-Expected: 11 passed.
+Expected: 12 passed (8 from Task 1.1 + 4 new).
 
 - [ ] **Step 4: Commit**
 
@@ -739,7 +739,7 @@ def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | N
 .venv/bin/python -m pytest tests/unit/web/composer/guided/test_protocol.py -v
 ```
 
-Expected: 17 passed.
+Expected: 19 passed (12 from prior tasks + 7 new).
 
 - [ ] **Step 4: Commit**
 
@@ -828,7 +828,7 @@ class TestGuidedSession:
 
     def test_session_history_is_immutable_tuple(self) -> None:
         s = GuidedSession.initial()
-        with pytest.raises(TypeError):
+        with pytest.raises(AttributeError):
             s.history.append(None)  # type: ignore[attr-defined]
 
     def test_session_with_terminal_set(self) -> None:
@@ -981,7 +981,7 @@ class GuidedSession:
 .venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py -v
 ```
 
-Expected: 7 passed.
+Expected: 8 passed (3 TestTerminalState + 2 TestTurnRecord + 3 TestGuidedSession).
 
 - [ ] **Step 4: Commit**
 

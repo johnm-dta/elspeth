@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
@@ -471,3 +473,38 @@ class TestTerminalHelpers:
         assert terminal.kind is TerminalKind.EXITED_TO_FREEFORM
         assert terminal.reason is TerminalReason.PROTOCOL_VIOLATION
         assert any(d.tool_name == "guided_dropped_to_freeform" and d.arguments["drop_reason"] == "protocol_violation" for d in directives)
+
+
+class TestStateMachineInvariants:
+    """Hypothesis property tests for invariants that must hold across all step states."""
+
+    @given(st.sampled_from(list(GuidedStep)))
+    def test_exit_to_freeform_always_terminates(self, starting_step: GuidedStep) -> None:
+        """control_signal='exit_to_freeform' terminates from ANY step, regardless of
+        intra-step state. The terminal kind is EXITED_TO_FREEFORM and the reason is
+        USER_PRESSED_EXIT — spec §5.3."""
+        sess = GuidedSession(
+            step=starting_step,
+            history=(),
+            step_1_result=None,
+            step_2_result=None,
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response: TurnResponse = {
+            "chosen": None,
+            "edited_values": None,
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": "exit_to_freeform",
+        }
+        new_sess, _next, terminal, _directives = step_advance(
+            sess,
+            response,
+            current_turn_type=TurnType.SINGLE_SELECT,
+        )
+        assert terminal is not None
+        assert new_sess.terminal is not None
+        assert new_sess.terminal.kind is TerminalKind.EXITED_TO_FREEFORM
+        assert new_sess.terminal.reason is TerminalReason.USER_PRESSED_EXIT

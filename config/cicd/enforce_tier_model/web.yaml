@@ -2304,91 +2304,91 @@ allow_hits:
   safety: Malformed shapes become structured argument errors returned to the LLM,
     not crashes or silent tool execution.
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=1e34eb7479b0167d
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=fca266425eeb1831
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=ea42c11436f7a6b4
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=471049fc5cee0515
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=d05240cdf2bf2c32
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=db0f56236380eed9
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=043480f8537ee20b
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=847aab8609439be9
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=8e4a7526a6efb1a2
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=baa6a5eb549b7fab
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider
     failures are converted into structured composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures
     are audited and returned as bounded tool results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=88e8da12a27d7c6c
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=d990c1c51860c4eb
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider
     failures are converted into structured composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures
     are audited and returned as bounded tool results.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=958db2f5afda2a29
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=826a1f372c8468d4
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=ac9bbfd059fb5f54
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=6e85f0c1c62a3ec2
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=96b591a02a1bff8d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=95e2da7226f58930
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=0e845d2cf03145b2
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=2064568867c07127
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9e1a5b94b288646a
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=3b6fe7e83bd7c65c
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=253ea848745b7422
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=6a9fb4dbd4f9ab9a
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=61b09e34591486c3
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=eca3581db63a1b6a
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.

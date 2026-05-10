@@ -36,7 +36,7 @@ class WebSettings(BaseModel):
     auth_provider: Literal["local", "oidc", "entra"] = "local"
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
-    data_dir: Path = Path("data")
+    data_dir: Path = Field(default=Path("data"), validate_default=True)
     composer_model: str = "gpt-5.5"
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
@@ -180,7 +180,15 @@ class WebSettings(BaseModel):
             return None
         if not str(v).strip():
             raise ValueError("must not be blank")
-        return v.expanduser()
+        # Resolve to an absolute path at validation time so downstream
+        # consumers do not depend on the running process CWD. Without
+        # this, a relative `data_dir` (e.g. the default Path("data"))
+        # is interpreted against whatever CWD the systemd unit happens
+        # to have when the audit DB is opened vs. when the
+        # sink-allowlist is checked — same code, different answers.
+        # `.resolve()` makes the answer immutable for the process
+        # lifetime regardless of later os.chdir calls.
+        return v.expanduser().resolve()
 
     @field_validator("server_secret_allowlist")
     @classmethod

@@ -66,6 +66,12 @@ visibility.
 - **Hard-mode composer evaluation harness** — reusable shell tooling and
   scenario fan-out capture validation transport failures, composer regressions,
   and per-row output evidence for demo-readiness checks.
+- **Advisor-conditional skill markers** — composer prompt assembly now strips
+  both `<!-- ADVISOR-ONLY -->` and `<!-- ADVISOR-DISABLED -->` regions from the
+  skill markdown depending on whether the advisor tool is enabled, so an
+  advisor-disabled deployment can no longer leak `request_advisor_hint`
+  guidance (anti-fabrication rule, fork+coalesce table row, Recipe #10
+  escalation, §10b read-gate) to the composer LLM.
 
 #### Plugin and Contract Surface
 
@@ -144,6 +150,26 @@ visibility.
   and a copy-to-clipboard control; `secret_ref` advertises an inline form for
   new-node credentials; resize-handle keyboard arrows align with value
   direction with a static affordance and touch-friendly hit zone.
+- **`<OPERATOR_REQUIRED>` sentinels for identity-bearing fields** — the
+  composer skill replaces literal example values for
+  `web_scrape.http.abuse_contact` and `scraping_reason` with angle-bracket
+  sentinels and an explicit resolution order (operator-supplied →
+  deployment-identity → ask the operator before `set_pipeline`). The
+  angle-bracket form is intentional: a placeholder validator (tracked
+  separately) can mechanically reject any YAML that still carries a
+  sentinel, providing a structural safety net for the prompt-level rule.
+- **Hard rule against silent operator-input rewrites** — composer skill now
+  forbids silent normalisations of operator-supplied strings (e.g. prepending
+  `https://` to a bare hostname, lowercasing, trailing-slash strip). Any
+  rewrite must either be confirmed by the operator or routed through a
+  recorded normalisation step (`value_transform` etc.) so it appears in the
+  YAML and the build summary.
+- **Implicit-decision disclosure ("Decisions I made on your behalf")** — new
+  Build Summary Discipline subsection requires the composer to enumerate
+  operator-invisible authoring decisions (identity headers, model/provider/
+  temperature, output shape and routing, format choices, allowlist defaults,
+  surviving operator-input rewrites) with explicit provenance markers
+  (`default` / `picked` / `deployment-identity` / `operator-supplied`).
 
 #### Run Evidence and Operator Visibility (RC-5.1)
 
@@ -164,6 +190,10 @@ visibility.
 - **Composer source-inspection silent-failure surfacing** — Tier-3 source
   inspection surfaces silent-failure modes (e.g. all-rows quarantined) as
   warnings rather than treating success-with-zero-results as a quiet pass.
+- **Failure-sample aggregation in run-level errors** — new
+  `web/execution/failure_samples` module aggregates the top distinct
+  `transform_errors` rows so a failed run's top-level error message carries
+  actionable detail rather than a single bubble-up exception string.
 
 #### Audit Integrity Test Coverage (RC-5.1)
 
@@ -223,6 +253,16 @@ visibility.
 
 ### Fixed
 
+- **Wire-visible identity fabrication (Tier-1 audit-integrity defect)** — the
+  composer skill previously carried `compliance@example.com` and a generic
+  scraping reason as the canonical worked example for the
+  `web_scrape.http.abuse_contact` / `scraping_reason` fields, and the LLM was
+  copying those literals into generated YAML verbatim. A reproduced eval
+  session shipped a fabricated abuse-contact email as an HTTP header to three
+  external `.gov.au` sites — a confident wrong answer to a third party we have
+  no relationship with. Closed by the `<OPERATOR_REQUIRED>` sentinel rewrite,
+  the silent-rewrite hard rule, and the implicit-decision disclosure block
+  (see *Validator and Pipeline Authoring (RC-5.1)*).
 - **Composer skill correctness** — multi-commit sweep closing skill-text
   fabrication and silent-shape-downgrade loopholes, widening the grounding
   detector and adding `confirm`/`confirmed` to the grounding verb list, scoping

@@ -92,12 +92,27 @@ type ToolCallList = list[ToolCallObject]
 
 
 class ChatMessageResponse(_StrictResponse):
-    """Response for a single chat message."""
+    """Response for a single chat message.
+
+    ``raw_content`` is the model's pre-synthesis prose for assistant turns
+    where ``service._finalize_no_tool_response`` augmented the visible
+    ``content`` with an operator-facing suffix or replaced it with a
+    synthetic blocker message. It is ``null`` in the response by default
+    (Tier 1 audit data; the conversation channel does not need it) and
+    carries the original prose only when the caller passes
+    ``include_raw_content=true`` on the GET endpoint. The field is always
+    present in the response shape — Pydantic v2 with the default
+    ``model_config`` does not enable ``exclude_none`` — so clients should
+    test ``raw_content is not None`` rather than ``"raw_content" in body``.
+    Eval/diagnosis tooling uses it to determine whether the model
+    converged on useful output that the synthesizer hid.
+    """
 
     id: str
     session_id: str
     role: str
     content: str
+    raw_content: str | None = None
     tool_calls: ToolCallList | None = None
     created_at: datetime
     composition_state_id: str | None = None
@@ -146,6 +161,12 @@ class CompositionStateResponse(_StrictResponse):
     validation_suggestions: list[ValidationEntryResponse] | None = None
     derived_from_state_id: str | None = None
     created_at: datetime
+    # Operational/audit metadata produced by the composer pipeline.
+    # ``repair_turns_used`` (number of forced repair turns the proof step
+    # injected when finalising this state) is currently the only field;
+    # ``None`` is honest for revert/fork paths and for historical states
+    # written before this surface existed.
+    composer_meta: CompositionObject | None = None
 
 
 class ForkSessionRequest(_RequestModel):

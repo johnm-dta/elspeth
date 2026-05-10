@@ -180,14 +180,22 @@ class TestRuntimeTelemetryConfig:
             config = RuntimeTelemetryConfig.from_settings(settings)
             assert config.granularity == expected_enum
 
-    def test_from_settings_case_insensitive(self) -> None:
-        """from_settings() handles uppercase granularity/backpressure mode.
+    def test_from_settings_lowercase_valid_inputs(self) -> None:
+        """from_settings() round-trips lowercase Pydantic-validated string values.
 
-        Settings validation enforces lowercase, but from_settings() lowercases
-        for robustness in case of programmatic construction.
+        TelemetrySettings.granularity / .backpressure_mode are Pydantic
+        ``Literal[...]`` fields whose accepted values are exactly the lowercase
+        enum value strings. By the time from_settings() runs, the inputs are
+        guaranteed lowercase and valid; this test pins the lowercase
+        round-trip into the runtime enum types.
+
+        This test is NOT a case-insensitivity check. There is no public
+        construction path that delivers a non-lowercase string to
+        from_settings(): Pydantic rejects uppercase inputs at TelemetrySettings
+        construction time with ``literal_error``. The ``.lower()`` calls
+        currently in from_settings() are unreachable defensive code; their
+        removal is tracked in elspeth-4d984e38ff.
         """
-        # Note: Pydantic validation enforces the exact values, so this test
-        # verifies the .lower() call in from_settings() doesn't break things
         settings = TelemetrySettings(granularity="lifecycle", backpressure_mode="block")
         config = RuntimeTelemetryConfig.from_settings(settings)
         assert config.granularity == TelemetryGranularity.LIFECYCLE

@@ -2,12 +2,14 @@
 import {
   useState,
   useCallback,
+  useEffect,
   useRef,
   type KeyboardEvent,
   type ChangeEvent,
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
+import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -44,8 +46,46 @@ export function ChatInput({
   // Track current text in a ref to avoid stale closures during async operations
   const textRef = useRef(text);
   textRef.current = text;
+  // Track current setText in a ref to avoid re-registering the prefill listener
+  // when setText identity changes (in controlled mode) on each render
+  const setTextRef = useRef(setText);
+  setTextRef.current = setText;
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const uploadBlob = useBlobStore((s) => s.uploadBlob);
+
+  // Listen for prefill events dispatched by PluginCard "Use in pipeline" action.
+  // Uses setText (the controlled/uncontrolled abstraction) to set the value,
+  // then focuses the textarea via the external inputRef.
+  useEffect(() => {
+    function handlePrefill(e: Event) {
+      const detail = (e as CustomEvent<string>).detail;
+      if (typeof detail !== "string") {
+        // System-to-system contract violation (PluginCard always sends a
+        // string).  Per CLAUDE.md trust-tier model: internal contract
+        // violations crash, not log-and-continue.  This surfaces immediately
+        // in dev / tests / DevTools rather than producing a silent no-op
+        // that a future contributor wouldn't notice.
+        throw new TypeError(
+          `[ChatInput] PREFILL_CHAT_INPUT_EVENT: expected string detail, got ${typeof detail}`,
+        );
+      }
+      setTextRef.current(detail);
+      // Defer focus + caret placement to a microtask so React flushes the
+      // controlled-value re-render first; otherwise focus() runs against a
+      // stale textarea value and setSelectionRange uses the wrong length.
+      // queueMicrotask (not requestAnimationFrame) keeps the prefill
+      // synchronous from the user's perspective — no visible 16ms gap.
+      queueMicrotask(() => {
+        const ta = inputRef.current;
+        if (!ta) return;
+        ta.focus();
+        const len = detail.length;
+        ta.setSelectionRange(len, len);
+      });
+    }
+    window.addEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
+    return () => window.removeEventListener(PREFILL_CHAT_INPUT_EVENT, handlePrefill);
+  }, []);
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();

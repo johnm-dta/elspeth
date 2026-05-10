@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-04-03 (synchronized with RC-5 branch)
-**Framework Version:** 0.5.0 (RC-5)
+**Last Updated:** 2026-05-11 (synchronized with RC-5.1 branch)
+**Framework Version:** 0.5.1 (RC-5.1)
 **Status:** Pre-release
 
 ---
@@ -17,8 +17,8 @@ C4 model documentation for the ELSPETH auditable pipeline framework.
 | **Data flow?** | Source → Transforms/Gates → Sinks (all recorded) |
 | **Audit storage?** | SQLite/SQLCipher (dev) / PostgreSQL (prod) |
 | **Extension model?** | pluggy-based plugin system |
-| **Production LOC** | ~121,400 Python lines across 359 files in `src/elspeth/` (frontend TSX/CSS counts not refreshed; see `docs/arch-analysis-2026-04-29-1500/01-discovery-findings.md`) |
-| **Test LOC** | ~274,900 Python lines (731 files, 2.6:1 ratio) |
+| **Production LOC** | ~121,400 Python lines across 359 files in `src/elspeth/` (RC-5 baseline; not refreshed for RC-5.1; frontend TSX/CSS counts not refreshed; see `docs/arch-analysis-2026-04-29-1500/01-discovery-findings.md`) |
+| **Test LOC** | ~274,900 Python lines (731 files, 2.6:1 ratio; RC-5 baseline) |
 
 ---
 
@@ -994,7 +994,7 @@ Based on automated analysis (2026-03-26) and ongoing CI enforcement.
 - Subsystems: 11 major (20+ including sub-components)
 - Plugins: 29 (6 sources + 17 transforms + 6 sinks; verified via the registry's `discover_all_plugins()` — same code path as `elspeth plugins list`)
 - ADRs: 17 (001–017)
-- Status: Pre-release (RC-5)
+- Status: Pre-release (RC-5.1)
 
 All diagrams use Mermaid syntax for version control compatibility.
 

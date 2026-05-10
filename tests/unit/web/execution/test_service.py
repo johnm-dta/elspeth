@@ -3967,9 +3967,9 @@ class TestPartialCompletionMessage:
         assert isinstance(msg, str)
 
     def test_includes_all_count_fields(self) -> None:
-        """Operator must be able to read the failure breakdown without
-        opening /diagnostics.  The four counts are the entire per-run
-        failure-evidence surface in ``RunRecord``."""
+        """Operator must be able to read the failure breakdown directly from
+        the runs row.  The four counts are the structural failure-evidence
+        surface in ``RunRecord``."""
         from elspeth.web.execution.service import _partial_completion_message
 
         msg = _partial_completion_message(
@@ -3983,9 +3983,10 @@ class TestPartialCompletionMessage:
         assert "rows_routed_failure=1" in msg
         assert "rows_quarantined=2" in msg
 
-    def test_points_at_diagnostics(self) -> None:
-        """Mirrors ``_structural_failure_message`` — the operator-actionable
-        next step is to inspect /diagnostics for per-row detail."""
+    def test_points_at_user_visible_affordance_when_no_samples(self) -> None:
+        """Without enrichment samples, the message must direct the operator to
+        the actual UI surface — the in-page expand panel — not a backend API
+        path the user cannot navigate to (was '/diagnostics')."""
         from elspeth.web.execution.service import _partial_completion_message
 
         msg = _partial_completion_message(
@@ -3994,7 +3995,26 @@ class TestPartialCompletionMessage:
             rows_routed_failure=0,
             rows_quarantined=0,
         )
-        assert "/diagnostics" in msg
+        assert "Expand this run" in msg
+        assert "/diagnostics" not in msg
+
+    def test_inlines_failure_samples_when_supplied(self) -> None:
+        """When the caller supplies a pre-formatted samples block, the
+        message inlines it under a 'Top per-row failures' heading so the
+        runs view shows the dominant cause without needing the expand."""
+        from elspeth.web.execution.service import _partial_completion_message
+
+        samples = "  • 3x SSRFBlockedError: URL is missing a scheme"
+        msg = _partial_completion_message(
+            rows_succeeded=0,
+            rows_failed=3,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            failure_samples=samples,
+        )
+        assert "Top per-row failures:" in msg
+        assert samples in msg
+        assert "Expand this run" not in msg
 
     def test_deterministic_given_inputs(self) -> None:
         """No timestamps, no random IDs — the message is a pure function of

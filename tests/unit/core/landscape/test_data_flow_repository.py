@@ -33,7 +33,7 @@ from elspeth.contracts.audit import (
     DISCARD_SINK_NAME,
     TokenRef,
 )
-from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.schema import SchemaConfig
@@ -772,6 +772,144 @@ class TestRecordValidationErrorDirect:
         assert errors[0].error == "bad field"
 
 
+class TestLinkValidationErrorToRow:
+    """Tests for DataFlowRepository.link_validation_error_to_row.
+
+    Audit U-CORE-1 (2026-05-06) found this method had zero tests in
+    either unit or integration suites. Six distinct branches are
+    individually exercised here:
+
+    1. Cross-run contamination via row_id (line 1550-1555 of
+       data_flow_repository.py): caller-supplied run_id mismatches the
+       row's actual run.
+    2. Non-existent error_id (line 1563-1564): error_id is fictional.
+    3. Cross-run contamination via error_id (line 1565-1569): error
+       belongs to a different run than caller-supplied run_id.
+    4. Relink-to-different-row (line 1570-1574): error already linked
+       to row A, caller supplies row B.
+    5. Idempotent same-row relink (line 1575): error already linked
+       to row A, caller supplies row A — early-return without UPDATE.
+    6. Happy-path UPDATE (line 1577-1585): error has row_id NULL,
+       caller supplies a valid row_id.
+
+    Per CLAUDE.md, this method is the quarantine-lineage-exactness
+    guarantee — if linkage is wrong the audit trail confidently
+    misattributes which row failed which validation. Cross-run, cross-row,
+    and silent-relink corruption all fail Tier 1 trust.
+    """
+
+    def test_happy_path_links_row_to_unbound_error(self) -> None:
+        """row_id NULL + valid linkage → UPDATE persists row_id."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+        error_id = repo.record_validation_error(
+            run_id="run-1",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+            # row_id intentionally omitted — error is recorded before quarantine row materialises
+        )
+
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+
+        errors = repo.get_validation_errors_for_run("run-1")
+        assert len(errors) == 1
+        assert errors[0].error_id == error_id
+        assert errors[0].row_id == row_id
+
+    def test_idempotent_relink_to_same_row_is_noop(self) -> None:
+        """Linking the same (error_id, row_id) twice is an early-return no-op."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+        error_id = repo.record_validation_error(
+            run_id="run-1",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+        # Second call must not raise and must not relink.
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+
+        errors = repo.get_validation_errors_for_run("run-1")
+        assert len(errors) == 1
+        assert errors[0].row_id == row_id
+
+    def test_relink_to_different_row_crashes(self) -> None:
+        """Once linked, attempting to relink to a different row is a Tier-1 crash."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+        other_row = repo.create_row("run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
+        error_id = repo.record_validation_error(
+            run_id="run-1",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+        repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=row_id)
+
+        with pytest.raises(AuditIntegrityError, match=r"already linked to row .* refusing to relink"):
+            repo.link_validation_error_to_row(run_id="run-1", error_id=error_id, row_id=other_row.row_id)
+
+    def test_non_existent_error_id_crashes(self) -> None:
+        """A fictional error_id is Tier-1 data corruption, not a soft miss."""
+        _db, repo, _fac, row_id, _tok = _make_repo_with_token()
+
+        with pytest.raises(AuditIntegrityError, match=r"does not exist in validation_errors\. This is Tier 1 data corruption"):
+            repo.link_validation_error_to_row(run_id="run-1", error_id="verr_does_not_exist", row_id=row_id)
+
+    def test_cross_run_via_row_id_crashes(self) -> None:
+        """Row from run B + caller-supplied run_id A → crash before any DB lookup of the error."""
+        _db, repo, factory, row_id, _tok = _make_repo_with_token(run_id="run-A")
+        # Set up run-B with its own row
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory.data_flow.register_node(
+            run_id="run-B",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-B",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        row_b = repo.create_row("run-B", "source-B", 0, {"name": "bob"}, row_id="row-B-1")
+        error_id = repo.record_validation_error(
+            run_id="run-A",
+            node_id="source-0",
+            row_data={"name": "alice"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+
+        # Caller claims run-A but supplies a row from run-B → guard fires before error lookup.
+        with pytest.raises(AuditIntegrityError, match=r"prevented cross-run contamination: row .* belongs to run 'run-B'"):
+            repo.link_validation_error_to_row(run_id="run-A", error_id=error_id, row_id=row_b.row_id)
+        # Sanity: the unrelated error in run-A is still present and unbound.
+        assert row_id  # row-A is bound to run-A; not part of the assertion but documents fixture intent
+
+    def test_cross_run_via_error_id_crashes(self) -> None:
+        """Error from run B + caller-supplied run_id A (with row from run A) → crash on error-row check."""
+        _db, repo, factory, row_id, _tok = _make_repo_with_token(run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        # Record the validation error against run-B with no row binding.
+        error_id_b = repo.record_validation_error(
+            run_id="run-B",
+            node_id=None,  # avoid composite-FK constraint on (node_id, run_id) for run-B nodes we haven't registered
+            row_data={"name": "stranger"},
+            error="bad field",
+            schema_mode="observed",
+            destination="quarantine",
+        )
+
+        # row_id is in run-A so the row-side guard passes; the error-side guard must catch it.
+        with pytest.raises(AuditIntegrityError, match=r"prevented cross-run contamination: error .* belongs to run 'run-B'"):
+            repo.link_validation_error_to_row(run_id="run-A", error_id=error_id_b, row_id=row_id)
+
+
 class TestRecordTransformErrorDirect:
     """Tests for DataFlowRepository.record_transform_error via direct repo."""
 
@@ -1262,3 +1400,317 @@ class TestValidateTokenRunOwnership:
         ref = TokenRef(token_id="nonexistent-token", run_id="run-1")
         with pytest.raises(AuditIntegrityError):
             repo._validate_token_run_ownership(ref)
+
+
+class TestValidateTokenRowOwnership:
+    """Tests for `_validate_token_row_ownership` direct invocation.
+
+    Audit U-CORE-1 (2026-05-06) found that this method is called from
+    `fork_token`, `coalesce_tokens`, and `expand_token` but is never
+    directly invoked in any unit test — those callers construct correct
+    inputs by definition (the row_id is sourced from internal state),
+    so the validation branch is never exercised against incorrect
+    inputs through the public API.
+
+    Direct testing of a private method is justified here because the
+    public surface cannot reach the cross-row failure mode through
+    normal use — the public callers always derive `row_id` from the
+    same token's internal state, making a mismatch structurally
+    impossible at the call site. The guard exists for the case where
+    a future caller (or refactor) constructs the row_id from a
+    different source. Without direct tests, a regression that breaks
+    the comparison would go undetected because the integration tests
+    cannot construct the bad input.
+
+    Per CLAUDE.md, this method is a Tier-1 audit-integrity guard:
+    cross-row lineage corruption produces a valid-looking audit trail
+    attributing the wrong source data to a terminal decision —
+    `explain()` would return a confidently-wrong answer about which
+    source row drove which outcome.
+    """
+
+    def test_matched_token_row_passes_silently(self) -> None:
+        """Token bound to row_id, called with the same row_id → no exception."""
+        _db, repo, _fac, row_id, tok = _make_repo_with_token()
+        repo._validate_token_row_ownership(token_id=tok, row_id=row_id)  # must not raise
+
+    def test_mismatched_row_id_crashes_with_lineage_message(self) -> None:
+        """Token bound to row-A, called with row-B → AuditIntegrityError."""
+        _db, repo, _fac, row_id, tok = _make_repo_with_token()
+        other_row = repo.create_row("run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
+        assert other_row.row_id != row_id  # documents the test premise
+
+        with pytest.raises(
+            AuditIntegrityError, match=r"Cross-row lineage corruption prevented: token .* belongs to row .*caller supplied row_id="
+        ):
+            repo._validate_token_row_ownership(token_id=tok, row_id=other_row.row_id)
+
+    def test_non_existent_token_id_crashes(self) -> None:
+        """A fictional token_id propagates `_resolve_token_ownership`'s Tier-1 crash.
+
+        The token-lookup runs before the row comparison, so non-existent
+        tokens fail with the resolver's "Token does not exist" message
+        — a structural Tier-1 invariant, not a row-mismatch outcome.
+        """
+        _db, repo, _fac = _make_repo()
+
+        with pytest.raises(AuditIntegrityError, match=r"does not exist in the tokens table\. This is Tier 1 data corruption"):
+            repo._validate_token_row_ownership(token_id="tok_does_not_exist", row_id="row-1")
+
+    def test_non_existent_row_id_crashes_as_lineage_mismatch(self) -> None:
+        """Token bound to row-A, called with fictional row_id → row-mismatch crash.
+
+        The method does not separately verify row_id exists in the rows
+        table; it only compares against the token's bound row_id.
+        A fictional row_id therefore surfaces through the lineage-mismatch
+        branch — auditors see "expected row-A, supplied row-X" rather
+        than a separate "row-X does not exist" message. This is correct
+        Tier-1 behaviour: the guard's contract is "the supplied row_id
+        is the one bound to the token", not "the supplied row_id is
+        valid in the rows table". Both forms of corruption are caught
+        by the same guard.
+        """
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+
+        with pytest.raises(AuditIntegrityError, match=r"Cross-row lineage corruption prevented"):
+            repo._validate_token_row_ownership(token_id=tok, row_id="row_does_not_exist")
+
+    def test_cross_run_token_row_combination_crashes(self) -> None:
+        """Token from run-A bound to row-A, called with a real row from run-B → crash.
+
+        Although `_validate_token_row_ownership` is not the cross-run
+        guard (`_validate_token_run_ownership` covers that surface),
+        the row-mismatch comparison still catches cross-run row mixing
+        as a side effect: row IDs are unique per run, so a row from
+        run-B will never equal a row from run-A. This documents the
+        compositional defence — even if a caller bypassed the
+        cross-run check, the row-ownership check would still catch
+        the corruption.
+        """
+        _db, repo, factory, row_a, tok_a = _make_repo_with_token(run_id="run-A")
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+        factory.data_flow.register_node(
+            run_id="run-B",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-B",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        row_b = repo.create_row("run-B", "source-B", 0, {"name": "stranger"}, row_id="row-B-1")
+        assert row_b.row_id != row_a  # premise: rows from different runs never collide
+
+        with pytest.raises(AuditIntegrityError, match=r"Cross-row lineage corruption prevented"):
+            repo._validate_token_row_ownership(token_id=tok_a, row_id=row_b.row_id)
+
+
+class TestAdr019DeferredInvariantSweep:
+    """Direct unit coverage for ADR-019 I1a/I1b run-end invariant enforcement.
+
+    Audit U-CORE-1 (2026-05-06) found that
+    `find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`,
+    and `sweep_deferred_invariants_or_crash` had **zero** unit tests.
+    Coverage existed only via integration tests in
+    `tests/integration/test_adr_019_*.py` that exercise the methods
+    through the deep orchestration stack.
+
+    The risk the audit flagged: a SQL regression in any of these queries
+    (wrong join, missing `run_id` filter, wrong `path` value comparison,
+    wrong outcome enum) would produce a silent false-negative —
+    orphaned parents pass the sweep, the run is marked "complete," and
+    a corrupt audit trail reaches storage. Integration tests cover the
+    sweep with real orchestrator-constructed orphan shapes; if a SQL
+    regression breaks for a shape integration tests don't construct,
+    the integration suite cannot catch it. Unit tests pin the SQL
+    semantics against direct probes.
+
+    Each test plants the orphan shape via the public factory API
+    (matching the integration-test idiom in
+    `_plant_orphan_fork_parent`/`_plant_orphan_batch_consumed`) so the
+    constructed state matches what the orchestrator actually produces.
+    The test surface stays tight and bypasses the orchestrator stack
+    that integration tests already cover.
+    """
+
+    @staticmethod
+    def _plant_orphan_fork_parent(
+        repo: DataFlowRepository,
+        *,
+        run_id: str,
+        row_id: str,
+        token_id: str,
+    ) -> None:
+        """Record an orphan FORK_PARENT outcome with no child witness."""
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.FORK_PARENT,
+            fork_group_id=f"fg_{token_id}",
+        )
+
+    @staticmethod
+    def _plant_orphan_batch_consumed(
+        repo: DataFlowRepository,
+        factory: RecorderFactory,
+        *,
+        run_id: str,
+        token_id: str,
+        batch_id: str,
+        complete_batch: bool = False,
+    ) -> None:
+        """Create a batch and record a BATCH_CONSUMED outcome on token_id.
+
+        If ``complete_batch`` is True, mark the batch COMPLETED so the
+        sweep treats it as fulfilled (non-orphan).
+        """
+        factory.execution.create_batch(
+            run_id=run_id,
+            aggregation_node_id="transform-1",
+            batch_id=batch_id,
+        )
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.BATCH_CONSUMED,
+            batch_id=batch_id,
+        )
+        if complete_batch:
+            factory.execution.complete_batch(
+                batch_id=batch_id,
+                status=BatchStatus.COMPLETED,
+            )
+
+    # -- find_orphaned_transient_parents ------------------------------
+
+    def test_find_orphaned_transient_parents_returns_orphan(self) -> None:
+        """A FORK_PARENT TRANSIENT outcome with no child witness is returned."""
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        self._plant_orphan_fork_parent(repo, run_id="run-1", row_id="row-1", token_id=tok)
+
+        orphans = repo.find_orphaned_transient_parents("run-1")
+
+        assert len(orphans) == 1
+        assert orphans[0].token_id == tok
+        assert orphans[0].path == TerminalPath.FORK_PARENT.value
+
+    def test_find_orphaned_transient_parents_excludes_parent_with_child_witness(self) -> None:
+        """A FORK_PARENT with a child token_outcome via token_parents is NOT orphan."""
+        _db, repo, _fac, row_id, tok = _make_repo_with_token()
+        # Use the public fork_token API: it inserts the FORK_PARENT outcome
+        # AND creates child tokens linked via token_parents_table.
+        children, _fg = repo.fork_token(
+            parent_ref=TokenRef(token_id=tok, run_id="run-1"),
+            row_id=row_id,
+            branches=["a"],
+        )
+        # Record a terminal outcome on the child so the EXISTS subquery finds it.
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=children[0].token_id, run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="sink-0",
+        )
+
+        orphans = repo.find_orphaned_transient_parents("run-1")
+
+        assert orphans == []
+
+    def test_find_orphaned_transient_parents_returns_empty_for_clean_run(self) -> None:
+        """Empty run with no token_outcomes returns []."""
+        _db, repo, _fac = _make_repo()
+
+        assert repo.find_orphaned_transient_parents("run-1") == []
+
+    def test_find_orphaned_transient_parents_isolates_runs(self) -> None:
+        """An orphan in run-A is invisible to a sweep on run-B."""
+        _db, repo, factory, _row_a, tok_a = _make_repo_with_token(run_id="run-A")
+        self._plant_orphan_fork_parent(repo, run_id="run-A", row_id="row-1", token_id=tok_a)
+        # Open run-B with no orphans.
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+
+        assert repo.find_orphaned_transient_parents("run-B") == []
+        assert len(repo.find_orphaned_transient_parents("run-A")) == 1
+
+    # -- find_orphaned_batch_consumptions -----------------------------
+
+    def test_find_orphaned_batch_consumptions_returns_incomplete_batch(self) -> None:
+        """BATCH_CONSUMED outcome on a batch that never reached COMPLETED is returned."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        self._plant_orphan_batch_consumed(repo, factory, run_id="run-1", token_id=tok, batch_id="batch-orphan")
+
+        orphans = repo.find_orphaned_batch_consumptions("run-1")
+
+        assert orphans == ["batch-orphan"]
+
+    def test_find_orphaned_batch_consumptions_excludes_completed_batch(self) -> None:
+        """A batch in COMPLETED state is NOT reported as orphan."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        self._plant_orphan_batch_consumed(
+            repo,
+            factory,
+            run_id="run-1",
+            token_id=tok,
+            batch_id="batch-fulfilled",
+            complete_batch=True,
+        )
+
+        assert repo.find_orphaned_batch_consumptions("run-1") == []
+
+    def test_find_orphaned_batch_consumptions_returns_empty_for_clean_run(self) -> None:
+        _db, repo, _fac = _make_repo()
+
+        assert repo.find_orphaned_batch_consumptions("run-1") == []
+
+    # -- sweep_deferred_invariants_or_crash ---------------------------
+
+    def test_sweep_no_orphans_returns_silently(self) -> None:
+        """A clean run produces no exception."""
+        _db, repo, _fac = _make_repo()
+
+        repo.sweep_deferred_invariants_or_crash("run-1")  # must not raise
+
+    def test_sweep_raises_i1a_on_orphan_fork_parent(self) -> None:
+        """Orphan FORK_PARENT triggers the I1a violation message."""
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        self._plant_orphan_fork_parent(repo, run_id="run-1", row_id="row-1", token_id=tok)
+
+        with pytest.raises(
+            AuditIntegrityError, match=r"ADR-019 I1a violation: 1 fork/expand parent token\(s\) have no child token_outcomes"
+        ):
+            repo.sweep_deferred_invariants_or_crash("run-1")
+
+    def test_sweep_raises_i1b_on_incomplete_batch(self) -> None:
+        """BATCH_CONSUMED with no COMPLETED batch triggers I1b violation."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        self._plant_orphan_batch_consumed(repo, factory, run_id="run-1", token_id=tok, batch_id="batch-orphan")
+
+        with pytest.raises(
+            AuditIntegrityError, match=r"ADR-019 I1b violation:.*BATCH_CONSUMED tokens but the batch never reached BatchStatus\.COMPLETED"
+        ):
+            repo.sweep_deferred_invariants_or_crash("run-1")
+
+    def test_sweep_checks_i1a_before_i1b(self) -> None:
+        """When both invariants are violated, I1a fires first (order documents the contract)."""
+        _db, repo, factory, _row, tok = _make_repo_with_token()
+        # Plant both an orphan FORK_PARENT (I1a) and an orphan BATCH_CONSUMED (I1b)
+        # on the SAME token by creating a sibling for the batch case.
+        self._plant_orphan_fork_parent(repo, run_id="run-1", row_id="row-1", token_id=tok)
+        sibling = repo.create_token("row-1", token_id="tok-2")
+        self._plant_orphan_batch_consumed(repo, factory, run_id="run-1", token_id=sibling.token_id, batch_id="batch-orphan")
+
+        # I1a is checked first, so we must see its message — not I1b's.
+        with pytest.raises(AuditIntegrityError, match=r"ADR-019 I1a violation"):
+            repo.sweep_deferred_invariants_or_crash("run-1")
+
+    def test_sweep_isolates_runs(self) -> None:
+        """Orphans in run-A do not crash a sweep on run-B."""
+        _db, repo, factory, _row_a, tok_a = _make_repo_with_token(run_id="run-A")
+        self._plant_orphan_fork_parent(repo, run_id="run-A", row_id="row-1", token_id=tok_a)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-B")
+
+        repo.sweep_deferred_invariants_or_crash("run-B")  # must not raise
+
+        # Sanity: run-A still crashes.
+        with pytest.raises(AuditIntegrityError, match=r"ADR-019 I1a violation"):
+            repo.sweep_deferred_invariants_or_crash("run-A")

@@ -10,6 +10,16 @@ vi.mock("@/api/client", () => ({
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
   evaluateRunDiagnostics: vi.fn(),
+  // RunOutputsPanel mounts whenever a row is expanded — give it an empty
+  // manifest by default so tests that don't care about outputs don't fail
+  // on an unmocked fetch. Tests that DO care override this.
+  fetchRunOutputs: vi.fn().mockResolvedValue({
+    run_id: "run-1",
+    landscape_run_id: "run-1",
+    artifacts: [],
+  }),
+  fetchRunOutputPreview: vi.fn(),
+  downloadRunOutputContent: vi.fn(),
 }));
 
 function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run {
@@ -245,7 +255,7 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    fireEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    fireEvent.click(screen.getByRole("button", { name: /show detail/i }));
 
     expect(fetchRunDiagnostics).toHaveBeenCalledTimes(1);
     await act(async () => {
@@ -255,18 +265,43 @@ describe("RunsView", () => {
   });
 
   it("shows token states and artifacts when diagnostics are opened", async () => {
-    const { fetchRunDiagnostics } = await import("@/api/client");
+    const { fetchRunDiagnostics, fetchRunOutputs } = await import("@/api/client");
     (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    // Artifact rendering moved from the diagnostics panel (capped at 3,
+    // text-only) to the new RunOutputsPanel (full manifest + actions).
+    // The manifest call returns the same artifact the diagnostics
+    // payload used to surface, so the visible string assertion still
+    // proves the output is reachable through the expanded row.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue({
+      run_id: "run-1",
+      landscape_run_id: "run-1",
+      artifacts: [
+        {
+          artifact_id: "artifact-1",
+          sink_node_id: "json_out",
+          artifact_type: "file",
+          path_or_uri: "file:///tmp/out.json",
+          content_hash: "a".repeat(64),
+          size_bytes: 42,
+          created_at: "2026-04-26T05:31:59.000Z",
+          exists_now: true,
+          downloadable: true,
+        },
+      ],
+    });
     useExecutionStore.setState({
       runs: [makeRun({ status: "running", error: null })],
     });
 
     render(<RunsView />);
-    await userEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
 
     expect(await screen.findByText("token-1")).toBeInTheDocument();
     expect(screen.getByText(/extract completed/)).toBeInTheDocument();
-    expect(screen.getByText("/tmp/out.json")).toBeInTheDocument();
+    // Outputs panel renders the basename, not the full path, with a
+    // Download anchor available.
+    expect(await screen.findByText("out.json")).toBeInTheDocument();
+    expect(screen.getByText("Download")).toBeInTheDocument();
   });
 
   it("renders the LLM explanation for diagnostics", async () => {
@@ -288,7 +323,7 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    await userEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
     await userEvent.click(await screen.findByRole("button", { name: /explain/i }));
 
     expect(await screen.findByText("The run has saved output")).toBeInTheDocument();
@@ -318,10 +353,96 @@ describe("RunsView", () => {
     });
 
     render(<RunsView />);
-    await userEvent.click(screen.getByRole("button", { name: /inspect/i }));
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
 
     expect(screen.getByText("Reading current run evidence")).toBeInTheDocument();
     expect(screen.getByText("2 tokens are visible in the runtime trace.")).toBeInTheDocument();
     expect(screen.getByText("Node states include completed=1, running=1.")).toBeInTheDocument();
+  });
+});
+
+describe("RunsView Inspect button a11y", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: null });
+  });
+
+  it("declares aria-expanded reflecting diagnostics panel state", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    const inspect = screen.getByRole("button", { name: /show detail/i });
+    expect(inspect.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(inspect);
+
+    const hide = screen.getByRole("button", { name: /hide/i });
+    expect(hide.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("aria-controls IDREF resolves both before and after the panel is expanded", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(makeDiagnostics());
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    const inspect = screen.getByRole("button", { name: /show detail/i });
+    const controlsId = inspect.getAttribute("aria-controls");
+    expect(controlsId).toBe("run-diagnostics-run-1");
+    // Option A: the wrapper div is always in the DOM — IDREF resolves when collapsed
+    expect(document.getElementById(controlsId!)).not.toBeNull();
+
+    await user.click(inspect);
+
+    // IDREF must continue to resolve after expansion (panel is now mounted inside the wrapper)
+    const hide = screen.getByRole("button", { name: /hide/i });
+    const expandedControlsId = hide.getAttribute("aria-controls");
+    expect(document.getElementById(expandedControlsId!)).not.toBeNull();
+  });
+});
+
+describe("RunsView cancelling badge", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: null });
+  });
+
+  it("uses dedicated cancelling badge class (visual differentiation from fully cancelled)", () => {
+    useExecutionStore.setState({
+      runs: [
+        makeRun({
+          status: "running",
+          cancel_requested: true,
+          error: null,
+        }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    // Get all status badge elements (excluding the duration label which also contains "cancelling")
+    const badges = screen.getAllByText(/cancelling/i);
+    // The first one is the badge; the second one is the duration span
+    const badge = badges[0].closest("[class*='status-badge']");
+    expect(badge).not.toBeNull();
+    // Distinct class — NOT status-badge-cancelled.  This pins the visual
+    // differentiation invariant: cancel-pending uses a pulsing-dot glyph,
+    // cancelled uses an em-dash glyph (App.css).
+    expect(badge).toHaveClass("status-badge-cancelling");
+    expect(badge).not.toHaveClass("status-badge-cancelled");
   });
 });

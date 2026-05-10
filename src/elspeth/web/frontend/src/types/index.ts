@@ -602,6 +602,57 @@ export interface CancelRunResponse {
   cancel_requested: boolean;
 }
 
+// ── Run outputs (full audit-evidence manifest + bounded preview) ──────────────
+//
+// Distinct from RunDiagnosticArtifact (capped operator-UI projection):
+// RunOutputArtifact is the per-run unbounded list returned by
+// GET /api/runs/{rid}/outputs. The `downloadable` flag is server-computed
+// from "is the file in the sink-allowlist AND on disk now?" — used by the
+// UI to suppress download buttons that would otherwise 4xx on click.
+
+export interface RunOutputArtifact {
+  artifact_id: string;
+  sink_node_id: string;
+  artifact_type: string;
+  path_or_uri: string;
+  content_hash: string;
+  size_bytes: number;
+  created_at: string;
+  exists_now: boolean;
+  // Optional in the wire shape so an OLDER backend (pre-`downloadable`
+  // rollout) doesn't make every artifact look "outside allowed sink
+  // directories" — that message implies sink misconfiguration but
+  // would actually be a deploy-skew. Missing → caller treats as
+  // "unknown, optimistic show-the-button"; explicit false → suppress.
+  downloadable?: boolean;
+}
+
+export interface RunOutputsResponse {
+  run_id: string;
+  landscape_run_id: string;
+  artifacts: RunOutputArtifact[];
+}
+
+// Renderer hints from the preview endpoint. Mirrors PreviewContentType
+// in elspeth/web/execution/preview.py — keep in sync when extending.
+export const PREVIEW_CONTENT_TYPE_VALUES = [
+  "text",
+  "csv",
+  "jsonl",
+  "json",
+  "binary",
+] as const;
+export type PreviewContentType = (typeof PREVIEW_CONTENT_TYPE_VALUES)[number];
+
+export interface RunOutputArtifactPreview {
+  artifact_id: string;
+  content_type: PreviewContentType;
+  preview_text: string;
+  truncated: boolean;
+  total_size_bytes: number;
+  row_count_preview: number | null;
+}
+
 export interface RunDiagnosticsWorkingView {
   headline: string;
   evidence: string[];

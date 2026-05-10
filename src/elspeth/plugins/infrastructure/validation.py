@@ -24,7 +24,7 @@ from typing import Any
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.plugin_protocols import PluginConfigProtocol
-from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.plugins.infrastructure.config_base import _SCHEMA_REQUIRED_GUIDANCE, PluginConfigError
 
 
 class UnknownPluginTypeError(ValueError):
@@ -269,7 +269,15 @@ def get_sink_config_model(sink_type: str) -> type[PluginConfigProtocol] | None:
 def _extract_errors(
     pydantic_error: PydanticValidationError,
 ) -> list[ValidationError]:
-    """Convert Pydantic errors to structured ValidationError list."""
+    """Convert Pydantic errors to structured ValidationError list.
+
+    The schema-required-on-DataPluginConfig case is enriched with mode
+    guidance (observed/fixed/flexible) so consumers — particularly the
+    LLM-composer — receive an actionable message rather than the bare
+    ``"Field required"`` (cf. elspeth-861b0c58f5). The enrichment mirrors
+    ``config_base._format_validation_error_cause`` so the structured
+    extraction path and the joined-string path stay in sync.
+    """
     errors: list[ValidationError] = []
 
     for err in pydantic_error.errors():
@@ -278,6 +286,9 @@ def _extract_errors(
         # Use "__model__" sentinel so the field is never empty.
         field_path = ".".join(str(loc) for loc in err["loc"]) or "__model__"
         message = err["msg"]
+
+        if tuple(err["loc"]) == ("schema",) and err.get("type") == "missing":
+            message = _SCHEMA_REQUIRED_GUIDANCE
 
         # Pydantic error dict includes failing input value.
         value = err["input"]

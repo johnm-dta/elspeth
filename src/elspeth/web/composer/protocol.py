@@ -22,27 +22,74 @@ class ComposerResult:
     """Result of a compose() call.
 
     Attributes:
-        message: The assistant's text response. When runtime preflight
-            fails, this is replaced with a synthetic failure message;
-            the original LLM text is preserved in ``raw_assistant_content``.
+        message: The assistant's text response. When synthesis fires
+            (preflight invalid, or state-claim grounding correction on
+            the happy-path), ``message`` is *augmented*: the model's
+            prose is preserved verbatim and an operator-facing suffix is
+            appended. The model's pre-synthesis prose is preserved in
+            ``raw_assistant_content`` for the audit trail and LLM
+            history replay.
         state: The (possibly updated) CompositionState.
         runtime_preflight: The ValidationResult from the final-gate
             runtime preflight run, or ``None`` if no preflight was
             triggered (e.g. the state was unchanged and no preview
             preflight was available to reuse).
-        raw_assistant_content: The original LLM text when ``message``
-            has been replaced with a synthetic preflight-failure message.
-            ``None`` when ``message`` is the verbatim LLM response.
+        raw_assistant_content: The model's pre-synthesis prose whenever
+            ``message`` is *synthesized* (augmented relative to raw LLM
+            output), regardless of why synthesis fired. Synthesis
+            triggers include preflight failure (empty-state and
+            non-empty-state augmentation) and state-claim grounding
+            correction on the happy-path. ``None`` when ``message`` is
+            the verbatim LLM response.
 
     Field-pairing invariant:
-        ``raw_assistant_content`` is non-None **iff** ``runtime_preflight``
-        is non-None and ``not is_valid`` (i.e., a runtime-preflight
-        failure caused the synthetic message replacement). Enforced
-        mechanically by ``__post_init__`` because this object flows
-        into the audit trail — a violating pairing would silently
-        misattribute a verbatim LLM response as if the runtime gate
-        had intervened, or lose the original LLM output when the gate
-        actually did intervene.
+        - When ``runtime_preflight`` is non-None and not ``is_valid``,
+          ``raw_assistant_content`` MUST be set (the model's pre-synthesis
+          prose must be recoverable from the audit row).
+        - When ``raw_assistant_content`` is set with passing preflight,
+          ``message`` MUST differ from ``raw_assistant_content``
+          (otherwise raw is set spuriously — the audit row would falsely
+          imply synthesis happened on a verbatim response).
+        Enforced mechanically by ``__post_init__`` because this object
+        flows into the audit trail — a violating pairing would silently
+        misattribute a verbatim LLM response as if synthesis intervened,
+        or lose the original LLM output when synthesis actually did
+        happen.
+
+    Synthesis shapes (all augmentation):
+        Producers (see ``service._finalize_no_tool_response``) emit
+        four synthesis shapes — all of them augmentations
+        (``message == raw_assistant_content + operator_suffix``):
+
+        1. No-mutation empty-state augmentation — preflight invalid,
+           build-style request received no successful mutation, state
+           is structurally empty.
+        2. Preflight-invalid empty-state augmentation — preflight
+           invalid, state is structurally empty.
+        3. Preflight-invalid non-empty-state augmentation (issue
+           elspeth-9cfbad6901) — preflight invalid, state has been
+           populated. Suffix names the validator's specific objection.
+        4. State-claim grounding correction (issue elspeth-c028f7d186) —
+           preflight VALID. Fires when the model's prose contradicts
+           persisted state (forward contradiction) or claims a fresh
+           action when state was unchanged this turn (backward
+           contradiction).
+
+        Consumers (see ``routes._composer_history_content``) detect
+        synthesis structurally at read time via
+        ``message.startswith(raw_assistant_content)`` — true for all
+        four shapes. The structural property lets consumers strip the
+        operator-facing suffix from LLM history without parsing it.
+
+    Producer contract (mechanical):
+        ``message`` MUST start with ``raw_assistant_content``. Enforced
+        at construction by
+        ``service._enforce_augmentation_prefix_invariant``. A producer
+        that violates the contract crashes with ``AuditIntegrityError``
+        rather than commit a corrupt audit row that the consumer-side
+        discriminator would silently misroute. The field-level
+        decoupling that would obviate the structural contract is
+        tracked at ``elspeth-7ae1732ab2``.
     """
 
     message: str
@@ -56,33 +103,81 @@ class ComposerResult:
     # returned text-only).
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
     llm_calls: tuple[ComposerLLMCall, ...] = ()
+    # Number of forced repair turns the proof step injected into this compose
+    # invocation. Capped at 2 by the loop. 0 means first-pass success; 1 or 2
+    # means the model was given proof_diagnostics back as a synthesized
+    # message and asked to iterate. Surfaced on the compose-produced
+    # ``composition_states`` row via the ``composer_meta`` JSON column (see
+    # web/sessions/models.py and
+    # web/sessions/protocol.py::CompositionStateData.composer_meta) and
+    # returned by ``GET /api/sessions/{id}/state`` under
+    # ``composer_meta.repair_turns_used`` for the convergence-suite eval
+    # scorer.
+    repair_turns_used: int = 0
 
     def __post_init__(self) -> None:
-        # Bidirectional iff enforcement of the field-pairing invariant
-        # documented above. Both directions matter:
+        # Two directions of the field-pairing invariant. Both matter:
         #
-        # 1. raw_assistant_content set with no preflight failure →
-        #    audit trail would imply a synthetic replacement happened
-        #    when message is actually the verbatim LLM output.
-        # 2. preflight failed with no raw_assistant_content →
-        #    audit trail would carry the synthetic message but the
-        #    original LLM text is irrecoverably lost.
+        # 1. preflight failed with no raw_assistant_content →
+        #    audit trail would carry an augmented or synthetic message
+        #    but the model's pre-synthesis prose is irrecoverably lost,
+        #    breaking the consumer-side structural discriminator in
+        #    routes._composer_history_content.
+        # 2. raw_assistant_content set with passing preflight AND
+        #    ``message == raw_assistant_content`` →
+        #    audit trail would falsely imply synthesis happened on a
+        #    verbatim response. The narrowing on ``message ==
+        #    raw_assistant_content`` allows non-preflight synthesis
+        #    triggers (state-claim grounding correction, issue
+        #    elspeth-c028f7d186) where preflight is valid but the
+        #    message is augmented relative to raw LLM output. The
+        #    consumer-side discriminator at
+        #    ``routes._composer_history_content`` does not depend on
+        #    *why* synthesis happened, only on whether it did
+        #    (``message.startswith(raw)`` distinguishes augmentation
+        #    from replacement structurally).
         preflight_failed = self.runtime_preflight is not None and not self.runtime_preflight.is_valid
-        if self.raw_assistant_content is not None and not preflight_failed:
-            raise ValueError(
-                "ComposerResult message replacement contract violated: "
-                "raw_assistant_content is set but runtime_preflight is "
-                "either None or passed — raw_assistant_content is reserved "
-                "for the case where runtime_preflight failed and message "
-                "was replaced with a synthetic failure summary."
-            )
         if preflight_failed and self.raw_assistant_content is None:
             raise ValueError(
-                "ComposerResult message replacement contract violated: "
+                "ComposerResult field-pairing invariant violated: "
                 "runtime_preflight failed but raw_assistant_content is None — "
-                "the failed preflight should have replaced message with a "
-                "synthetic summary and parked the original LLM text in "
-                "raw_assistant_content for audit-trail recovery."
+                "the failed preflight should have augmented or replaced "
+                "message and parked the model's pre-synthesis prose in "
+                "raw_assistant_content for audit-trail recovery and for the "
+                "consumer-side augment-vs-replace discriminator at "
+                "routes._composer_history_content."
+            )
+        if self.raw_assistant_content is not None and not preflight_failed and self.message == self.raw_assistant_content:
+            raise ValueError(
+                "ComposerResult field-pairing invariant violated: "
+                "raw_assistant_content is set with passing preflight, but "
+                "message is identical to raw_assistant_content — the audit "
+                "row would falsely imply synthesis (augmentation or "
+                "replacement) happened on a verbatim LLM response. "
+                "raw_assistant_content must only be set when message has "
+                "actually been synthesized (preflight-failure shapes, or "
+                "the state-claim grounding correction shape on the "
+                "happy-path)."
+            )
+        # Cap-assert on repair_turns_used. The loop enforces the bound
+        # informally via ``_MAX_REPAIR_TURNS`` (web/composer/service.py),
+        # but the field flows into the audit trail via
+        # ``composition_states.composer_meta.repair_turns_used`` and is
+        # consumed by the convergence-suite eval scorer. An out-of-range
+        # value here would land in the legal record and be silently
+        # accepted by downstream consumers. Literal[0, 1, 2] would have
+        # been the mechanical mypy-checked form, but the compose loop
+        # mutates a plain ``int`` counter and threads it via
+        # ``dataclasses.replace`` — mypy cannot narrow ``int`` to a
+        # Literal at that site. The runtime check is the fallback that
+        # still mechanically rejects the bad value at the construction
+        # boundary. Keep this bound aligned with ``_MAX_REPAIR_TURNS``
+        # in web/composer/service.py.
+        if not 0 <= self.repair_turns_used <= 2:
+            raise ValueError(
+                "ComposerResult.repair_turns_used must be 0, 1, or 2 "
+                "(capped by _MAX_REPAIR_TURNS in web/composer/service.py); "
+                f"got {self.repair_turns_used}."
             )
 
 

@@ -69,7 +69,7 @@ class TestNodeSpec:
         defaults: dict[str, Any] = {
             "id": "transform_1",
             "node_type": "transform",
-            "plugin": "uppercase",
+            "plugin": "passthrough",
             "input": "source_out",
             "on_success": "sink_main",
             "on_error": None,
@@ -377,7 +377,7 @@ class TestCompositionState:
         return NodeSpec(
             id=id,
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="source_out",
             on_success="sink_main",
             on_error=None,
@@ -760,7 +760,7 @@ class TestStage1Validation:
         return NodeSpec(
             id=id,
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input=input,
             on_success=on_success,
             on_error=on_error,
@@ -1188,7 +1188,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="in",
             on_success="out",
             on_error=None,
@@ -1813,7 +1813,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success=None,
             on_error="discard",
@@ -1838,7 +1838,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success="",
             on_error="discard",
@@ -1863,7 +1863,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success="main",
             on_error="  ",
@@ -1888,7 +1888,7 @@ class TestStage1Validation:
         node = NodeSpec(
             id="t1",
             node_type="transform",
-            plugin="uppercase",
+            plugin="passthrough",
             input="t1",
             on_success="main",
             on_error=None,
@@ -2108,6 +2108,209 @@ class TestStage1Validation:
         assert result.suggestions == ()
 
 
+class TestWebScrapeAbuseContactValidation:
+    """Mechanical backstop for skill-prompt rule in pipeline_composer.md.
+
+    Rejects RFC 2606 / RFC 6761 reserved-domain emails in
+    `web_scrape.http.abuse_contact`. Pairs with the prompt-level rule that
+    forbids fabricating wire-visible identity values; without this validator
+    the LLM has unlimited rationalisation room to ship `ops@example.com` and
+    similar fabrications. See elspeth-457c8688ef and observation
+    obs-69697091d9 for context.
+    """
+
+    def _state_with_web_scrape(
+        self,
+        abuse_contact: str | None,
+        *,
+        http_present: bool = True,
+        plugin: str = "web_scrape",
+        options_override: dict[str, Any] | None = None,
+    ) -> CompositionState:
+        """Build a minimal state with a single transform node carrying the
+        given abuse_contact under options.http.
+
+        Other validation rules will report unrelated errors (no source, no
+        sinks, etc.); the tests assert only on the abuse_contact rule's
+        message presence/absence.
+        """
+        if options_override is not None:
+            options: dict[str, Any] = options_override
+        elif http_present:
+            http_block: dict[str, Any] = {"scraping_reason": "test", "allowed_hosts": "public_only"}
+            if abuse_contact is not None:
+                http_block["abuse_contact"] = abuse_contact
+            options = {
+                "schema": {"mode": "fixed", "fields": ["url: str"]},
+                "url_field": "url",
+                "content_field": "content",
+                "fingerprint_field": "content_fingerprint",
+                "format": "markdown",
+                "http": http_block,
+            }
+        else:
+            options = {
+                "schema": {"mode": "fixed", "fields": ["url: str"]},
+                "url_field": "url",
+            }
+        node = NodeSpec(
+            id="fetch_pages",
+            node_type="transform",
+            plugin=plugin,
+            input="url_rows",
+            on_success="scraped_content",
+            on_error="discard",
+            options=options,
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+        return CompositionState(
+            source=None,
+            nodes=(node,),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def _abuse_contact_error_messages(self, state: CompositionState) -> list[str]:
+        return [e.message for e in state.validate().errors if "abuse_contact" in e.message]
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "ops@example.com",
+            "compliance@example.com",
+            "abuse@example.org",
+            "ops@example.net",
+            "user@something.test",
+            "user@deep.something.test",
+            "admin@something.invalid",
+            "root@localhost",
+            "user@host.localhost",
+            "user@something.example",
+        ],
+    )
+    def test_rejects_rfc_reserved_domains(self, address: str) -> None:
+        """All RFC 2606/6761 reserved labels and their subdomains must be rejected."""
+        state = self._state_with_web_scrape(address)
+        messages = self._abuse_contact_error_messages(state)
+        assert messages, f"Expected reject for {address!r}, got no abuse_contact error"
+        msg = messages[0]
+        assert "fabricated identity" in msg
+        assert "abuse_contact" in msg
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "OPS@EXAMPLE.COM",
+            "ops@Example.Com",
+            "User@SOMETHING.TEST",
+        ],
+    )
+    def test_case_insensitive_reject(self, address: str) -> None:
+        """Domain matching must be case-insensitive — uppercase variants are still RFC-reserved."""
+        state = self._state_with_web_scrape(address)
+        assert self._abuse_contact_error_messages(state), f"Expected reject for {address!r}"
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "abuse-contact-unset@elspeth.foundryside.dev",
+            "ops@somecompany.gov.au",
+            "abuse@example.foundryside.dev",  # 'example' as a label, not the reserved TLD
+            "user@reallytest.example-mail.org",  # not endswith ".test" / ".example.org"
+            "ops@notlocalhost.com",
+            "ops@subdomain.example.io",  # 'example' inside string but not reserved
+        ],
+    )
+    def test_accepts_real_domains(self, address: str) -> None:
+        """Real, deliverable domains must pass even when they contain reserved
+        labels as substrings (only label-boundary matches count)."""
+        state = self._state_with_web_scrape(address)
+        assert not self._abuse_contact_error_messages(state), f"Real domain {address!r} was incorrectly rejected"
+
+    def test_skips_non_web_scrape_transform(self) -> None:
+        """Rule is plugin-scoped — a passthrough or other transform with an
+        accidental http.abuse_contact field is none of this rule's business."""
+        state = self._state_with_web_scrape(
+            "ops@example.com",
+            plugin="passthrough",
+        )
+        assert not self._abuse_contact_error_messages(state), "Rule should not fire on non-web_scrape plugins"
+
+    def test_skips_when_http_block_missing(self) -> None:
+        """When http is absent entirely, the plugin-schema rule reports it; this
+        rule must not double-report or fire on a node it cannot inspect."""
+        state = self._state_with_web_scrape(None, http_present=False)
+        assert not self._abuse_contact_error_messages(state)
+
+    def test_skips_when_abuse_contact_missing(self) -> None:
+        """abuse_contact absent inside http — plugin schema flags it; this
+        rule remains silent."""
+        state = self._state_with_web_scrape(None, http_present=True)
+        assert not self._abuse_contact_error_messages(state)
+
+    def test_skips_when_abuse_contact_wrong_type(self) -> None:
+        """Non-string value (e.g. a secret_ref dict) — plugin schema handles
+        type validation; this rule is value-shape-tolerant."""
+        state = self._state_with_web_scrape(
+            None,
+            options_override={
+                "schema": {"mode": "fixed", "fields": ["url: str"]},
+                "url_field": "url",
+                "content_field": "content",
+                "fingerprint_field": "content_fingerprint",
+                "format": "markdown",
+                "http": {
+                    "abuse_contact": {"secret_ref": "ABUSE_CONTACT"},
+                    "scraping_reason": "test",
+                    "allowed_hosts": "public_only",
+                },
+            },
+        )
+        assert not self._abuse_contact_error_messages(state)
+
+    def test_skips_when_email_malformed(self) -> None:
+        """No `@` character — let the plugin's email-format rule report it
+        (this rule only cares about the domain part of a real-shaped email)."""
+        state = self._state_with_web_scrape("not-an-email")
+        assert not self._abuse_contact_error_messages(state)
+
+    def test_error_severity_is_high(self) -> None:
+        """The rule must produce a blocking (high-severity) error — Tier-1
+        audit-integrity defects are not advisory."""
+        state = self._state_with_web_scrape("ops@example.com")
+        abuse_errors = [e for e in state.validate().errors if "abuse_contact" in e.message]
+        assert abuse_errors
+        assert abuse_errors[0].severity == "high"
+
+    def test_error_names_the_node_and_field(self) -> None:
+        """Message must identify the offending node id and field path so the
+        operator (or composer LLM) can locate the violation."""
+        state = self._state_with_web_scrape("ops@example.com")
+        abuse_errors = [e for e in state.validate().errors if "abuse_contact" in e.message]
+        assert abuse_errors
+        assert abuse_errors[0].component == "node:fetch_pages"
+        assert "web_scrape.http.abuse_contact" in abuse_errors[0].message
+
+    def test_pipeline_with_reserved_address_is_invalid(self) -> None:
+        """End-to-end: a fully-formed pipeline carrying a fabricated
+        abuse_contact must fail validate() with is_valid=False, regardless of
+        otherwise-valid structure."""
+        # Single transform node with a reserved-domain address — even with
+        # missing source/sinks, is_valid must be False *and* an
+        # abuse_contact error must be among the reasons.
+        state = self._state_with_web_scrape("ops@example.com")
+        result = state.validate()
+        assert not result.is_valid
+        assert any("abuse_contact" in e.message for e in result.errors)
+
+
 class TestSchemaContractValidation:
     """Tests for schema contract validation (pass 9) in CompositionState.validate()."""
 
@@ -2241,7 +2444,7 @@ class TestSchemaContractValidation:
             "format": "text",
             "fingerprint_mode": "content",
             "http": {
-                "abuse_contact": "pipeline@example.com",
+                "abuse_contact": "pipeline-tests@elspeth.foundryside.dev",
                 "scraping_reason": "test scrape",
                 "allowed_hosts": "public_only",
             },

@@ -38,6 +38,27 @@ def test_validator_rejects_missing_required_field():
     assert "required" in errors[0].message.lower()
 
 
+def test_validator_enriches_missing_schema_with_mode_guidance():
+    """Missing ``schema`` on a DataPluginConfig (the most common LLM-composer first-attempt
+    failure shape per elspeth-861b0c58f5) is surfaced with mode guidance — not a bare
+    ``Field required`` — so the LLM can self-repair on the next turn. This exercises the
+    structured ``_extract_errors`` enrichment path; the joined-string path is covered
+    separately by ``_format_validation_error_cause``.
+    """
+    config = {
+        "path": "/tmp/test.csv",
+        # Missing 'schema' - required by CSVSourceConfig (DataPluginConfig)
+        "on_validation_failure": "quarantine",
+    }
+
+    errors = validate_source_config("csv", config)
+    assert len(errors) == 1
+    assert "schema" in errors[0].field
+    assert "mode: observed" in errors[0].message
+    assert "fixed" in errors[0].message
+    assert "flexible" in errors[0].message
+
+
 def test_validator_rejects_invalid_field_type():
     """Invalid field type returns error."""
 

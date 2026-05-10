@@ -63,7 +63,7 @@ def _make_populated_state() -> CompositionState:
     node = NodeSpec(
         id="transform_1",
         node_type="transform",
-        plugin="uppercase",
+        plugin="passthrough",
         input="source_out",
         on_success="sink_out",
         on_error="discard",
@@ -314,21 +314,27 @@ class TestVersionChangeDetection:
 
 
 class TestComposerResultPairingInvariant:
-    """I6 lock-in: enforce the docstring contract between
-    ``runtime_preflight`` and ``raw_assistant_content`` mechanically.
+    """Enforce the docstring contract between ``runtime_preflight`` and
+    ``raw_assistant_content`` mechanically.
 
-    The pairing is iff:
-    * ``raw_assistant_content`` is set
-    * ⇔ ``runtime_preflight`` is non-None and ``not is_valid``
-    * ⇔ ``message`` was replaced by the synthetic preflight-failure
-      summary; the original LLM text is parked in ``raw_assistant_content``.
+    The pairing has two directions:
 
-    Without an enforcement check, a caller could construct a
-    ``ComposerResult(raw_assistant_content="...")`` with no preflight
-    failure attached. That object would silently violate the audit-trail
-    contract: the persisted ``raw_content`` would imply a replacement
-    that never happened, mis-attributing a verbatim LLM response as if
-    the runtime gate had intervened.
+    1. preflight failed ⇒ raw_assistant_content MUST be set (so the
+       original LLM text is recoverable from the audit row).
+    2. raw_assistant_content set with passing preflight AND
+       message == raw_assistant_content ⇒ rejected (spurious raw set;
+       the audit row would falsely imply synthesis happened on a
+       verbatim response).
+
+    Note the narrowing on direction (2): synthesis with passing preflight
+    IS legitimate when message ≠ raw_assistant_content (the state-claim
+    grounding correction case from issue elspeth-c028f7d186 augments the
+    happy-path message with an [ELSPETH-SYSTEM] correction suffix).
+    The audit-integrity guarantee — no spurious raw_content set on a
+    verbatim pass-through — survives the narrowing because the consumer
+    discriminator at routes._composer_history_content uses
+    ``message.startswith(raw)`` structurally and does not depend on
+    *why* synthesis happened.
     """
 
     @staticmethod
@@ -371,35 +377,58 @@ class TestComposerResultPairingInvariant:
             raw_assistant_content="The pipeline is complete.",
         )
 
-    def test_raw_content_without_preflight_is_rejected(self) -> None:
-        """raw_assistant_content set but runtime_preflight is None — forbidden.
+    def test_spurious_raw_content_no_preflight_is_rejected(self) -> None:
+        """raw_assistant_content set with no preflight AND message == raw —
+        rejected (verbatim pass-through with raw set spuriously).
 
-        The docstring says raw_content holds the original LLM text "when
-        ``message`` has been replaced with a synthetic preflight-failure
-        message". Without a preflight, no replacement happened, so a
-        non-None raw_content represents a contract violation.
+        The audit row would falsely imply synthesis happened when the
+        message is actually verbatim LLM output.
         """
-        with pytest.raises(ValueError, match=r"message replacement contract|preflight"):
+        with pytest.raises(ValueError, match=r"identical to raw_assistant_content|verbatim"):
             ComposerResult(
                 message="hi",
                 state=_make_empty_state(),
                 runtime_preflight=None,
-                raw_assistant_content="something",
+                raw_assistant_content="hi",
             )
 
-    def test_raw_content_with_passed_preflight_is_rejected(self) -> None:
-        """raw_assistant_content set but runtime_preflight passed — forbidden.
-
-        A passing preflight does not replace ``message``, so raw_content
-        being non-None represents a contract violation.
+    def test_spurious_raw_content_passed_preflight_is_rejected(self) -> None:
+        """raw_assistant_content set with passing preflight AND
+        message == raw — rejected (spurious raw set on verbatim
+        pass-through).
         """
-        with pytest.raises(ValueError, match=r"message replacement contract|preflight"):
+        with pytest.raises(ValueError, match=r"identical to raw_assistant_content|verbatim"):
             ComposerResult(
                 message="hi",
                 state=_make_empty_state(),
                 runtime_preflight=self._passing_validation(),
-                raw_assistant_content="something",
+                raw_assistant_content="hi",
             )
+
+    def test_grounding_correction_synthesis_with_passed_preflight_is_valid(self) -> None:
+        """raw_assistant_content set with passing preflight AND
+        message ≠ raw — legitimate (state-claim grounding correction
+        from issue elspeth-c028f7d186 augments happy-path prose with
+        an [ELSPETH-SYSTEM] correction suffix).
+        """
+        ComposerResult(
+            message="hi\n\n---\n\n[ELSPETH-SYSTEM] correction text",
+            state=_make_empty_state(),
+            runtime_preflight=self._passing_validation(),
+            raw_assistant_content="hi",
+        )
+
+    def test_grounding_correction_synthesis_with_no_preflight_is_valid(self) -> None:
+        """Same shape as above, with no preflight (the finalizer's
+        skip-preflight branch when state.version is unchanged and no
+        cached preflight is available — runtime_result is None and the
+        grounding check still runs)."""
+        ComposerResult(
+            message="hi\n\n---\n\n[ELSPETH-SYSTEM] correction text",
+            state=_make_empty_state(),
+            runtime_preflight=None,
+            raw_assistant_content="hi",
+        )
 
     def test_failed_preflight_without_raw_content_is_rejected(self) -> None:
         """runtime_preflight failed but raw_assistant_content is None — forbidden.
@@ -419,6 +448,65 @@ class TestComposerResultPairingInvariant:
                 runtime_preflight=self._failing_validation(),
                 raw_assistant_content=None,
             )
+
+
+class TestComposerResultRepairTurnsCap:
+    """Mechanical cap-assert on ``ComposerResult.repair_turns_used``.
+
+    The compose loop in ``web/composer/service.py`` enforces the bound
+    informally via ``_MAX_REPAIR_TURNS = 2`` (``if repair_turns_used >=
+    _MAX_REPAIR_TURNS: return False`` before each ``+= 1``). The field
+    flows into the audit trail via
+    ``composition_states.composer_meta.repair_turns_used`` and is
+    consumed by the convergence-suite eval scorer; an out-of-range value
+    would land in the legal record and be silently accepted by
+    downstream consumers.
+
+    ``Literal[0, 1, 2]`` would have been the static-typed form, but the
+    loop mutates a plain ``int`` counter and threads it via
+    ``dataclasses.replace`` — mypy cannot narrow ``int`` to a Literal at
+    that site. The runtime check in ``__post_init__`` is the fallback
+    that mechanically rejects an out-of-range value at the construction
+    boundary regardless of how callers obtained the integer. These tests
+    pin the bound so future edits cannot relax it silently. Keep
+    aligned with ``_MAX_REPAIR_TURNS`` in ``web/composer/service.py``.
+    """
+
+    def test_zero_is_valid(self) -> None:
+        """First-pass success — no repair turns used."""
+        result = ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=0)
+        assert result.repair_turns_used == 0
+
+    def test_one_is_valid(self) -> None:
+        """One forced repair turn — within budget."""
+        result = ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=1)
+        assert result.repair_turns_used == 1
+
+    def test_two_is_valid_at_cap(self) -> None:
+        """Two forced repair turns — exactly at ``_MAX_REPAIR_TURNS``."""
+        result = ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=2)
+        assert result.repair_turns_used == 2
+
+    def test_three_is_rejected_above_cap(self) -> None:
+        """Three repair turns — above ``_MAX_REPAIR_TURNS``, must be rejected.
+
+        If the compose loop ever forgets to clamp before a ``+= 1`` (or a
+        future edit relaxes the loop's pre-increment guard), the audit
+        row must not silently record an over-budget count.
+        """
+        with pytest.raises(ValueError, match=r"repair_turns_used must be 0, 1, or 2"):
+            ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=3)
+
+    def test_negative_is_rejected_below_zero(self) -> None:
+        """Negative repair turns — nonsensical, must be rejected.
+
+        The counter starts at 0 and only increments; a negative value
+        could only arise from a programming bug threading the wrong
+        integer through ``dataclasses.replace``. Crash informatively
+        rather than land it in the audit trail.
+        """
+        with pytest.raises(ValueError, match=r"repair_turns_used must be 0, 1, or 2"):
+            ComposerResult(message="hi", state=_make_empty_state(), repair_turns_used=-1)
 
 
 # ---------------------------------------------------------------------------

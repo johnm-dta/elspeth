@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -186,13 +186,20 @@ def _session_response(session: SessionRecord) -> SessionResponse:
     )
 
 
-def _message_response(msg: ChatMessageRecord) -> ChatMessageResponse:
-    """Convert a ChatMessageRecord to a ChatMessageResponse."""
+def _message_response(msg: ChatMessageRecord, *, include_raw_content: bool = False) -> ChatMessageResponse:
+    """Convert a ChatMessageRecord to a ChatMessageResponse.
+
+    ``include_raw_content`` opt-in surfaces the model's pre-synthesis prose
+    for assistant turns intercepted by the empty-state synthesizer. Default
+    False keeps the conversation channel free of audit-only data; eval
+    tooling sets True via the ``?include_raw_content=true`` query param.
+    """
     return ChatMessageResponse(
         id=str(msg.id),
         session_id=str(msg.session_id),
         role=msg.role,
         content=msg.content,
+        raw_content=msg.raw_content if include_raw_content else None,
         tool_calls=deep_thaw(msg.tool_calls) if msg.tool_calls is not None else None,
         created_at=msg.created_at,
         composition_state_id=str(msg.composition_state_id) if msg.composition_state_id else None,
@@ -321,6 +328,7 @@ def _state_response(
         else None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
+        composer_meta=deep_thaw(state.composer_meta) if state.composer_meta is not None else None,
     )
 
 
@@ -421,7 +429,7 @@ def _safe_frame_strings(
     structured server log must not retain them. File paths reference
     the on-disk source tree, which the operator already has access to
     under ELSPETH's single-operator deployment model (see the
-    ``_runtime_preflight_failure_message`` comment in
+    ``_compose_preflight_failure_message`` comment in
     ``web/composer/service.py`` for the deployment-shape caveat).
 
     Frames are emitted in walked order — outermost frame of the original
@@ -534,13 +542,6 @@ def _record_composer_request_terminal(
     _COMPOSER_REQUEST_TERMINAL_COUNTER.add(1, {"endpoint": endpoint, "status": status})
 
 
-_INTERCEPTED_ASSISTANT_HISTORY_PREFIX = (
-    "[ELSPETH composer note: Your previous assistant response was intercepted "
-    "by runtime preflight and replaced before it was shown to the user. The "
-    "visible replacement below is authoritative; continue from it and do not "
-    "assume the original completion claim succeeded.]\n\n"
-)
-
 _COMPOSER_EXCEPTION_CLASS_BUCKETS = frozenset(
     {
         "AttributeError",
@@ -596,9 +597,53 @@ def _record_composer_authoring_validation_telemetry(
 
 
 def _composer_history_content(message: ChatMessageRecord) -> str:
-    """Return the content sent back to the composer LLM for a stored message."""
+    """Return the content sent back to the composer LLM for a stored message.
+
+    All composer synthesis shapes are augmentations (see
+    service._finalize_no_tool_response). The model's prose is preserved
+    verbatim with an operator-facing suffix appended; ``content`` starts
+    with ``raw_content``. The LLM should see its own prose unmodified
+    on subsequent turns; the operator-facing suffix stays out of the
+    prompt history.
+
+    Equality (``content == raw_content``) is augmentation with an empty
+    suffix and returns ``raw_content`` unchanged. Empty ``raw_content``
+    (the no-mutation, preflight-invalid empty-state, and
+    preflight-invalid non-empty-state augmentation branches in
+    ``service._finalize_no_tool_response`` when the model emitted no
+    prose) is augmentation by the structural rule: the model produced
+    no prose and the operator-facing suffix replaces nothing — so the
+    LLM sees an empty prior turn and the operator-facing suffix stays
+    out of the prompt history.
+
+    The structural rule's correctness depends on the producer never
+    emitting a non-augmentation shape (``content`` not starting with
+    ``raw_content``). This is mechanically enforced at construction by
+    ``service._enforce_augmentation_prefix_invariant``. A row reaching
+    this discriminator that violates the contract is an audit-integrity
+    violation and crashes here rather than silently misroute. The
+    field-level overloading that makes the structural discriminator
+    necessary at all is tracked as architectural debt at
+    ``elspeth-7ae1732ab2`` (introduce a producer-side discriminator
+    field on the record).
+    """
     if message.role == "assistant" and message.raw_content is not None:
-        return _INTERCEPTED_ASSISTANT_HISTORY_PREFIX + message.content
+        if not message.content.startswith(message.raw_content):
+            raise AuditIntegrityError(
+                "Tier 1: composer chat row violates augmentation prefix "
+                "invariant on the read path. content does not start with "
+                "raw_content. All synthesis shapes are augmentations "
+                "post-elspeth-9cfbad6901; a row reaching this discriminator "
+                "that breaks the contract is an audit-integrity violation. "
+                "Fix the producer (service._finalize_no_tool_response) "
+                "or the row (drop the audit DB if the row predates the "
+                "augmentation-only migration; per project_db_migration_policy, "
+                "operator deletes the old DB on schema-shape changes)."
+            )
+        # Augmentation (incl. equality and empty raw_content): emit
+        # unmodified model prose. The operator-facing suffix stays
+        # out of LLM history.
+        return message.raw_content
     return message.content
 
 
@@ -639,10 +684,13 @@ def _composer_conversation_or_llm_audit_messages(messages: Sequence[ChatMessageR
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
     """Convert persisted session messages to LLM chat history.
 
-    `raw_content` is attribution/audit data and must not be sent back to the
-    model. When an assistant message has raw_content, its visible content is a
-    synthetic runtime-preflight replacement; annotate that visible content so
-    the next LLM turn understands why its apparent prior answer changed.
+    ``raw_content`` is attribution/audit data and feeds the LLM-context
+    decision in ``_composer_history_content``. All assistant-synthesis
+    shapes are augmentations (see ``service._finalize_no_tool_response``
+    and ``_composer_history_content`` for the policy): the model's
+    prose is preserved verbatim and an operator-facing suffix is
+    appended. The LLM sees its own prose unmodified on subsequent
+    turns; the suffix stays out of the prompt.
 
     Composer tool-call audit rows are persisted as ``role="tool"`` messages so
     the session record retains the dispatch trail. They are not prior LLM
@@ -841,6 +889,7 @@ async def _state_data_from_composer_state(
     preflight_exception_policy: _PreflightExceptionPolicy,
     initial_version: int | None,
     telemetry_source: _ComposerPreflightTelemetrySource,
+    composer_meta: Mapping[str, Any] | None = None,
 ) -> tuple[CompositionStateData, ValidationSummary]:
     try:
         authoring = state.validate()
@@ -918,6 +967,7 @@ async def _state_data_from_composer_state(
             metadata_=state_d["metadata"],
             is_valid=persisted_is_valid,
             validation_errors=persisted_errors,
+            composer_meta=composer_meta,
         ),
         authoring,
     )
@@ -1990,6 +2040,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="compose",
+                            composer_meta={"repair_turns_used": result.repair_turns_used},
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -2441,6 +2492,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="recompose",
+                            composer_meta={"repair_turns_used": result.repair_turns_used},
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -2573,8 +2625,17 @@ def create_session_router() -> APIRouter:
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
         include_llm_audit: bool = Query(False),
+        include_raw_content: bool = Query(False),
     ) -> list[ChatMessageResponse]:
-        """Get conversation history for a session."""
+        """Get conversation history for a session.
+
+        ``include_raw_content`` opts in to the assistant message's
+        pre-synthesis prose (the model's actual final text when the
+        empty-state synthesizer replaced the visible content). Default
+        omits it — the SPA conversation channel does not need audit data.
+        Eval/diagnosis tooling enables it to verify whether the model
+        converged on useful output that the synthesizer hid.
+        """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
         # Fetch before slicing so hidden audit rows cannot skew normal-chat
@@ -2587,7 +2648,7 @@ def create_session_router() -> APIRouter:
             _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
         )
         paged_messages = conversation_messages[offset : offset + limit]
-        return [_message_response(m) for m in paged_messages]
+        return [_message_response(m, include_raw_content=include_raw_content) for m in paged_messages]
 
     @router.get(
         "/{session_id}/runs",
@@ -2935,7 +2996,9 @@ def create_session_router() -> APIRouter:
 
                 if rewritten:
                     source_dict["options"] = options
-                    # Save updated state with remapped source
+                    # Save updated state with remapped source. Preserve the
+                    # source state's composer_meta — fork inherits the
+                    # operational provenance of the parent compose.
                     state_data = CompositionStateData(
                         source=source_dict,
                         nodes=deep_thaw(copied_state.nodes),
@@ -2944,6 +3007,7 @@ def create_session_router() -> APIRouter:
                         metadata_=deep_thaw(copied_state.metadata_),
                         is_valid=copied_state.is_valid,
                         validation_errors=list(copied_state.validation_errors) if copied_state.validation_errors else None,
+                        composer_meta=deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None,
                     )
                     copied_state = await service.save_composition_state(
                         new_session.id,

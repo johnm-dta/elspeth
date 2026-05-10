@@ -324,16 +324,26 @@ class TestPluginConfigWithSchema:
         assert config.schema_config is None
 
     def test_data_plugin_config_requires_schema(self) -> None:
-        """DataPluginConfig (for sources/sinks) requires schema."""
+        """DataPluginConfig (for sources/sinks) requires schema with actionable guidance.
+
+        When the schema key is omitted entirely (the common LLM-composer first
+        attempt), the error message must include the ``mode: observed`` /
+        ``fixed`` / ``flexible`` guidance so the model can repair its tool call
+        without an extra clarifying turn (cf. elspeth-861b0c58f5). The previous
+        bare ``"schema: Field required"`` left the LLM with no usable hint.
+        """
 
         class SourceConfig(DataPluginConfig):
             _plugin_component_type: ClassVar[str | None] = "source"
             path: str
 
-        # Should fail without schema - from_dict wraps in PluginConfigError
-        # Error message uses alias "schema" not field name "schema_config"
-        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
+        with pytest.raises(PluginConfigError) as exc_info:
             SourceConfig.from_dict({"path": "data.csv"})
+        message = str(exc_info.value)
+        # The bare-Pydantic regression guard: the message must NOT be just
+        # "schema: Field required" — it must carry the actionable guidance.
+        assert "mode: observed" in message, f"Missing-schema error must include mode-guidance for LLM repair; got: {message!r}"
+        assert "fixed" in message and "flexible" in message, f"Missing-schema error must enumerate alternative modes; got: {message!r}"
 
         # Should succeed with schema
         config = SourceConfig.from_dict(

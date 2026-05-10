@@ -31,6 +31,8 @@ from elspeth.web.composer.tools import (
     ToolResult,
     _apply_merge_patch,
     _compute_validation_delta,
+    _credential_wiring_contract_failure,
+    _failure_result,
     _inject_prior_validation,
     _prevalidate_plugin_options,
     execute_tool,
@@ -95,7 +97,7 @@ def _mock_catalog() -> MagicMock:
     ]
     catalog.list_transforms.return_value = [
         PluginSummary(
-            name="uppercase",
+            name="passthrough",
             description="Uppercase transform",
             plugin_type="transform",
             config_fields=[],
@@ -207,6 +209,56 @@ class TestToolResult:
         d = result.to_dict()
         assert d["validation"]["warnings"] == []
         assert d["validation"]["suggestions"] == []
+
+
+class TestFailureResult:
+    """``_failure_result`` must lead validation.errors with the rejection reason.
+
+    The composer LLM converges via ``validation.errors`` ordering — see
+    composer session 58d7ede3 (2026-05-08) where the LLM read stale
+    state-snapshot errors first and burned a full round retrying the
+    same call shape with only a cosmetic change. Locking the leading
+    entry here makes that regression invisible to refactors.
+    """
+
+    def test_prepends_rejection_reason_to_errors(self) -> None:
+        state = _empty_state()  # has neither source nor sinks
+        result = _failure_result(state, "boom: missing path")
+
+        assert result.success is False
+        assert result.validation.is_valid is False
+        first = result.validation.errors[0]
+        assert first.component == "rejected_mutation"
+        assert first.message == "boom: missing path"
+        assert first.severity == "high"
+        # State-level errors still present, just no longer leading.
+        components = [e.component for e in result.validation.errors[1:]]
+        assert "source" in components
+        assert "pipeline" in components
+
+    def test_data_error_mirrors_leading_validation_message(self) -> None:
+        """data.error and validation.errors[0].message must match.
+
+        The two channels exist for backward compatibility with
+        consumers that read either field. They must stay in sync so a
+        consumer reading one cannot disagree with a consumer reading
+        the other.
+        """
+        state = _empty_state()
+        result = _failure_result(state, "rejection text")
+        assert result.data["error"] == result.validation.errors[0].message
+
+    def test_preserves_warnings_and_semantic_contracts(self) -> None:
+        """Non-error fields on the input ValidationSummary survive prepending."""
+        # state.validate() on an empty state yields no warnings/suggestions,
+        # so this test asserts the ValidationSummary fields are reachable
+        # and unchanged in shape after _failure_result wraps them.
+        state = _empty_state()
+        result = _failure_result(state, "x")
+        assert result.validation.warnings == ()
+        assert result.validation.suggestions == ()
+        assert result.validation.semantic_contracts == ()
+        assert result.validation.edge_contracts == ()
 
 
 class TestToolResultSemanticContracts:
@@ -410,6 +462,7 @@ class TestVfDestinationAdvisory:
         assert result.data is not None
         assert "nonexistent" in result.data["note"]
         assert "output" in result.data["note"].lower()
+        assert "discard" in result.data["note"]
 
     def test_set_source_discard_vf_no_note(self) -> None:
         """'discard' is a built-in value — no advisory needed."""
@@ -502,10 +555,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -522,10 +575,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -535,10 +588,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "new_in",
                 "on_success": "out",
-                "options": {"field": "x"},
+                "options": {"schema": {"mode": "observed"}},
             },
             result1.updated_state,
             catalog,
@@ -742,10 +795,10 @@ class TestUpsertNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
                 "condition": "this is not python!!!",
             },
             state,
@@ -808,10 +861,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "old_stream",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -848,10 +901,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1038,10 +1091,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1108,10 +1161,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "stream_a",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1121,10 +1174,10 @@ class TestUpsertEdge:
             {
                 "id": "t2",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "stream_a",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             r1.updated_state,
             catalog,
@@ -1148,10 +1201,10 @@ class TestUpsertEdge:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "csv_out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1191,10 +1244,10 @@ class TestRemoveNode:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "in",
                 "on_success": "out",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -1659,6 +1712,19 @@ class TestToolDefinitions:
         for defn in get_tool_definitions():
             self._assert_no_enum_on_validation_failure(defn.get("parameters", {}), defn["name"])
 
+    def test_on_validation_failure_descriptions_match_runtime_contract(self) -> None:
+        """Tool docs must not advertise a non-existent built-in quarantine sink."""
+        descriptions: list[tuple[str, str]] = []
+        for defn in get_tool_definitions():
+            self._collect_on_validation_failure_descriptions(defn.get("parameters", {}), defn["name"], descriptions)
+
+        assert descriptions, "expected at least one on_validation_failure schema description"
+        for tool_name, description in descriptions:
+            lowered = description.lower()
+            assert "built-in quarantine" not in lowered, tool_name
+            assert "discard" in description, tool_name
+            assert "Any other value, including 'quarantine', must match a configured output/sink name." in description, tool_name
+
     def test_upsert_node_trigger_schema_documents_end_of_source_only_shape(self) -> None:
         """Aggregation trigger schema must expose the end-of-source-only shape."""
         upsert_node = next(defn for defn in get_tool_definitions() if defn["name"] == "upsert_node")
@@ -1714,6 +1780,25 @@ class TestToolDefinitions:
         elif isinstance(schema, list):
             for item in schema:
                 self._assert_no_enum_on_validation_failure(item, tool_name)
+
+    def _collect_on_validation_failure_descriptions(
+        self,
+        schema: object,
+        tool_name: str,
+        descriptions: list[tuple[str, str]],
+    ) -> None:
+        """Collect on_validation_failure descriptions from nested tool schemas."""
+        if isinstance(schema, dict):
+            for key, value in schema.items():
+                if key == "on_validation_failure" and isinstance(value, dict):
+                    description = value.get("description")
+                    assert isinstance(description, str), f"Tool {tool_name!r} on_validation_failure lacks description"
+                    descriptions.append((tool_name, description))
+                elif isinstance(value, (dict, list)):
+                    self._collect_on_validation_failure_descriptions(value, tool_name, descriptions)
+        elif isinstance(schema, list):
+            for item in schema:
+                self._collect_on_validation_failure_descriptions(item, tool_name, descriptions)
 
     def _assert_arrays_have_items(self, schema: object, tool_name: str, path: tuple[str, ...]) -> None:
         """Recursively walk a JSON schema and assert all arrays declare items."""
@@ -2111,6 +2196,8 @@ class TestToolRegistry:
             "explain_validation_error",
             "get_plugin_assistance",
             "list_models",
+            "get_audit_info",
+            "list_recipes",
             "get_pipeline_state",
             "preview_pipeline",
             "diff_pipeline",
@@ -2275,7 +2362,7 @@ class TestGetPipelineState:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source",
                 "on_success": "out",
                 "options": {"schema": {"mode": "observed"}},
@@ -2408,7 +2495,7 @@ class TestGetPipelineState:
         data = result.to_dict()["data"]
         assert "node" in data
         assert data["node"]["id"] == "t1"
-        assert data["node"]["plugin"] == "uppercase"
+        assert data["node"]["plugin"] == "passthrough"
         assert isinstance(data["node"]["options"], dict)
 
     def test_full_state_alias_does_not_shadow_real_node_id(self) -> None:
@@ -2417,7 +2504,7 @@ class TestGetPipelineState:
             NodeSpec(
                 id="full",
                 node_type="transform",
-                plugin="uppercase",
+                plugin="passthrough",
                 input="source",
                 on_success="out",
                 on_error=None,
@@ -2714,6 +2801,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.updated_state.source is not None
         assert result.updated_state.source.plugin == "csv"
+        assert result.updated_state.source.on_validation_failure == "discard"
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
@@ -2926,6 +3014,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.data is not None
         assert "nonexistent" in result.data["note"]
+        assert "discard" in result.data["note"]
 
     def test_create_blob_cleans_file_on_db_failure(self, tmp_path: Path) -> None:
         """DB failure during create_blob must delete the orphaned storage file."""
@@ -4779,7 +4868,7 @@ class TestPatchNodeOptions:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
                 "options": options,
@@ -4791,11 +4880,11 @@ class TestPatchNodeOptions:
         return r.updated_state
 
     def test_patch_node_options_updates_key(self) -> None:
-        state = self._state_with_node({"field": "old"})
+        state = self._state_with_node({"schema": {"mode": "observed"}, "required_input_fields": ["old"]})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_node_options",
-            {"node_id": "t1", "patch": {"field": "new"}},
+            {"node_id": "t1", "patch": {"required_input_fields": ["new"]}},
             state,
             catalog,
         )
@@ -4804,13 +4893,13 @@ class TestPatchNodeOptions:
         assert node.id == "t1"
 
         opts = deep_thaw(node.options)
-        assert opts["field"] == "new"
+        assert opts["required_input_fields"] == ["new"]
         # Other node fields preserved
         assert node.node_type == "transform"
-        assert node.plugin == "uppercase"
+        assert node.plugin == "passthrough"
 
     def test_patch_node_options_rejects_literal_credential_value_without_mutating_state(self) -> None:
-        state = self._state_with_node({"field": "old"})
+        state = self._state_with_node({"schema": {"mode": "observed"}})
         catalog = _mock_catalog()
         literal = "literal-node-key-for-test"
 
@@ -4837,11 +4926,11 @@ class TestPatchNodeOptions:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
                 "on_error": "discard",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             },
             state,
             catalog,
@@ -5094,11 +5183,11 @@ def _valid_pipeline_args() -> dict[str, Any]:
             {
                 "id": "t1",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "source_out",
                 "on_success": "main",
                 "on_error": "discard",
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             }
         ],
         "edges": [
@@ -5146,6 +5235,110 @@ def _assert_secret_wiring_contract_failure(
     assert field in result.data["credential_fields"]
     assert "list_secret_refs -> validate_secret_ref -> wire_secret_ref" in result.data["error"]
     assert literal_value not in repr(result.to_dict())
+
+
+class TestCredentialRejectionAdvertisesInlineForm:
+    """Lock the credential-rejection error contract for elspeth-85ae8972b0.
+
+    The cheap composer model (gpt-5.x-mini class) cannot create a new node
+    that has a required credential field because:
+
+    - ``set_pipeline`` is atomic, so a node with ``api_key`` missing fails
+      pydantic validation and the whole mutation rolls back.
+    - ``wire_secret_ref`` requires the node to already exist in state.
+    - A literal credential value is rejected by this helper.
+
+    The escape hatch is to pass ``{secret_ref: NAME}`` *inline* as the
+    value of the credential field — supported by ``secrets.py`` and
+    stripped before pydantic validation in tools.py — but the rejection
+    message historically only advertised the ``wire_secret_ref`` tool
+    sequence (which is unusable for new nodes). This locks in the
+    inline-form-first messaging.
+    """
+
+    def test_error_message_contains_inline_form(self) -> None:
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="my_llm",
+            component_type="transform",
+            options={"api_key": "literal-secret"},
+        )
+        assert result is not None
+        assert result.success is False
+        error = result.data["error"]
+        # Inline form must appear (and appear before the post-hoc form).
+        assert "secret_ref" in error
+        assert "{secret_ref: NAME}" in error or "{secret_ref:" in error
+        # Inline form must be the lead — operator should see it before
+        # the post-hoc tool sequence.
+        inline_idx = error.find("set_pipeline")
+        post_hoc_idx = error.find("list_secret_refs -> validate_secret_ref -> wire_secret_ref")
+        assert inline_idx != -1, "inline form must reference set_pipeline / upsert_node"
+        assert post_hoc_idx != -1, "post-hoc form must remain documented"
+        assert inline_idx < post_hoc_idx, (
+            "Inline form must lead — model reads top-down and the wire_secret_ref path is unusable for new nodes."
+        )
+
+    def test_repair_payload_splits_inline_and_post_hoc(self) -> None:
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="my_llm",
+            component_type="transform",
+            options={"api_key": "literal-secret"},
+        )
+        assert result is not None
+        repair = result.data["repair"]
+        # Old key must be gone — no compatibility shim per CLAUDE.md.
+        assert "required_tool_sequence" not in repair
+        # New shape: two separately-keyed forms.
+        assert "inline_form" in repair
+        assert "post_hoc_form" in repair
+        inline = repair["inline_form"]
+        post_hoc = repair["post_hoc_form"]
+        # Inline form carries an example the model can copy verbatim.
+        assert "instruction" in inline
+        assert "example_options" in inline
+        assert inline["example_options"] == {"api_key": {"secret_ref": "<NAME>"}}
+        # Post-hoc form carries the tool sequence.
+        assert "instruction" in post_hoc
+        assert tuple(post_hoc["tool_sequence"]) == (
+            "list_secret_refs",
+            "validate_secret_ref",
+            "wire_secret_ref",
+        )
+
+    def test_existing_helper_assertion_still_holds(self) -> None:
+        """The legacy ``_assert_secret_wiring_contract_failure`` helper
+        looks for the post-hoc tool-sequence substring — keep it intact
+        so existing rejection-shape tests continue to lock in the
+        contract from the post-hoc side."""
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="my_llm",
+            component_type="transform",
+            options={"api_key": "literal-secret"},
+        )
+        assert result is not None
+        assert "list_secret_refs -> validate_secret_ref -> wire_secret_ref" in result.data["error"]
+
+    def test_multiple_fields_listed_with_single_inline_example_form(self) -> None:
+        """When multiple credential fields are violated, the example_options
+        payload should enumerate all of them so the model sees the inline
+        form for each one."""
+        state = _empty_state()
+        result = _credential_wiring_contract_failure(
+            state,
+            component_id="db",
+            component_type="sink",
+            options={"api_key": "literal-1", "password": "literal-2"},
+        )
+        assert result is not None
+        example = result.data["repair"]["inline_form"]["example_options"]
+        assert set(example.keys()) == {"api_key", "password"}
+        assert all(v == {"secret_ref": "<NAME>"} for v in example.values())
 
 
 class TestSetPipelineSchemaShape:
@@ -5242,6 +5435,20 @@ class TestSetPipeline:
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
 
+    def test_set_pipeline_source_defaults_validation_failures_to_discard(self) -> None:
+        """Omitting on_validation_failure must not synthesize an absent quarantine sink."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        del args["source"]["on_validation_failure"]
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.updated_state.source is not None
+        assert result.updated_state.source.on_validation_failure == "discard"
+        assert result.data is None
+
     def test_set_pipeline_missing_json_output_options_returns_exact_repair_hint(self) -> None:
         state = _empty_state()
         catalog = self._catalog_with_json_sink()
@@ -5262,6 +5469,39 @@ class TestSetPipeline:
         assert '"schema": {"mode": "observed"}' in error
         assert '"collision_policy": "auto_increment"' in error
         assert '"on_write_failure": "discard"' in error
+
+    def test_set_pipeline_failure_leads_validation_with_rejection_reason(self) -> None:
+        """Regression for composer session 58d7ede3 round 6.
+
+        When ``set_pipeline`` rejects a mutation, ``validation.errors[0]``
+        must carry the actionable rejection reason (component
+        ``rejected_mutation``) ahead of any state-snapshot errors like
+        ``"No source configured."``. In the live session, the LLM read
+        the stale-state errors first and burned a full round retrying
+        with only a cosmetic change.
+        """
+        state = _empty_state()
+        catalog = self._catalog_with_json_sink()
+        args = _valid_pipeline_args()
+        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        del args["outputs"][0]["options"]
+        args["outputs"][0]["plugin"] = "json"
+
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+
+        assert result.success is False
+        first = result.validation.errors[0]
+        assert first.component == "rejected_mutation"
+        assert first.severity == "high"
+        assert "missing options" in first.message.lower()
+        # data.error mirrors the leading entry's message verbatim so the
+        # two channels stay in sync.
+        assert first.message == result.data["error"]
+        # Stale state-level errors remain in the array — they must not
+        # vanish, only be demoted from the leading slot.
+        components = [e.component for e in result.validation.errors[1:]]
+        assert "source" in components
+        assert "pipeline" in components
 
     def test_set_pipeline_accepts_two_json_sinks_with_explicit_file_options(self, tmp_path: Path) -> None:
         state = _empty_state()
@@ -5601,10 +5841,10 @@ class TestSetPipeline:
                 {
                     "id": f"t{i}",
                     "node_type": "transform",
-                    "plugin": "uppercase",
+                    "plugin": "passthrough",
                     "input": "in",
                     "on_success": "out",
-                    "options": {},
+                    "options": {"schema": {"mode": "observed"}},
                 },
                 state,
                 catalog,
@@ -5645,11 +5885,11 @@ class TestSetPipeline:
             {
                 "id": "t2",
                 "node_type": "transform",
-                "plugin": "uppercase",
+                "plugin": "passthrough",
                 "input": "orphan_channel",
                 "on_success": "main",
                 "on_error": None,
-                "options": {},
+                "options": {"schema": {"mode": "observed"}},
             }
         )
         result = execute_tool("set_pipeline", args, state, catalog)
@@ -6034,6 +6274,88 @@ class TestExplainValidationError:
         assert "patch_source_options" in result.data["suggested_fix"]
         assert "patch_node_options" in result.data["suggested_fix"]
 
+    # ---------------------------------------------------------------------
+    # "Expected ..." hint surfacing — observation elspeth-obs-eb4509376c.
+    #
+    # The validator catches schema-spec mistakes and produces strings
+    # like ``"... Expected single-key dict like {'field_name': 'type'} ..."``.
+    # The handler used to throw away that hint entirely. These tests lock
+    # in that the hint is echoed verbatim into ``suggested_fix``.
+    # ---------------------------------------------------------------------
+
+    def test_surfaces_expected_hint_when_pattern_matches(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # The "Invalid options for source 'csv'" prefix matches an
+        # existing pattern; the inner "Expected ..." span is the actionable
+        # hint that the catalogue's static fix doesn't carry.
+        error_text = (
+            "Invalid options for source 'csv': Field spec at index 0 is a "
+            "dict with 2 keys. Expected single-key dict like "
+            "{'field_name': 'type'} or a string like 'field_name: type'."
+        )
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": error_text},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # Catalogue fix (from the matched pattern) is preserved.
+        assert "patch_source_options" in result.data["suggested_fix"]
+        # And the validator hint is appended verbatim.
+        assert ("Expected single-key dict like {'field_name': 'type'} or a string like 'field_name: type'.") in result.data["suggested_fix"]
+
+    def test_surfaces_expected_hint_when_no_pattern_matches(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        error_text = (
+            "Field spec at index 0 is a dict with 2 keys. Expected "
+            "single-key dict like {'field_name': 'type'} or a string "
+            "like 'field_name: type'."
+        )
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": error_text},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # Falls through to generic explanation but still surfaces the hint.
+        assert "not in the known pattern" in result.data["explanation"]
+        assert ("Expected single-key dict like {'field_name': 'type'} or a string like 'field_name: type'.") in result.data["suggested_fix"]
+
+    def test_no_hint_appended_when_expected_substring_absent(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "No source configured."},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # Without "Expected " the catalogue fix should be returned
+        # unchanged — no synthetic hint, no trailing whitespace artifacts.
+        assert result.data["suggested_fix"] == ("Use set_source to configure a source plugin (e.g. csv, json, dataverse).")
+
+    def test_expected_hint_stops_at_sentence_boundary(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        error_text = "Some preamble. Expected an integer. Got a string. Other noise."
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": error_text},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        # The first sentence after "Expected " is what we surface.
+        # Trailing "Got a string. Other noise." should not be included.
+        assert "Expected an integer." in result.data["suggested_fix"]
+        assert "Got a string" not in result.data["suggested_fix"]
+        assert "Other noise" not in result.data["suggested_fix"]
+
 
 # ---------------------------------------------------------------------------
 # list_models tool tests
@@ -6087,6 +6409,100 @@ class TestListModels:
         providers = result.data.get("providers", {})
         # Must not contain the non-round-trippable "(no provider)" label
         assert "(no provider)" not in providers
+
+
+# ---------------------------------------------------------------------------
+# get_audit_info tool tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetAuditInfo:
+    """``get_audit_info`` returns CONSTANT facts about the Landscape audit.
+
+    The audit backend is operator-managed (``WebSettings.get_landscape_url()``)
+    and intentionally not composer-controllable (security fix S1, see
+    ``web/composer/yaml_generator.py:179``). This tool exists so the LLM can
+    answer "is audit on, can I configure it?" without inventing a backend
+    type and without leaking operator-internal config (URL, encryption key)
+    into chat. These tests pin down both behaviours.
+    """
+
+    def test_returns_enabled_true_and_not_modifiable(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        assert result.success is True
+        assert result.data["enabled"] is True
+        assert result.data["composer_modifiable"] is False
+
+    def test_summary_fields_present_and_non_empty(self) -> None:
+        """The model paraphrases ``summary``; an empty string here would let it invent text."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        assert isinstance(result.data["summary"], str) and result.data["summary"].strip()
+        assert isinstance(result.data["audit_export_summary"], str) and result.data["audit_export_summary"].strip()
+
+    def test_payload_never_leaks_operator_internal_fields(self) -> None:
+        """Regression guard: never expose URL/DSN/path/encryption-key fields.
+
+        If a future edit adds any of these as a top-level key OR embeds them
+        into one of the existing string fields, this test fails. The audit
+        URL is operator-internal — surfacing it to the LLM would defeat the
+        purpose of S1 (the LLM might echo it back to the user, log it to
+        chat history, or use it to construct a sink shape).
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        forbidden_keys = {
+            "url",
+            "dsn",
+            "path",
+            "database_url",
+            "landscape_url",
+            "encryption_key",
+            "encryption_key_env",
+            "passphrase",
+            "backend",
+        }
+        assert forbidden_keys.isdisjoint(result.data.keys()), (
+            f"get_audit_info leaked operator-internal keys into payload: {forbidden_keys & result.data.keys()}"
+        )
+
+        # Also string-scan the values: a future change might inline a path
+        # into the summary text. Catch obvious DSN / sqlite path patterns.
+        joined_text = " ".join(v for v in result.data.values() if isinstance(v, str)).lower()
+        for forbidden_substring in ("sqlite:///", "postgresql://", "postgres://", ".db", "/audit", "audit.db"):
+            assert forbidden_substring not in joined_text, (
+                f"get_audit_info summary text contains forbidden DSN/path substring "
+                f"{forbidden_substring!r} — operator-internal config must not be "
+                f"echoed into the LLM context (security fix S1)."
+            )
+
+    def test_state_is_unchanged(self) -> None:
+        """Discovery tool MUST NOT mutate state — updated_state is the same instance."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool("get_audit_info", {}, state, catalog)
+        assert result.updated_state is state
+
+    def test_is_registered_as_cacheable_discovery(self) -> None:
+        """Result is constant per compose call — should be cacheable."""
+        from elspeth.web.composer.tools import (
+            is_cacheable_discovery_tool,
+            is_discovery_tool,
+        )
+
+        assert is_discovery_tool("get_audit_info")
+        assert is_cacheable_discovery_tool("get_audit_info")
+
+    def test_appears_in_tool_definitions(self) -> None:
+        """The tool must be advertised in the LLM-visible function list."""
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        names = {defn["name"] for defn in get_tool_definitions()}
+        assert "get_audit_info" in names
 
 
 # ---------------------------------------------------------------------------
@@ -6238,7 +6654,14 @@ class TestPreviewPipeline:
         )
         r2 = execute_tool(
             "upsert_node",
-            {"id": "t1", "node_type": "transform", "plugin": "uppercase", "input": "t1", "on_success": "main", "options": {}},
+            {
+                "id": "t1",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "t1",
+                "on_success": "main",
+                "options": {"schema": {"mode": "observed"}},
+            },
             r1.updated_state,
             catalog,
         )
@@ -6530,7 +6953,7 @@ class TestPrevalidatePluginOptions:
     """Direct unit tests for _prevalidate_plugin_options.
 
     Covers the 6 code paths identified in the architecture review:
-    bypass (unknown plugin), success, config error with prefix stripping,
+    structured rejection (unknown plugin), success, config error with prefix stripping,
     injected_fields merge, MappingProxyType deep-thaw, and ValueError surfacing.
     Also covers the absence-is-evidence contract: missing required fields (like
     path) must produce validation errors, not be papered over by placeholders.
@@ -6555,14 +6978,41 @@ class TestPrevalidatePluginOptions:
         assert result is not None
         assert result.startswith("Invalid options for transform 'passthrough':")
 
-    def test_unknown_plugin_name_returns_none(self) -> None:
-        """Unregistered plugin name skips pre-validation; engine catches it later."""
+    def test_unknown_transform_plugin_returns_actionable_error(self) -> None:
+        """Unregistered transform name surfaces as an actionable error string."""
         result = _prevalidate_plugin_options(
             "transform",
-            "nonexistent_plugin_xyz",
-            {},
+            "this_plugin_does_not_exist",
+            {"some": "options"},
         )
-        assert result is None
+        assert result is not None
+        assert "this_plugin_does_not_exist" in result
+        assert "transform" in result.lower()
+        assert "list_transforms" in result
+
+    def test_unknown_source_plugin_returns_actionable_error(self) -> None:
+        """Unregistered source name surfaces as an actionable error string."""
+        result = _prevalidate_plugin_options(
+            "source",
+            "no_such_source_plugin",
+            {"path": "/data/blobs/in.csv"},
+        )
+        assert result is not None
+        assert "no_such_source_plugin" in result
+        assert "source" in result.lower()
+        assert "list_sources" in result
+
+    def test_unknown_sink_plugin_returns_actionable_error(self) -> None:
+        """Unregistered sink name surfaces as an actionable error string."""
+        result = _prevalidate_plugin_options(
+            "sink",
+            "no_such_sink_plugin",
+            {"path": "/data/outputs/out.csv"},
+        )
+        assert result is not None
+        assert "no_such_sink_plugin" in result
+        assert "sink" in result.lower()
+        assert "list_sinks" in result
 
     def test_injected_fields_satisfy_required_options(self) -> None:
         """Injected fields are merged in for validation only — not stored in state."""
@@ -7960,3 +8410,850 @@ class TestUpdateBlobAtomicWrite:
         assert self.storage_path.read_bytes() == self.original_content
         leftovers = [p for p in self.storage_dir.iterdir() if p != self.storage_path]
         assert leftovers == [], f"Tempfiles leaked after DB failure: {leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# inspect_source mirrors get_blob_content's lifecycle/integrity/decode
+# guards, but returns SourceInspectionFacts as a structured dict rather than
+# raw bytes — so the LLM can reason about headers and types without seeing
+# row content.
+# ---------------------------------------------------------------------------
+
+
+class TestInspectSourceTool:
+    """``inspect_source`` returns bounded structural facts about a blob."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        self.engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(self.engine)
+
+        self.session_id = str(uuid4())
+        self.blob_id = str(uuid4())
+        now = datetime.now(UTC)
+
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True)
+        self.storage_path = storage_dir / f"{self.blob_id}_orders.csv"
+        self.content_bytes = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        self.content_hash_hex = _content_hash(self.content_bytes)
+        self.storage_path.write_bytes(self.content_bytes)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=self.session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.blob_id,
+                    session_id=self.session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(self.content_bytes),
+                    content_hash=self.content_hash_hex,
+                    storage_path=str(self.storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+    def _set_status(self, status: str) -> None:
+        from elspeth.web.sessions.models import blobs_table
+
+        with self.engine.begin() as conn:
+            conn.execute(blobs_table.update().where(blobs_table.c.id == self.blob_id).values(status=status))
+
+    def test_returns_csv_facts_for_ready_blob(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        data = result.data
+        assert data["source_kind"] == "csv"
+        # Data is deep-frozen by ToolResult.__post_init__: lists become tuples,
+        # dicts become MappingProxyType. Compare against the frozen forms.
+        assert tuple(data["observed_headers"]) == ("order_id", "customer", "price")
+        assert dict(data["inferred_types"]) == {
+            "order_id": "str",
+            "customer": "str",
+            "price": "float",
+        }
+        assert data["sample_row_count"] == 2
+        assert data["redacted_identity"]["filename"] == "orders.csv"
+        assert data["redacted_identity"]["mime_type"] == "text/csv"
+        # Identity must NOT include storage_path
+        assert "storage_path" not in data["redacted_identity"]
+
+    def test_returns_url_candidates_when_present(self) -> None:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        # Add a second blob with URL content
+        url_blob_id = str(uuid4())
+        url_path = self.storage_path.parent / f"{url_blob_id}_urls.txt"
+        url_bytes = b"https://example.com/api\n"
+        url_path.write_bytes(url_bytes)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=url_blob_id,
+                    session_id=self.session_id,
+                    filename="urls.txt",
+                    mime_type="text/plain",
+                    size_bytes=len(url_bytes),
+                    content_hash=_content_hash(url_bytes),
+                    storage_path=str(url_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": url_blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        assert result.data["source_kind"] == "text"
+        assert tuple(result.data["url_candidates"]) == ("https://example.com/api",)
+        assert any("web_scrape" in w for w in result.data["warnings"])
+
+    def test_pending_blob_refused(self) -> None:
+        self._set_status("pending")
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is False
+        # Failure messages live in result.data["error"] (set by _failure_result).
+        assert "pending" in result.data["error"].lower()
+
+    def test_missing_blob_returns_failure(self) -> None:
+        from uuid import uuid4
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": str(uuid4())},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is False
+        assert "not found" in result.data["error"].lower()
+
+    def test_without_session_context_returns_failure(self) -> None:
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+        )
+        assert result.success is False
+
+    def test_hash_mismatch_raises_blob_integrity_error(self) -> None:
+        """Tier-1 invariant — corrupted blob must escalate, not return facts."""
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        # Tamper with the on-disk bytes so SHA-256 mismatches the stored hash.
+        self.storage_path.write_bytes(b"tampered,content\n9,9\n")
+        with pytest.raises(BlobIntegrityError):
+            execute_tool(
+                "inspect_source",
+                {"blob_id": self.blob_id},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+    def test_non_uuid_blob_id_surfaces_warning_fact(self, tmp_path: Path) -> None:
+        """A blob row whose id is not a parseable UUID must surface a
+        ``blob_id_not_uuid:`` warning to the audit trail, never silently
+        dropping the identifier."""
+        from datetime import UTC, datetime
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        non_uuid_id = "not-a-uuid-but-a-real-row"
+        body = b"a,b,c\n1,2,3\n"
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        non_uuid_path = storage_dir / f"{non_uuid_id}_x.csv"
+        non_uuid_path.write_bytes(body)
+        now = datetime.now(UTC)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=non_uuid_id,
+                    session_id=self.session_id,
+                    filename="x.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(non_uuid_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": non_uuid_id},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        warnings = tuple(result.data["warnings"])
+        matched = [w for w in warnings if w.startswith("blob_id_not_uuid:")]
+        assert len(matched) == 1, f"expected exactly one blob_id_not_uuid warning, got {warnings!r}"
+        assert non_uuid_id in matched[0]
+        identity = result.data["redacted_identity"]
+        assert "blob_id" not in identity
+        assert "content_hash_prefix" in identity
+
+
+# ---------------------------------------------------------------------------
+# preview_pipeline proof step. proof_diagnostics surfaces blocking issues that
+# depend on observed input shape: fixed CSV schema omitting observed columns,
+# text source containing a URL with no web_scrape downstream, missing or
+# unreadable blob storage. is_valid is forced to False when any proof
+# diagnostic is blocking, even if authoring/runtime checks pass.
+# ---------------------------------------------------------------------------
+
+
+class TestPreviewProofStep:
+    """preview_pipeline must surface input-shape diagnostics when session context is supplied."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path: Path):
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        self.engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(self.engine)
+
+        self.session_id = str(uuid4())
+        self.csv_blob_id = str(uuid4())
+        self.url_blob_id = str(uuid4())
+        now = datetime.now(UTC)
+
+        # CSV blob with three observed columns
+        storage_dir = tmp_path / "blobs" / self.session_id
+        storage_dir.mkdir(parents=True)
+        self.csv_storage_path = storage_dir / f"{self.csv_blob_id}_orders.csv"
+        csv_content = b"order_id,customer,price\nO-1,Alice,49.95\nO-2,Bob,150.00\n"
+        self.csv_storage_path.write_bytes(csv_content)
+
+        # Text blob with a single URL
+        self.url_storage_path = storage_dir / f"{self.url_blob_id}_url.txt"
+        url_content = b"https://example.com/data.json\n"
+        self.url_storage_path.write_bytes(url_content)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=self.session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.csv_blob_id,
+                    session_id=self.session_id,
+                    filename="orders.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                    storage_path=str(self.csv_storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+            conn.execute(
+                blobs_table.insert().values(
+                    id=self.url_blob_id,
+                    session_id=self.session_id,
+                    filename="url.txt",
+                    mime_type="text/plain",
+                    size_bytes=len(url_content),
+                    content_hash=_content_hash(url_content),
+                    storage_path=str(self.url_storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+    def _state_with_csv_source(
+        self,
+        *,
+        schema_mode: str = "fixed",
+        fields: tuple[str, ...] = (),
+        on_validation_failure: str = "discard",
+    ):
+        """Build a state with a CSV blob source via the composer tool API."""
+        schema: dict[str, object] = {"mode": schema_mode}
+        if fields:
+            schema["fields"] = list(fields)
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # Wire source via set_source_from_blob — this is the canonical way to
+        # produce a state with source.options.blob_ref set.
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.csv_blob_id,
+                "on_success": "rows",
+                "on_validation_failure": on_validation_failure,
+                "options": {"schema": schema},
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    def _state_with_text_url_source(self, *, with_web_scrape: bool):
+        """Build a state with a text URL blob source, optionally with web_scrape."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.url_blob_id,
+                "on_success": "url_rows" if with_web_scrape else "content",
+                "on_validation_failure": "discard",
+                "options": {
+                    "column": "url",
+                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                },
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success, result.data
+        state = result.updated_state
+
+        if with_web_scrape:
+            result = execute_tool(
+                "upsert_node",
+                {
+                    "id": "fetch",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "url_rows",
+                    "on_success": "content",
+                    "on_error": "discard",
+                    "options": {
+                        "url_field": "url",
+                        "schema": {"mode": "fixed", "fields": ["url: str"]},
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "format": "text",
+                        "text_separator": "\n",
+                        "http": {
+                            "abuse_contact": "test@example.com",
+                            "scraping_reason": "test",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                state,
+                catalog,
+            )
+            assert result.success, result.data
+            state = result.updated_state
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "out",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/out.json",
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert result.success, result.data
+        return result.updated_state
+
+    # -- Empty / no-op cases ------------------------------------------------
+
+    def test_proof_empty_when_no_blob_source(self) -> None:
+        """Path-based source has no blob to inspect — diagnostics empty."""
+        # Build a state via set_pipeline using a path-based source (no blob_ref)
+        args = _valid_pipeline_args()
+        args["source"]["on_validation_failure"] = "discard"
+        result = execute_tool("set_pipeline", args, _empty_state(), _mock_catalog())
+        assert result.success, result.data
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            result.updated_state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
+        assert result.data["proof_diagnostics"] == ()
+
+    def test_proof_empty_when_no_session_context(self) -> None:
+        """Blob source with no session_engine — proof step degrades to empty."""
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool("preview_pipeline", {}, state, _mock_catalog())
+        assert result.success is True
+        assert result.data["proof_diagnostics"] == ()
+
+    # -- csv_fixed_schema_omits_observed_columns ----------------------------
+
+    def test_fixed_csv_omits_columns_with_discard_blocks(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "csv_fixed_schema_omits_observed_columns" in codes
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert blocking, "expected a blocking diagnostic for omitted observed columns"
+        # is_valid is forced False by the blocking proof diagnostic.
+        assert result.data["is_valid"] is False
+
+    def test_fixed_csv_with_all_columns_does_not_block(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str", "customer: str", "price: float"),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_flexible_csv_does_not_block(self) -> None:
+        """Flexible mode accepts extra columns by design."""
+        state = self._state_with_csv_source(schema_mode="flexible", fields=("order_id: str",))
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_fixed_csv_with_routed_failures_does_not_block(self) -> None:
+        """on_validation_failure routes to a sink → not silent discard, not blocking."""
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="quarantine_sink",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    # -- text_source_url_without_web_scrape ---------------------------------
+
+    def test_text_url_without_web_scrape_blocks(self) -> None:
+        state = self._state_with_text_url_source(with_web_scrape=False)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "text_source_url_without_web_scrape" in codes
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        assert blocking
+        assert result.data["is_valid"] is False
+
+    def test_text_url_with_web_scrape_does_not_block(self) -> None:
+        state = self._state_with_text_url_source(with_web_scrape=True)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "text_source_url_without_web_scrape" not in codes
+
+    # -- inspection warnings surfaced as info -------------------------------
+
+    def test_inspection_warnings_surfaced_as_info(self) -> None:
+        """The text source's web_scrape warning is mirrored in proof_diagnostics as info."""
+        state = self._state_with_text_url_source(with_web_scrape=True)
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        info = [d for d in diagnostics if d["severity"] == "info"]
+        # web_scrape warning from inspection should be mirrored — as info, not blocking
+        assert any(d["code"] == "source_inspection_warning" for d in info)
+
+    # -- csv_duplicate_headers (promoted to blocking) -----------------------
+    # Duplicate CSV headers cause silent column collapse in csv.DictReader
+    # (last-write-wins) and similar libraries, fabricating a single column
+    # from multiple source columns. That is a Tier-1 audit-integrity
+    # violation and must force the repair loop, not pass through as
+    # advisory info.
+
+    def _replace_csv_blob_with_duplicate_headers(self) -> None:
+        """Overwrite the seeded CSV blob's bytes + content_hash so it has
+        duplicate headers. Must update content_hash to match the new bytes
+        or the proof step's BlobIntegrityError check will fire instead.
+        """
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        new_bytes = b"order_id,name,name,price\nO-1,Alice,Smith,49.95\nO-2,Bob,Jones,150.00\n"
+        self.csv_storage_path.write_bytes(new_bytes)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(new_bytes),
+                    content_hash=_content_hash(new_bytes),
+                )
+            )
+
+    def test_csv_duplicate_headers_blocks(self) -> None:
+        """Duplicate CSV headers must surface as a blocking proof diagnostic."""
+        self._replace_csv_blob_with_duplicate_headers()
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        diagnostics = result.data["proof_diagnostics"]
+        codes = [d["code"] for d in diagnostics]
+        assert "csv_duplicate_headers" in codes, diagnostics
+        # Severity is blocking, not info.
+        dup = next(d for d in diagnostics if d["code"] == "csv_duplicate_headers")
+        assert dup["severity"] == "blocking", dup
+        # Must carry an actionable suggested_repair string (not None) so the
+        # forced-repair loop has a concrete remedy to relay to the LLM.
+        assert isinstance(dup["suggested_repair"], str) and dup["suggested_repair"], dup
+        # The warning text must reach the LLM verbatim — it names the
+        # offending header(s).
+        assert "name" in dup["message"], dup
+        # is_valid is forced False by the blocking proof diagnostic.
+        assert result.data["is_valid"] is False
+
+    def test_csv_without_duplicate_headers_does_not_block(self) -> None:
+        """Clean headers must not produce a csv_duplicate_headers diagnostic."""
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_duplicate_headers" not in codes
+
+    def test_csv_duplicate_headers_registered_as_blocking_code(self) -> None:
+        """Registry membership ripples — the constructor would crash if the
+        emission site used an unregistered code, so this test pins the
+        canonical-vocabulary contract independently of emission."""
+        from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES
+
+        assert "csv_duplicate_headers" in _BLOCKING_DIAGNOSTIC_CODES
+
+    # -- missing/unreadable blob --------------------------------------------
+
+    def test_missing_storage_file_blocks(self) -> None:
+        self.csv_storage_path.unlink()
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "source_inspection_failed" in codes
+        assert result.data["is_valid"] is False
+
+    def test_blocking_proof_overrides_authoring_validation(self) -> None:
+        """Authoring may be valid but blocking proof_diagnostics still flips is_valid."""
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=("order_id: str",),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        # Stage 1 might be valid, but proof step blocks → is_valid False.
+        assert result.data["is_valid"] is False
+        # The state-level validation still reflects authoring shape, only
+        # the summary-level is_valid is forced. authoring_validation is
+        # deep-frozen to MappingProxyType by ToolResult.__post_init__.
+        from collections.abc import Mapping as _Mapping
+
+        assert isinstance(result.data["authoring_validation"], _Mapping)
+
+    # -- proof step integrity verification -----------------------------------
+    # The proof step reads blob bytes through the same Tier-1 invariants as
+    # _execute_get_blob_content and _execute_inspect_source: NULL stored
+    # content_hash escalates via AuditIntegrityError; SHA-256 mismatch
+    # escalates via BlobIntegrityError. Without these the audit trail would
+    # accept LLM repair turns driven by unverified bytes.
+
+    def test_proof_raises_blob_integrity_error_on_hash_mismatch(self) -> None:
+        """Tampering with on-disk bytes after upload must raise, not soft-fail.
+
+        The proof step reads the blob's bytes; if SHA-256 of the bytes
+        does not match the stored content_hash, that's a Tier-1 anomaly
+        (filesystem corruption, tampering, or write-path bug) and must
+        ESCALATE — not silently let downstream LLM repair turns act on
+        garbage.
+        """
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+
+        state = self._state_with_csv_source(schema_mode="observed")
+        # Tamper with the on-disk bytes after the row was inserted.
+        self.csv_storage_path.write_bytes(b"tampered,data\nX,Y\n")
+        with pytest.raises(BlobIntegrityError):
+            execute_tool(
+                "preview_pipeline",
+                {},
+                state,
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+    def test_proof_raises_audit_integrity_error_on_null_content_hash(self) -> None:
+        """A ``ready`` blob with NULL content_hash is a DB-integrity anomaly.
+
+        Enforced at write time by the ``ck_blobs_ready_hash`` CHECK
+        constraint. If the proof step ever observes NULL here, the
+        constraint was bypassed (or the database is corrupt). Must
+        ESCALATE via AuditIntegrityError; cannot soft-degrade to "no
+        diagnostics" because that would let an unverified blob drive
+        repair turns.
+        """
+        from sqlalchemy import update
+
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.web.sessions.models import blobs_table
+
+        # Bypass the CHECK constraint by suspending it; sqlite respects
+        # ``PRAGMA defer_foreign_keys`` but not check toggles inline,
+        # so we drop and recreate without the constraint for the test
+        # row. Simpler: directly patch via raw SQL with a workaround
+        # — but the cleanest test path is to set status='ready' and
+        # NULL the hash explicitly via UPDATE; sqlite will reject the
+        # CHECK if defined. Use a raw SQL UPDATE that violates the
+        # check guard if present, else falls through; the row's
+        # presence on read with NULL hash is what we need.
+        state = self._state_with_csv_source(schema_mode="observed")
+        with self.engine.begin() as conn:
+            # Disable the row-level check by toggling pragma; sqlite
+            # 3.x respects this for the connection. Then null the hash.
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+            conn.execute(update(blobs_table).where(blobs_table.c.id == self.csv_blob_id).values(content_hash=None))
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+        with pytest.raises(AuditIntegrityError, match="NULL content_hash"):
+            execute_tool(
+                "preview_pipeline",
+                {},
+                state,
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+
+class TestBlockingDiagnosticRegistry:
+    """``_blocking_diagnostic`` enforces the canonical-codes invariant.
+
+    The skill markdown that drives the composer LLM cites these codes by
+    name; if a contributor adds a new blocker without registering the code
+    in ``_BLOCKING_DIAGNOSTIC_CODES``, the LLM's repair vocabulary drifts
+    silently. The constructor's runtime assertion turns that drift into a
+    crash at the construction site.
+    """
+
+    def test_unregistered_code_raises_at_construction(self) -> None:
+        from elspeth.web.composer.tools import _blocking_diagnostic
+
+        with pytest.raises(AssertionError, match="not registered in _BLOCKING_DIAGNOSTIC_CODES"):
+            _blocking_diagnostic(
+                code="this_code_was_never_registered",
+                message="msg",
+                suggested_repair="repair",
+                evidence_locator={},
+            )
+
+    def test_registered_codes_construct_successfully(self) -> None:
+        from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES, _blocking_diagnostic
+
+        for code in _BLOCKING_DIAGNOSTIC_CODES:
+            d = _blocking_diagnostic(
+                code=code,
+                message="msg",
+                suggested_repair="repair",
+                evidence_locator={"source": "blob", "blob_id": "abc"},
+            )
+            # Construction sets severity blocking and preserves the inputs.
+            assert d["code"] == code
+            assert d["severity"] == "blocking"
+            assert d["message"] == "msg"
+            assert d["suggested_repair"] == "repair"
+            assert d["evidence_locator"] == {"source": "blob", "blob_id": "abc"}

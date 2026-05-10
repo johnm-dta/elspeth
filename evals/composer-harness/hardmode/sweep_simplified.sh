@@ -75,10 +75,12 @@ log() { echo "[sweep] $*" >&2; }
 
 log "label=$LABEL runs=$ELSPETH_EVAL_RUNS_DIR"
 
-# 15 scenarios under scenarios/hardmode/
+# Scenarios under $ELSPETH_EVAL_SCENARIO_ROOT (default: scenarios/hardmode/).
+# Panel cohorts override this to scenarios/panel/<cohort>/.
+scenario_root="${ELSPETH_EVAL_SCENARIO_ROOT:-$HARNESS_ROOT/scenarios/hardmode}"
 shopt -s nullglob
-scenario_files=("$HARNESS_ROOT"/scenarios/hardmode/*.json)
-log "found ${#scenario_files[@]} scenarios"
+scenario_files=("$scenario_root"/*.json)
+log "found ${#scenario_files[@]} scenarios under $scenario_root"
 
 # Per-fixture pattern check helper: scan the persisted messages for forbidden
 # phrases ("if you want, i can", etc.) on the assistant turns AND check whether

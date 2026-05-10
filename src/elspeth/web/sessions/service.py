@@ -24,7 +24,6 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
-    run_events_table,
     runs_table,
     sessions_table,
 )
@@ -317,10 +316,6 @@ class SessionServiceImpl:
             try:
                 with self._engine.begin() as conn:
                     # Delete in dependency order (children first for non-CASCADE DBs)
-                    # Get run IDs for this session to delete run_events
-                    run_ids = [r.id for r in conn.execute(select(runs_table.c.id).where(runs_table.c.session_id == sid)).fetchall()]
-                    if run_ids:
-                        conn.execute(delete(run_events_table).where(run_events_table.c.run_id.in_(run_ids)))
                     conn.execute(delete(runs_table).where(runs_table.c.session_id == sid))
                     conn.execute(delete(chat_messages_table).where(chat_messages_table.c.session_id == sid))
                     conn.execute(delete(composition_states_table).where(composition_states_table.c.session_id == sid))
@@ -493,6 +488,7 @@ class SessionServiceImpl:
                         metadata_=_enveloped(state.metadata_),
                         is_valid=state.is_valid,
                         validation_errors=deep_thaw(state.validation_errors),
+                        composer_meta=_enveloped(state.composer_meta),
                         derived_from_state_id=None,
                         created_at=now,
                     )
@@ -514,6 +510,7 @@ class SessionServiceImpl:
             validation_errors=state.validation_errors,
             created_at=now,
             derived_from_state_id=None,
+            composer_meta=state.composer_meta,
         )
 
     async def get_current_state(
@@ -596,6 +593,7 @@ class SessionServiceImpl:
             validation_errors=row.validation_errors,
             created_at=self._ensure_utc(row.created_at),
             derived_from_state_id=(UUID(row.derived_from_state_id) if row.derived_from_state_id is not None else None),
+            composer_meta=self._unwrap_envelope(row.composer_meta),
         )
 
     async def create_run(
@@ -932,6 +930,7 @@ class SessionServiceImpl:
                         metadata_=prior_row.metadata_,
                         is_valid=prior_row.is_valid,
                         validation_errors=prior_row.validation_errors,
+                        composer_meta=prior_row.composer_meta,
                         derived_from_state_id=str(state_id),
                         created_at=now,
                     )
@@ -953,6 +952,7 @@ class SessionServiceImpl:
             validation_errors=prior_row.validation_errors,
             created_at=now,
             derived_from_state_id=state_id,
+            composer_meta=self._unwrap_envelope(prior_row.composer_meta),
         )
 
     async def cancel_orphaned_runs(
@@ -1289,6 +1289,7 @@ class SessionServiceImpl:
                             metadata_=_enveloped(source_state_record.metadata_),
                             is_valid=source_state_record.is_valid,
                             validation_errors=deep_thaw(source_state_record.validation_errors),
+                            composer_meta=_enveloped(source_state_record.composer_meta),
                             derived_from_state_id=None,
                             created_at=now,
                         )
@@ -1343,6 +1344,7 @@ class SessionServiceImpl:
                 validation_errors=source_state_record.validation_errors,
                 created_at=now,
                 derived_from_state_id=None,
+                composer_meta=source_state_record.composer_meta,
             )
 
         return new_session, new_messages, copied_state

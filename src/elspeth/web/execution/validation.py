@@ -81,6 +81,14 @@ _CHECK_ROUTE_TARGETS = "route_target_resolution"
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
+# Advisory check — non-blocking, multi-entry (one ValidationCheck per
+# detected node, all sharing this name).  Deliberately NOT included in
+# _ALL_CHECKS: that list governs the "skipped check" propagation when an
+# earlier pass/fail check fails.  This advisory uses ``passed=True`` for
+# every entry and is emitted only on the happy-path return, so structural
+# errors are never drowned in cosmetic noise.
+_CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+
 # _CHECK_VALUE_SOURCE_COMPLIANCE slots between _CHECK_PLUGINS (typed configs
 # now exist) and _CHECK_GRAPH (so a hallucinated model fails before any DAG
 # work). The position is asserted by tests/unit/web/execution/test_validation.py
@@ -357,6 +365,134 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                 )
             )
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityFinding:
+    """One detected identity-shaped passthrough between a transform and a sink.
+
+    Emitted by ``_find_identity_node_advisories``; consumed by the advisory
+    block in ``validate_pipeline``.  All four fields are scalars, so
+    ``frozen=True`` is sufficient (no ``deep_freeze`` guard needed).
+
+    Attributes:
+        node_id: ID of the passthrough node itself.
+        upstream_id: ID of the producer feeding the passthrough's input
+            (or "source" when the source feeds it directly).
+        sink_name: Name of the downstream sink (output) the passthrough emits to.
+        sink_schema_mode: Schema mode of the sink ("fixed" / "flexible" /
+            "observed"), or ``None`` when the sink declares no schema mode.
+            Used purely for the advisory's detail string — not a detection input.
+    """
+
+    node_id: str
+    upstream_id: str
+    sink_name: str
+    sink_schema_mode: str | None
+
+
+def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFinding]:
+    """Detect identity-shaped passthrough transforms between a real transform and a sink.
+
+    A node is flagged iff ALL of the following hold:
+
+    1. ``node_type == "transform"`` and ``plugin == "passthrough"`` (literal
+       string check — deliberately narrow per dispatch; broader registry-based
+       detection of ``passes_through_input`` plugins is out of scope).
+    2. Exactly one upstream producer feeds ``node.input`` (single inbound).
+    3. ``on_success`` targets exactly one sink (output by name) — the
+       downstream must be a sink, not another transform.
+    4. The node has no fork machinery (``fork_to``, ``routes`` empty).
+    5. ``options["schema"]["fields"]`` is missing or empty (not Concept-5
+       schema-anchoring per ``pipeline_composer.md:758-768``).
+    6. The upstream node is NOT a ``gate`` (per ``pipeline_composer.md:1517-1518``,
+       per-fork-branch passthrough is the documented legitimate pattern).
+
+    Returns:
+        List of :class:`_IdentityFinding`, one per detected node.  Empty when
+        nothing was detected.
+    """
+    findings: list[_IdentityFinding] = []
+
+    output_by_name = {output.name: output for output in state.outputs}
+    nodes_by_id = {node.id: node for node in state.nodes}
+
+    # Producer index: maps a connection-target name (the value carried by an
+    # upstream's on_success / on_error / route value / fork_to entry) back to
+    # the producer node id.  Used to find a node's upstream by matching its
+    # input field.  Explicit "if key not in dict" preserves first-writer-wins
+    # semantics; the schema validator rejects duplicate connection targets
+    # earlier in the pipeline so collisions here would already have surfaced.
+    producer_by_target: dict[str, str] = {}
+
+    def _record(target: str, producer_id: str) -> None:
+        if target not in producer_by_target:
+            producer_by_target[target] = producer_id
+
+    if state.source is not None and state.source.on_success:
+        producer_by_target[state.source.on_success] = "source"
+    for upstream in state.nodes:
+        if upstream.on_success:
+            _record(upstream.on_success, upstream.id)
+        if upstream.on_error:
+            _record(upstream.on_error, upstream.id)
+        if upstream.routes:
+            for route_target in upstream.routes.values():
+                _record(route_target, upstream.id)
+        if upstream.fork_to:
+            for fork_target in upstream.fork_to:
+                _record(fork_target, upstream.id)
+
+    for node in state.nodes:
+        # Rule 1: identity passthrough plugin (literal name).
+        if node.node_type != "transform" or node.plugin != "passthrough":
+            continue
+        # Rule 4: no fork machinery on the node itself.
+        if node.fork_to or node.routes:
+            continue
+        # Rule 3: on_success must point to exactly one sink (output).
+        if node.on_success is None or node.on_success not in output_by_name:
+            continue
+        sink = output_by_name[node.on_success]
+        # Rule 2: must have an upstream producer.  Absence means the pipeline
+        # has a dangling input ref, which a structural check will already have
+        # surfaced; the advisory simply skips the node.
+        if node.input not in producer_by_target:
+            continue
+        upstream_id = producer_by_target[node.input]
+        # Rule 6: upstream is not a gate (per skill lines 1517-1518 —
+        # per-fork-branch passthrough is the documented legitimate pattern).
+        # ``upstream_id == "source"`` is not in nodes_by_id; the source is
+        # never a gate, so falling through is correct.
+        if upstream_id in nodes_by_id and nodes_by_id[upstream_id].node_type == "gate":
+            continue
+        # Rule 5: passthrough has no schema.fields anchor (Concept-5 exemption
+        # per skill lines 758-768).  ``options`` values are Tier-3 (LLM- or
+        # operator-supplied), so isinstance() dispatches the optional schema
+        # block legitimately — a non-Mapping value means "no schema declared".
+        schema_block = node.options.get("schema")
+        if isinstance(schema_block, Mapping):
+            fields = schema_block.get("fields")
+            if isinstance(fields, (list, tuple)) and len(fields) > 0:
+                continue
+        # Compute sink schema mode for the advisory's detail string.  Same
+        # Tier-3 dispatch: sink options are operator-supplied, schema may be
+        # absent or shaped differently than expected.
+        sink_schema_mode: str | None = None
+        sink_schema_block = sink.options.get("schema")
+        if isinstance(sink_schema_block, Mapping):
+            mode = sink_schema_block.get("mode")
+            if isinstance(mode, str):
+                sink_schema_mode = mode
+        findings.append(
+            _IdentityFinding(
+                node_id=node.id,
+                upstream_id=upstream_id,
+                sink_name=sink.name,
+                sink_schema_mode=sink_schema_mode,
+            )
+        )
+    return findings
 
 
 def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> list[str]:
@@ -1043,6 +1179,32 @@ def validate_pipeline(
             checks=checks,
             errors=errors,
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+
+    # Identity-node advisory — non-blocking, multi-entry.  Emitted only on the
+    # happy path (after every structural check has passed) so structural errors
+    # are not drowned in cosmetic noise.  One ValidationCheck per detected node;
+    # the detail string names the offending node, its upstream, and its
+    # downstream sink, plus the repair action so the composer LLM can self-correct
+    # on the next turn.  See dispatch-prompt-floofy-noodle.md plan + skill lines
+    # 758-768 (Concept-5 exemption) and 1517-1518 (fork-branch exemption).
+    for identity_finding in _find_identity_node_advisories(state):
+        sink_mode_text = (
+            f", which uses schema.mode: {identity_finding.sink_schema_mode}" if identity_finding.sink_schema_mode is not None else ""
+        )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_IDENTITY_NODE_ADVISORY,
+                passed=True,
+                detail=(
+                    f"Node '{identity_finding.node_id}' is an identity-shaped passthrough "
+                    f"between '{identity_finding.upstream_id}' and sink '{identity_finding.sink_name}'"
+                    f"{sink_mode_text}.  The sink accepts the upstream row directly; "
+                    f"the passthrough adds an audit hop with no contract benefit.  "
+                    f"Consider removing it and wiring '{identity_finding.upstream_id}'.on_success "
+                    f"directly to '{identity_finding.sink_name}'."
+                ),
+            )
         )
 
     return ValidationResult(

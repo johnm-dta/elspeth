@@ -1,5 +1,6 @@
 """Tests for identity contracts."""
 
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
@@ -23,8 +24,6 @@ class TestTokenInfo:
 
     def test_create_token_info(self) -> None:
         """Can create TokenInfo with required fields."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({"field": "value"}, contract)
 
@@ -37,12 +36,11 @@ class TestTokenInfo:
         assert token.row_id == "row-123"
         assert token.token_id == "tok-456"
         assert token.row_data["field"] == "value"
+        assert token.row_data is pipeline_row, "row_data must be a reference to pipeline_row, not a copy"
         assert token.branch_name is None
 
     def test_token_info_with_branch(self) -> None:
         """Can create TokenInfo with branch_name."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -57,8 +55,6 @@ class TestTokenInfo:
 
     def test_rejects_empty_row_id(self) -> None:
         """TokenInfo rejects empty row_id at construction time."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -67,8 +63,6 @@ class TestTokenInfo:
 
     def test_rejects_empty_token_id(self) -> None:
         """TokenInfo rejects empty token_id at construction time."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -77,8 +71,6 @@ class TestTokenInfo:
 
     def test_token_info_row_data_immutable(self) -> None:
         """TokenInfo.row_data (PipelineRow) is immutable for audit integrity."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({"field": "value"}, contract)
 
@@ -90,10 +82,6 @@ class TestTokenInfo:
 
     def test_token_info_is_frozen(self) -> None:
         """TokenInfo is immutable — field assignment raises FrozenInstanceError."""
-        from dataclasses import FrozenInstanceError
-
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         pipeline_row = PipelineRow({}, contract)
 
@@ -105,8 +93,6 @@ class TestTokenInfo:
 
     def test_with_updated_data_preserves_lineage(self) -> None:
         """with_updated_data() preserves all lineage fields."""
-        from elspeth.contracts import TokenInfo
-
         contract = _make_contract()
         original_row = PipelineRow({"field": "original"}, contract)
         updated_row = PipelineRow({"field": "updated"}, contract)
@@ -174,3 +160,67 @@ class TestTokenInfoLineageFieldGuards:
         kwargs[field] = "valid_value"
         t = TokenInfo(**kwargs)
         assert getattr(t, field) == "valid_value"
+
+
+class TestTokenInfoExtraFields:
+    """Tests covering two specific extras on TokenInfo.row_data:
+
+    - The schema contract is reachable via ``row_data.contract``.
+    - ``PipelineRow.to_dict()`` round-trips non-contract (extra) fields
+      attached during pipeline execution.
+    """
+
+    def test_row_data_contract_accessible(self) -> None:
+        """The schema contract is reachable via token.row_data.contract."""
+        contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                make_field(
+                    "amount",
+                    int,
+                    original_name="'Amount'",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+        pipeline_row = PipelineRow({"amount": 100}, contract)
+
+        token = TokenInfo(
+            row_id="row_001",
+            token_id="token_001",
+            row_data=pipeline_row,
+        )
+
+        assert token.row_data.contract is contract
+        assert token.row_data.contract.mode == "FIXED"
+
+    def test_pipeline_row_to_dict_includes_extra_fields(self) -> None:
+        """to_dict() returns ALL fields, not just contract-declared ones.
+
+        Pipeline execution can attach extras (computed fields, nested objects)
+        beyond the declared schema. to_dict() must round-trip those, otherwise
+        downstream sinks lose data the audit trail needs.
+        """
+        contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                make_field(
+                    "amount",
+                    int,
+                    original_name="'Amount'",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            locked=True,
+        )
+        data_with_extras = {"amount": 100, "computed_field": "extra", "nested": {"a": 1}}
+        pipeline_row = PipelineRow(data_with_extras, contract)
+
+        result = pipeline_row.to_dict()
+
+        assert result["amount"] == 100
+        assert result["computed_field"] == "extra"
+        assert result["nested"] == {"a": 1}

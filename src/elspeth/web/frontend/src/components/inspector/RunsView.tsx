@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { ProgressView } from "@/components/execution/ProgressView";
+import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
 import type { RunAccounting, RunDiagnostics, RunDiagnosticsWorkingView, RunProgress, RunStatus } from "@/types/index";
 
 // ── Status badge CSS class mapping ───────────────────────────────────────────
@@ -99,12 +100,15 @@ function buildVisibleEvidence(diagnostics: RunDiagnostics): string[] {
     evidence.push(operationSummary);
   }
 
-  diagnostics.artifacts.slice(0, 3).forEach((artifact) => {
-    evidence.push(`Saved output is visible at ${artifact.path_or_uri}.`);
-  });
+  // Saved-output evidence is now surfaced through the dedicated
+  // RunOutputsPanel (full manifest + downloads + previews), not as a
+  // bullet in the diagnostics evidence list. Keeping the bullet would
+  // double-report the same information once the operator expands the
+  // row, and the diagnostics version was capped at 3 — strictly
+  // inferior to the new panel's unbounded list.
 
   if (evidence.length === 0) {
-    evidence.push("No tokens, operations, or saved outputs are visible yet.");
+    evidence.push("No tokens or operations are visible yet.");
   }
   return evidence;
 }
@@ -258,8 +262,17 @@ export function RunsView() {
                   marginBottom: 4,
                 }}
               >
-                {/* Status badge: uses CSS class from App.css */}
-                <span className={STATUS_BADGE_CLASSES[run.status]}>
+                {/* Status badge: uses CSS class from App.css.  Cancel-pending
+                    (running + cancel_requested) gets a dedicated class with a
+                    pulsing dot glyph so it is visually distinguishable from
+                    a fully cancelled run that uses the same colour. */}
+                <span
+                  className={
+                    run.cancel_requested && run.status === "running"
+                      ? "status-badge status-badge-cancelling"
+                      : STATUS_BADGE_CLASSES[run.status]
+                  }
+                >
                   {displayStatus}
                 </span>
                 <span
@@ -362,6 +375,8 @@ export function RunsView() {
                 </span>
                 <button
                   type="button"
+                  aria-expanded={expandedRunId === run.id}
+                  aria-controls={`run-diagnostics-${run.id}`}
                   onClick={() => {
                     const nextRunId = expandedRunId === run.id ? null : run.id;
                     setExpandedRunId(nextRunId);
@@ -369,17 +384,9 @@ export function RunsView() {
                       void loadRunDiagnostics(run.id);
                     }
                   }}
-                  style={{
-                    border: "1px solid var(--color-border)",
-                    borderRadius: "var(--radius-sm)",
-                    background: "var(--color-bg)",
-                    color: "var(--color-text)",
-                    fontSize: 12,
-                    padding: "2px 7px",
-                    cursor: "pointer",
-                  }}
+                  className="btn btn-small"
                 >
-                  {expandedRunId === run.id ? "Hide" : "Inspect"}
+                  {expandedRunId === run.id ? "Hide detail" : "Show detail"}
                 </button>
               </div>
 
@@ -392,7 +399,7 @@ export function RunsView() {
                 failure-like terminal runs:
                   - FAILED  → structural failure message
                   - COMPLETED_WITH_FAILURES → _partial_completion_message
-                    (count summary; per-token detail lives behind "Inspect")
+                    (count summary; per-token detail lives behind "Show detail")
                 A count-based predicate would duplicate the L0
                 `failure_indicator` invariant (web/execution/schemas.py)
                 and would also miss FAILED-with-zero-counts (engine crash
@@ -418,18 +425,35 @@ export function RunsView() {
                 </div>
               )}
 
-              {expandedRunId === run.id && (
-                <RunDiagnosticsPanel
-                  diagnostics={diagnosticsByRunId[run.id]}
-                  error={diagnosticsErrorByRunId[run.id] ?? null}
-                  explanation={diagnosticsExplanationByRunId[run.id] ?? null}
-                  isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
-                  isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
-                  workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
-                  onExplain={() => void evaluateRunDiagnostics(run.id)}
-                  onRefresh={() => void loadRunDiagnostics(run.id)}
-                />
-              )}
+              {/*
+                Always-rendered wrapper satisfies WAI-ARIA 1.2: the button's
+                aria-controls IDREF must resolve to an element that exists in
+                the DOM regardless of expanded state.  The heavy
+                RunDiagnosticsPanel (which reads props — no fetch on mount)
+                is only mounted when the row is expanded so that we avoid
+                paying any rendering cost for collapsed rows.
+              */}
+              <div
+                id={`run-diagnostics-${run.id}`}
+                hidden={expandedRunId !== run.id}
+                className="run-diagnostics"
+              >
+                {expandedRunId === run.id && (
+                  <>
+                    <RunDiagnosticsPanel
+                      diagnostics={diagnosticsByRunId[run.id]}
+                      error={diagnosticsErrorByRunId[run.id] ?? null}
+                      explanation={diagnosticsExplanationByRunId[run.id] ?? null}
+                      isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
+                      isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
+                      workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
+                      onExplain={() => void evaluateRunDiagnostics(run.id)}
+                      onRefresh={() => void loadRunDiagnostics(run.id)}
+                    />
+                    <RunOutputsPanel runId={run.id} />
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Show live progress inline for the active running run */}
@@ -493,10 +517,10 @@ function RunDiagnosticsPanel({
           {diagnostics?.summary.preview_truncated ? `, first ${diagnostics.summary.preview_limit}` : ""}
         </span>
         <span style={{ display: "flex", gap: 6 }}>
-          <button type="button" onClick={onRefresh} disabled={isLoading}>
+          <button type="button" className="btn btn-small" onClick={onRefresh} disabled={isLoading}>
             Refresh
           </button>
-          <button type="button" onClick={onExplain} disabled={isEvaluating || isLoading || !diagnostics}>
+          <button type="button" className="btn btn-small" onClick={onExplain} disabled={isEvaluating || isLoading || !diagnostics}>
             {isEvaluating ? "Explaining..." : "Explain"}
           </button>
         </span>
@@ -547,15 +571,14 @@ function RunDiagnosticsPanel({
             </div>
           )}
 
-          {diagnostics.artifacts.length > 0 && (
-            <div style={{ display: "grid", gap: 4, marginBottom: 8 }}>
-              {diagnostics.artifacts.map((artifact) => (
-                <span key={artifact.artifact_id} style={{ overflowWrap: "anywhere" }}>
-                  {artifact.path_or_uri}
-                </span>
-              ))}
-            </div>
-          )}
+          {/*
+            Artifacts are now surfaced through the dedicated
+            RunOutputsPanel mounted alongside this panel — see the
+            outer expanded-row block in RunsView. The panel renders the
+            full unbounded manifest with download anchors and a
+            preview pane, superseding the line-list rendering that
+            used to live here.
+          */}
         </>
       )}
 

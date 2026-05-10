@@ -464,7 +464,7 @@ export function InspectorPanel() {
               };
 
               const colors: Record<string, string> = {
-                unchecked: "var(--color-warning)",
+                unchecked: "var(--color-text-muted)",
                 valid: "var(--color-success)",
                 warning: "var(--color-warning)",
                 invalid: "var(--color-error)",
@@ -584,10 +584,9 @@ export function InspectorPanel() {
         />
       )}
 
-      {/* Tab content area with ARIA live region */}
+      {/* Tab content area */}
       <div
         role="tabpanel"
-        aria-live="polite"
         id={`inspector-tabpanel-${activeTab}`}
         aria-labelledby={`inspector-tab-${activeTab}`}
         className="inspector-tab-content"

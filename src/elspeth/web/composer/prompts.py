@@ -10,6 +10,7 @@ Layer: L3 (application).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
@@ -22,10 +23,12 @@ from elspeth.web.composer.state import CompositionState
 # Load the pipeline composer skill once at module level (static content).
 _PIPELINE_SKILL = load_skill("pipeline_composer")
 
-# SYSTEM_PROMPT is the no-deployment-layer fast path.  Used directly by
-# build_messages when data_dir is None, avoiding a function call.  Also
-# exported for tests that need to assert identity with the core skill.
-SYSTEM_PROMPT = _PIPELINE_SKILL
+# SYSTEM_PROMPT is bound below, once the strip helpers are defined — it is the
+# advisor-enabled, no-deployment-layer projection of the loaded skill (i.e.,
+# what ``build_system_prompt(None, advisor_enabled=True)`` returns). Exported
+# for tests that need to assert identity with the core skill; build_messages
+# no longer uses it as a fast path (the F1 fix routes every call through
+# ``build_system_prompt`` so advisor-strip applies consistently).
 
 
 def _strip_advisor_content(text: str) -> str:
@@ -38,13 +41,22 @@ def _strip_advisor_content(text: str) -> str:
     turn for no reason and leaving the model confused about why a tool
     the skill described doesn't actually exist.
 
-    Removes two pieces:
+    Removes:
 
     1. The ``, `request_advisor_hint``` token from the Step-0 Diagnostics
        line (leaves ``- **Diagnostics:** `explain_validation_error```).
     2. The dedicated ``#### When You Are Still Stuck — `request_advisor_hint```
        subsection — from its heading through to (but not including) the
        next ``#### `` heading.
+    3. Any content wrapped in ``<!-- ADVISOR-ONLY -->...<!-- /ADVISOR-ONLY -->``
+       markers — used for advisor-conditional clauses inline in prose where
+       a section-level strip would damage surrounding content (e.g., table
+       rows, inline guidance referencing the advisor by name).
+    4. The marker tags ``<!-- ADVISOR-DISABLED -->...<!-- /ADVISOR-DISABLED -->``
+       are removed but their *content* is kept — these wrap fallback prose
+       that should only reach the LLM when advisor is disabled. The mirror
+       function ``_strip_advisor_disabled_fallback`` strips both the markers
+       *and* the content when advisor is enabled.
 
     The transformation operates on the loaded skill text without touching
     the on-disk file, so the parity test
@@ -53,18 +65,30 @@ def _strip_advisor_content(text: str) -> str:
     """
     text = text.replace(", `request_advisor_hint`", "")
     start = text.find("#### When You Are Still Stuck")
-    if start == -1:
-        return text  # advisor section already absent; nothing to do
-    end = text.find("\n#### ", start + 1)
-    if end == -1:
-        # Advisor subsection is the trailing subsection of its parent
-        # section. Strip from the heading to the next top-level (``## ``)
-        # heading, or to end-of-file if none.
-        next_h2 = text.find("\n## ", start + 1)
-        if next_h2 == -1:
-            return text[:start].rstrip() + "\n"
-        return text[:start] + text[next_h2 + 1 :]
-    return text[:start] + text[end + 1 :]  # +1 to skip the leading newline
+    if start != -1:
+        end = text.find("\n#### ", start + 1)
+        if end == -1:
+            # Advisor subsection is the trailing subsection of its parent
+            # section. Strip from the heading to the next top-level (``## ``)
+            # heading, or to end-of-file if none.
+            next_h2 = text.find("\n## ", start + 1)
+            text = text[:start].rstrip() + "\n" if next_h2 == -1 else text[:start] + text[next_h2 + 1 :]
+        else:
+            text = text[:start] + text[end + 1 :]  # +1 to skip the leading newline
+    text = re.sub(r"<!-- ADVISOR-ONLY -->.*?<!-- /ADVISOR-ONLY -->", "", text, flags=re.DOTALL)
+    text = text.replace("<!-- ADVISOR-DISABLED -->", "").replace("<!-- /ADVISOR-DISABLED -->", "")
+    return text
+
+
+def _strip_advisor_disabled_fallback(text: str) -> str:
+    """Inverse of ``_strip_advisor_content``: when advisor IS enabled, strip
+    the ``<!-- ADVISOR-DISABLED -->...<!-- /ADVISOR-DISABLED -->`` blocks
+    (markers and content) so the LLM doesn't see contradictory fallback
+    guidance that only applies on advisor-disabled deployments."""
+    return re.sub(r"<!-- ADVISOR-DISABLED -->.*?<!-- /ADVISOR-DISABLED -->", "", text, flags=re.DOTALL)
+
+
+SYSTEM_PROMPT = _strip_advisor_disabled_fallback(_PIPELINE_SKILL)
 
 
 @lru_cache(maxsize=8)
@@ -95,7 +119,7 @@ def build_system_prompt(data_dir: str | None = None, *, advisor_enabled: bool = 
     Returns:
         Combined system prompt string.
     """
-    core = _PIPELINE_SKILL if advisor_enabled else _strip_advisor_content(_PIPELINE_SKILL)
+    core = _strip_advisor_disabled_fallback(_PIPELINE_SKILL) if advisor_enabled else _strip_advisor_content(_PIPELINE_SKILL)
     deployment = load_deployment_skill("pipeline_composer", data_dir)
     if deployment:
         return core + "\n\n---\n\n" + deployment

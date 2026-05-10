@@ -114,9 +114,23 @@ class ChatMessageRecord:
     tool_calls uses the stored LiteLLM array format and may contain nested
     mutable lists/dicts -- requires freeze guard when not None.
 
-    raw_content stores the original LLM text when the visible content was
-    replaced by runtime preflight interception. It is persisted for audit
-    provenance and must NOT be returned in ChatMessageResponse.
+    raw_content stores the model's pre-synthesis prose when the visible
+    content was augmented (operator-facing suffix appended) or replaced
+    (false-completion-claim path) by ``_finalize_no_tool_response``. It
+    is persisted for audit provenance and is returned in
+    ChatMessageResponse only when the caller opts in via
+    ``?include_raw_content=true``; otherwise the response field is
+    ``null`` (the field is always present in the response shape).
+
+    Producer contract: when raw_content is set, ``content`` MUST start
+    with raw_content (all composer synthesis shapes are augmentations
+    post-elspeth-9cfbad6901). Mechanically enforced at producer
+    construction by
+    ``web.composer.service._enforce_augmentation_prefix_invariant``.
+    Consumers (notably ``routes._composer_history_content``) rely on
+    the contract to detect synthesis structurally without a field-level
+    discriminator; the field-level decoupling is tracked at
+    ``elspeth-7ae1732ab2``.
     """
 
     id: UUID
@@ -149,6 +163,10 @@ class CompositionStateData:
     metadata_: Mapping[str, Any] | None = None
     is_valid: bool = False
     validation_errors: Sequence[str] | None = None
+    # Operational/audit meta describing how this state was reached. Distinct
+    # from ``metadata_`` which carries user-facing PipelineMetadata. ``None``
+    # is honest for revert/fork paths and for non-compose write paths.
+    composer_meta: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         non_none = []
@@ -164,6 +182,8 @@ class CompositionStateData:
             non_none.append("metadata_")
         if self.validation_errors is not None:
             non_none.append("validation_errors")
+        if self.composer_meta is not None:
+            non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
 
@@ -187,6 +207,10 @@ class CompositionStateRecord:
     validation_errors: Sequence[str] | None
     created_at: datetime
     derived_from_state_id: UUID | None
+    # Operational/audit meta describing how this state was reached. Distinct
+    # from ``metadata_`` which carries user-facing PipelineMetadata. ``None``
+    # is honest for revert/fork paths and for non-compose write paths.
+    composer_meta: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         non_none = []
@@ -202,6 +226,8 @@ class CompositionStateRecord:
             non_none.append("metadata_")
         if self.validation_errors is not None:
             non_none.append("validation_errors")
+        if self.composer_meta is not None:
+            non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
 

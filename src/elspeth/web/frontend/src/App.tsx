@@ -67,7 +67,12 @@ function App() {
       const status = await api.fetchSystemStatus();
       setSystemStatus(status);
       setBackendAvailable(true);
-    } catch {
+    } catch (err) {
+      // Preserve diagnostic detail (network vs CORS vs auth vs 5xx) for
+      // operators inspecting DevTools when Retry keeps failing.  The
+      // user-visible signal is the role=alert banner; this is the only
+      // channel that exposes the underlying cause.
+      console.error("[health-check] fetchSystemStatus failed:", err);
       setSystemStatus(null);
       setBackendAvailable(false);
     }
@@ -180,7 +185,10 @@ function App() {
         </a>
         <h1 className="sr-only">ELSPETH Pipeline Composer</h1>
 
-        {/* Backend unavailable banner */}
+        {/* Backend unavailable banner.
+            role=alert (assertive) because backend-down is a hard outage that
+            blocks every feature in the app; the composer-unavailable banner
+            below is role=status (polite) because it's a soft degradation. */}
         {backendAvailable === false && (
           <div role="alert" className="alert-banner">
             <span>
@@ -200,7 +208,7 @@ function App() {
 
         {/* Composer unavailable banner (backend is up but LLM not configured) */}
         {backendAvailable && systemStatus && !systemStatus.composer_available && (
-          <div role="alert" className="alert-banner">
+          <div role="status" className="alert-banner">
             <span>
               Service unavailable:{" "}
               {systemStatus.composer_reason ??

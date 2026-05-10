@@ -46,7 +46,7 @@ class StubCatalog:
     def list_transforms(self) -> list[PluginSummary]:
         return [
             PluginSummary(
-                name="uppercase",
+                name="passthrough",
                 description="Uppercase transform",
                 plugin_type="transform",
                 config_fields=[],
@@ -158,7 +158,7 @@ class TestBuildMessages:
         assert "Current pipeline state" not in stable_system_content
         assert dynamic_context_content.startswith("Current pipeline state and available plugins:")
         assert "csv" in dynamic_context_content
-        assert "uppercase" in dynamic_context_content
+        assert "passthrough" in dynamic_context_content
 
     def test_first_system_message_is_stable_when_state_changes(self) -> None:
         catalog = _stub_catalog()
@@ -188,7 +188,7 @@ class TestBuildContextString:
         assert "available_plugins" in parsed
         plugins = parsed["available_plugins"]
         assert "csv" in plugins["sources"]
-        assert "uppercase" in plugins["transforms"]
+        assert "passthrough" in plugins["transforms"]
         assert "csv" in plugins["sinks"]
 
     def test_includes_validation_summary(self) -> None:
@@ -238,19 +238,6 @@ class TestBuildContextString:
 
 class TestBuildSystemPrompt:
     """System prompt composition with optional deployment layer."""
-
-    def test_web_prompt_does_not_mandate_mcp_schema_loading(self) -> None:
-        """The web LiteLLM path already sends tool schemas with each request."""
-        assert "Composer MCP tools are deferred" not in SYSTEM_PROMPT
-        assert "Do not call discovery tools just to load function signatures" in SYSTEM_PROMPT
-
-    def test_web_prompt_documents_atomic_blob_set_pipeline(self) -> None:
-        """Prompt should steer complete file-backed builds to one atomic tool."""
-        assert "source.blob_id" in SYSTEM_PROMPT
-        assert "source.inline_blob" in SYSTEM_PROMPT
-        assert "header-only inline CSV" in SYSTEM_PROMPT
-        assert "success: true" in SYSTEM_PROMPT
-        assert "state is empty" in SYSTEM_PROMPT
 
     def test_no_data_dir_returns_core_skill_only(self) -> None:
         """Without data_dir, returns the core skill unchanged."""

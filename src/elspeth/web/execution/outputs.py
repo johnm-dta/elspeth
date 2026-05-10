@@ -27,8 +27,26 @@ from elspeth.core.landscape.schema import artifacts_table
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
 from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputsResponse
+from elspeth.web.paths import allowed_sink_directories
 
 _FILE_URI_PREFIX = "file://"
+
+
+def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path) -> bool:
+    """Mirror of the read-side guard in the ``/content`` endpoint.
+
+    Returns True iff ``fs_path`` resolves to a location inside one of
+    the canonical sink directories (``data_dir/{outputs,blobs}``).
+    Used to decide whether the UI may surface a Download button — a
+    sink that wrote outside the allowlist produces a real artefact
+    record but the download endpoint will refuse to serve it.
+    """
+    try:
+        resolved = fs_path.resolve()
+    except OSError:
+        return False
+    allowed = allowed_sink_directories(str(data_dir))
+    return any(resolved.is_relative_to(base) for base in allowed)
 
 
 class RunOutputsAuditUnavailableError(RuntimeError):
@@ -64,8 +82,17 @@ def load_run_outputs_from_db(
     *,
     run_id: str,
     landscape_run_id: str,
+    data_dir: str | Path | None = None,
 ) -> RunOutputsResponse:
-    """Read every sink-write artefact for a run and return the full manifest."""
+    """Read every sink-write artefact for a run and return the full manifest.
+
+    ``data_dir`` is needed to compute the per-artifact ``downloadable``
+    flag — it parameterises the sink-allowlist check that the
+    ``/content`` endpoint enforces. When omitted (legacy callers, eval
+    harness, tests that don't care), every artefact reports
+    ``downloadable=False``: a safe degradation that matches "the UI
+    can't trust this server to serve bytes."
+    """
     stmt = (
         select(
             artifacts_table.c.artifact_id,
@@ -82,19 +109,28 @@ def load_run_outputs_from_db(
     artifacts: list[RunOutputArtifact] = []
     with db.read_only_connection() as conn:
         for row in conn.execute(stmt):
-            artifact = RunOutputArtifact(
-                artifact_id=row.artifact_id,
-                sink_node_id=row.sink_node_id,
-                artifact_type=row.artifact_type,
-                path_or_uri=row.path_or_uri,
-                content_hash=row.content_hash,
-                size_bytes=row.size_bytes,
-                created_at=row.created_at,
-                exists_now=False,
-            )
-            fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
+            fs_path = path_or_uri_to_filesystem_path(row.path_or_uri)
             exists_now = fs_path.exists() if fs_path is not None else False
-            artifacts.append(artifact.model_copy(update={"exists_now": exists_now}))
+            downloadable = (
+                row.artifact_type == "file"
+                and exists_now
+                and fs_path is not None
+                and data_dir is not None
+                and _is_path_in_sink_allowlist(fs_path, data_dir)
+            )
+            artifacts.append(
+                RunOutputArtifact(
+                    artifact_id=row.artifact_id,
+                    sink_node_id=row.sink_node_id,
+                    artifact_type=row.artifact_type,
+                    path_or_uri=row.path_or_uri,
+                    content_hash=row.content_hash,
+                    size_bytes=row.size_bytes,
+                    created_at=row.created_at,
+                    exists_now=exists_now,
+                    downloadable=downloadable,
+                )
+            )
     return RunOutputsResponse(
         run_id=run_id,
         landscape_run_id=landscape_run_id,
@@ -122,4 +158,9 @@ def load_run_outputs_for_settings(
         passphrase=settings.landscape_passphrase,
         create_tables=False,
     ) as db:
-        return load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=landscape_run_id)
+        return load_run_outputs_from_db(
+            db,
+            run_id=run_id,
+            landscape_run_id=landscape_run_id,
+            data_dir=settings.data_dir,
+        )

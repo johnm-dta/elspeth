@@ -197,7 +197,9 @@ class TestWebSettingsDerivedAccessors:
         assert path == Path("/mnt/payloads")
 
     def test_default_data_dir_landscape_url(self) -> None:
-        """Default data_dir='data' produces a relative sqlite path."""
+        """Default data_dir='data' is resolved to an absolute path at
+        validation time, so derived URLs are anchored to a fixed
+        location regardless of later os.chdir calls."""
         settings = WebSettings(
             composer_max_composition_turns=15,
             composer_max_discovery_turns=10,
@@ -205,10 +207,12 @@ class TestWebSettingsDerivedAccessors:
             composer_rate_limit_per_minute=10,
         )
         url = settings.get_landscape_url()
-        assert url == f"sqlite:///{Path('data') / 'runs' / 'audit.db'}"
+        expected_data_dir = Path("data").resolve()
+        assert url == f"sqlite:///{expected_data_dir / 'runs' / 'audit.db'}"
 
     def test_default_data_dir_payload_store_path(self) -> None:
-        """Default data_dir='data' produces a relative payload path."""
+        """Default data_dir='data' is resolved at validation time;
+        payload path inherits that absolute prefix."""
         settings = WebSettings(
             composer_max_composition_turns=15,
             composer_max_discovery_turns=10,
@@ -216,7 +220,7 @@ class TestWebSettingsDerivedAccessors:
             composer_rate_limit_per_minute=10,
         )
         path = settings.get_payload_store_path()
-        assert path == Path("data") / "payloads"
+        assert path == Path("data").resolve() / "payloads"
 
     def test_get_session_db_url_default_derives_from_data_dir(self) -> None:
         settings = WebSettings(
@@ -241,7 +245,8 @@ class TestWebSettingsDerivedAccessors:
         assert url == "postgresql://db/sessions"
 
     def test_default_data_dir_session_db_url(self) -> None:
-        """Default data_dir='data' produces a relative sqlite path."""
+        """Default data_dir='data' is resolved to an absolute path at
+        validation time; session DB URL inherits that prefix."""
         settings = WebSettings(
             composer_max_composition_turns=15,
             composer_max_discovery_turns=10,
@@ -249,7 +254,8 @@ class TestWebSettingsDerivedAccessors:
             composer_rate_limit_per_minute=10,
         )
         url = settings.get_session_db_url()
-        assert url == f"sqlite:///{Path('data') / 'sessions.db'}"
+        expected_data_dir = Path("data").resolve()
+        assert url == f"sqlite:///{expected_data_dir / 'sessions.db'}"
 
 
 class TestSecretKeyGuard:
@@ -379,8 +385,9 @@ class TestPathFieldValidation:
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
         )
-        expected = Path("~/data").expanduser()
+        expected = Path("~/data").expanduser().resolve()
         assert settings.data_dir == expected
+        assert settings.data_dir.is_absolute()
         assert settings.get_landscape_url() == f"sqlite:///{expected / 'runs' / 'audit.db'}"
         assert settings.get_session_db_url() == f"sqlite:///{expected / 'sessions.db'}"
 
@@ -392,7 +399,33 @@ class TestPathFieldValidation:
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
         )
-        assert settings.get_payload_store_path() == Path("~/payloads").expanduser()
+        assert settings.get_payload_store_path() == Path("~/payloads").expanduser().resolve()
+        assert settings.get_payload_store_path().is_absolute()
+
+    def test_relative_data_dir_resolved_at_validation_immune_to_chdir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The download/preview path-allowlist check used to silently
+        depend on the running process CWD: a relative data_dir was
+        resolved at every callsite, so a chdir between sink-write and
+        download-time would move the allowlist with the process. After
+        validation-time resolve(), the data_dir is pinned for the
+        process lifetime regardless of later chdir.
+        """
+        monkeypatch.chdir(tmp_path)
+        settings = WebSettings(
+            data_dir="data",
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+        )
+        # Captured at validation time, anchored to tmp_path.
+        expected = (tmp_path / "data").resolve()
+        assert settings.data_dir == expected
+        # Now chdir somewhere else — settings.data_dir MUST NOT move.
+        other_dir = tmp_path / "elsewhere"
+        other_dir.mkdir()
+        monkeypatch.chdir(other_dir)
+        assert settings.data_dir == expected
 
 
 class TestServerSecretAllowlistValidation:

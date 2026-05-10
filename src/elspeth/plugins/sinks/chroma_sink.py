@@ -169,7 +169,7 @@ class ChromaSink(BaseSink):
 
     name = "chroma_sink"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:89351e5be1d6cf3c"
+    source_file_hash: str | None = "sha256:2d5637e16b4ebeb1"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -551,6 +551,7 @@ class ChromaSink(BaseSink):
         """ChromaDB writes are synchronous in write() — no pending data to flush."""
 
     def on_complete(self, ctx: LifecycleContext) -> None:
+        super().on_complete(ctx)
         if self._telemetry_emit is not None:
             self._telemetry_emit(
                 {

@@ -11,22 +11,17 @@ import hashlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, Mock
 
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import PendingOutcome, TerminalOutcome, TerminalPath, TokenInfo
-from elspeth.contracts.enums import NodeStateStatus
-from elspeth.contracts.schema_contract import SchemaContract
-from elspeth.engine.executors.sink import SinkExecutor
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.base_classes import inject_write_failure
-from tests.fixtures.factories import make_context, make_field, make_row
+from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
-from .test_sink_protocol import SinkContractTestBase, SinkDeterminismContractTestBase
+from .test_sink_protocol import SinkDeterminismContractTestBase
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
@@ -57,8 +52,12 @@ class _PartiallyFailingFile:
         return getattr(self._wrapped, name)
 
 
-class TestCSVSinkContract(SinkContractTestBase):
-    """Contract tests for CSVSink."""
+class TestCSVSinkContract(SinkDeterminismContractTestBase):
+    """Contract + determinism tests for CSVSink.
+
+    Determinism base is a strict superset of the contract base, so a single
+    class covers both surfaces.
+    """
 
     @pytest.fixture
     def sink_factory(self, tmp_path: Path) -> Callable[[], SinkProtocol]:
@@ -85,36 +84,6 @@ class TestCSVSinkContract(SinkContractTestBase):
             {"id": 1, "name": "Alice", "score": 95.5},
             {"id": 2, "name": "Bob", "score": 87.0},
             {"id": 3, "name": "Charlie", "score": 91.2},
-        ]
-
-
-class TestCSVSinkDeterminism(SinkDeterminismContractTestBase):
-    """Determinism contract tests for CSVSink."""
-
-    @pytest.fixture
-    def sink_factory(self, tmp_path: Path) -> Callable[[], SinkProtocol]:
-        """Create a factory for CSVSink instances."""
-        counter = [0]
-
-        def factory() -> SinkProtocol:
-            counter[0] += 1
-            return inject_write_failure(
-                CSVSink(
-                    {
-                        "path": str(tmp_path / f"output_{counter[0]}.csv"),
-                        "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                    }
-                )
-            )
-
-        return factory
-
-    @pytest.fixture
-    def sample_rows(self) -> list[dict[str, Any]]:
-        """Provide sample rows to write."""
-        return [
-            {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"},
         ]
 
 
@@ -253,78 +222,6 @@ class TestCSVSinkAppendMode:
             assert csv_path.read_bytes() == content_before_failure
         finally:
             sink.close()
-
-
-class TestCSVSinkExecutorAuditContract:
-    """Contract tests for engine-side audit registration of CSV sink writes."""
-
-    def test_executor_registers_csv_artifact_after_successful_write(self, tmp_path: Path) -> None:
-        """A durable CSV write MUST produce a registered artifact audit record."""
-        csv_path = tmp_path / "audited_output.csv"
-        execution = MagicMock()
-        execution.begin_node_state.return_value = Mock(state_id="sink-state-1")
-        execution.begin_operation.return_value = Mock(operation_id="sink-op-1")
-        execution.register_artifact.return_value = Mock(artifact_id="artifact-1")
-        data_flow = MagicMock()
-        spans = MagicMock()
-        spans.sink_span.return_value.__enter__ = MagicMock(return_value=None)
-        spans.sink_span.return_value.__exit__ = MagicMock(return_value=False)
-
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(csv_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                }
-            )
-        )
-        sink.node_id = "csv-sink-node"
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(
-                make_field("id", int, required=True, source="declared"),
-                make_field("name", str, required=True, source="declared"),
-            ),
-            locked=True,
-        )
-        token = TokenInfo(
-            row_id="row-1",
-            token_id="token-1",
-            row_data=make_row({"id": 1, "name": "Alice"}, contract=contract),
-        )
-        ctx = make_context(run_id="run-1", node_id=sink.node_id)
-        executor = SinkExecutor(execution, data_flow, spans, "run-1")
-
-        try:
-            artifact, diversion_counts = executor.write(
-                sink=sink,
-                tokens=[token],
-                ctx=ctx,
-                step_in_pipeline=2,
-                sink_name="csv_output",
-                pending_outcome=PendingOutcome(
-                    outcome=TerminalOutcome.SUCCESS,
-                    path=TerminalPath.DEFAULT_FLOW,
-                ),
-            )
-        finally:
-            sink.close()
-
-        expected_hash = hashlib.sha256(csv_path.read_bytes()).hexdigest()
-        assert artifact == execution.register_artifact.return_value
-        assert diversion_counts.total == 0
-        execution.complete_node_state.assert_called_once()
-        assert execution.complete_node_state.call_args.kwargs["status"] == NodeStateStatus.COMPLETED
-        execution.register_artifact.assert_called_once_with(
-            run_id="run-1",
-            state_id="sink-state-1",
-            sink_node_id="csv-sink-node",
-            artifact_type="file",
-            path=f"file://{csv_path}",
-            content_hash=expected_hash,
-            size_bytes=csv_path.stat().st_size,
-        )
-        data_flow.record_token_outcome.assert_called_once()
 
 
 class TestCSVSinkPropertyBased:

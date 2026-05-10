@@ -364,7 +364,7 @@ class TestRunnableComposerSkillExamples:
         web_scrape_guidance = _section_between(
             _WEB_SKILL_CONTENT,
             "**web_scrape** — Fetch and extract content from a URL in each row.",
-            "**Canonical full options block:**",
+            "**Canonical full options block**",
         )
 
         format_line = next(line for line in web_scrape_guidance.splitlines() if line.startswith("- `format`:"))

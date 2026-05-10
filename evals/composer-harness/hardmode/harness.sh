@@ -73,7 +73,10 @@ fi
 evals_load_env --require-creds
 evals_require_tools
 
-scen_path=$(evals_resolve_scenario "$HARNESS_ROOT/scenarios/hardmode" "$scenario_id")
+# Scenario root override: panel cohorts live under scenarios/panel/<cohort>/.
+# Env var lets the same harness drive different scenario sets without a fork.
+scenario_root="${ELSPETH_EVAL_SCENARIO_ROOT:-$HARNESS_ROOT/scenarios/hardmode}"
+scen_path=$(evals_resolve_scenario "$scenario_root" "$scenario_id")
 
 # Default RUNS_DIR includes a UTC date so historical runs accumulate side-by-side.
 runs_root="${ELSPETH_EVAL_RUNS_DIR:-$HARNESS_ROOT/runs/$(date -u +%Y-%m-%d)-hardmode}"

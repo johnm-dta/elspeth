@@ -2,7 +2,7 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** `0.5.0` (RC-5 line)
+**Framework status:** `0.5.1` (RC-5.1 line)
 **Tracking note:** active delivery work lives in Filigree; many docs under `release/`,
 `plans/`, `analysis/`, `audits/`, and `arch-analysis-*` are intentionally
 point-in-time snapshots.

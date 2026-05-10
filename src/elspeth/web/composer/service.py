@@ -21,9 +21,9 @@ import os
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Final, NoReturn, TypedDict, cast
+from typing import Any, Final, Literal, NoReturn, TypedDict, cast
 
 import structlog
 from opentelemetry import metrics
@@ -38,6 +38,7 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerLLMCallStatus,
     ComposerLLMProviderCostSource,
 )
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.core.canonical import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
@@ -69,11 +70,16 @@ from elspeth.web.composer.protocol import (
     ToolArgumentError,
 )
 from elspeth.web.composer.state import CompositionState, ValidationSummary
+from elspeth.web.composer.state_claim_grounding import (
+    check_state_claim_grounding,
+    compose_grounded_message,
+)
 from elspeth.web.composer.tools import (
     ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_VALUES,
     RuntimePreflight,
     ToolResult,
+    compute_proof_diagnostics,
     execute_tool,
     get_tool_definitions,
     is_cacheable_discovery_tool,
@@ -133,6 +139,19 @@ _KNOWN_PREFLIGHT_EXCEPTION_CLASSES: frozenset[str] = frozenset(
 _RUNTIME_PREFLIGHT_COUNTER = metrics.get_meter(__name__).create_counter(
     "composer.runtime_preflight.total",
     description="Total runtime-equivalent preflight invocations in the composer service",
+)
+
+# Module-level OTel counter for producer-side audit-integrity invariant violations.
+# Increments before the AuditIntegrityError raise so an SRE has a count even if the
+# uncaught exception kills the request before any other telemetry flushes. The crash
+# is the right operational signal (CLAUDE.md: "Crash > silent wrong result"), but
+# operators benefit from a counter trend ("how often is this firing?") to decide
+# whether the field-level paydown at elspeth-7ae1732ab2 is becoming urgent.
+# Attributes: invariant (augmentation_prefix | replacement_non_prefix), branch (the
+# specific producer branch that violated; closed-list at type level via Literal).
+_COMPOSER_AUDIT_INTEGRITY_VIOLATION_COUNTER = metrics.get_meter(__name__).create_counter(
+    "composer.audit_integrity_violation.total",
+    description="Producer-side audit-integrity invariant violations (augmentation/replacement prefix contracts)",
 )
 
 
@@ -724,6 +743,33 @@ _EMPTY_STATE_FINALIZE_SUFFIX = (
     "with more specifics, or reply telling the composer to retry with the "
     "plan it described above."
 )
+_EMPTY_STATE_FINALIZE_SUFFIX_WITH_BLOCKER = (
+    "\n\n---\n\n"
+    "[ELSPETH-SYSTEM] The pipeline is still empty — the composer did not "
+    "complete a valid build this turn.\n\nCause: {blocker}\n\n"
+    "To continue: refine your request with more specifics, or reply telling "
+    "the composer to retry with the plan it described above."
+)
+
+# Suffix appended to the model's prose when finalize-time runtime preflight
+# fails on a non-empty state. Companion to the empty-state pair above; the
+# difference is the suffix wording — empty-state asks the operator to refine
+# or retry, non-empty-state names the validator's specific objection so the
+# operator sees both the model's analysis and the validator's reason.
+# Single source of truth for the contract (issue elspeth-9cfbad6901).
+_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_WITH_DETAIL = (
+    "\n\n---\n\n"
+    "[ELSPETH-SYSTEM] Runtime preflight failed before this build could be "
+    "marked complete.\n\nCause: {detail}{suggestion_block}\n\n"
+    "The composer's analysis above is preserved verbatim; the validator's "
+    "objection is recorded here."
+)
+_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_BARE = (
+    "\n\n---\n\n"
+    "[ELSPETH-SYSTEM] Runtime preflight failed before this build could be "
+    "marked complete.\n\nThe composer's analysis above is preserved verbatim; "
+    "the validator's objection is recorded here."
+)
 
 
 _BUILD_INTENT_PHRASES: Final[tuple[str, ...]] = (
@@ -761,7 +807,53 @@ _INFORMATION_ONLY_PREFIXES: Final[tuple[str, ...]] = (
 )
 
 
-def _compose_empty_state_message(content: str) -> str:
+_AugmentationBranch = Literal[
+    "no_mutation_empty_state_augmentation",
+    "preflight_invalid_empty_state_augmentation",
+    "preflight_invalid_non_empty_state_augmentation",
+    "state_claim_grounding_correction",
+]
+
+
+def _enforce_augmentation_prefix_invariant(
+    *,
+    branch: _AugmentationBranch,
+    content: str,
+    augmented: str,
+) -> None:
+    """Mechanically enforce the producer-side augmentation prefix contract.
+
+    All composer synthesis shapes are augmentations — the consumer-side
+    discriminator at ``routes._composer_history_content`` strips the
+    operator-facing suffix from LLM history by detecting the structural
+    property ``message.startswith(raw_content)``. A producer that breaks
+    the prefix property would emit a row whose suffix cannot be
+    distinguished from the model's own prose at read time; the LLM
+    would see synthesized operator-facing text in its prior-turn
+    history. Crash here rather than commit a corrupt audit row.
+
+    Empty ``content`` is permitted — ``"".startswith("")`` is trivially
+    True and the augmentation builders degenerate to suffix-only output
+    for empty inputs. Non-empty ``content`` MUST appear at the start of
+    ``augmented``.
+    """
+    if not augmented.startswith(content):
+        _COMPOSER_AUDIT_INTEGRITY_VIOLATION_COUNTER.add(1, {"invariant": "augmentation_prefix", "branch": branch})
+        raise AuditIntegrityError(
+            f"Tier 1: composer augmentation contract violated on branch={branch!r}. "
+            "Producer constructed an augmented message that does not have the "
+            "model's pre-synthesis prose as a strict prefix. The consumer-side "
+            "discriminator at routes._composer_history_content uses "
+            "content.startswith(raw_content) to detect synthesis and strip "
+            "the operator-facing suffix from LLM history; a producer that "
+            "breaks the prefix property misroutes synthesized operator-facing "
+            "text into the model's prior-turn history. Fix the augmented-"
+            "message constructor so the prose appears verbatim at the start "
+            "of message."
+        )
+
+
+def _compose_empty_state_message(content: str, *, blocker: str | None = None) -> str:
     """Build the user-facing message for the empty-state finalize path.
 
     Surfaces the model's content (which audit-DB inspection shows is
@@ -769,12 +861,103 @@ def _compose_empty_state_message(content: str) -> str:
     convergence) and appends a system-attributed suffix telling the user
     how to proceed.
 
-    Edge case: if the model produced no content at all, the suffix alone
-    becomes the message — better than silence.
+    Two suffix templates are interpolated:
+    ``_EMPTY_STATE_FINALIZE_SUFFIX_WITH_BLOCKER`` when ``blocker`` is a
+    non-empty string (carries ``Cause: {blocker}``);
+    ``_EMPTY_STATE_FINALIZE_SUFFIX`` otherwise. Future maintainers
+    extending the function MUST keep the two templates in sync —
+    edits should generally apply to both.
+
+    Args:
+        content: The model's actual prose. Preserved verbatim at the start
+            of the message. If the model produced no content at all (empty
+            string), the suffix alone becomes the message — better than
+            silence.
+        blocker: When set to a non-empty string, the concrete cause that
+            prevented mutation (e.g., a failed tool call's error). Included
+            in the suffix so the operator gets the cause from the suffix
+            even if the model's prose did not mention it. Used by the
+            no-mutation empty-state augmentation; the preflight-invalid
+            empty-state augmentation passes ``None`` because
+            ``runtime_result`` already carries multi-error structured data.
+            ``None`` and empty-string are treated identically (no blocker)
+            to avoid emitting a degenerate ``Cause: \\n\\n`` suffix.
     """
+    suffix = _EMPTY_STATE_FINALIZE_SUFFIX_WITH_BLOCKER.format(blocker=blocker) if blocker else _EMPTY_STATE_FINALIZE_SUFFIX
     if not content:
-        return _EMPTY_STATE_FINALIZE_SUFFIX.lstrip("\n").lstrip("-").lstrip()
-    return content + _EMPTY_STATE_FINALIZE_SUFFIX
+        return suffix.lstrip("\n").lstrip("-").lstrip()
+    return content + suffix
+
+
+def _compose_preflight_failure_message(content: str, *, runtime_result: ValidationResult) -> str:
+    """Build the user-facing message for the non-empty-state preflight-invalid path.
+
+    Surfaces the model's prose verbatim (panel-evals evidence shows it
+    typically carries substantive disclosure: removed nodes, chosen
+    operational semantics, the model's own diagnosis — see issue
+    elspeth-9cfbad6901). Appends a system-attributed suffix carrying the
+    technical preflight error so the operator sees both the model's
+    analysis and the validator's objection.
+
+    Companion to ``_compose_empty_state_message`` (preflight-invalid
+    empty-state branch). Both branches augment; the difference is the
+    suffix wording — empty-state asks the operator to refine or retry,
+    non-empty-state names the validator's specific objection.
+
+    Suffix template selection (longest-detail-wins fallback chain):
+    ``_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_WITH_DETAIL`` when
+    ``runtime_result`` carries a ValidationError or a failed check;
+    ``_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_BARE`` when neither.
+    Future maintainers extending this function MUST keep the templates
+    in sync — edits should generally apply to both.
+
+    Args:
+        content: The model's actual prose. Preserved verbatim at the
+            start of the message. If empty, the suffix becomes the whole
+            message (matches ``_compose_empty_state_message``); the
+            augmentation prefix invariant holds trivially because every
+            string startswith "".
+        runtime_result: The failed ValidationResult from the final-gate
+            preflight. The first ValidationError's ``message`` and
+            optional ``suggestion`` populate the suffix; falls back to
+            the first failed check's ``detail``; falls back to the bare
+            template when the result has neither.
+
+    Boundary contract: the suffix is echoed verbatim into chat history
+    and the OpenAI-format chat completion. Secrets are guaranteed
+    absent because validate_pipeline() resolves secret refs before
+    settings load and validation errors are derived from typed plugin
+    configs, never from raw secret values. However, the suffix MAY
+    carry operator-supplied path fragments (the operator's own
+    configured CSV paths, sink output paths) and exception text that
+    names plugin config field values — both surface verbatim from
+    ``ValidationError.message`` / ``ValidationCheck.detail``. In the
+    current single-operator deployment model this is acceptable: the
+    operator already knows their own paths and config. If ELSPETH ever
+    takes a multi-tenant deployment shape, the suffix builder must be
+    sanitized before merge.
+    """
+    detail: str | None = None
+    suggestion: str | None = None
+    if runtime_result.errors:
+        first_error = runtime_result.errors[0]
+        detail = first_error.message
+        suggestion = first_error.suggestion
+    else:
+        failed_checks = [check for check in runtime_result.checks if not check.passed]
+        if failed_checks:
+            detail = failed_checks[0].detail
+    if detail:
+        suggestion_block = f"\n\nSuggested fix: {suggestion}" if suggestion else ""
+        suffix = _PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_WITH_DETAIL.format(
+            detail=detail,
+            suggestion_block=suggestion_block,
+        )
+    else:
+        suffix = _PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_BARE
+    if not content:
+        return suffix.lstrip("\n").lstrip("-").lstrip()
+    return content + suffix
 
 
 def _user_request_expects_pipeline_mutation(message: str) -> bool:
@@ -847,18 +1030,6 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     )
 
 
-def _compose_no_mutation_empty_state_message(blocker: str) -> str:
-    """Build a concrete blocker message for no-mutation empty-state finalization."""
-    return (
-        "[ELSPETH-SYSTEM] No composition-state mutation completed successfully, "
-        "so the pipeline state is still empty (state_exists=false). "
-        f"Blocking result: {blocker}\n\n"
-        "Next action: call set_pipeline with source.blob_id or source.inline_blob, "
-        "call set_source_from_blob/set_source plus set_output, or ask for the "
-        "specific missing file/configuration."
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class ComposerAvailability:
     """Boot-time availability snapshot for the composer service."""
@@ -898,6 +1069,36 @@ _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 # invariant inside a single helper rather than spreading it across seven
 # procedural recorder.record() call sites in _compose_loop. See the audit.py
 # module docstring for the contract details.
+
+
+# Hard cap on proof-step-driven repair turns. When the assistant claims
+# completion but preview_pipeline's proof_diagnostics still has blocking
+# entries, the loop may inject a synthetic repair message and continue for
+# at most this many additional iterations. After the cap, the original
+# termination path runs — preventing indefinite spin against a model that
+# refuses to apply the suggested repair.
+_MAX_REPAIR_TURNS: Final[int] = 2
+
+
+def _proof_repair_is_applicable(state: CompositionState) -> bool:
+    """Return True iff the proof step has any input it can inspect.
+
+    The forced-repair gate must fire whenever ``compute_proof_diagnostics``
+    might find blocking diagnostics. The proof step is a no-op for sources
+    that aren't blob-backed (no bytes to read), so the gate's predicate is
+    "source is present AND options carries a ``blob_ref``" — *not* "state
+    changed this turn", because a blocker can survive session resume into
+    a turn where the LLM does no mutations.
+
+    ``SourceSpec.options`` is internally typed as ``Mapping[str, Any]``
+    (Tier-1 dataclass invariant — no isinstance probe needed). ``blob_ref``
+    is an optional, well-known key set by the binding tools; its absence
+    is a documented part of the contract (path-based sources don't have
+    one), so containment checking is the appropriate primitive here.
+    """
+    if state.source is None:
+        return False
+    return "blob_ref" in state.source.options
 
 
 class ComposerServiceImpl:
@@ -1022,35 +1223,85 @@ class ComposerServiceImpl:
         _RUNTIME_PREFLIGHT_COUNTER.add(1, {"outcome": "success"})
         return entry
 
-    @staticmethod
-    def _runtime_preflight_failure_message(result: ValidationResult) -> str:
-        """Compose a synthetic user-visible message for a failed runtime preflight.
+    def _attempt_proof_repair(
+        self,
+        *,
+        state: CompositionState,
+        llm_messages: list[dict[str, Any]],
+        session_id: str | None,
+        repair_turns_used: int,
+    ) -> bool:
+        """Pre-finalize proof gate.
 
-        Prefers the first ValidationError's message and suggestion, falls back
-        to the first failed check's detail, then to a bare fallback if the
-        ValidationResult carries neither.
+        When the assistant emits no tool_calls (claiming completion), check
+        ``preview_pipeline``'s ``proof_diagnostics`` for blocking entries.
+        If any are found AND the repair-turn budget has not been exhausted,
+        synthesize a user-attributed message describing each diagnostic plus
+        its ``suggested_repair`` and append it to ``llm_messages``. The
+        outer compose loop then continues for one more iteration so the
+        model can apply the suggested fix.
 
-        Boundary contract: the message is echoed verbatim into chat history
-        and the OpenAI-format chat completion. Secrets are guaranteed absent
-        because validate_pipeline() resolves secret refs before settings load
-        and validation errors are derived from typed plugin configs, never
-        from raw secret values. However, the message MAY carry operator-
-        supplied path fragments (the operator's own configured CSV paths,
-        sink output paths) and exception text that names plugin config field
-        values — both are surfaced verbatim from ValidationError.message and
-        ValidationCheck.detail. In the current single-operator deployment
-        model this is acceptable: the operator already knows their own
-        paths and config. If ELSPETH ever takes a multi-tenant deployment
-        shape, this synthesizer must be sanitized before merge.
+        Returns True when a repair message was injected (the loop should
+        ``continue`` and skip finalization). Returns False when there are
+        no blocking diagnostics OR the repair budget is exhausted.
+
+        Boundary contract: this helper NEVER catches plugin exceptions.
+        It only repairs *configurations* via composer-tool calls. Plugin
+        bugs (transform.process raising) propagate to the operator per the
+        Plugin Ownership policy in CLAUDE.md.
+
+        The synthesised message is appended verbatim into chat history. It
+        contains operator-supplied column names and the diagnostic-message
+        text (which may name CSV paths the operator wrote). No secrets are
+        carried — proof_diagnostics never reads source bytes through any
+        path that retains decoded content; only inspect_blob_content's
+        bounded-summary facts are surfaced.
         """
-        if result.errors:
-            first = result.errors[0]
-            suggestion = f" Suggested fix: {first.suggestion}" if first.suggestion else ""
-            return f"I cannot mark this pipeline complete yet because runtime preflight failed: {first.message}.{suggestion}"
-        failed_checks = [check for check in result.checks if not check.passed]
-        if failed_checks:
-            return f"I cannot mark this pipeline complete yet because runtime preflight failed: {failed_checks[0].detail}."
-        return "I cannot mark this pipeline complete yet because runtime preflight failed."
+        if repair_turns_used >= _MAX_REPAIR_TURNS:
+            return False
+
+        diagnostics = compute_proof_diagnostics(
+            state,
+            session_engine=self._session_engine,
+            session_id=session_id,
+        )
+        # The diagnostic dict shape is the documented contract of
+        # ``compute_proof_diagnostics`` (see ``tools.py``): every entry
+        # has ``severity``, ``code``, ``message``, ``suggested_repair``,
+        # ``evidence_locator``. This is an internal-package invariant,
+        # not a Tier-3 trust boundary — a missing key is a bug in the
+        # diagnostic builder, not malformed external data, so direct
+        # subscript access is correct and a ``KeyError`` here is the
+        # right failure mode (informative crash) per CLAUDE.md
+        # offensive-programming policy. ``.get()`` fallbacks would bury
+        # contract drift and ship ``[unknown]`` codes / empty messages
+        # into the audit trail and the LLM's repair-message context.
+        blocking = [d for d in diagnostics if d["severity"] == "blocking"]
+        if not blocking:
+            return False
+
+        # Cap at 3 blocking entries in the synthesised message to keep the
+        # context window manageable. The model can call preview_pipeline to
+        # see the full list.
+        rendered = []
+        for i, d in enumerate(blocking[:3], start=1):
+            rendered.append(f"{i}. [{d['code']}] {d['message']}\n   Suggested repair: {d['suggested_repair']}")
+
+        next_turn = repair_turns_used + 1
+        budget_note = (
+            f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}. "
+            "Apply the suggested repair via the appropriate composer tool, then call "
+            "preview_pipeline to verify the diagnostics are cleared before finalising again."
+        )
+
+        message = (
+            "[composer-system] Pre-finalisation proof step found blocking "
+            "diagnostic(s) — the pipeline cannot run as currently configured. "
+            "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note
+        )
+
+        llm_messages.append({"role": "user", "content": message})
+        return True
 
     async def _finalize_no_tool_response(
         self,
@@ -1069,15 +1320,80 @@ class ComposerServiceImpl:
     ) -> ComposerResult:
         """Apply the deterministic final-gate check and build a ComposerResult.
 
-        Gate logic (no regex on natural-language text):
+        Four augmentation exit shapes are produced (the
+        ``routes._composer_history_content`` discriminator depends on the
+        ``content`` / ``raw_assistant_content`` relationship below):
+
+        1. **No-mutation empty-state augmentation** — user asked for a
+           build-style action, no successful mutation has been seen this
+           turn, and the state is structurally empty. The model's prose
+           is passed through verbatim with an operator-facing suffix
+           appended (concrete blocker if a tool failed). ``content``
+           starts with ``raw_assistant_content`` so the LLM keeps seeing
+           its own prose on subsequent turns.
+        2. **Preflight-invalid empty-state augmentation** — preflight
+           is invalid AND the state is structurally empty. Same
+           augmentation shape as (1); ``raw_assistant_content`` carries
+           the unaugmented prose so the LLM context is unaffected by the
+           operator-facing suffix.
+        3. **Preflight-invalid non-empty-state augmentation** —
+           preflight is invalid and the state is non-empty. Panel-evals
+           evidence (issue elspeth-9cfbad6901) showed the model's prose
+           in this case is typically substantive disclosure rather than
+           a false completion claim — the model names removed nodes,
+           chosen operational semantics, and its own diagnosis. The
+           prose is preserved verbatim with a system-attributed suffix
+           naming the validator's specific objection appended;
+           ``raw_assistant_content`` carries the unaugmented prose so
+           the LLM-context channel sees the model's own prose on
+           subsequent turns. Self-correction continues to land via the
+           model's next ``preview_pipeline`` call.
+
+        When preflight is valid (or skipped because state did not
+        change and ``last_runtime_preflight`` is ``None``) the
+        ``check_state_claim_grounding`` content check runs to detect
+        un-grounded prose (state-field contradictions or unmotivated
+        action claims — see issues elspeth-c028f7d186 and
+        elspeth-905fe2a3d8). When the check returns violations, the
+        response is augmented with an ``[ELSPETH-SYSTEM]`` correction
+        suffix and ``raw_assistant_content`` carries the unaugmented
+        prose. Otherwise the response passes through unchanged and
+        ``raw_assistant_content`` is left unset.
+
+        Gate logic (no regex on natural-language text governs the
+        routing-shape decision):
         - If ``state.version > initial_version`` (state changed this turn),
           run ``_cached_runtime_preflight`` for the current state.
         - Otherwise, reuse ``last_runtime_preflight`` from the most recent
           ``preview_pipeline`` call (may be ``None``).
+        - Whichever of the two paths populated ``runtime_result``, the
+          state-claim grounding check runs after preflight-invalid
+          branches are dispatched. The grounding check's regex
+          patterns are content-grounding (additive correction suffix),
+          not routing-shape decisions.
 
-        If the preflight result is invalid, replace the assistant message with
-        a synthetic failure notice and preserve the original LLM text in
-        ``raw_assistant_content``.
+        Args:
+            content: The model's assistant prose for this turn.
+            state: The post-tool composition state. ``state.version``
+                versus ``initial_version`` decides whether preflight
+                must re-run.
+            initial_version: The composition version at turn start.
+            user_id: Authenticated user identity for cache scoping.
+            last_runtime_preflight: Most recent preflight outcome from
+                ``preview_pipeline`` calls this turn; ``None`` if none.
+            runtime_preflight_cache: Per-turn cache to avoid redundant
+                preflight invocations on identical state.
+            session_scope: Scope identifier for cache + telemetry.
+            user_message: The user's message that triggered this turn.
+                Used to detect "build-style" requests for the
+                no-mutation empty-state augmentation path.
+            mutation_success_seen: Whether any mutating tool call
+                succeeded this turn. Suppresses the no-mutation
+                augmentation path.
+            tool_invocations: Tool calls made this turn; the most
+                recent failure feeds the operator-facing blocker
+                suffix.
+            llm_calls: LLM call audit rows for this turn.
 
         Unexpected preflight exceptions (anything other than a
         ``RuntimePreflightFailure`` caught inside ``_cached_runtime_preflight``)
@@ -1086,10 +1402,25 @@ class ComposerServiceImpl:
         path — they are not caught here.
         """
         if _user_request_expects_pipeline_mutation(user_message) and not mutation_success_seen and _state_is_structurally_empty(state):
+            # No-mutation empty-state augmentation. The model produced
+            # honest diagnostic prose about what it tried and what blocked
+            # convergence (audit-DB inspection across 2026-05-08 panel-cohort
+            # cells confirms this). Pass the prose through and append a
+            # system-attributed suffix carrying the concrete blocker — the
+            # earlier full-replacement behavior hid the model's actual
+            # output from both the user and (via routes._composer_history_content)
+            # from the model itself on subsequent turns
+            # (cf. elspeth-861b0c58f5).
             blocker = _blocking_result_from_tool_invocations(tool_invocations)
             empty_state_runtime_result = _no_mutation_empty_state_validation(blocker)
+            augmented_message = _compose_empty_state_message(content, blocker=blocker)
+            _enforce_augmentation_prefix_invariant(
+                branch="no_mutation_empty_state_augmentation",
+                content=content,
+                augmented=augmented_message,
+            )
             return ComposerResult(
-                message=_compose_no_mutation_empty_state_message(blocker),
+                message=augmented_message,
                 state=state,
                 runtime_preflight=empty_state_runtime_result,
                 raw_assistant_content=content,
@@ -1108,45 +1439,120 @@ class ComposerServiceImpl:
                 llm_calls=llm_calls,
             )
 
-        if runtime_result is None:
-            return ComposerResult(message=content, state=state, tool_invocations=tool_invocations, llm_calls=llm_calls)
-
-        if not runtime_result.is_valid:
-            # Structurally-empty state special case (Tier 1.5 §7.6 followup).
+        if runtime_result is not None and not runtime_result.is_valid:
+            # Two finalize shapes for invalid preflight, dispatched on
+            # state structure. Both augment — the difference is suffix
+            # wording (issue elspeth-9cfbad6901 unified the policy after
+            # the original replacement-on-non-empty-state branch was
+            # found to discard substantive model disclosure):
             #
-            # The synthesizer below was designed for the case where the model
-            # falsely claims completion: the server replaces the lie with a
-            # concrete preflight-failed message that names the actual issue.
+            # 1. Preflight-invalid empty-state augmentation: state is
+            #    structurally empty. The model produced honest diagnostic
+            #    prose about what it tried and what blocked convergence.
+            #    Pass the prose through and append a system suffix asking
+            #    the operator to refine or retry. raw_assistant_content
+            #    carries the unaugmented prose so
+            #    routes._composer_history_content replays it to the LLM
+            #    on subsequent turns without the synthetic system text
+            #    (cf. elspeth-861b0c58f5 — the original synthesizer-
+            #    replaces-prose behavior corrupted both user view and
+            #    LLM context).
             #
-            # On a structurally-empty state, however, the model isn't lying.
-            # Audit-DB inspection of captured rag-text-llm REDs (sessions
-            # 2cf59016, 12f061d9, 29ef178e — 2026-05-06 cohort) shows the
-            # model spent 20+ tool calls trying to converge on a valid
-            # set_pipeline call, gave up, and produced honest prose
-            # explaining what it tried to build and what's blocking
-            # ("I did discover the needed plugin requirements... web_scrape
-            # needs explicit schema, url_field..."). The synthesizer
-            # discards this and replaces it with raw Pydantic noise
-            # ("source: Field required, sinks: Field required"), which is
-            # both less informative and looks like a system bug to a viewer.
-            #
-            # When the state is structurally empty, pass through the model's
-            # content (it is more truthful than the synthesizer in this
-            # case) and append a brief system-attributed suffix telling the
-            # user what to do next. The original content is also preserved
-            # in raw_assistant_content for the audit trail, matching the
-            # synthesizer-path semantics.
+            # 2. Preflight-invalid non-empty-state augmentation: state
+            #    has been populated AND preflight failed. Panel-evals
+            #    evidence (fork_coalesce__p4_adversarial_engineer,
+            #    boolean_routing__p3_marketingops; see issue
+            #    elspeth-9cfbad6901) shows the model's prose in this
+            #    case is typically substantive disclosure — what was
+            #    attempted, removed nodes, chosen semantics — rather
+            #    than a false completion claim. Pass the prose through
+            #    and append a system suffix naming the validator's
+            #    specific objection. The model's next preview_pipeline
+            #    call surfaces the failure on the self-correction loop;
+            #    the operator-facing suffix is stripped from LLM history
+            #    so the LLM sees only its own prose.
             if _state_is_structurally_empty(state):
+                augmented_message = _compose_empty_state_message(content)
+                _enforce_augmentation_prefix_invariant(
+                    branch="preflight_invalid_empty_state_augmentation",
+                    content=content,
+                    augmented=augmented_message,
+                )
                 return ComposerResult(
-                    message=_compose_empty_state_message(content),
+                    message=augmented_message,
                     state=state,
                     runtime_preflight=runtime_result,
                     raw_assistant_content=content,
                     tool_invocations=tool_invocations,
                     llm_calls=llm_calls,
                 )
+            augmented_message = _compose_preflight_failure_message(content, runtime_result=runtime_result)
+            _enforce_augmentation_prefix_invariant(
+                branch="preflight_invalid_non_empty_state_augmentation",
+                content=content,
+                augmented=augmented_message,
+            )
             return ComposerResult(
-                message=self._runtime_preflight_failure_message(runtime_result),
+                message=augmented_message,
+                state=state,
+                runtime_preflight=runtime_result,
+                raw_assistant_content=content,
+                tool_invocations=tool_invocations,
+                llm_calls=llm_calls,
+            )
+
+        # State-claim grounding correction (Path 3 of issue elspeth-c028f7d186,
+        # widened by issue elspeth-905fe2a3d8 to also catch verbal
+        # acknowledgement without state mutation). The check runs in both
+        # of the remaining cases:
+        #
+        #   - runtime_result is_valid: state has reached passing preflight
+        #     with non-empty contents (T4 forward-contradiction case
+        #     covered here).
+        #   - runtime_result is None: state did not change AND no
+        #     preview_pipeline was called this turn. Without grounding,
+        #     the prior version of this function bare-passed-through —
+        #     the panel-evals T5 case (model said "I just fixed it" with
+        #     state unchanged from T4) and the cells #2/#4 cases (model
+        #     said "you're right, I'll change that" with no mutation
+        #     tool call) both landed in this hole. Running the grounding
+        #     check here is what closes both bugs.
+        #
+        # The model's prose may contradict state — claiming a field has
+        # its old value when the mutation already landed (forward
+        # contradiction), claiming a fresh action when state was
+        # unchanged (backward contradiction), or agreeing with the user
+        # without acting (verbal acknowledgement). Detect and append an
+        # [ELSPETH-SYSTEM] correction so amateur personas (compliance,
+        # marketing-ops) cannot read confidently-wrong prose as
+        # authoritative.
+        #
+        # Augmentation shape preserves the model's prose verbatim per the
+        # ``_enforce_augmentation_prefix_invariant`` contract; the
+        # raw_assistant_content field carries the original prose for the
+        # LLM history-replay path (consistent with the empty-state
+        # augmentation branches above). The natural-language regex used
+        # by ``check_state_claim_grounding`` is content-grounding, not
+        # gate routing — the gate decision (state non-empty, preflight
+        # not failed) was already taken above without consulting prose.
+        grounding_violations = check_state_claim_grounding(
+            prose=content,
+            state=state,
+            mutation_success_seen=mutation_success_seen,
+            state_changed=state.version > initial_version,
+        )
+        if grounding_violations:
+            augmented_message = compose_grounded_message(
+                prose=content,
+                violations=grounding_violations,
+            )
+            _enforce_augmentation_prefix_invariant(
+                branch="state_claim_grounding_correction",
+                content=content,
+                augmented=augmented_message,
+            )
+            return ComposerResult(
+                message=augmented_message,
                 state=state,
                 runtime_preflight=runtime_result,
                 raw_assistant_content=content,
@@ -1403,6 +1809,13 @@ class ComposerServiceImpl:
         # toggle is disabled the counter is never read.
         advisor_calls_used = 0
 
+        # Forced-repair counter. When the assistant emits no tool_calls but
+        # the proof step found blocking diagnostics, the loop synthesises a
+        # repair message and continues for at most _MAX_REPAIR_TURNS
+        # additional iterations. NEVER catches plugin exceptions — only
+        # configuration diagnostics.
+        repair_turns_used = 0
+
         while True:
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -1417,6 +1830,33 @@ class ComposerServiceImpl:
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
+                # Forced-repair gate: when the model claims completion but
+                # the proof step still has blocking diagnostics, inject a
+                # repair message and continue. Capped at _MAX_REPAIR_TURNS so
+                # the loop can never spin indefinitely. NEVER catches plugin
+                # exceptions — only repairs configurations.
+                #
+                # The gate fires whenever the proof step is applicable —
+                # i.e. there is a blob-backed source to inspect. The earlier
+                # ``state.version > initial_version`` guard skipped the gate
+                # on the first compose turn of a resumed session whose
+                # blob-backed source was bound on a prior turn (state already
+                # carries the source, no mutation this turn). That is exactly
+                # the cross-turn scenario the gate exists to catch (e.g.
+                # ``csv_fixed_schema_omits_observed_columns`` blockers
+                # surviving session resume). For chat-only turns where the
+                # source is absent or not blob-backed, ``_attempt_proof_repair``
+                # short-circuits cheaply via ``compute_proof_diagnostics``'s
+                # own early return.
+                if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
+                    state=state,
+                    llm_messages=llm_messages,
+                    session_id=session_id,
+                    repair_turns_used=repair_turns_used,
+                ):
+                    repair_turns_used += 1
+                    continue
+
                 await _emit_progress(
                     progress,
                     ComposerProgressEvent(
@@ -1427,7 +1867,7 @@ class ComposerServiceImpl:
                         reason="composer_complete",
                     ),
                 )
-                return await self._finalize_no_tool_response(
+                result = await self._finalize_no_tool_response(
                     content=assistant_message.content or "",
                     state=state,
                     initial_version=initial_version,
@@ -1440,6 +1880,13 @@ class ComposerServiceImpl:
                     tool_invocations=recorder.invocations,
                     llm_calls=recorder.llm_calls,
                 )
+                # Thread repair_turns_used through to the result so the
+                # route handler can persist it onto the new
+                # ``composition_states.composer_meta`` row (and the API state
+                # response can surface ``composer_meta.repair_turns_used``)
+                # — see web/sessions/routes.py::_state_data_from_composer_state
+                # call sites in the compose / recompose paths.
+                return replace(result, repair_turns_used=repair_turns_used)
 
             await _emit_progress(
                 progress,

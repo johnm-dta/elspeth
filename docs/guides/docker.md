@@ -197,7 +197,7 @@ services:
   elspeth:
     image: ghcr.io/johnm-dta/elspeth:v0.1.0
     environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/elspeth
+      - DATABASE_URL=postgresql://<user>:<password>@db:5432/elspeth  # secret-scan: allow-this-line
       - OPENROUTER_API_KEY
       - ELSPETH_FINGERPRINT_KEY
       - ELSPETH_SIGNING_KEY

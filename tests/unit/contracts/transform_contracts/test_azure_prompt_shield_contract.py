@@ -9,19 +9,19 @@ tests (name, schema, determinism) are now included in BatchTransformContractTest
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import httpx
 import pytest
 
-from elspeth.contracts import TransformResult
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
 from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
-from elspeth.testing import make_pipeline_row
 
+from ._azure_batch_helpers import (
+    patch_httpx_client_with_default,
+    set_httpx_response,
+    submit_and_collect_single_result,
+)
 from .test_batch_transform_protocol import BatchTransformContractTestBase, CollectingOutputPort
-
-_HTTPX_CLIENT_CLASS = httpx.Client
 
 
 def _make_prompt_shield_response(
@@ -29,6 +29,7 @@ def _make_prompt_shield_response(
     user_attack: bool = False,
     document_attack: bool = False,
 ) -> dict[str, Any]:
+    """Per-service response factory: encodes Prompt Shield dual-attack surface."""
     return {
         "userPromptAnalysis": {"attackDetected": user_attack},
         "documentsAnalysis": [{"attackDetected": document_attack}],
@@ -37,44 +38,6 @@ def _make_prompt_shield_response(
 
 def _make_clean_response() -> dict[str, Any]:
     return _make_prompt_shield_response()
-
-
-def _create_http_response(response_data: dict[str, Any], *, url: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json=response_data,
-        request=httpx.Request("POST", url),
-    )
-
-
-def _set_prompt_shield_response(
-    mock_client_class: MagicMock,
-    response_data: dict[str, Any],
-) -> None:
-    mock_client_instance = mock_client_class.return_value
-
-    def _mocked_post(url: str, **_: object) -> httpx.Response:
-        return _create_http_response(response_data, url=url)
-
-    mock_client_instance.post.side_effect = _mocked_post
-
-
-def _submit_and_collect_single_result(
-    started_transform: BatchTransformMixin,
-    row_data: dict[str, Any],
-    ctx: Any,
-    output_port: CollectingOutputPort,
-) -> TransformResult:
-    started_transform.accept(make_pipeline_row(row_data), ctx)
-
-    arrived = output_port.wait_for_results(1, timeout=10.0)
-    assert arrived, "Result did not arrive via OutputPort within timeout"
-
-    results = output_port.get_results()
-    assert len(results) == 1
-    _token, result, _state_id = results[0]
-    assert isinstance(result, TransformResult)
-    return result
 
 
 class TestAzurePromptShieldBatchContract(BatchTransformContractTestBase):
@@ -90,14 +53,7 @@ class TestAzurePromptShieldBatchContract(BatchTransformContractTestBase):
     @pytest.fixture(autouse=True)
     def mock_httpx_for_batch(self):
         """Mock httpx.Client for all batch contract tests."""
-        with patch("httpx.Client", autospec=True) as mock_client_class:
-            mock_client_instance = MagicMock(spec_set=_HTTPX_CLIENT_CLASS)
-
-            def _mocked_post(url: str, **_: object) -> httpx.Response:
-                return _create_http_response(_make_clean_response(), url=url)
-
-            mock_client_instance.post.side_effect = _mocked_post
-            mock_client_class.return_value = mock_client_instance
+        with patch_httpx_client_with_default(_make_clean_response) as mock_client_class:
             yield mock_client_class
 
     @pytest.fixture
@@ -127,12 +83,12 @@ class TestAzurePromptShieldBatchContract(BatchTransformContractTestBase):
         mock_httpx_for_batch: MagicMock,
     ) -> None:
         """Contract: user-prompt attacks produce structured on_error routing data."""
-        _set_prompt_shield_response(
+        set_httpx_response(
             mock_httpx_for_batch,
             _make_prompt_shield_response(user_attack=True),
         )
 
-        result = _submit_and_collect_single_result(
+        result = submit_and_collect_single_result(
             started_transform,
             valid_input,
             mock_ctx_factory(),
@@ -158,12 +114,12 @@ class TestAzurePromptShieldBatchContract(BatchTransformContractTestBase):
         mock_httpx_for_batch: MagicMock,
     ) -> None:
         """Contract: document attacks also fail closed through the batch output path."""
-        _set_prompt_shield_response(
+        set_httpx_response(
             mock_httpx_for_batch,
             _make_prompt_shield_response(document_attack=True),
         )
 
-        result = _submit_and_collect_single_result(
+        result = submit_and_collect_single_result(
             started_transform,
             valid_input,
             mock_ctx_factory(),

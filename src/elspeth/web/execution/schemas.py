@@ -521,6 +521,13 @@ class RunOutputArtifact(_StrictResponse):
     this is the audit-evidence retrieval shape — full per-run list, with
     ``content_hash`` and ``exists_now`` fields suited to backfill /
     re-fetch flows. Returned by ``/api/runs/{rid}/outputs``.
+
+    ``downloadable`` is a server-computed convenience: true iff the
+    ``/outputs/{artifact_id}/content`` endpoint would actually serve
+    bytes for this row. False when the artifact is not file-backed,
+    when the file is gone, or when the path resolves outside the
+    sink-allowlist. Lets the UI suppress download buttons that would
+    otherwise 4xx on click.
     """
 
     artifact_id: str
@@ -531,6 +538,34 @@ class RunOutputArtifact(_StrictResponse):
     size_bytes: int = Field(ge=0)
     created_at: datetime
     exists_now: bool
+    downloadable: bool
+
+
+PreviewContentType = Literal["text", "csv", "jsonl", "json", "binary"]
+
+
+class RunOutputArtifactPreview(_StrictResponse):
+    """Bounded preview of one sink-write artefact for in-UI inspection.
+
+    Returned by ``GET /api/runs/{rid}/outputs/{aid}/preview``. Intended
+    as a head-of-file render so an operator can decide whether to pull
+    the full file via the ``/content`` endpoint. Bounded to the lesser
+    of 256 KiB or 100 rows; ``truncated`` indicates the cap was hit.
+
+    ``content_type`` is the renderer hint:
+    * ``csv`` / ``jsonl`` — UI may render as a parsed table.
+    * ``json`` — UI may pretty-print.
+    * ``text`` — UI renders as monospace pre-formatted block.
+    * ``binary`` — bytes are not text (or extension is unknown);
+      ``preview_text`` is empty and the UI suggests downloading.
+    """
+
+    artifact_id: str
+    content_type: PreviewContentType
+    preview_text: str
+    truncated: bool
+    total_size_bytes: int = Field(ge=0)
+    row_count_preview: int | None = Field(default=None, ge=0)
 
 
 class RunOutputsResponse(_StrictResponse):

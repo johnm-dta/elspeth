@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-5](https://img.shields.io/badge/status-RC--5-yellow.svg)
+![Status: RC-5.1](https://img.shields.io/badge/status-RC--5.1-yellow.svg)
 
 Elspeth is a high-assurance pipeline substrate for consequential workflows:
 systems where the wrong output can cause operational, legal, safety, financial,
@@ -26,6 +26,7 @@ artifact that the executor runs directly.
 - [Why Elspeth Exists](#why-elspeth-exists)
 - [Architecture At A Glance](#architecture-at-a-glance)
 - [What Changed In RC-5](#what-changed-in-rc-5)
+  - [RC-5.1 Updates](#rc-51-updates)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -158,6 +159,55 @@ The assurance work also moved forward: runtime-shaped validation, declaration
 trust, VAL manifests, terminal outcome modelling, run-accounting invariants,
 strict response schemas, and CI policy gates are now part of the product
 surface.
+
+### RC-5.1 Updates
+
+RC-5.1 is a correctness and assurance follow-up to RC-5 rather than a new
+surface release. The notable deltas:
+
+- **`identity_node_advisory` validator** — `validate_pipeline` now detects
+  identity passthroughs wired between transforms and observed sinks, where the
+  passthrough silently degrades observed-sink lineage. Surfaces as an
+  actionable repair hint in the composer; gated by an exemption matrix locked
+  in by tests.
+- **Composer pipeline recipes, source inspection, and forced repair** — new
+  `apply_pipeline_recipe` MCP tool and template library, an `inspect_source`
+  MCP tool that surfaces external-data shape and silent-failure modes as
+  warnings, and a forced-repair loop driven by `proof_diagnostics` that fires
+  on the resumed-session first turn.
+- **Run outputs panel and artifact preview** — the frontend now exposes the
+  full audit-evidence manifest for a run, with downloadable artifacts gated by
+  a per-artifact `downloadable` flag and backed by a new
+  `/artifacts/preview` execution endpoint.
+- **Cancellation-requested badge** — runs whose cancellation has been requested
+  but not yet drained carry a distinct badge style, separate from the terminal
+  `cancelled` state.
+- **`data_dir` resolved to absolute path** — `WebSettings` resolves `data_dir`
+  to an absolute path at validation time, removing a class of ambiguity where
+  relative paths were interpreted against different working directories.
+- **GraphView viewport preservation** — composer GraphView preserves the
+  operator's pan/zoom across topology changes; iterative edits no longer reset
+  the view.
+- **Audit-integrity test coverage** — direct unit coverage for four
+  ADR-019-family invariants that previously had zero unit tests:
+  `sweep_deferred_invariants_or_crash`, `_validate_token_row_ownership`,
+  `link_validation_error_to_row`, and `_REQUIRED_COMPOSITE_FOREIGN_KEYS`. Plus
+  closure of residual SSRF blocked-IP coverage in `web_scrape`.
+- **Composer accessibility (Tier-1 panel-review pass)** — corrections to
+  `aria-controls`, `aria-expanded`, `aria-live` scoping, and focus management
+  across the composer surface; SecretsPanel form recovery on `createSecret`
+  failure; light-theme `--color-status-empty` override.
+- **Composer skill correctness** — multi-commit sweep closing fabrication and
+  silent-shape-downgrade loopholes, widening the grounding detector, and
+  forbidding identity nodes between transforms and observed sinks.
+- **Default `on_validation_failure = discard`** — the per-source default
+  validation-failure behaviour is now `discard` with documented quarantine
+  semantics, replacing the prior implicit fall-through.
+- **Unknown-plugin composer error is actionable** —
+  `_prevalidate_plugin_options` surfaces unknown plugin ids as structured,
+  actionable rejections instead of silent fail-open.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
 ---
 
@@ -778,11 +828,11 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.5.0` with the tag
+Elspeth can run from a published Docker image. Replace `v0.5.1` with the tag
 published for the release you are evaluating.
 
 ```bash
-IMAGE_TAG=v0.5.0
+IMAGE_TAG=v0.5.1
 
 # Run a pipeline
 docker run --rm \

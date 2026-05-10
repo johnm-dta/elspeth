@@ -312,3 +312,14 @@ if [[ "$is_valid" != "true" ]]; then
 fi
 
 evals_log INFO "finalize complete: $out/ledger.json"
+
+# Panel-cohort scenarios encode red_criteria + green_criteria for RGR-style
+# scoring. Hardmode scenarios don't have those fields, so this step is a
+# silent no-op for them. When the fields ARE present, score_scenario.sh
+# emits rgr_score.json which aggregate.sh rolls into the panel scorecard.
+if jq -e 'has("red_criteria") and has("green_criteria")' "$out/scenario.json" >/dev/null 2>&1; then
+  evals_log INFO "scoring against scenario red/green criteria"
+  if ! "$EVALS_SCRIPT_DIR/score_scenario.sh" "$out"; then
+    evals_log WARN "score_scenario.sh exited non-zero — see $out/rgr_score.json"
+  fi
+fi

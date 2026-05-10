@@ -8,8 +8,26 @@ import type { CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
 // Render nodes and edges as simple divs so we can assert on their presence.
 vi.mock("@xyflow/react", () => ({
-  ReactFlow: ({ nodes, edges, children, colorMode }: any) => (
-    <div data-testid="react-flow" data-color-mode={colorMode}>
+  ReactFlow: ({
+    nodes,
+    edges,
+    children,
+    colorMode,
+    fitView,
+    onInit,
+    fitViewOptions,
+  }: any) => (
+    <div
+      data-testid="react-flow"
+      data-color-mode={colorMode}
+      // Structural assertions: bug elspeth-0e2d449d82 (GraphView fitView reset).
+      // `fitView` boolean prop must NOT be passed — it re-fires on every
+      // topology change and resets the operator's pan/zoom. `onInit` must be
+      // passed so the imperative fitView() runs once on mount only.
+      data-fit-view-prop={fitView === undefined ? "absent" : String(Boolean(fitView))}
+      data-has-on-init={String(typeof onInit === "function")}
+      data-fit-view-options={fitViewOptions ? JSON.stringify(fitViewOptions) : ""}
+    >
       {nodes?.map((n: any) => (
         <div key={n.id} data-testid={`node-${n.id}`} style={n.style}>
           {typeof n.data?.label === "string" ? n.data.label : n.data?.label}
@@ -463,6 +481,41 @@ describe("GraphView", () => {
       // Sink edges should be inferred
       expect(screen.getByTestId("edge-inferred-sink-processor-results")).toBeInTheDocument();
       expect(screen.getByTestId("edge-inferred-sink-processor-errors-error")).toBeInTheDocument();
+    });
+  });
+
+  // Regression: bug elspeth-0e2d449d82.
+  // The `fitView` boolean prop on @xyflow/react v12 re-fires on every
+  // `nodesInitialized` flip, which destroys the operator's pan/zoom whenever
+  // the LLM mutates the DAG. The component must mount-fit imperatively via
+  // `onInit` and never re-fit on topology change. This is a structural
+  // contract test — jsdom cannot exercise viewport behaviour, so we pin the
+  // prop shape that produces it.
+  describe("viewport stability (regression elspeth-0e2d449d82)", () => {
+    beforeEach(() => {
+      useSessionStore.setState({
+        compositionState: makeState({ nodes: [makeNode()], edges: [] }),
+      });
+    });
+
+    it("does not pass `fitView` boolean prop to ReactFlow", () => {
+      render(<GraphView />);
+      const flow = screen.getByTestId("react-flow");
+      expect(flow.dataset.fitViewProp).toBe("absent");
+    });
+
+    it("provides an onInit callback for one-shot mount fit", () => {
+      render(<GraphView />);
+      const flow = screen.getByTestId("react-flow");
+      expect(flow.dataset.hasOnInit).toBe("true");
+    });
+
+    it("supplies fitViewOptions so the Controls fit-view button shares the same constraints", () => {
+      render(<GraphView />);
+      const flow = screen.getByTestId("react-flow");
+      expect(flow.dataset.fitViewOptions).not.toBe("");
+      const opts = JSON.parse(flow.dataset.fitViewOptions ?? "{}");
+      expect(opts).toEqual({ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 });
     });
   });
 });

@@ -589,6 +589,37 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_handle_list_blobs:arguments"
   - "src/elspeth/web/composer/tools.py:_handle_get_blob_metadata:arguments"
   - "src/elspeth/web/composer/tools.py:_execute_set_source_from_blob:arguments"
+  - "src/elspeth/web/composer/tools.py:_execute_inspect_source:arguments"
+  - "src/elspeth/web/composer/tools.py:_execute_apply_pipeline_recipe:arguments"
+  - "src/elspeth/web/composer/tools.py:_execute_list_recipes:arguments"
+  # Recipe slot validation — operator-supplied slot dicts (Tier-3) and the
+  # set_pipeline-shaped args dict each recipe builds. Both shapes are
+  # documented contracts but inherently dynamic key spaces; capturing them
+  # in a TypedDict per recipe would duplicate the SlotSpec table.
+  - "src/elspeth/web/composer/recipes.py:validate_slots:return"
+  - "src/elspeth/web/composer/recipes.py:_build_classify_recipe:return"
+  - "src/elspeth/web/composer/recipes.py:_build_threshold_recipe:return"
+  - "src/elspeth/web/composer/recipes.py:_build_fork_coalesce_truncate_recipe:return"
+  - "src/elspeth/web/composer/recipes.py:list_recipes:return (list)"
+  - "src/elspeth/web/composer/recipes.py:apply_recipe:return"
+  # Source inspection — operator-supplied JSON sample objects (Tier-3) and
+  # the JSON-safe dict returned to the LLM tool channel.
+  - "src/elspeth/web/composer/source_inspection.py:_facts_from_objects:objects (list)"
+  - "src/elspeth/web/composer/source_inspection.py:facts_to_dict:return"
+  # proof_diagnostics — JSON-safe dicts returned to the LLM tool channel.
+  # Each entry has {code, severity, message, suggested_repair, evidence_locator}
+  # and is consumed by the forced-repair loop (service.py) and the convergence
+  # eval harness (evals/lib/composer_rgr_score.py).
+  - "src/elspeth/web/composer/tools.py:compute_proof_diagnostics:return (list)"
+  # _blocking_diagnostic constructor for the same dict shape — registry-checked
+  # against _BLOCKING_DIAGNOSTIC_CODES at construction so the LLM's repair
+  # vocabulary cannot drift silently.
+  - "src/elspeth/web/composer/tools.py:_blocking_diagnostic:evidence_locator"
+  - "src/elspeth/web/composer/tools.py:_blocking_diagnostic:return"
+  # _attempt_proof_repair appends a synthesised user-role message to the
+  # OpenAI-format chat completion list. Each entry is the documented chat
+  # message shape ({role, content, ...}) which is inherently dynamic.
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_proof_repair:llm_messages (list)"
   # Blob sync helpers — return dicts for tool response payloads
   - "src/elspeth/web/composer/tools.py:_sync_list_blobs:return (list)"
   # Secret tool handlers — same pattern as above, LLM-provided arguments
@@ -613,6 +644,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_execute_explain_validation_error:args"
   - "src/elspeth/web/composer/tools.py:_execute_get_plugin_assistance:args"
   - "src/elspeth/web/composer/tools.py:_execute_list_models:args"
+  - "src/elspeth/web/composer/tools.py:_execute_get_audit_info:args"
   - "src/elspeth/web/composer/tools.py:_execute_preview_pipeline:args"
   - "src/elspeth/web/composer/tools.py:diff_states:return"
   - "src/elspeth/web/composer/redaction.py:redact_source_storage_path:state_dict"

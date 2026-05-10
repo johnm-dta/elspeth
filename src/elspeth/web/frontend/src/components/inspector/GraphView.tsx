@@ -19,6 +19,7 @@ import {
   type Node,
   type Edge,
   type NodeMouseHandler,
+  type OnInit,
   Background,
   Controls,
   MiniMap,
@@ -160,6 +161,14 @@ export function GraphView() {
   const onPaneClick = useCallback(() => {
     selectNode(null);
   }, [selectNode]);
+
+  // Fit-to-view ONCE on first render. Using `fitView` as a static prop
+  // re-triggers viewport reset whenever `nodesInitialized` flips (i.e. every
+  // chat-driven topology change), which destroys the operator's pan/zoom.
+  // The Controls fit-view button continues to honour `fitViewOptions` below.
+  const handleInit: OnInit = useCallback((instance) => {
+    instance.fitView();
+  }, []);
 
   // Build a map of component_id → validation severity for border coloring
   const nodeValidationMap = useMemo(() => {
@@ -572,7 +581,7 @@ export function GraphView() {
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         colorMode={resolvedTheme}
-        fitView
+        onInit={handleInit}
         fitViewOptions={{ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 }}
         proOptions={{ hideAttribution: true }}
       >

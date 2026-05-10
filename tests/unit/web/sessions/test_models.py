@@ -13,7 +13,6 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
-    run_events_table,
     runs_table,
     sessions_table,
 )
@@ -29,7 +28,7 @@ def engine():
 
 
 class TestTableCreation:
-    """Verify all five tables are created with correct schemas."""
+    """Verify the session-database tables are created with correct schemas."""
 
     def test_all_tables_exist(self, engine) -> None:
         inspector = inspect(engine)
@@ -38,7 +37,6 @@ class TestTableCreation:
         assert "chat_messages" in table_names
         assert "composition_states" in table_names
         assert "runs" in table_names
-        assert "run_events" in table_names
 
     def test_sessions_columns(self, engine) -> None:
         inspector = inspect(engine)
@@ -95,11 +93,6 @@ class TestTableCreation:
             "landscape_run_id",
             "pipeline_yaml",
         }
-
-    def test_run_events_columns(self, engine) -> None:
-        inspector = inspect(engine)
-        columns = {c["name"] for c in inspector.get_columns("run_events")}
-        assert columns >= {"id", "run_id", "timestamp", "event_type", "data"}
 
 
 class TestCompositionStateUniqueConstraint:
@@ -253,50 +246,5 @@ class TestCheckConstraints:
                         started_at=datetime.now(UTC),
                         rows_processed=0,
                         rows_failed=0,
-                    )
-                )
-
-    def test_invalid_run_event_type_rejected(self, engine) -> None:
-        session_id = str(uuid.uuid4())
-        state_id = str(uuid.uuid4())
-        run_id = str(uuid.uuid4())
-        with engine.begin() as conn:
-            conn.execute(
-                insert(sessions_table).values(
-                    id=session_id,
-                    user_id="alice",
-                    title="Test",
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
-            )
-            conn.execute(
-                insert(composition_states_table).values(
-                    id=state_id,
-                    session_id=session_id,
-                    version=1,
-                    is_valid=True,
-                    created_at=datetime.now(UTC),
-                )
-            )
-            conn.execute(
-                insert(runs_table).values(
-                    id=run_id,
-                    session_id=session_id,
-                    state_id=state_id,
-                    status="pending",
-                    started_at=datetime.now(UTC),
-                    rows_processed=0,
-                    rows_failed=0,
-                )
-            )
-            with pytest.raises(IntegrityError):
-                conn.execute(
-                    insert(run_events_table).values(
-                        id=str(uuid.uuid4()),
-                        run_id=run_id,
-                        timestamp=datetime.now(UTC),
-                        event_type="invalid_type",
-                        data="{}",
                     )
                 )

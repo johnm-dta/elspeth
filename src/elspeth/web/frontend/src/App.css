@@ -27,6 +27,12 @@
   --color-border:            rgba(143, 200, 200, 0.12);
   --color-border-strong:     rgba(143, 200, 200, 0.25);
 
+  /* Affordance bar for the inspector resize handle. Solid teal at ~3.5:1
+     contrast against --color-bg (#0f2d35) — meets WCAG 1.4.11 (3:1 non-text)
+     for the static-visible-bar pattern. Distinct from --color-border-strong,
+     which is a low-alpha border accent and fails 3:1 by design. */
+  --color-resize-handle:     #5a8a8a;
+
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.14);
   --color-bubble-user-border:    rgba(40, 130, 100, 0.35);
@@ -571,6 +577,28 @@ summary:focus-visible {
   content: "\2014 "; /* — em dash */
 }
 
+/* Cancel-pending badge — same colour family as cancelled but distinguished
+   by a pulsing glyph that signals "still running, stop requested" rather
+   than "done, was cancelled".  Without this, the only visual distinction
+   between the two states is a 3-character text suffix ("cancelling" vs
+   "cancelled") which is easy to miss in the uppercase 13px badge. */
+.status-badge-cancelling {
+  background-color: rgba(227, 132, 68, 0.15);
+  color: var(--color-status-cancelled);
+}
+.status-badge-cancelling::before {
+  content: "\25CF "; /* ● filled circle */
+  display: inline-block;
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-badge-cancelling::before {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 /* Phase 2.2 (elspeth-0de989c56d): widened taxonomy.
    - completed_with_failures: reuses --color-status-completed (teal) so the
      run is visually grouped with successful runs, but the warning glyph
@@ -686,6 +714,11 @@ summary:focus-visible {
 
 .btn-danger:hover:not(:disabled) {
   background-color: rgba(232, 86, 83, 0.25);
+}
+
+.btn-small {
+  font-size: var(--font-size-xs);
+  padding: 2px var(--space-sm);
 }
 
 /* ---------------------------------------------------------------------------
@@ -860,21 +893,40 @@ summary:focus-visible {
   bottom: 0;
   width: 20px;
   cursor: col-resize;
-  background-color: transparent;
+  background: transparent;
   z-index: var(--z-panel-controls);
   touch-action: none;
+  transition: background var(--transition-fast);
 }
 
-.resize-handle:hover {
-  background-color: var(--color-focus-ring);
-  opacity: 0.5;
-  transition: background-color var(--transition-normal);
+/* Static visible bar — 2px wide, centered. Always visible (not hover-only)
+   so the resize affordance is discoverable by sighted users without exploring,
+   and meets WCAG 1.4.11 (3:1 non-text contrast) via --color-resize-handle. */
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 9px;
+  width: 2px;
+  background: var(--color-resize-handle);
+  transition: background var(--transition-fast);
 }
 
-.resize-handle:focus-visible {
-  background-color: var(--color-focus-ring);
-  opacity: 0.6;
-  outline: none; /* the bar itself IS the indicator */
+.resize-handle:hover::before,
+.resize-handle:focus-visible::before {
+  background: var(--color-focus-ring);
+}
+
+/* Touch breakpoint — widen the hit zone without enlarging the visible bar */
+@media (max-width: 900px), (pointer: coarse) {
+  .resize-handle {
+    width: 36px;
+    left: -16px;
+  }
+  .resize-handle::before {
+    left: 17px;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1313,6 +1365,9 @@ summary:focus-visible {
   --color-border:            rgba(15, 45, 53, 0.12);
   --color-border-strong:     rgba(15, 45, 53, 0.25);
 
+  /* Resize-handle bar — solid mid-tone teal at ~4.3:1 against #f4f8f9 (light bg). */
+  --color-resize-handle:     #5a7884;
+
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.10);
   --color-bubble-user-border:    rgba(40, 130, 100, 0.30);
@@ -1381,6 +1436,7 @@ summary:focus-visible {
   --color-status-completed:  #0d8a88;
   --color-status-failed:     #c93b38;
   --color-status-cancelled:  #b86830;
+  --color-status-empty:      #4d6a73;
 
   /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */
   --color-scrollbar-track:       var(--color-bg);
@@ -1459,6 +1515,7 @@ summary:focus-visible {
     --color-text-muted:     #96c0c0;
     --color-border:         rgba(143, 200, 200, 0.30);
     --color-border-strong:  rgba(143, 200, 200, 0.50);
+    --color-resize-handle:  #96c0c0;
   }
 
   [data-theme="light"] {
@@ -1467,6 +1524,7 @@ summary:focus-visible {
     --color-text-muted:     #2a4a54;
     --color-border:         rgba(15, 45, 53, 0.30);
     --color-border-strong:  rgba(15, 45, 53, 0.50);
+    --color-resize-handle:  #2a4a54;
   }
 
   .type-badge {
@@ -1560,6 +1618,30 @@ summary:focus-visible {
 .markdown-body .code-block code {
   background: none;
   padding: 0;
+}
+
+.markdown-body .code-block-wrapper {
+  position: relative;
+}
+
+.markdown-body .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.markdown-body .code-block-wrapper:hover .code-block-copy,
+.markdown-body .code-block-copy:focus-visible {
+  opacity: 1;
 }
 
 .markdown-body .mermaid-container {
@@ -3059,13 +3141,39 @@ summary:focus-visible {
 .plugin-card {
   padding: var(--space-sm) var(--space-md);
   border-bottom: 1px solid var(--color-border);
-  cursor: pointer;
 }
 
 .plugin-card-header {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  cursor: pointer;
+}
+
+/* "Use in pipeline" action — hidden at rest, revealed on card hover or
+   keyboard focus.  Mirrors the .code-block-copy pattern so the catalog
+   matches the chat code-block ergonomics.  Always reachable by keyboard
+   navigation via :focus-visible; never invisible to AT (the button still
+   exists in the DOM and accessibility tree, just visually hidden). */
+.plugin-card-use-btn {
+  align-self: flex-start;
+  margin-top: var(--space-xs);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.plugin-card:hover .plugin-card-use-btn,
+.plugin-card:focus-within .plugin-card-use-btn,
+.plugin-card-use-btn:focus-visible {
+  opacity: 1;
+}
+
+/* Touch devices have no hover — fall back to always-visible there so the
+   feature remains discoverable on mobile/tablet. */
+@media (hover: none), (pointer: coarse) {
+  .plugin-card-use-btn {
+    opacity: 1;
+  }
 }
 
 .plugin-card-name {

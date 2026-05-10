@@ -4,11 +4,18 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## [Unreleased]
+## [0.5.1] - 2026-05-11 (RC-5.1 — Composer Correctness, Validator Hardening, and Audit-Integrity Coverage)
 
-Draft consolidation for the final RC5-UX branch update. This section captures
-the extended user-facing story that landed after the first `0.5.0` changelog
-stamp and should be refined before the release branch is pushed.
+RC-5.1 is a correctness and assurance follow-up to RC-5. The Web Composer's
+authoring loop, validation surface, and run-evidence views all received targeted
+hardening; a new `identity_node_advisory` validator detects identity passthroughs
+that obscure observed-sink lineage; the `data_dir` config is now resolved to an
+absolute path at validation time; pipeline recipes, source inspection, and a
+forced-repair loop with proof diagnostics extend the composer authoring surface;
+and the Landscape audit-integrity test surface gains direct coverage for four
+ADR-019-family invariants that previously had zero unit tests. Frontend UX received
+a Tier-1 panel-review pass covering accessibility, focus management, and operator
+visibility.
 
 ### Added
 
@@ -59,6 +66,12 @@ stamp and should be refined before the release branch is pushed.
 - **Hard-mode composer evaluation harness** — reusable shell tooling and
   scenario fan-out capture validation transport failures, composer regressions,
   and per-row output evidence for demo-readiness checks.
+- **Advisor-conditional skill markers** — composer prompt assembly now strips
+  both `<!-- ADVISOR-ONLY -->` and `<!-- ADVISOR-DISABLED -->` regions from the
+  skill markdown depending on whether the advisor tool is enabled, so an
+  advisor-disabled deployment can no longer leak `request_advisor_hint`
+  guidance (anti-fabrication rule, fork+coalesce table row, Recipe #10
+  escalation, §10b read-gate) to the composer LLM.
 
 #### Plugin and Contract Surface
 
@@ -98,6 +111,116 @@ stamp and should be refined before the release branch is pushed.
   FastAPI backend and Vite frontend, with an initial smoke proof and fixme
   specs for composer-correctness acceptance paths.
 
+#### Validator and Pipeline Authoring (RC-5.1)
+
+- **`identity_node_advisory` validator check** — `validate_pipeline` now detects
+  identity passthrough nodes wired between transforms and observed sinks, where
+  the passthrough silently degrades observed-sink lineage. The check is gated
+  by an exemption matrix locked in by tests, surfaces as an actionable repair
+  hint in the composer, and is enforced on the validation happy path.
+- **Composer pipeline recipes** — `apply_pipeline_recipe` MCP tool plus two
+  initial templates compose a multi-node pipeline from a single named recipe,
+  with deep-frozen `RecipeSpec.slots`, `SlotSpec.default` validated against
+  `slot_type` at construction, recipes that emit schema-valid `llm` and
+  `type_coerce` options, and recipe `blob_id` placed at source top-level so
+  `set_pipeline` can resolve it.
+- **Source inspection MCP tool** — new `source_inspection` module and
+  `inspect_source` MCP tool surface external-data shape and silent-failure modes
+  as warnings, supporting "look before you wire" composer sessions; hostile-input
+  coverage included for `inspect_blob_content`.
+- **Forced-repair loop with proof diagnostics** — `preview_pipeline` runs a
+  proof step that produces a `proof_diagnostics` array; the composer's
+  forced-repair loop is wired to those diagnostics, fires on the resumed-session
+  first turn, and plumbs `repair_turns_used` into `composition_states.composer_meta`.
+  `compute_proof_diagnostics` verifies blob `content_hash` so a stale blob can
+  no longer pass the proof gate. `_BLOCKING_DIAGNOSTIC_CODES` is now the
+  structural source of truth for blocking diagnostics.
+- **Audit-backend skill + recipe-first fork-coalesce shape** — composer skill
+  pack adds an audit-backend skill and reorganises the fork-coalesce guidance
+  to be recipe-first; canonical fork pattern aligned to the
+  `validate_boolean_routes` contract; mandatory advisor escalation gate for
+  Recipe #10 (fork+coalesce) shapes.
+- **Convergence-suite test scenarios** — new evaluation scenarios cover
+  end-to-end convergence (URL-text smoke, mocked-LLM integration, end-to-end
+  forced-repair through the real `_compose_loop`, end-to-end
+  `apply_pipeline_recipe` through the proof step) plus a pure scoring function;
+  fork-and-coalesce regression scenario locks in skill commit `a2d9706b`.
+- **Composer authoring affordances** — `Use in pipeline` action in the plugin
+  catalog prefills the chat input; chat code blocks gain syntax highlighting
+  and a copy-to-clipboard control; `secret_ref` advertises an inline form for
+  new-node credentials; resize-handle keyboard arrows align with value
+  direction with a static affordance and touch-friendly hit zone.
+- **`<OPERATOR_REQUIRED>` sentinels for identity-bearing fields** — the
+  composer skill replaces literal example values for
+  `web_scrape.http.abuse_contact` and `scraping_reason` with angle-bracket
+  sentinels and an explicit resolution order (operator-supplied →
+  deployment-identity → ask the operator before `set_pipeline`). The
+  angle-bracket form is intentional: a placeholder validator (tracked
+  separately) can mechanically reject any YAML that still carries a
+  sentinel, providing a structural safety net for the prompt-level rule.
+- **Hard rule against silent operator-input rewrites** — composer skill now
+  forbids silent normalisations of operator-supplied strings (e.g. prepending
+  `https://` to a bare hostname, lowercasing, trailing-slash strip). Any
+  rewrite must either be confirmed by the operator or routed through a
+  recorded normalisation step (`value_transform` etc.) so it appears in the
+  YAML and the build summary.
+- **Implicit-decision disclosure ("Decisions I made on your behalf")** — new
+  Build Summary Discipline subsection requires the composer to enumerate
+  operator-invisible authoring decisions (identity headers, model/provider/
+  temperature, output shape and routing, format choices, allowlist defaults,
+  surviving operator-input rewrites) with explicit provenance markers
+  (`default` / `picked` / `deployment-identity` / `operator-supplied`).
+
+#### Run Evidence and Operator Visibility (RC-5.1)
+
+- **Run outputs panel** — frontend `RunOutputsPanel` exposes the full
+  audit-evidence manifest for a run, with downloadable artifacts gated by a
+  per-artifact `downloadable` flag; backed by a new `/artifacts/preview`
+  execution endpoint.
+- **Cancellation-requested badge** — runs whose cancellation has been requested
+  but not yet drained now carry a distinct badge style, separate from the
+  terminal `cancelled` state.
+- **GraphView viewport preservation** — composer GraphView preserves the
+  operator's pan/zoom across topology changes, so iterative edits no longer
+  reset the view to a default `fitView`.
+- **`data_dir` resolved to absolute path** — `WebSettings` now resolves
+  `data_dir` to an absolute path at validation time, eliminating a class of
+  ambiguity where relative paths were interpreted against different working
+  directories at validate vs. run time.
+- **Composer source-inspection silent-failure surfacing** — Tier-3 source
+  inspection surfaces silent-failure modes (e.g. all-rows quarantined) as
+  warnings rather than treating success-with-zero-results as a quiet pass.
+- **Failure-sample aggregation in run-level errors** — new
+  `web/execution/failure_samples` module aggregates the top distinct
+  `transform_errors` rows so a failed run's top-level error message carries
+  actionable detail rather than a single bubble-up exception string.
+
+#### Audit Integrity Test Coverage (RC-5.1)
+
+- **ADR-019 deferred-invariant sweep** — direct unit coverage for the
+  `sweep_deferred_invariants_or_crash` run-end invariant enforcer (was
+  previously zero unit tests).
+- **DataFlowRepository `_validate_token_row_ownership`** — direct coverage for
+  the cross-row lineage corruption guard (previously never directly tested).
+- **`link_validation_error_to_row` branches** — direct coverage for quarantine
+  lineage exactness across all branches.
+- **`_REQUIRED_COMPOSITE_FOREIGN_KEYS`** — exhaustive coverage for all 12
+  composite foreign-key entries (previously 11 of 12 untested).
+- **SSRF blocked-IP coverage** — closes residual blocklist coverage including
+  the `::ffff:0:0/96` IPv4-mapped-IPv6 range and seven other previously
+  untested boundary cases in `web_scrape`.
+
+#### Contracts and Lifecycle (RC-5.1)
+
+- **Symmetric `_on_start_called` / `_on_complete_called` lifecycle flags** —
+  runtime-config protocols now expose paired start/complete lifecycle flags so
+  asymmetric implementations (start without complete, or complete without
+  start) become structurally detectable.
+- **Autouse catalog fixture + derived `RUNTIME_CONFIGS`** — contract tests now
+  derive the runtime-config inventory from runtime introspection rather than
+  a hand-maintained list, eliminating drift between the inventory and the
+  actually-registered configs.
+
 ### Changed
 
 - **README front door refreshed for RC-5** — the README now leads with the
@@ -111,6 +234,52 @@ stamp and should be refined before the release branch is pushed.
   the regular `llm` transform with provider pooling/multi-query for LLM
   throughput and the statistical batch transforms for audit-attributable local
   aggregation.
+- **Default `on_validation_failure` is now `discard`** — the default
+  per-source validation-failure behaviour changed to `discard` with documented
+  quarantine semantics, replacing the prior implicit fall-through.
+- **Unknown-plugin composer error is now actionable** —
+  `_prevalidate_plugin_options` surfaces an unknown plugin id as a structured,
+  actionable rejection instead of a silent fail-open.
+- **Composer rejected-mutation entries lead `validation.errors`** — when a
+  composer mutation is rejected, the rejection entry is now the first item in
+  `validation.errors`, so downstream UI surfaces and skill prose treat it as
+  the primary diagnostic.
+- **Augment-shape preflight failures preserve model prose** — when an
+  augment-shape preflight fails, the composer now retains the model's original
+  prose explanation instead of replacing it with a generic failure summary.
+- **`apply_pipeline_recipe` surfaces destructive replacement** — applying a
+  recipe over an existing pipeline now explicitly reports the replacement as
+  destructive in the composer audit trail.
+
+### Fixed
+
+- **Wire-visible identity fabrication (Tier-1 audit-integrity defect)** — the
+  composer skill previously carried `compliance@example.com` and a generic
+  scraping reason as the canonical worked example for the
+  `web_scrape.http.abuse_contact` / `scraping_reason` fields, and the LLM was
+  copying those literals into generated YAML verbatim. A reproduced eval
+  session shipped a fabricated abuse-contact email as an HTTP header to three
+  external `.gov.au` sites — a confident wrong answer to a third party we have
+  no relationship with. Closed by the `<OPERATOR_REQUIRED>` sentinel rewrite,
+  the silent-rewrite hard rule, and the implicit-decision disclosure block
+  (see *Validator and Pipeline Authoring (RC-5.1)*).
+- **Composer skill correctness** — multi-commit sweep closing skill-text
+  fabrication and silent-shape-downgrade loopholes, widening the grounding
+  detector and adding `confirm`/`confirmed` to the grounding verb list, scoping
+  state-claim grounding correction (Path 3), forbidding identity nodes between
+  transforms and observed sinks, and narrowing the `ComposerResult` pairing
+  invariant.
+- **Composer accessibility (Tier-1 panel review)** — `aria-controls` IDREF
+  remains resolvable when a run is collapsed; `aria-expanded` added to the
+  `RunsView` Inspect button (now using the shared `.btn` class); health-check
+  banners downgraded to `role=status`; nested `aria-live` removed from
+  `ComposingIndicator`; `aria-live` scoped to the validation banner instead of
+  the tab panel; light-theme `--color-status-empty` override added; validation
+  indicator decoupled from the warning colour.
+- **Composer SecretsPanel form recovery** — the form now recovers cleanly when
+  `createSecret` fails, instead of leaving the panel in a wedged state.
+- **Composer audit-shape symmetry** — `augment` and `replace` audit shapes now
+  use symmetric producer-side invariants.
 
 ---
 
@@ -952,7 +1121,8 @@ plugin system, and CLI.
 - [RC-2 Changelog](CHANGELOG-RC2.md) — Sub-releases RC2 through RC2.5 (Feb 2 – Feb 12, 2026)
 
 <!-- Comparison links — tags created at release time -->
-[0.5.0]: https://github.com/tachyon-beep/elspeth/compare/v0.4.1-rc4.1...main
+[0.5.1]: https://github.com/tachyon-beep/elspeth/compare/v0.5.0-rc5.0...v0.5.1-rc5.1
+[0.5.0]: https://github.com/tachyon-beep/elspeth/compare/v0.4.1-rc4.1...v0.5.0-rc5.0
 [0.4.1]: https://github.com/tachyon-beep/elspeth/compare/v0.4.0-rc4.0...v0.4.1-rc4.1
 [0.4.0]: https://github.com/tachyon-beep/elspeth/compare/v0.3.4-rc3.4...v0.4.0-rc4.0
 [0.3.4]: https://github.com/tachyon-beep/elspeth/compare/v0.3.3-rc3.3...v0.3.4-rc3.4

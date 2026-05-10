@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, TypedDict, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from opentelemetry import metrics
 from pydantic import ValidationError as PydanticValidationError
@@ -36,7 +36,17 @@ from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import _guard_blob_row_literals, _source_references_blob, content_hash, sanitize_filename
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
+from elspeth.web.composer.recipes import (
+    RecipeValidationError,
+    apply_recipe,
+    list_recipes,
+)
 from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.source_inspection import (
+    derive_extra_column_risk,
+    facts_to_dict,
+    inspect_blob_content,
+)
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
@@ -44,6 +54,7 @@ from elspeth.web.composer.state import (
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
+    ValidationEntry,
     ValidationSummary,
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
@@ -64,6 +75,11 @@ _AUTHORING_VALIDATION_COUNTER = metrics.get_meter(__name__).create_counter(
 _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
+_DEFAULT_SOURCE_VALIDATION_FAILURE: Final[str] = "discard"
+_SOURCE_VALIDATION_FAILURE_DESCRIPTION: Final[str] = (
+    "How to handle source validation failures. Use 'discard' to drop invalid rows without routing. "
+    "Any other value, including 'quarantine', must match a configured output/sink name."
+)
 
 
 class _SemanticEdgeContractPayload(TypedDict):
@@ -557,7 +573,7 @@ ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 35 tools: 11 discovery + 13 mutation + 7 blob tools + 3 secret
+    Returns 39 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
     tools + 1 advisor tool. ``request_advisor_hint`` is the only tool that
     is filtered out of the LLM-visible list when the operator's
     ``composer_advisor_enabled`` flag is False (the default) — see
@@ -633,8 +649,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "options": {"type": "object", "description": "Plugin-specific config."},
                     "on_validation_failure": {
                         "type": "string",
-                        "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                        "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                     },
                 },
                 "required": ["plugin", "on_success", "options", "on_validation_failure"],
@@ -961,8 +976,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                             },
                             "on_validation_failure": {
                                 "type": "string",
-                                "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                                "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
+                                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
                             },
                             "inline_blob": {
                                 "type": "object",
@@ -1262,6 +1276,21 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "get_audit_info",
+            "description": (
+                "Return facts about ELSPETH's Landscape audit trail. Call this BEFORE "
+                "answering any user question that mentions audit logging, audit "
+                "database, SQLite/Postgres audit, audit backend, audit export, "
+                "Landscape, or 'how do I record what the pipeline did'. Audit is "
+                "mandatory and operator-managed; the composer cannot configure the "
+                "backend (security boundary — see yaml_generator.py:179, fix S1). "
+                "Returns enabled status, composer_modifiable flag, and a canonical "
+                "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
+                "that is operator-internal and intentionally not surfaced to the LLM."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        {
             "name": "preview_pipeline",
             "description": "Preview the current pipeline configuration — returns "
             "validation status, source summary, and node/output overview "
@@ -1334,9 +1363,8 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     },
                     "on_validation_failure": {
                         "type": "string",
-                        "description": "How to handle validation failures. Use 'discard' to drop invalid rows, "
-                        "'quarantine' for the built-in quarantine sink, or a sink name to divert failed rows.",
-                        "default": "quarantine",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                        "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
                     },
                     "options": {
                         "type": "object",
@@ -1424,6 +1452,64 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                     "blob_id": {
                         "type": "string",
                         "description": "ID of the blob to read.",
+                    },
+                },
+                "required": ["blob_id"],
+            },
+        },
+        {
+            "name": "list_recipes",
+            "description": (
+                "List the registered pipeline recipes — deterministic scaffolds for common simple "
+                "intents. Each recipe declares its required slots; apply_pipeline_recipe then "
+                "instantiates the recipe with operator-supplied slot values. Recipes accelerate "
+                "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
+                "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "apply_pipeline_recipe",
+            "description": (
+                "Apply a registered pipeline recipe with operator-supplied slot values and replace "
+                "the current pipeline state with the resulting configuration. Slots are validated "
+                "against the recipe's declared schema before scaffolding — invalid slots are "
+                "rejected with a repair hint. Call list_recipes to discover available recipes and "
+                "their slot schemas. The resulting state is identical to a hand-authored "
+                "set_pipeline call; the model can refine via patch_*_options afterwards."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipe_name": {
+                        "type": "string",
+                        "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
+                    },
+                    "slots": {
+                        "type": "object",
+                        "description": "Operator-supplied slot values; must match the recipe's slot schema",
+                    },
+                },
+                "required": ["recipe_name", "slots"],
+            },
+        },
+        {
+            "name": "inspect_source",
+            "description": (
+                "Return bounded structural facts about a blob-backed source: source kind, observed "
+                "headers, sample row count, inferred scalar types per column, URL candidates, and "
+                "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
+                "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
+                "tell you which fields the source actually contains and what numeric coercion is "
+                "needed before any gate or value_transform numeric op. Never returns raw row "
+                "content; only summary facts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {
+                        "type": "string",
+                        "description": "ID of the blob to inspect.",
                     },
                 },
                 "required": ["blob_id"],
@@ -1615,14 +1701,53 @@ def _failure_result(
     state: CompositionState,
     error_msg: str,
 ) -> ToolResult:
-    """Build a ToolResult for a failed mutation."""
-    validation = state.validate()
+    """Build a ToolResult for a failed mutation.
+
+    The rejection reason (``error_msg``) is also prepended to
+    ``validation.errors`` as a synthetic ``ValidationEntry`` with
+    component ``"rejected_mutation"``. State-level errors from
+    ``state.validate()`` (e.g. "No source configured.") describe the
+    *unchanged* state and follow the rejection reason. This puts the
+    action-rejection signal ahead of the stale-state signal for any
+    consumer that reads ``validation.errors`` in array order — closing
+    the convergence gap surfaced by composer session 58d7ede3 where the
+    LLM repeated a near-identical ``set_pipeline`` because the array led
+    with "No source configured." instead of the real option-shape
+    error.
+    """
+    validation = _prepend_rejection_entry(state.validate(), error_msg)
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
         data={"error": error_msg},
+    )
+
+
+def _prepend_rejection_entry(
+    base: ValidationSummary,
+    error_msg: str,
+) -> ValidationSummary:
+    """Return a ValidationSummary with a leading rejected_mutation entry.
+
+    Preserves all non-error fields (warnings, suggestions,
+    edge_contracts, semantic_contracts) verbatim. ``is_valid`` is
+    forced to False because a rejection entry is by construction a
+    high-severity error.
+    """
+    rejection = ValidationEntry(
+        component="rejected_mutation",
+        message=error_msg,
+        severity="high",
+    )
+    return ValidationSummary(
+        is_valid=False,
+        errors=(rejection, *base.errors),
+        warnings=base.warnings,
+        suggestions=base.suggestions,
+        edge_contracts=base.edge_contracts,
+        semantic_contracts=base.semantic_contracts,
     )
 
 
@@ -1633,7 +1758,23 @@ def _credential_wiring_contract_failure(
     component_type: str,
     options: Any,
 ) -> ToolResult | None:
-    """Reject literal credentials before a mutation writes them into state."""
+    """Reject literal credentials before a mutation writes them into state.
+
+    The returned message advertises the *inline* secret_ref form first
+    because that is the only path that works for new nodes:
+
+    - ``set_pipeline`` is atomic, so a node whose options omit a required
+      credential field fails pydantic validation and the whole mutation
+      rolls back — meaning ``wire_secret_ref`` cannot be used to attach
+      the secret post-hoc (the node never lands in state).
+    - ``collect_credential_field_violations`` short-circuits on
+      ``{secret_ref: NAME}`` markers and ``set_pipeline`` strips those
+      markers before pydantic validation, so passing the marker inline
+      in the node's options is the supported new-node path.
+
+    The post-hoc ``wire_secret_ref`` sequence is still documented as
+    the secondary path for nodes that already exist in state.
+    """
     fields = tuple(dict.fromkeys(collect_credential_field_violations(options)))
     if not fields:
         return None
@@ -1642,18 +1783,28 @@ def _credential_wiring_contract_failure(
     field_list = ", ".join(credential_fields)
     repair_sequence = ("list_secret_refs", "validate_secret_ref", "wire_secret_ref")
     repair_text = "list_secret_refs -> validate_secret_ref -> wire_secret_ref"
-    validation = state.validate()
+    inline_instruction = (
+        "Set `<field>: {secret_ref: NAME}` directly in the node's options "
+        "when calling set_pipeline / upsert_node. (The marker is stripped "
+        "before option validation and resolved at execution time.)"
+    )
+    post_hoc_instruction = f"Alternatively, after the node already exists in state, call {repair_text} to attach the marker post-hoc."
+    error_msg = (
+        f"Credential field(s) contain literal value(s): {field_list}. "
+        f"Literal credential values were not stored. {inline_instruction} "
+        f"{post_hoc_instruction}"
+    )
+    # Symmetric with _failure_result: lead validation.errors with the
+    # rejection reason so LLMs reading the array in order see the
+    # actionable message before any stale-state errors.
+    validation = _prepend_rejection_entry(state.validate(), error_msg)
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
         data={
-            "error": (
-                f"Credential field(s) contain literal value(s): {field_list}. "
-                "Literal credential values were not stored. "
-                f"Use {repair_text} to attach a deferred {{secret_ref: NAME}} marker."
-            ),
+            "error": error_msg,
             "credential_fields": credential_fields,
             "components": (
                 {
@@ -1663,11 +1814,14 @@ def _credential_wiring_contract_failure(
                 },
             ),
             "repair": {
-                "required_tool_sequence": repair_sequence,
-                "instruction": (
-                    "List available secret refs, validate the chosen name, then wire it "
-                    "to the named credential field. Do not type credential values into options."
-                ),
+                "inline_form": {
+                    "instruction": inline_instruction,
+                    "example_options": {field: {"secret_ref": "<NAME>"} for field in fields},
+                },
+                "post_hoc_form": {
+                    "instruction": post_hoc_instruction,
+                    "tool_sequence": repair_sequence,
+                },
             },
         },
     )
@@ -1710,7 +1864,8 @@ def _vf_destination_note(
         return {
             "note": (
                 f"on_validation_failure='{on_vf}' does not match any configured output. "
-                f"Add an output named '{on_vf}' before running the pipeline. "
+                "Use 'discard' to drop invalid rows without routing, or "
+                f"add an output named '{on_vf}' before running the pipeline. "
                 f"Current outputs: {current}."
             ),
         }
@@ -2030,8 +2185,7 @@ def _prevalidate_plugin_options(
             # PluginKind is Literal["source", "transform", "sink"] — unreachable.
             raise AssertionError(f"_prevalidate_plugin_options: unexpected plugin_type={plugin_type!r}")
     except UnknownPluginTypeError:
-        # Plugin name not in registry — let engine validation catch it later.
-        return None
+        return f"Unknown {plugin_type} plugin '{plugin_name}'. Call list_{plugin_type}s to see available {plugin_type} plugins."
     except ValueError as exc:
         # Config model selection raised (e.g. unknown LLM provider) — surface it.
         return f"Invalid options for {plugin_type} '{plugin_name}': {exc}"
@@ -2192,7 +2346,7 @@ def validate_composer_file_sink_collision_policy(
 def _prevalidate_source(
     plugin_name: str,
     options: Mapping[str, Any],
-    on_validation_failure: str = "quarantine",
+    on_validation_failure: str = _DEFAULT_SOURCE_VALIDATION_FAILURE,
 ) -> str | None:
     """Pre-validate source options, injecting on_validation_failure and filtering web-only keys."""
     filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
@@ -2251,7 +2405,7 @@ def _execute_set_source(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    on_vf = args.get("on_validation_failure", "quarantine")
+    on_vf = args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     prevalidation_error = _prevalidate_source(plugin, options, on_vf)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
@@ -2588,7 +2742,7 @@ def _execute_set_source_from_blob(
             expected="an object",
             actual_type=type(caller_options).__name__,
         )
-    on_vf = arguments.get("on_validation_failure", "quarantine")
+    on_vf = arguments.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     resolved = _resolve_source_blob(
         blob_id=arguments["blob_id"],
         explicit_plugin=arguments.get("plugin"),
@@ -3392,6 +3546,31 @@ def _execute_delete_blob(
     return _discovery_result(state, {"blob_id": blob_id, "deleted": True})
 
 
+def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
+    """Verify on-disk blob bytes match the stored content_hash.
+
+    Tier-1 invariant: a ``ready`` blob's stored ``content_hash`` is
+    enforced non-NULL by the ``ck_blobs_ready_hash`` CHECK constraint
+    at write time. Reading NULL here is therefore a DB-integrity
+    anomaly (someone bypassed the constraint, the row was tampered
+    with, or the constraint is missing in this database). A SHA-256
+    mismatch between recomputed bytes and stored hash is filesystem
+    corruption, tampering, or a write-path bug.
+
+    Both conditions ESCALATE via ``AuditIntegrityError`` /
+    ``BlobIntegrityError`` rather than degrading to a soft result;
+    silently passing through unverified bytes would let the audit
+    trail confidently record decisions made on garbage.
+    """
+    blob_id = blob["id"]
+    stored_hash = blob["content_hash"]
+    if stored_hash is None:
+        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
+    actual_hash = content_hash(data)
+    if not hmac.compare_digest(actual_hash, stored_hash):
+        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+
+
 def _execute_get_blob_content(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -3418,6 +3597,8 @@ def _execute_get_blob_content(
        (our hash, our file) indicating filesystem corruption,
        tampering, or a write-path bug; it must ESCALATE via
        ``BlobIntegrityError``, not degrade to a tool-failure result.
+       Implemented by ``_verify_blob_content_integrity`` (shared with
+       ``_execute_inspect_source`` and ``compute_proof_diagnostics``).
     3. **Decode safety** — the MIME allowlist admits encodings other
        than UTF-8 (``text/csv`` is frequently latin-1 in the wild).
        ``UnicodeDecodeError`` is converted to a ``_failure_result``
@@ -3452,16 +3633,9 @@ def _execute_get_blob_content(
 
     data = storage_path.read_bytes()
 
-    # Guard 2 — integrity.  A ``ready`` blob must always have a
-    # content_hash (enforced by the ``ck_blobs_ready_hash`` CHECK
-    # constraint at write time); NULL here is a DB-integrity anomaly
-    # and must escalate, not silently fall through to a bytes-return.
-    stored_hash = blob["content_hash"]
-    if stored_hash is None:
-        raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
-    if not hmac.compare_digest(actual_hash, stored_hash):
-        raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
+    # Guard 2 — integrity.  Shared helper: NULL stored_hash escalates
+    # via AuditIntegrityError, mismatch via BlobIntegrityError.
+    _verify_blob_content_integrity(blob, data)
 
     # Guard 3 — decode safety.  Non-UTF-8 bytes are a Tier-3 external
     # input condition (the operator supplied content in an encoding we
@@ -3493,6 +3667,170 @@ def _execute_get_blob_content(
             "size_bytes": blob["size_bytes"],
         },
     )
+
+
+def _execute_inspect_source(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Inspect a blob-backed source and return bounded structural facts.
+
+    Mirrors the lifecycle and integrity guards of ``_execute_get_blob_content``
+    (only ``ready`` blobs are readable; SHA-256 verified; UnicodeDecodeError
+    surfaced as tool-failure) but returns ``SourceInspectionFacts`` rather
+    than raw content. Reads at most 8 KiB and parses at most 100 rows.
+
+    Never returns raw row content — only summary facts (headers, inferred
+    types, URL candidates, warnings, redacted identity).
+    """
+    if session_engine is None or session_id is None:
+        return _failure_result(state, "Blob tools require session context.")
+
+    blob_id = arguments["blob_id"]
+    blob = _sync_get_blob(session_engine, blob_id, session_id)
+    if blob is None:
+        return _failure_result(state, f"Blob '{blob_id}' not found.")
+
+    blob_status = blob["status"]
+    if blob_status != "ready":
+        return _failure_result(
+            state,
+            f"Blob '{blob_id}' is not readable — status is '{blob_status}', expected 'ready'.",
+        )
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        return _failure_result(state, f"Blob storage file missing for '{blob_id}'.")
+
+    data = storage_path.read_bytes()
+
+    _verify_blob_content_integrity(blob, data)
+
+    blob_id_warning: str | None = None
+    try:
+        blob_uuid = UUID(blob_id)
+    except ValueError:
+        blob_uuid = None
+        truncated = blob_id if len(blob_id) <= 64 else blob_id[:64] + "..."
+        blob_id_warning = (
+            f"blob_id_not_uuid: matched blob_id {truncated!r} is not a parseable "
+            "UUID — redacted_identity will omit blob_id and surface "
+            "content_hash_prefix only"
+        )
+
+    facts = inspect_blob_content(
+        content=data,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        blob_id=blob_uuid,
+        content_hash=blob["content_hash"],
+    )
+    if blob_id_warning is not None:
+        facts = replace(facts, warnings=(blob_id_warning, *facts.warnings))
+    return _discovery_result(state, facts_to_dict(facts))
+
+
+def _execute_list_recipes(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return discovery metadata for every registered pipeline recipe."""
+    return _discovery_result(state, {"recipes": list_recipes()})
+
+
+def _execute_apply_pipeline_recipe(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
+
+    ``set_pipeline`` is full state replacement, so a ``replaced_pipeline_note`` is
+    emitted to make the destructive replacement visible to the LLM/operator. The
+    note is suppressed when the prior pipeline is empty — a no-op replacement
+    needs no flag, and emitting one would be noise on a fresh-session apply.
+    """
+    recipe_name = arguments.get("recipe_name")
+    raw_slots = arguments.get("slots")
+    if not isinstance(recipe_name, str) or not recipe_name:
+        return _failure_result(
+            state,
+            "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
+        )
+    if not isinstance(raw_slots, Mapping):
+        return _failure_result(
+            state,
+            "apply_pipeline_recipe requires 'slots' as a JSON object whose keys match the recipe's declared slot names.",
+        )
+
+    try:
+        pipeline_args = apply_recipe(recipe_name, dict(raw_slots))
+    except RecipeValidationError as exc:
+        return _failure_result(state, str(exc))
+
+    # Capture pre-replacement counts BEFORE delegating to the destructive
+    # set_pipeline path. Frozen-dataclass fields, so capturing the integers
+    # now is sufficient — the post-call result.updated_state is a fresh
+    # CompositionState produced by set_pipeline.
+    pre_source_present = state.source is not None
+    pre_node_count = len(state.nodes)
+    pre_output_count = len(state.outputs)
+
+    # Delegate to the existing set_pipeline executor — recipes produce the
+    # exact arguments shape set_pipeline accepts, so validation and state
+    # mutation flow through the canonical mutation path.
+    result = _execute_set_pipeline(
+        pipeline_args,
+        state,
+        catalog,
+        data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+
+    # Only annotate successful replacements over a non-empty prior state.
+    # On failure, set_pipeline returned ``state`` unchanged and the note
+    # would be misleading. On a fresh-session apply, there is nothing to
+    # call out and a note would be noise.
+    if not result.success:
+        return result
+    if not (pre_source_present or pre_node_count or pre_output_count):
+        return result
+
+    note = (
+        f"apply_pipeline_recipe replaced the existing pipeline "
+        f"(prior state had source={'set' if pre_source_present else 'unset'}, "
+        f"{pre_node_count} node(s), {pre_output_count} output(s)). "
+        "Recipes are full-state scaffolds; the prior composition was discarded."
+    )
+
+    # Preserve any existing data payload from set_pipeline (e.g. inline-blob
+    # creation summary) by merging into a single dict. set_pipeline's
+    # ``data`` is currently None on the recipe path because recipes don't
+    # use inline_blob, but merging is forward-compatible.
+    existing_data = result.data
+    if existing_data is None:
+        merged_data: Any = {"replaced_pipeline_note": note}
+    elif isinstance(existing_data, Mapping):
+        merged_data = {**dict(existing_data), "replaced_pipeline_note": note}
+    else:
+        # set_pipeline contract: ``data`` is None or a Mapping. Anything
+        # else is a contract drift bug — surface the note alongside in a
+        # wrapper rather than silently dropping either.
+        merged_data = {"replaced_pipeline_note": note, "set_pipeline_data": existing_data}
+
+    return replace(result, data=merged_data)
 
 
 # Blob tool handler type — extended signature with session context
@@ -3675,6 +4013,7 @@ def _execute_set_pipeline(
     resolved_source_blob: _ResolvedSourceBlob | None = None
     source_blob_id = src_args.get("blob_id")
     inline_blob = src_args.get("inline_blob")
+    src_on_vf = src_args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
     if source_blob_id is not None and inline_blob is not None:
         return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
     if source_blob_id is not None:
@@ -3688,7 +4027,7 @@ def _execute_set_pipeline(
             blob_id=source_blob_id,
             explicit_plugin=src_plugin,
             caller_options=src_options,
-            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            on_validation_failure=src_on_vf,
             state=state,
             catalog=catalog,
             session_engine=session_engine,
@@ -3741,7 +4080,6 @@ def _execute_set_pipeline(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    src_on_vf = src_args.get("on_validation_failure", "quarantine")
     src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
     if src_prevalidation is not None:
         return _failure_result(state, src_prevalidation)
@@ -3838,7 +4176,7 @@ def _execute_set_pipeline(
             plugin=src_plugin,
             on_success=src_args["on_success"],
             options=src_options,
-            on_validation_failure=src_args.get("on_validation_failure", "quarantine"),
+            on_validation_failure=src_on_vf,
         )
 
         node_specs = []
@@ -4315,6 +4653,42 @@ _VALIDATION_ERROR_PATTERNS: list[tuple[str, str, str]] = [
 ]
 
 
+def _extract_validator_expected_hint(error_text: str) -> str | None:
+    """Pull the ``Expected ...`` span out of a validator error string.
+
+    Pydantic and our schema-spec validators frequently emit errors like
+    ``"Field spec at index 0 is a dict with 2 keys. Expected single-key
+    dict like {'field_name': 'type'} or a string like 'field_name: type'."``.
+    The static catalogue fix below the substring discards that hint, so
+    the model only sees ``"Use get_pipeline_state ... patch_source_options"``
+    — which doesn't tell it what shape to actually emit. Returning the
+    ``Expected ...`` span verbatim lets the caller append it to
+    ``suggested_fix`` so the model can copy the shape directly.
+
+    The hint terminates at the next sentence boundary (``.`` followed by
+    whitespace or end-of-string) so a trailing ``"Got X. Other noise."``
+    doesn't get swept up.
+    """
+    idx = error_text.find("Expected ")
+    if idx == -1:
+        return None
+    rest = error_text[idx:]
+    end = len(rest)
+    for i, ch in enumerate(rest):
+        if ch == "." and (i + 1 == len(rest) or rest[i + 1].isspace()):
+            end = i + 1
+            break
+    return rest[:end].strip()
+
+
+def _augment_with_expected_hint(fix: str, error_text: str) -> str:
+    """Append the validator ``Expected ...`` hint to ``fix`` when present."""
+    hint = _extract_validator_expected_hint(error_text)
+    if hint is None:
+        return fix
+    return f"{fix} {hint}"
+
+
 def _execute_explain_validation_error(
     args: dict[str, Any],
     state: CompositionState,
@@ -4333,7 +4707,7 @@ def _execute_explain_validation_error(
                 data={
                     "error_text": error_text,
                     "explanation": explanation,
-                    "suggested_fix": fix,
+                    "suggested_fix": _augment_with_expected_hint(fix, error_text),
                 },
             )
     # No match — return a generic response
@@ -4345,7 +4719,10 @@ def _execute_explain_validation_error(
         data={
             "error_text": error_text,
             "explanation": "This error is not in the known pattern catalogue.",
-            "suggested_fix": "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+            "suggested_fix": _augment_with_expected_hint(
+                "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+                error_text,
+            ),
         },
     )
 
@@ -4431,6 +4808,53 @@ def _execute_get_plugin_assistance(
         "suggested_fixes": list(assistance.suggested_fixes),
         "examples": [_serialize_plugin_assistance_example(ex) for ex in assistance.examples],
         "composer_hints": list(assistance.composer_hints),
+    }
+    return _discovery_result(state, payload)
+
+
+def _execute_get_audit_info(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return constant facts about the Landscape audit trail.
+
+    Audit is mandatory (`LandscapeSettings` rejects `enabled=false` at
+    config validation time) and the backend URL is operator-managed via
+    `WebSettings.get_landscape_url()` — security fix S1, see
+    `web/composer/yaml_generator.py:179`. Letting the composer set the
+    audit backend would let a user prompt redirect the audit trail to an
+    attacker DB, disable encryption, or split audit across stores.
+
+    The returned payload is a constant — no `WebSettings` access — so
+    operator-internal config (URL, backend type, encryption-key env var)
+    never reaches the LLM context. The model paraphrases `summary`; it
+    does not need the URL itself.
+    """
+    payload = {
+        "enabled": True,
+        "composer_modifiable": False,
+        "summary": (
+            "Landscape audit is mandatory and always on for every pipeline run. "
+            "The audit backend (database type, location, encryption) is configured "
+            "by the operator at deploy time and is intentionally NOT addressable "
+            "from the composer — letting the composer set it would be a security "
+            "regression (audit-DSN injection, encryption bypass, audit split-brain). "
+            "When a user asks for 'audit logging', 'SQLite audit', or similar: "
+            "acknowledge that audit is already enabled for every run, do NOT add a "
+            "sink shape for it, and do NOT silently remove an audit-shaped node by "
+            "treating it as 'unconnected'. To inspect past runs, point the user at "
+            "the Landscape MCP forensic tools."
+        ),
+        "audit_export_summary": (
+            "A separate optional feature ('landscape.export') can copy each run's "
+            "audit data to an additional sink for offline review. This is also "
+            "operator-configured and is not currently composer-controllable. If a "
+            "user asks for 'export the audit data to a file', explain that this is "
+            "an operator-side configuration and is not part of the pipeline the "
+            "composer is building."
+        ),
     }
     return _discovery_result(state, payload)
 
@@ -4632,6 +5056,252 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
     }
 
 
+# Canonical registry of every diagnostic code ``compute_proof_diagnostics``
+# may emit at ``severity='blocking'``. The skill markdown that drives the
+# composer LLM cites these codes by name, and the forced-repair loop keys off
+# ``severity == 'blocking'`` to decide whether to inject a repair message.
+# Drift between this set and the actual emission sites would silently break
+# the LLM's expected vocabulary, so ``_blocking_diagnostic`` enforces that
+# every blocking dict's ``code`` appears here at construction time.
+_BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "csv_duplicate_headers",
+        "csv_fixed_schema_omits_observed_columns",
+        "text_source_url_without_web_scrape",
+        "source_inspection_failed",
+    }
+)
+
+
+def _blocking_diagnostic(
+    *,
+    code: str,
+    message: str,
+    suggested_repair: str,
+    evidence_locator: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a blocking diagnostic dict and assert the code is registered.
+
+    Offensive: a contributor who adds a new blocker without registering it in
+    ``_BLOCKING_DIAGNOSTIC_CODES`` (and the matching skill-markdown vocabulary)
+    crashes immediately rather than shipping an unrecognised code into the
+    audit trail and the LLM's repair-message context.
+    """
+    if code not in _BLOCKING_DIAGNOSTIC_CODES:
+        raise AssertionError(
+            f"blocking diagnostic code {code!r} is not registered in "
+            f"_BLOCKING_DIAGNOSTIC_CODES. Add it there (and to the skill-"
+            f"markdown vocabulary the composer LLM consumes) before emitting "
+            f"a blocking diagnostic with this code."
+        )
+    return {
+        "code": code,
+        "severity": "blocking",
+        "message": message,
+        "suggested_repair": suggested_repair,
+        "evidence_locator": evidence_locator,
+    }
+
+
+def compute_proof_diagnostics(
+    state: CompositionState,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Compute machine-readable proof diagnostics for a composer state.
+
+    Promotes ``preview_pipeline`` from a "state validates" check into a
+    "state is plausibly runnable against observed input" proof. Returns a
+    machine-readable list of diagnostics — each entry has::
+
+        {
+            "code": "csv_fixed_schema_omits_observed_columns",
+            "severity": "blocking" | "warning" | "info",
+            "message": "human-readable description",
+            "suggested_repair": "tool/options the LLM should call",
+            "evidence_locator": {"source": "...", "node_id": "...", ...},
+        }
+
+    Diagnostics surfaced:
+
+      * ``csv_fixed_schema_omits_observed_columns`` — fixed CSV schema +
+        on_validation_failure=discard + at least one observed column
+        absent from declared fields. The combination silently discards
+        every row, which is the #1 historical convergence-failure mode.
+      * ``text_source_url_without_web_scrape`` — text source whose blob
+        content is a single URL but no web_scrape node downstream. The
+        URL string itself reaches sinks instead of the URL's content.
+      * ``source_inspection_warning`` — every warning surfaced by
+        ``inspect_blob_content`` is mirrored here at ``info`` severity
+        so the model sees them in the same array as blocking issues.
+
+    Bounded I/O: at most one blob read per call, bounded by
+    ``inspect_blob_content``'s 8 KiB / 100 row caps.
+
+    No-op (returns an empty list) if the source is not blob-backed or
+    if session context is absent.
+    """
+    diagnostics: list[dict[str, Any]] = []
+
+    source = state.source
+    if source is None:
+        return diagnostics
+
+    # Only blob-backed sources are inspectable from preview_pipeline; for
+    # path-based sources we have no bytes to peek at. SourceSpec.options is
+    # internally typed as Mapping[str, Any] (Tier-1 dataclass invariant — no
+    # isinstance probe needed); see _proof_repair_is_applicable for the
+    # canonical pattern this site mirrors.
+    blob_id = source.options.get("blob_ref")
+    if blob_id is None or session_engine is None or session_id is None:
+        return diagnostics
+
+    blob = _sync_get_blob(session_engine, str(blob_id), session_id)
+    # ``blob`` is a BlobToolRecord (TypedDict produced by
+    # ``_blob_row_to_tool_dict`` from a validated blobs row). Direct
+    # subscript access is mandatory — a missing key is a Tier-1
+    # contract violation in our own dict shape, not external data.
+    if blob is None or blob["status"] != "ready":
+        return diagnostics
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        diagnostics.append(
+            _blocking_diagnostic(
+                code="source_inspection_failed",
+                message=(f"Source blob '{blob_id}' storage file is missing — pipeline cannot run until the blob is re-uploaded."),
+                suggested_repair="create_blob with the original content and re-wire via set_source_from_blob",
+                evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+            )
+        )
+        return diagnostics
+
+    # Tier 1 (our data, our file): an OSError between exists() and
+    # read_bytes() is a real anomaly (concurrent delete, fs corruption,
+    # permission revocation). Per CLAUDE.md offensive-programming
+    # policy, let it propagate so the operator sees an informative
+    # exception rather than a synthesised soft-degraded diagnostic
+    # that could let downstream act on absent bytes.
+    content = storage_path.read_bytes()
+
+    # Tier 1 integrity verification — same shared helper as the two
+    # other composer-tool blob readers. Without this, the proof step
+    # would feed unverified bytes into ``inspect_blob_content`` and
+    # repair-loop, undermining the audit trail's "decisions made on
+    # verified inputs" invariant.
+    _verify_blob_content_integrity(blob, content)
+
+    facts = inspect_blob_content(
+        content=content,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        content_hash=blob["content_hash"],
+    )
+
+    # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
+    if facts.source_kind in {"csv", "json", "jsonl"}:
+        # source.options is Tier-1 (Mapping[str, Any]); the *value* at "schema"
+        # is unstructured and may be absent, so the inner shape probes below
+        # remain.
+        schema = source.options.get("schema")
+        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+            declared = schema.get("fields") or ()
+            if isinstance(declared, (list, tuple)):
+                missing = derive_extra_column_risk(facts, tuple(declared))
+                if missing and source.on_validation_failure == "discard":
+                    diagnostics.append(
+                        _blocking_diagnostic(
+                            code="csv_fixed_schema_omits_observed_columns",
+                            message=(
+                                f"Source schema is mode=fixed but omits observed columns "
+                                f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
+                                "Combined with on_validation_failure='discard', every row will be "
+                                "dropped because each contains an undeclared column."
+                            ),
+                            suggested_repair=(
+                                "patch_source_options with schema.mode='flexible' to accept extra "
+                                "columns, OR add the missing columns to schema.fields, OR set "
+                                "on_validation_failure to a configured output for inspection."
+                            ),
+                            evidence_locator={
+                                "source": "blob",
+                                "blob_id": str(blob_id),
+                                "missing_columns": list(missing),
+                                "observed_columns": list(facts.observed_headers or ()),
+                            },
+                        )
+                    )
+
+    # 2. Text source containing a single URL but no web_scrape downstream.
+    if facts.source_kind == "text" and facts.url_candidates:
+        node_plugins = {(n.plugin or "").lower() for n in state.nodes}
+        if "web_scrape" not in node_plugins:
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="text_source_url_without_web_scrape",
+                    message=(
+                        f"Source blob contains URL(s) {list(facts.url_candidates)} but no "
+                        "web_scrape transform is wired downstream. The URL string itself will "
+                        "flow to sinks, not the URL's content."
+                    ),
+                    suggested_repair=(
+                        "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
+                        "input: <source on_success>, options: {url_field: '<column>'}}) and route "
+                        "the source on_success to it."
+                    ),
+                    evidence_locator={
+                        "source": "blob",
+                        "blob_id": str(blob_id),
+                        "url_candidates": list(facts.url_candidates),
+                    },
+                )
+            )
+
+    # 3. Surface inspection warnings as info-severity diagnostics so the model
+    #    sees them in the same array as blocking issues. These are *advisory*
+    #    only — the model can ignore them if the operator's intent justifies.
+    #
+    #    Exception: ``csv_duplicate_headers`` is promoted to blocking. Duplicate
+    #    headers cause silent column collapse in csv.DictReader (last-write-
+    #    wins) and similar libraries, fabricating a single column from multiple
+    #    source columns. That is a Tier-1 audit-integrity violation — the
+    #    audit trail would silently contain data that "looks single-column"
+    #    when the source had two — and must force the repair loop, not pass
+    #    through as advisory. The repair vocabulary is: rename headers,
+    #    declare ``columns`` explicitly, configure ``field_mapping``, or set
+    #    ``on_validation_failure`` to a configured quarantine output.
+    for warning in facts.warnings:
+        if warning.startswith("csv_duplicate_headers:"):
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="csv_duplicate_headers",
+                    message=warning,
+                    suggested_repair=(
+                        "Rename the duplicate header(s) at the source, OR declare "
+                        "explicit `columns` in the source options, OR configure "
+                        "`field_mapping` to disambiguate the collapsed names, OR "
+                        "set `on_validation_failure` to a configured quarantine "
+                        "output so the silent column collapse does not poison the "
+                        "audit trail."
+                    ),
+                    evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+                )
+            )
+            continue
+        diagnostics.append(
+            {
+                "code": "source_inspection_warning",
+                "severity": "info",
+                "message": warning,
+                "suggested_repair": None,
+                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
+            }
+        )
+
+    return diagnostics
+
+
 def _execute_preview_pipeline(
     args: dict[str, Any],
     state: CompositionState,
@@ -4639,12 +5309,16 @@ def _execute_preview_pipeline(
     data_dir: str | None = None,
     *,
     runtime_preflight: RuntimePreflight | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
 ) -> ToolResult:
     """Preview pipeline configuration — dry-run validation with source summary.
 
-    V1: Returns validation result + source/node/output summary without
-    executing. Full data-flow preview (actually running the source and
-    returning sample rows) is a future enhancement.
+    Returns ``authoring_validation`` (Stage 1), ``runtime_preflight``
+    (Stage 2 from the caller-supplied callback), and ``proof_diagnostics``
+    (Stage 3 — operator-input-aware proof against the observed source
+    blob). The presence of any blocking ``proof_diagnostics`` entry means
+    ``is_valid=False`` even when authoring + runtime checks pass.
     """
     validation = state.validate()
     _AUTHORING_VALIDATION_COUNTER.add(
@@ -4654,8 +5328,21 @@ def _execute_preview_pipeline(
     authoring_payload = _authoring_validation_payload(state, validation)
     runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
 
+    proof_diagnostics = compute_proof_diagnostics(
+        state,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+    has_blocking_proof = any(d["severity"] == "blocking" for d in proof_diagnostics)
+
+    is_valid = validation.is_valid
+    if runtime_result is not None:
+        is_valid = is_valid and runtime_result.is_valid
+    if has_blocking_proof:
+        is_valid = False
+
     summary: dict[str, Any] = {
-        "is_valid": validation.is_valid if runtime_result is None else validation.is_valid and runtime_result.is_valid,
+        "is_valid": is_valid,
         "errors": authoring_payload["errors"],
         "warnings": authoring_payload["warnings"],
         "suggestions": authoring_payload["suggestions"],
@@ -4664,6 +5351,7 @@ def _execute_preview_pipeline(
         "graph_repair_suggestions": authoring_payload["graph_repair_suggestions"],
         "authoring_validation": authoring_payload,
         "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
+        "proof_diagnostics": proof_diagnostics,
         "source": None,
         "node_count": len(state.nodes),
         "output_count": len(state.outputs),
@@ -4731,6 +5419,8 @@ _DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "explain_validation_error": _execute_explain_validation_error,
     "get_plugin_assistance": _execute_get_plugin_assistance,
     "list_models": _execute_list_models,
+    "get_audit_info": _execute_get_audit_info,
+    "list_recipes": _execute_list_recipes,
     "get_pipeline_state": _execute_get_pipeline_state,
     "preview_pipeline": _execute_preview_pipeline,
     "diff_pipeline": _execute_diff_pipeline,
@@ -4768,6 +5458,7 @@ _BLOB_DISCOVERY_TOOLS: dict[str, BlobToolHandler] = {
     "list_blobs": _handle_list_blobs,
     "get_blob_metadata": _handle_get_blob_metadata,
     "get_blob_content": _execute_get_blob_content,
+    "inspect_source": _execute_inspect_source,
 }
 
 _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
@@ -4775,6 +5466,7 @@ _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
     "create_blob": _execute_create_blob,
     "update_blob": _execute_update_blob,
     "delete_blob": _execute_delete_blob,
+    "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
 }
 
 # Secret tools use an extended handler signature with secret_service + user_id kwargs
@@ -4878,6 +5570,8 @@ def execute_tool(
             so execute_tool() stays synchronous.
     """
     # preview_pipeline has an extended signature with runtime_preflight kwarg
+    # plus session context (session_engine, session_id) so the proof step
+    # can inspect blob-backed sources.
     if tool_name == "preview_pipeline":
         return _execute_preview_pipeline(
             arguments,
@@ -4885,6 +5579,8 @@ def execute_tool(
             catalog,
             data_dir,
             runtime_preflight=runtime_preflight,
+            session_engine=session_engine,
+            session_id=session_id,
         )
 
     # diff_pipeline has an extended signature with baseline kwarg

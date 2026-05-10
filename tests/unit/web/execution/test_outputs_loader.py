@@ -173,3 +173,90 @@ def test_load_run_outputs_returns_empty_artifacts_for_unknown_run(tmp_path: Path
         response = load_run_outputs_from_db(db, run_id="nope", landscape_run_id="nope")
         assert response.run_id == "nope"
         assert response.artifacts == []
+
+
+# ── downloadable field tests ─────────────────────────────────────────
+
+
+def test_downloadable_true_when_file_inside_allowlist_and_exists(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    outputs_dir = data_dir / "outputs"
+    outputs_dir.mkdir(parents=True)
+    target = outputs_dir / "results.csv"
+    target.write_bytes(b"col1\n1\n")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-dl-1"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].downloadable is True
+
+
+def test_downloadable_false_when_file_inside_allowlist_but_missing(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    outputs_dir = data_dir / "outputs"
+    outputs_dir.mkdir(parents=True)
+    target = outputs_dir / "vanished.csv"
+    target.write_bytes(b"col1\n1\n")
+    target.unlink()
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-dl-2"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, 7, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].downloadable is False
+    assert response.artifacts[0].exists_now is False
+
+
+def test_downloadable_false_when_file_exists_but_outside_allowlist(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "outputs").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    rogue = elsewhere / "rogue.csv"
+    rogue.write_bytes(b"escaped\n")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-dl-3"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(rogue), "a" * 64, rogue.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].exists_now is True
+    assert response.artifacts[0].downloadable is False
+
+
+def test_downloadable_false_when_data_dir_omitted_safe_default(tmp_path: Path) -> None:
+    # Legacy callers (eval harness, test fixtures) that don't pass
+    # data_dir get downloadable=False everywhere — the safe degraded
+    # response: "the UI can't trust this server to serve bytes."
+    target = tmp_path / "anywhere.csv"
+    target.write_bytes(b"x\n")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-dl-4"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
+
+    assert response.artifacts[0].downloadable is False

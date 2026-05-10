@@ -1078,6 +1078,7 @@ class TestIDORCoverageDrift:
             "evaluate_run_diagnostics",
             "get_run_outputs",
             "get_run_output_content",
+            "get_run_output_preview",
             "cancel_run",
             "get_run_results",
         }
@@ -1866,6 +1867,55 @@ class TestMessageRoutes:
         assert tool_calls[0]["_kind"] == "llm_call_audit"
         assert tool_calls[0]["call"]["provider_cost"] == 0.0037
         assert all("call-tool" not in str(message.get("tool_calls")) for message in messages)
+
+    def test_get_messages_can_include_raw_content_for_intercepted_assistant_turns(self, tmp_path) -> None:
+        """raw_content (model's actual prose) is exposed only when explicitly requested.
+
+        Server-side synthesis at ``service._finalize_no_tool_response`` replaces the
+        model's actual content with a synthetic blocker message (or augments it with an
+        operator-facing suffix) and stashes the original in ``raw_content``.
+        The eval harness needs the original prose to diagnose whether the model converged;
+        the SPA does not. Mirrors the ``include_llm_audit`` query-param pattern.
+        """
+        app, service = _make_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+
+        synthetic = "[ELSPETH-SYSTEM] No composition-state mutation completed successfully…"
+        actual_prose = "I confirmed the file shape from your sample: id→string, message→string, approved→boolean-like."
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(
+                service.add_message(
+                    session_id,
+                    "assistant",
+                    synthetic,
+                    raw_content=actual_prose,
+                )
+            )
+        finally:
+            loop.close()
+
+        default_resp = client.get(f"/api/sessions/{session_id}/messages")
+        assert default_resp.status_code == 200
+        default_messages = default_resp.json()
+        assistant_default = next(m for m in default_messages if m["role"] == "assistant")
+        assert assistant_default["content"] == synthetic
+        assert assistant_default.get("raw_content") is None
+
+        included_resp = client.get(f"/api/sessions/{session_id}/messages?include_raw_content=true")
+        assert included_resp.status_code == 200
+        included_messages = included_resp.json()
+        assistant_included = next(m for m in included_messages if m["role"] == "assistant")
+        assert assistant_included["content"] == synthetic
+        assert assistant_included["raw_content"] == actual_prose
+
+        user_included = next(m for m in included_messages if m["role"] == "user")
+        assert user_included["raw_content"] is None
 
     def test_send_message_llm_call_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
         app, service = _make_app(tmp_path)
@@ -5661,7 +5711,10 @@ def test_assistant_raw_content_is_persisted_but_not_returned(tmp_path) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["message"]["content"].startswith("I cannot mark this pipeline complete")
-    assert "raw_content" not in body["message"]
+    # POST /messages never populates raw_content. The field is part of the schema
+    # (so eval tooling has a stable shape on the parallel GET endpoint), but is
+    # null here — opt-in retrieval is GET-only via ?include_raw_content=true.
+    assert body["message"]["raw_content"] is None
 
     loop = asyncio.new_event_loop()
     try:
@@ -5672,19 +5725,73 @@ def test_assistant_raw_content_is_persisted_but_not_returned(tmp_path) -> None:
     assert assistant.raw_content == "The pipeline is complete and valid."
 
 
-def test_intercepted_assistant_history_is_annotated_without_raw_content() -> None:
-    from elspeth.web.sessions.routes import (
-        _INTERCEPTED_ASSISTANT_HISTORY_PREFIX,
-        _composer_chat_history,
-    )
+def test_non_augmentation_assistant_history_raises_audit_integrity_error() -> None:
+    """Read-path defense: a persisted assistant row whose ``content`` does
+    not start with ``raw_content`` violates the augmentation prefix
+    invariant. All composer synthesis shapes are augmentations
+    post-elspeth-9cfbad6901, so a row that breaks the contract is an
+    audit-integrity violation. Crash on read rather than silently
+    misroute synthesized operator-facing text into LLM history.
+
+    Per project_db_migration_policy, the operator deletes the audit DB
+    on schema-shape changes — so this case should not occur in
+    production after the augmentation-only migration. The defensive
+    check exists to surface a producer regression early rather than
+    quietly serve corrupted history to the LLM.
+    """
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.sessions.routes import _composer_chat_history
 
     session_id = uuid.uuid4()
     message = ChatMessageRecord(
         id=uuid.uuid4(),
         session_id=session_id,
         role="assistant",
-        content="I cannot mark this pipeline complete yet because runtime preflight failed: bad config.",
-        raw_content="The pipeline is complete and valid.",
+        content="Synthetic content that does not start with raw_content.",
+        raw_content="Model's actual prose.",
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+        composition_state_id=None,
+    )
+
+    with pytest.raises(AuditIntegrityError) as exc_info:
+        _composer_chat_history([message])
+
+    detail = str(exc_info.value)
+    assert "Tier 1" in detail
+    assert "augmentation prefix invariant" in detail
+
+
+def test_augmented_assistant_history_returns_unmodified_model_prose() -> None:
+    """Augmentation path: the model's prose is preserved verbatim and an
+    operator-facing suffix is appended. The LLM should see its own prose
+    unmodified on subsequent turns — without this, the model cannot
+    recover its own diagnostic context across turns.
+
+    Discriminator is structural: ``content.startswith(raw_content)``
+    detects synthesis and returns ``raw_content``. All composer
+    synthesis shapes are augmentations post-elspeth-9cfbad6901; a row
+    that breaks the contract raises AuditIntegrityError on read.
+    """
+    from elspeth.web.sessions.routes import _composer_chat_history
+
+    session_id = uuid.uuid4()
+    model_prose = (
+        "I tried to build the workflow but couldn't bind the CSV source — "
+        "the schema requirement is not met. To move forward I need the file."
+    )
+    augmented_content = (
+        model_prose + "\n\n---\n\n[ELSPETH-SYSTEM] The pipeline is still empty — "
+        "the composer did not complete a valid build this turn.\n\n"
+        "Cause: set_pipeline returned success=false: schema: Field required\n\n"
+        "To continue: refine your request..."
+    )
+    message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="assistant",
+        content=augmented_content,
+        raw_content=model_prose,
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
@@ -5692,16 +5799,85 @@ def test_intercepted_assistant_history_is_annotated_without_raw_content() -> Non
 
     history = _composer_chat_history([message])
 
-    assert history == [
-        {
-            "role": "assistant",
-            "content": (
-                _INTERCEPTED_ASSISTANT_HISTORY_PREFIX
-                + "I cannot mark this pipeline complete yet because runtime preflight failed: bad config."
-            ),
-        }
-    ]
-    assert "The pipeline is complete and valid" not in history[0]["content"]
+    # Augmented turns: LLM sees its own prose verbatim, no system suffix —
+    # the suffix is operator-facing only.
+    assert history == [{"role": "assistant", "content": model_prose}]
+    assert "[ELSPETH-SYSTEM]" not in history[0]["content"]
+
+
+def test_augmented_assistant_history_handles_content_equal_to_raw_content() -> None:
+    """Equality case: ``content == raw_content`` is augmentation with an empty
+    suffix (or augmentation that no-ops). The LLM must see its own prose
+    verbatim. Pre-fix a ``len(content) > len(raw_content)`` guard routed
+    equal-length cases away from augmentation; the structural rule
+    ``startswith`` handles the equality case correctly because every
+    string startswith itself.
+    """
+    from elspeth.web.sessions.routes import _composer_chat_history
+
+    session_id = uuid.uuid4()
+    model_prose = "Done — the pipeline validates and is ready to run."
+    message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="assistant",
+        content=model_prose,
+        raw_content=model_prose,
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+        composition_state_id=None,
+    )
+
+    history = _composer_chat_history([message])
+
+    assert history == [{"role": "assistant", "content": model_prose}]
+
+
+def test_augmented_assistant_history_treats_empty_raw_content_as_augmentation() -> None:
+    """Empty-raw-content case for empty-state augmentation: when the model
+    produces empty prose AND the empty-state synthesizer appends an
+    operator-facing suffix, ``raw_content == ""`` and ``content == "<suffix>"``.
+    The LLM must see an empty prior turn (its own actual output), not the
+    operator-facing suffix.
+
+    Pre-fix the discriminator's ``raw_content != ""`` guard short-circuited
+    this case to ``return message.content`` — routing the suffix-only
+    synthetic text into LLM history as if it were the model's own prior
+    answer. The structural discriminator now treats empty-raw as
+    augmentation (``"".startswith("")`` is always True) and returns the
+    empty prose.
+
+    Per elspeth-9cfbad6901, all composer synthesis shapes are
+    augmentations including the non-empty-state preflight-invalid case
+    that previously emitted a replacement; the empty-content + empty-raw
+    + non-empty-state shape now degenerates cleanly to suffix-only
+    output without the prior ambiguity.
+    """
+    from elspeth.web.sessions.routes import _composer_chat_history
+
+    session_id = uuid.uuid4()
+    operator_facing_suffix = (
+        "[ELSPETH-SYSTEM] The pipeline is still empty — the composer did "
+        "not complete a valid build this turn.\n\n"
+        "To continue: refine your request..."
+    )
+    message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="assistant",
+        content=operator_facing_suffix,
+        raw_content="",
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+        composition_state_id=None,
+    )
+
+    history = _composer_chat_history([message])
+
+    # LLM sees its empty prior turn, not the operator-facing suffix.
+    # The suffix stays out of LLM context.
+    assert history == [{"role": "assistant", "content": ""}]
+    assert "[ELSPETH-SYSTEM]" not in history[0]["content"]
 
 
 def test_composer_chat_history_skips_audit_tool_messages() -> None:
@@ -5784,39 +5960,6 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         {"role": "user", "content": "Build a CSV pipeline."},
         {"role": "assistant", "content": "I updated the pipeline."},
     ]
-
-
-def test_send_message_annotates_intercepted_assistant_history_for_llm(tmp_path) -> None:
-    app, service = _make_app(tmp_path)
-    composer = _make_composer_mock(response_text="Retrying from the runtime failure.")
-    app.state.composer_service = composer
-    client = TestClient(app)
-
-    session_resp = client.post("/api/sessions", json={"title": "Chat"})
-    session_id = uuid.UUID(session_resp.json()["id"])
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
-        loop.run_until_complete(
-            service.add_message(
-                session_id,
-                "assistant",
-                "I cannot mark this pipeline complete yet because runtime preflight failed: bad config.",
-                raw_content="The pipeline is complete and valid.",
-            )
-        )
-    finally:
-        loop.close()
-
-    resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Fix it"})
-
-    assert resp.status_code == 200
-    history = composer.compose.call_args.args[1]
-    assert history[1]["role"] == "assistant"
-    assert history[1]["content"].startswith("[ELSPETH composer note: Your previous assistant response was intercepted")
-    assert "runtime preflight failed: bad config" in history[1]["content"]
-    assert "The pipeline is complete and valid" not in history[1]["content"]
 
 
 def test_send_message_does_not_replay_audit_tool_rows_to_composer(tmp_path) -> None:

@@ -295,6 +295,49 @@ describe("Version selector and catalog", () => {
   });
 });
 
+describe("InspectorPanel validation dot colour", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+      stateVersions: [],
+      isLoadingVersions: false,
+    });
+    useExecutionStore.setState({
+      validationResult: null,
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+  });
+
+  it("renders unchecked state in muted text colour, not warning orange", () => {
+    render(<InspectorPanel />);
+
+    const dot = screen.getByLabelText("Not validated");
+    expect(dot.getAttribute("style")).toContain("var(--color-text-muted)");
+    expect(dot.getAttribute("style")).not.toContain("var(--color-warning)");
+  });
+
+  it("renders warning state in warning colour", () => {
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        summary: "Passed with warnings",
+        checks: [],
+        errors: [],
+        warnings: [{ component_id: "src", component_type: "source", message: "x", suggestion: null }],
+      },
+    });
+
+    render(<InspectorPanel />);
+
+    const dot = screen.getByLabelText("Validation passed with warnings");
+    expect(dot.getAttribute("style")).toContain("var(--color-warning)");
+  });
+});
+
 describe("InspectorPanel execution feedback", () => {
   beforeEach(async () => {
     const { executePipeline, fetchRuns } = await import("@/api/client");
@@ -359,5 +402,30 @@ describe("InspectorPanel execution feedback", () => {
         "true",
       ),
     );
+  });
+});
+
+describe("InspectorPanel aria-live scope", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: "s1",
+      compositionState: makeState(),
+      stateVersions: [],
+      isLoadingVersions: false,
+    });
+    useExecutionStore.setState({
+      validationResult: null,
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+  });
+
+  it("does not place aria-live on the tab panel container", () => {
+    render(<InspectorPanel />);
+
+    const tabPanel = screen.getByRole("tabpanel");
+    expect(tabPanel.getAttribute("aria-live")).toBeNull();
   });
 });

@@ -182,9 +182,8 @@ class TestAzureBlobSinkConfigValidation:
             AzureBlobSink(make_config(blob_path="results/{% if unclosed %}/output.csv"))
 
     def test_missing_schema_raises_error(self) -> None:
-        """Missing schema raises PluginConfigError."""
-        # Error message uses alias "schema" not field name "schema_config"
-        with pytest.raises(PluginConfigError, match=r"schema[\s\S]*Field required"):
+        """Missing schema raises PluginConfigError with actionable mode guidance."""
+        with pytest.raises(PluginConfigError) as exc_info:
             AzureBlobSink(
                 {
                     "connection_string": TEST_CONNECTION_STRING,
@@ -192,6 +191,12 @@ class TestAzureBlobSinkConfigValidation:
                     "blob_path": TEST_BLOB_PATH,
                 }
             )
+        message = str(exc_info.value)
+        assert "schema" in message
+        assert "Field required" in message
+        assert "mode: observed" in message
+        assert "fixed" in message
+        assert "flexible" in message
 
     def test_unknown_field_raises_error(self) -> None:
         """Unknown config field raises PluginConfigError."""

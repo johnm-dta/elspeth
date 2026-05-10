@@ -52,7 +52,7 @@ function AvailabilityDot({ available }: { available: boolean }) {
  *
  * SECURITY:
  * - Value input uses type="password" — no browser autocomplete for the secret value.
- * - Value field is cleared immediately after successful submission.
+ * - Value field is cleared immediately after submission, whether the API call succeeds or fails.
  * - The store never retains the value after the API call completes.
  * - No "show password" toggle is provided.
  */
@@ -83,12 +83,18 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
       e.preventDefault();
       if (!name.trim() || !value) return;
       setIsSubmitting(true);
-      await createSecret(name.trim(), value);
-      // SECURITY: clear value immediately after submission — it must never
-      // linger in component state or the store after the API call.
-      setValue("");
-      setName("");
-      setIsSubmitting(false);
+      try {
+        await createSecret(name.trim(), value);
+      } catch {
+        // createSecret does not re-throw — the store catches and sets state.error.
+        // This catch is defensive in case that contract changes; it never fires today.
+      } finally {
+        // SECURITY: clear value immediately — it must never linger in component
+        // state regardless of whether the API call succeeded or failed.
+        setValue("");
+        setName("");
+        setIsSubmitting(false);
+      }
     },
     [name, value, createSecret],
   );

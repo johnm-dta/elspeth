@@ -52,6 +52,111 @@ summary_cost = {
     "costed_call_count": 0,
     "sources": set(),
 }
+summary_fidelity = {
+    "channel1_in_character": 0,
+    "channel1_drift": 0,
+    "channel1_exempt": 0,
+    "channel1_unavailable": 0,
+    "channel2_in_character": 0,
+    "channel2_out_of_character": 0,
+    "channel2_skipped": 0,
+    "channel2_unavailable": 0,
+    "total_actionable_drift_events": 0,
+    "total_judge_drift_events": 0,
+}
+summary_rgr = {
+    "green": 0,
+    "amber": 0,
+    "red": 0,
+    "error": 0,
+    "unavailable": 0,
+}
+
+
+def load_rgr_score(run_dir: pathlib.Path) -> dict:
+    """Load rgr_score.json (panel-cohort RGR verdict).
+
+    Hardmode scenarios don't have red/green_criteria so this file won't exist
+    for them — we record `unavailable`. Panel scenarios always have it (or
+    record error if scoring failed).
+    """
+    rgr_path = run_dir / "rgr_score.json"
+    if not rgr_path.exists():
+        return {"verdict": "unavailable"}
+    try:
+        d = json.loads(rgr_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"verdict": "error", "error": str(exc)[:120]}
+    return {
+        "verdict": str(d.get("verdict", "unavailable")).lower(),
+        "red_reason_count": len(d.get("red_reasons") or []),
+        "amber_reason_count": len(d.get("amber_reasons") or []),
+        "red_reasons": d.get("red_reasons") or [],
+        "amber_reasons": d.get("amber_reasons") or [],
+    }
+
+def load_fidelity(run_dir: pathlib.Path) -> dict:
+    """Load drift.json (Channel 1) and judge.json (Channel 2) for a run dir.
+
+    Each may be absent (validator/judge wasn't run); record `unavailable` so
+    the scorecard can distinguish "ran and was clean" from "wasn't checked".
+    Verdict is the conservative join: drift if either channel reports drift,
+    in_character only if both report clean (or one is exempt).
+    """
+    out = {
+        "channel1": {"verdict": "unavailable"},
+        "channel2": {"verdict": "unavailable"},
+        "verdict": "unavailable",
+    }
+
+    drift_path = run_dir / "drift.json"
+    if drift_path.exists():
+        try:
+            d = json.loads(drift_path.read_text())
+            summary = d.get("summary") or {}
+            out["channel1"] = {
+                "verdict": summary.get("verdict", "unknown"),
+                "actionable_drift_count": summary.get("actionable_drift_count", 0),
+                "scenario_design_flag_count": summary.get("scenario_design_flag_count", 0),
+                "ceiling": d.get("competence_ceiling"),
+            }
+        except (json.JSONDecodeError, OSError):
+            out["channel1"] = {"verdict": "malformed"}
+
+    judge_path = run_dir / "judge.json"
+    if judge_path.exists():
+        try:
+            j = json.loads(judge_path.read_text())
+            if j.get("skipped"):
+                out["channel2"] = {"verdict": "skipped"}
+            elif "error" in j:
+                out["channel2"] = {"verdict": "malformed", "error": j["error"][:120]}
+            else:
+                in_char = bool(j.get("in_character"))
+                out["channel2"] = {
+                    "verdict": "in-character" if in_char else "out-of-character",
+                    "confidence": j.get("confidence"),
+                    "drift_event_count": len(j.get("drift_events") or []),
+                }
+        except (json.JSONDecodeError, OSError):
+            out["channel2"] = {"verdict": "malformed"}
+
+    # Joined verdict — conservative.
+    c1 = out["channel1"]["verdict"]
+    c2 = out["channel2"]["verdict"]
+    if c1 == "drift" or c2 == "out-of-character":
+        out["verdict"] = "drift"
+    elif c1 == "unavailable" and c2 == "unavailable":
+        out["verdict"] = "unavailable"
+    elif c1 in ("malformed",) or c2 in ("malformed",):
+        out["verdict"] = "malformed"
+    elif c1 in ("in-character", "exempt") and c2 in ("in-character", "skipped", "unavailable"):
+        out["verdict"] = "in-character"
+    elif c2 == "in-character" and c1 == "unavailable":
+        out["verdict"] = "in-character"
+    else:
+        out["verdict"] = "mixed"
+    return out
 
 def as_int(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
@@ -113,6 +218,38 @@ for p in ledgers:
             summary_cost["sources"].add(cost["source"])
     else:
         summary_cost["cost_unavailable_scenarios"] += 1
+    fidelity = load_fidelity(p.parent)
+    rgr = load_rgr_score(p.parent)
+    rv = rgr.get("verdict") or "unavailable"
+    if rv in summary_rgr:
+        summary_rgr[rv] += 1
+    else:
+        summary_rgr["error"] += 1
+    c1v = fidelity["channel1"]["verdict"]
+    c2v = fidelity["channel2"]["verdict"]
+    if c1v == "in-character":
+        summary_fidelity["channel1_in_character"] += 1
+    elif c1v == "drift":
+        summary_fidelity["channel1_drift"] += 1
+    elif c1v == "exempt":
+        summary_fidelity["channel1_exempt"] += 1
+    else:
+        summary_fidelity["channel1_unavailable"] += 1
+    if c1v != "exempt":
+        summary_fidelity["total_actionable_drift_events"] += int(
+            fidelity["channel1"].get("actionable_drift_count") or 0
+        )
+    if c2v == "in-character":
+        summary_fidelity["channel2_in_character"] += 1
+    elif c2v == "out-of-character":
+        summary_fidelity["channel2_out_of_character"] += 1
+    elif c2v == "skipped":
+        summary_fidelity["channel2_skipped"] += 1
+    else:
+        summary_fidelity["channel2_unavailable"] += 1
+    summary_fidelity["total_judge_drift_events"] += int(
+        fidelity["channel2"].get("drift_event_count") or 0
+    )
     agg.append({
         "scenario_id": L.get("scenario_id"),
         "persona": L.get("persona"),
@@ -136,6 +273,8 @@ for p in ledgers:
         "artifact_collection_errors": artifact_errors,
         "provider_usage": usage,
         "cost": cost,
+        "persona_fidelity": fidelity,
+        "rgr_score": rgr,
     })
 
 agg.sort(key=lambda r: (r.get("persona") or "", r.get("task_class") or "", r.get("scenario_id") or ""))
@@ -164,6 +303,8 @@ agg.sort(key=lambda r: (r.get("persona") or "", r.get("task_class") or "", r.get
         "cost_unavailable_scenarios": summary_cost["cost_unavailable_scenarios"],
         "costed_call_count": summary_cost["costed_call_count"],
     },
+    "persona_fidelity": summary_fidelity,
+    "rgr": summary_rgr,
 }, indent=2))
 
 # Human-readable scorecard.
@@ -189,16 +330,51 @@ lines = [
     "",
     f"_Generated from `{runs.name}/aggregate.json` ({len(agg)} scenarios)._",
     "",
-    "| Scenario | Persona | Class | Turns | Wall (s) | Tokens | Cost | Artifact errors | Outcome | Rows ok / proc |",
-    "|---|---|---|---|---|---|---|---|---|---|",
+    "| Scenario | Persona | Class | Turns | Wall (s) | Tokens | Cost | Artifact errors | Outcome | RGR | Fidelity | Rows ok / proc |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|",
 ]
+
+
+def fmt_fidelity(fid: dict) -> str:
+    """Format the joined fidelity verdict for the scorecard.
+
+    Format: <joined>(<channel1>/<channel2>) — keeps the source channels
+    visible so a "drift" verdict points the reader at which channel fired.
+    """
+    if not fid:
+        return "—"
+    joined = fid.get("verdict", "—")
+    c1 = (fid.get("channel1") or {}).get("verdict", "?")
+    c2 = (fid.get("channel2") or {}).get("verdict", "?")
+    glyph = {
+        "in-character": "✓",
+        "drift": "✗",
+        "out-of-character": "✗",
+        "exempt": "—",
+        "skipped": "·",
+        "unavailable": "·",
+        "malformed": "?",
+        "mixed": "~",
+    }
+    return f"{glyph.get(joined, '?')} ({glyph.get(c1, '?')}/{glyph.get(c2, '?')})"
+
+
 for r in agg:
     rows = f"{r.get('rows_succeeded')}/{r.get('rows_processed')}" if r.get("ran_engine") else "—"
     usage = r.get("provider_usage") or {}
     tokens = usage.get("total_tokens") if usage.get("token_usage_available") else "—"
     cost = r.get("cost") or {}
     cost_cell = f"${cost.get('actual_usd'):.4f}" if cost.get("cost_available") else "—"
-    lines.append("| {sid} | {p} | {c} | {t} | {w} | {tokens} | {cost} | {artifact_errors} | {o} | {r} |".format(
+    fidelity_cell = fmt_fidelity(r.get("persona_fidelity") or {})
+    rgr_v = (r.get("rgr_score") or {}).get("verdict") or "—"
+    rgr_cell = {
+        "green": "GREEN",
+        "amber": "AMBER",
+        "red": "RED",
+        "error": "err",
+        "unavailable": "—",
+    }.get(rgr_v, rgr_v)
+    lines.append("| {sid} | {p} | {c} | {t} | {w} | {tokens} | {cost} | {artifact_errors} | {o} | {rgr} | {fid} | {r} |".format(
         sid=r["scenario_id"] or "?",
         p=r["persona"] or "?",
         c=r["task_class"] or "?",
@@ -208,6 +384,8 @@ for r in agg:
         cost=cost_cell,
         artifact_errors=r.get("artifact_collection_error_count") or 0,
         o=fmt_outcome(r),
+        rgr=rgr_cell,
+        fid=fidelity_cell,
         r=rows,
     ))
 
@@ -235,6 +413,40 @@ lines += [
     ),
     f"- Cost coverage: {summary_cost['cost_available_scenarios']} available, "
     f"{summary_cost['cost_unavailable_scenarios']} unavailable",
+    "",
+    "## Persona fidelity",
+    "",
+    "Cross-scenario character-fidelity rollup. Channel 1 is structural-token "
+    "drift detection (`drift.json` from `validate_drift.sh`). Channel 2 is the "
+    "Haiku LLM judge (`judge.json` from `judge_persona.sh`). Verdict glyphs: "
+    "✓ in-character, ✗ drift, — exempt (Channel 1 only, for Dev), · skipped/"
+    "unavailable, ~ mixed, ? malformed.",
+    "",
+    f"- Channel 1: {summary_fidelity['channel1_in_character']} in-character, "
+    f"{summary_fidelity['channel1_drift']} drift, "
+    f"{summary_fidelity['channel1_exempt']} exempt, "
+    f"{summary_fidelity['channel1_unavailable']} unavailable",
+    f"- Channel 2: {summary_fidelity['channel2_in_character']} in-character, "
+    f"{summary_fidelity['channel2_out_of_character']} out-of-character, "
+    f"{summary_fidelity['channel2_skipped']} skipped, "
+    f"{summary_fidelity['channel2_unavailable']} unavailable",
+    f"- Total actionable Channel-1 drift events: {summary_fidelity['total_actionable_drift_events']}",
+    f"- Total Channel-2 drift events: {summary_fidelity['total_judge_drift_events']}",
+    "",
+    "## RGR scoring (panel cohort)",
+    "",
+    "RGR-style verdict from the scenario's red/green criteria, computed by "
+    "`score_scenario.sh` against the captured composition state. Hardmode "
+    "scenarios show `unavailable` because they don't carry red/green criteria; "
+    "panel scenarios show GREEN (all criteria met), AMBER (RED signals absent "
+    "but green criteria not all met), or RED (build-failure sentinel, "
+    "is_valid=false, or passivity phrase in final assistant message).",
+    "",
+    f"- GREEN: {summary_rgr['green']}",
+    f"- AMBER: {summary_rgr['amber']}",
+    f"- RED: {summary_rgr['red']}",
+    f"- error: {summary_rgr['error']}",
+    f"- unavailable (hardmode-style scenario): {summary_rgr['unavailable']}",
 ]
 
 lines += ["", "## Persona-class matrix", ""]

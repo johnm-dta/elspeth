@@ -8,6 +8,8 @@ import pytest
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
+    SinkOutputResolved,
+    SinkResolved,
     SourceResolved,
     TerminalKind,
     TerminalReason,
@@ -259,3 +261,113 @@ class TestStepAdvance:
         response = _make_response(edited_values=None)
         with pytest.raises(ValueError, match="multi_select_with_custom"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+
+    # ---------------------------------------------------------------------------
+    # Task 2.4 tests: Step 2.5 → Step 3 (or passthrough on recipe accept)
+    # ---------------------------------------------------------------------------
+
+    def test_step_2_5_recipe_accepted_session_unchanged(self) -> None:
+        """chosen=["accept"] at STEP_2_5: session stays at STEP_2_5, no directive.
+
+        The endpoint handler (Errata C2) reads response["chosen"] == ["accept"]
+        and invokes _execute_apply_pipeline_recipe to commit the recipe and
+        produce the COMPLETED terminal. step_advance is pure and does not run
+        apply_recipe; it leaves the session unchanged for the handler to act on.
+        """
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={"blob_id": "blob-1"},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.jsonl"},
+                        required_fields=("category",),
+                        schema_mode="fixed",
+                    ),
+                )
+            ),
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response: TurnResponse = {
+            "chosen": ["accept"],
+            "edited_values": None,
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": None,
+        }
+        new_sess, next_turn, terminal, directives = step_advance(
+            sess,
+            response,
+            current_turn_type=TurnType.RECIPE_OFFER,
+        )
+        # Session stays at STEP_2_5 — endpoint handler advances to COMPLETED
+        assert new_sess.step is GuidedStep.STEP_2_5_RECIPE_MATCH
+        assert new_sess is sess  # pure: no state change
+        assert next_turn is None
+        assert terminal is None
+        assert directives == []
+
+    def test_step_2_5_build_manually_advances_to_step_3(self) -> None:
+        """chosen=["build_manually"] at STEP_2_5: advance to STEP_3_TRANSFORMS."""
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=SinkResolved(outputs=()),
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response: TurnResponse = {
+            "chosen": ["build_manually"],
+            "edited_values": None,
+            "custom_inputs": None,
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": None,
+        }
+        new_sess, next_turn, terminal, directives = step_advance(
+            sess,
+            response,
+            current_turn_type=TurnType.RECIPE_OFFER,
+        )
+        assert new_sess.step is GuidedStep.STEP_3_TRANSFORMS
+        assert next_turn is None
+        assert terminal is None
+        assert len(directives) == 1
+        assert directives[0].tool_name == "guided_step_advanced"
+        assert directives[0].arguments["prev_step"] == GuidedStep.STEP_2_5_RECIPE_MATCH.value
+        assert directives[0].arguments["next_step"] == GuidedStep.STEP_3_TRANSFORMS.value
+        assert directives[0].arguments["reason"] == "user_advanced"
+
+    def test_step_2_5_unexpected_chosen_raises(self) -> None:
+        """Any chosen value other than 'accept' or 'build_manually' is a protocol violation."""
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=SinkResolved(outputs=()),
+            step_3_proposal=None,
+            terminal=None,
+        )
+        response = _make_response(chosen=["nonsense"])
+        with pytest.raises(ValueError, match="unexpected chosen for recipe_offer"):
+            step_advance(sess, response, current_turn_type=TurnType.RECIPE_OFFER)

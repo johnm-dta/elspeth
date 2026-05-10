@@ -336,7 +336,45 @@ def _advance_step_2_5(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    raise NotImplementedError("step 2.5 advance — implemented in Task 2.4")
+    """Handle a Step 2.5 (recipe match) response.
+
+    Two valid paths:
+    - chosen == ["accept"]: the session stays at STEP_2_5 with no directive.
+      The endpoint handler (Task 3.3 / Errata C2) detects response["chosen"] ==
+      ["accept"] and invokes ``_execute_apply_pipeline_recipe`` to commit the
+      recipe and produce a COMPLETED terminal. step_advance is pure and does not
+      run apply_recipe; emitting emit_turn_answered is the handler's
+      responsibility.
+    - chosen == ["build_manually"]: advance to STEP_3_TRANSFORMS with a
+      ``guided_step_advanced`` directive.
+
+    Any other chosen value is a protocol violation — raises ValueError.
+    Non-RECIPE_OFFER turn types are intra-step turns; no advance.
+    """
+    if turn_type is not TurnType.RECIPE_OFFER:
+        return (session, None, None, [])
+
+    chosen = response["chosen"] or []
+    if list(chosen) == ["accept"]:
+        # Endpoint handler reads response["chosen"] == ["accept"] and runs
+        # apply_recipe (Errata C2). step_advance leaves the session at
+        # STEP_2_5 unchanged; the handler advances to terminal=COMPLETED after
+        # committing. No directive here — the handler emits emit_turn_answered.
+        return (session, None, None, [])
+    if list(chosen) == ["build_manually"]:
+        directives = [
+            GuidedAuditDirective(
+                tool_name="guided_step_advanced",
+                arguments={
+                    "prev_step": GuidedStep.STEP_2_5_RECIPE_MATCH.value,
+                    "next_step": GuidedStep.STEP_3_TRANSFORMS.value,
+                    "reason": "user_advanced",
+                },
+            ),
+        ]
+        new_sess = replace(session, step=GuidedStep.STEP_3_TRANSFORMS)
+        return (new_sess, None, None, directives)
+    raise ValueError(f"unexpected chosen for recipe_offer: {chosen!r}")
 
 
 def _advance_step_3(

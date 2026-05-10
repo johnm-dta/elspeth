@@ -1181,6 +1181,32 @@ def validate_pipeline(
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
+    # Identity-node advisory — non-blocking, multi-entry.  Emitted only on the
+    # happy path (after every structural check has passed) so structural errors
+    # are not drowned in cosmetic noise.  One ValidationCheck per detected node;
+    # the detail string names the offending node, its upstream, and its
+    # downstream sink, plus the repair action so the composer LLM can self-correct
+    # on the next turn.  See dispatch-prompt-floofy-noodle.md plan + skill lines
+    # 758-768 (Concept-5 exemption) and 1517-1518 (fork-branch exemption).
+    for identity_finding in _find_identity_node_advisories(state):
+        sink_mode_text = (
+            f", which uses schema.mode: {identity_finding.sink_schema_mode}" if identity_finding.sink_schema_mode is not None else ""
+        )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_IDENTITY_NODE_ADVISORY,
+                passed=True,
+                detail=(
+                    f"Node '{identity_finding.node_id}' is an identity-shaped passthrough "
+                    f"between '{identity_finding.upstream_id}' and sink '{identity_finding.sink_name}'"
+                    f"{sink_mode_text}.  The sink accepts the upstream row directly; "
+                    f"the passthrough adds an audit hop with no contract benefit.  "
+                    f"Consider removing it and wiring '{identity_finding.upstream_id}'.on_success "
+                    f"directly to '{identity_finding.sink_name}'."
+                ),
+            )
+        )
+
     return ValidationResult(
         is_valid=True,
         checks=checks,

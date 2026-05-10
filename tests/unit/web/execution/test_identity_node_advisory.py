@@ -8,7 +8,9 @@ and is not on a gate-fork branch. See plan:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 from elspeth.web.composer.state import (
     CompositionState,
@@ -17,9 +19,11 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
+from elspeth.web.config import WebSettings
 from elspeth.web.execution.validation import (
     _CHECK_IDENTITY_NODE_ADVISORY,
     _find_identity_node_advisories,
+    validate_pipeline,
 )
 
 # ── Fixture builders ────────────────────────────────────────────────────
@@ -290,3 +294,154 @@ def test_identity_passthrough_to_fixed_sink_is_flagged() -> None:
     findings = _find_identity_node_advisories(state)
     assert len(findings) == 1
     assert findings[0].sink_schema_mode == "fixed"
+
+
+# ── Integration — wired into validate_pipeline() ────────────────────────
+
+
+def _make_settings(data_dir: str = "/tmp/test_data") -> WebSettings:
+    """WebSettings shaped to satisfy validate_pipeline()'s data_dir lookup."""
+    return WebSettings(
+        data_dir=Path(data_dir),
+        composer_max_composition_turns=10,
+        composer_max_discovery_turns=5,
+        composer_timeout_seconds=30.0,
+        composer_rate_limit_per_minute=60,
+    )
+
+
+def _allowlisted_source(data_dir: str = "/tmp/test_data") -> SourceSpec:
+    """Source with a path under ``data_dir/blobs/`` — passes path_allowlist."""
+    return SourceSpec(
+        plugin="csv",
+        on_success="page_in",
+        options={"path": f"{data_dir}/blobs/in.csv"},
+        on_validation_failure="discard",
+    )
+
+
+def _allowlisted_observed_sink(
+    name: str = "json_out",
+    data_dir: str = "/tmp/test_data",
+) -> OutputSpec:
+    """Observed-mode sink with a path under ``data_dir/outputs/``."""
+    return OutputSpec(
+        name=name,
+        plugin="json",
+        options={"path": f"{data_dir}/outputs/out.json", "schema": {"mode": "observed"}},
+        on_write_failure="discard",
+    )
+
+
+@patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
+@patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+@patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
+@patch("elspeth.web.execution.validation.build_runtime_graph")
+def test_validate_pipeline_emits_advisory_on_happy_path(
+    mock_build_graph: MagicMock,
+    mock_instantiate: MagicMock,
+    mock_load: MagicMock,
+    mock_assemble: MagicMock,
+) -> None:
+    """End-to-end: helper output appears in validate_pipeline()'s ValidationResult.checks
+    when validation otherwise succeeds, with the expected detail-string content."""
+    mock_yaml_gen = MagicMock()
+    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+    mock_settings = MagicMock()
+    mock_load.return_value = mock_settings
+
+    mock_bundle = MagicMock()
+    mock_bundle.source = MagicMock()
+    mock_bundle.source_settings = MagicMock()
+    mock_bundle.transforms = ()
+    mock_bundle.sinks = {"json_out": MagicMock()}
+    mock_bundle.aggregations = {}
+    mock_instantiate.return_value = mock_bundle
+    mock_build_graph.return_value = MagicMock()
+    mock_assemble.return_value = MagicMock()
+
+    state = _make_state_with(
+        source=_allowlisted_source(),
+        nodes=(
+            _make_real_transform_node(),
+            _make_passthrough_node(),
+        ),
+        outputs=(_allowlisted_observed_sink(),),
+    )
+    result = validate_pipeline(state, _make_settings(), mock_yaml_gen)
+
+    assert result.is_valid is True, "Advisory must not block is_valid"
+    advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
+    assert len(advisories) == 1
+    advisory = advisories[0]
+    assert advisory.passed is True, "Advisory entries are passed=True (informational)"
+    detail = advisory.detail
+    assert "forward_summaries" in detail
+    assert "summarize_page" in detail
+    assert "json_out" in detail
+    assert "observed" in detail
+    assert "Consider removing it" in detail
+
+
+@patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
+@patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+@patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
+@patch("elspeth.web.execution.validation.build_runtime_graph")
+def test_validate_pipeline_emits_no_advisory_when_clean(
+    mock_build_graph: MagicMock,
+    mock_instantiate: MagicMock,
+    mock_load: MagicMock,
+    mock_assemble: MagicMock,
+) -> None:
+    """A pipeline with no identity passthrough gets no advisory entries."""
+    mock_yaml_gen = MagicMock()
+    mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+    mock_load.return_value = MagicMock()
+
+    mock_bundle = MagicMock()
+    mock_bundle.source = MagicMock()
+    mock_bundle.source_settings = MagicMock()
+    mock_bundle.transforms = ()
+    mock_bundle.sinks = {"json_out": MagicMock()}
+    mock_bundle.aggregations = {}
+    mock_instantiate.return_value = mock_bundle
+    mock_build_graph.return_value = MagicMock()
+    mock_assemble.return_value = MagicMock()
+
+    state = _make_state_with(
+        source=_allowlisted_source(),
+        nodes=(_make_real_transform_node(on_success="json_out"),),
+        outputs=(_allowlisted_observed_sink(),),
+    )
+    result = validate_pipeline(state, _make_settings(), mock_yaml_gen)
+
+    assert result.is_valid is True
+    advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
+    assert advisories == []
+
+
+def test_validate_pipeline_suppresses_advisory_on_failure_path() -> None:
+    """When a structural check fails, the advisory is suppressed — happy-path
+    only.  Confirms the wiring is positioned correctly (only fires before the
+    final ``is_valid=True`` return)."""
+    # Path-allowlist failure path: source path outside allowed dirs.
+    state = _make_state_with(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="page_in",
+            options={"path": "/etc/passwd"},  # blocked path
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            _make_real_transform_node(),
+            _make_passthrough_node(),
+        ),
+        outputs=(_make_observed_sink(),),
+    )
+    settings = _make_settings(data_dir="/tmp/test_data")
+    mock_yaml_gen = MagicMock()
+    result = validate_pipeline(state, settings, mock_yaml_gen)
+
+    assert result.is_valid is False, "path_allowlist must block this pipeline"
+    advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
+    assert advisories == [], "Advisory must NOT emit on the failure path — would drown the structural error in cosmetic noise."

@@ -674,8 +674,13 @@ def test_runtime_preflight_preview_blocks_scenario_2_invalid_trigger(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_final_completion_claim_is_replaced_by_runtime_preflight_failure(tmp_path: Path) -> None:
-    """The composer must not repeat an LLM complete/valid claim after dry-run failure."""
+async def test_final_completion_claim_is_augmented_with_runtime_preflight_failure(tmp_path: Path) -> None:
+    """The composer must augment (not discard) the LLM's prose with the validator's
+    objection after a dry-run failure. Issue elspeth-9cfbad6901 unified the
+    preflight-fail policy on augmentation: the model's prose is preserved
+    verbatim and the technical preflight error is appended as a system-
+    attributed suffix.
+    """
     data_dir, source_path, output_path = _scenario_2_files(tmp_path)
     settings = _web_settings(data_dir)
     composer = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
@@ -686,9 +691,10 @@ async def test_final_completion_claim_is_replaced_by_runtime_preflight_failure(t
         aggregation_options={"schema": {"mode": "observed"}, "value_field": "amount"},
     )
     changed_state = replace(state, version=state.version + 1)
+    model_prose = "The pipeline is complete and valid."
 
     result = await composer._finalize_no_tool_response(
-        content="The pipeline is complete and valid.",
+        content=model_prose,
         state=changed_state,
         initial_version=state.version,
         user_id=EVAL_USER_ID,
@@ -697,13 +703,16 @@ async def test_final_completion_claim_is_replaced_by_runtime_preflight_failure(t
         session_scope="session:eval",
     )
 
-    assert result.message != "The pipeline is complete and valid."
-    # Positive content check: synthetic preflight-failure message must reference
-    # the actual reason. _runtime_preflight_failure_message echoes the first
-    # ValidationError.message verbatim, which for the end_of_source trigger
-    # case contains "end_of_source". A regression that replaces the message
-    # with a generic fallback would pass the negative check above but fail this.
+    # Augmentation prefix invariant: model prose preserved verbatim at start.
+    assert result.message.startswith(model_prose)
+    # System-attributed suffix carries the validator's specific objection.
+    # The first ValidationError.message for the end_of_source trigger case
+    # contains "end_of_source", so a regression that omits the validator
+    # detail from the suffix would fail this check.
+    assert "[ELSPETH-SYSTEM]" in result.message
     assert "end_of_source" in result.message
-    assert result.raw_assistant_content == "The pipeline is complete and valid."
+    # raw_assistant_content carries the unaugmented prose for the audit
+    # trail and LLM history replay.
+    assert result.raw_assistant_content == model_prose
     assert result.runtime_preflight is not None
     assert result.runtime_preflight.is_valid is False

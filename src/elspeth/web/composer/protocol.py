@@ -22,24 +22,25 @@ class ComposerResult:
     """Result of a compose() call.
 
     Attributes:
-        message: The assistant's text response. When runtime preflight
-            returns invalid, ``message`` is either *augmented* (the
-            model's prose preserved verbatim, with an operator-facing
-            suffix appended) or *replaced* (synthetic preflight-failure
-            text). In both cases, the model's pre-synthesis prose is
-            preserved in ``raw_assistant_content``.
+        message: The assistant's text response. When synthesis fires
+            (preflight invalid, or state-claim grounding correction on
+            the happy-path), ``message`` is *augmented*: the model's
+            prose is preserved verbatim and an operator-facing suffix is
+            appended. The model's pre-synthesis prose is preserved in
+            ``raw_assistant_content`` for the audit trail and LLM
+            history replay.
         state: The (possibly updated) CompositionState.
         runtime_preflight: The ValidationResult from the final-gate
             runtime preflight run, or ``None`` if no preflight was
             triggered (e.g. the state was unchanged and no preview
             preflight was available to reuse).
         raw_assistant_content: The model's pre-synthesis prose whenever
-            ``message`` is *synthesized* (augmented or replaced relative
-            to raw LLM output), regardless of why synthesis fired.
-            Synthesis triggers include preflight failure (empty-state
-            augmentation, non-empty-state replacement) and state-claim
-            grounding correction on the happy-path. ``None`` when
-            ``message`` is the verbatim LLM response.
+            ``message`` is *synthesized* (augmented relative to raw LLM
+            output), regardless of why synthesis fired. Synthesis
+            triggers include preflight failure (empty-state and
+            non-empty-state augmentation) and state-claim grounding
+            correction on the happy-path. ``None`` when ``message`` is
+            the verbatim LLM response.
 
     Field-pairing invariant:
         - When ``runtime_preflight`` is non-None and not ``is_valid``,
@@ -55,44 +56,39 @@ class ComposerResult:
         or lose the original LLM output when synthesis actually did
         happen.
 
-    Augmentation-vs-replacement discriminator:
+    Synthesis shapes (all augmentation):
         Producers (see ``service._finalize_no_tool_response``) emit
-        four synthesis shapes:
+        four synthesis shapes — all of them augmentations
+        (``message == raw_assistant_content + operator_suffix``):
 
-        1. No-mutation empty-state augmentation —
-           ``message == raw_assistant_content + operator_suffix``,
-           preflight invalid.
-        2. Preflight-invalid empty-state augmentation — same shape as 1,
-           preflight invalid.
-        3. Replacement (preflight-invalid non-empty state) —
-           ``message`` is synthetic preflight-failure text;
-           ``raw_assistant_content`` is the model's overruled
-           completion claim, preflight invalid.
+        1. No-mutation empty-state augmentation — preflight invalid,
+           build-style request received no successful mutation, state
+           is structurally empty.
+        2. Preflight-invalid empty-state augmentation — preflight
+           invalid, state is structurally empty.
+        3. Preflight-invalid non-empty-state augmentation (issue
+           elspeth-9cfbad6901) — preflight invalid, state has been
+           populated. Suffix names the validator's specific objection.
         4. State-claim grounding correction (issue elspeth-c028f7d186) —
-           ``message == raw_assistant_content + grounding_correction_suffix``,
            preflight VALID. Fires when the model's prose contradicts
            persisted state (forward contradiction) or claims a fresh
            action when state was unchanged this turn (backward
            contradiction).
 
-        The augmentation-vs-replacement distinction is not stored on
-        this record; consumers (see
-        ``routes._composer_history_content``) determine it
-        *structurally* at read time via
-        ``message.startswith(raw_assistant_content)``.
+        Consumers (see ``routes._composer_history_content``) detect
+        synthesis structurally at read time via
+        ``message.startswith(raw_assistant_content)`` — true for all
+        four shapes. The structural property lets consumers strip the
+        operator-facing suffix from LLM history without parsing it.
 
     Producer contract (mechanical):
-        Augmentation paths (1, 2): ``message`` MUST start with
-        ``raw_assistant_content``. Enforced at construction by
-        ``service._enforce_augmentation_prefix_invariant``.
-        Replacement path (3): ``message`` MUST NOT start with
-        ``raw_assistant_content``. Enforced at construction by
-        ``service._enforce_replacement_non_prefix_invariant``.
-        Together the guards guarantee the consumer-side discriminator
-        only ever sees structurally classifiable shapes; a producer
-        that violates either contract crashes with
-        ``AuditIntegrityError`` rather than commit a corrupt audit row.
-        The field-level decoupling that would obviate the contract is
+        ``message`` MUST start with ``raw_assistant_content``. Enforced
+        at construction by
+        ``service._enforce_augmentation_prefix_invariant``. A producer
+        that violates the contract crashes with ``AuditIntegrityError``
+        rather than commit a corrupt audit row that the consumer-side
+        discriminator would silently misroute. The field-level
+        decoupling that would obviate the structural contract is
         tracked at ``elspeth-7ae1732ab2``.
     """
 

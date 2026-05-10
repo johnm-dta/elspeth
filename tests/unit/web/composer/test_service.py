@@ -4469,12 +4469,97 @@ class TestEmptyStateFinalizePassthrough:
         assert "Pipeline empty" not in result.message  # synthesizer skipped
 
     @pytest.mark.asyncio
-    async def test_non_empty_state_invalid_preflight_still_synthesizes(self) -> None:
-        """Regression — when the state has actually been populated AND
-        runtime preflight is invalid, the synthesizer still fires
-        (preserving the original "model lied about completion" semantics).
-        This branch is the load-bearing safety net for the empty-state
-        special case above."""
+    async def test_non_empty_state_invalid_preflight_augments_with_validator_suffix(self) -> None:
+        """When state is populated AND runtime preflight is invalid, the
+        finalizer augments the model's prose with a system-attributed
+        suffix naming the validator's objection (issue elspeth-9cfbad6901).
+
+        Panel-evals evidence (fork_coalesce__p4_adversarial_engineer,
+        boolean_routing__p3_marketingops) showed the model's prose in
+        this case is typically substantive disclosure rather than a
+        false completion claim. The earlier replacement-shape policy
+        discarded the prose; the augmentation shape preserves it
+        verbatim while still surfacing the validator's reason to the
+        operator. The model's next preview_pipeline call drives self-
+        correction so the [INTERCEPTED] framing is no longer required.
+        """
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = (
+            _empty_state()
+            .with_source(
+                SourceSpec(
+                    plugin="csv",
+                    on_success="t1",
+                    options={"path": "/data/inputs/in.csv"},
+                    on_validation_failure="discard",
+                )
+            )
+            .with_output(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                )
+            )
+        )
+        bumped_state = replace(state, version=state.version + 1)
+        invalid_preflight = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="t1",
+                    component_type="transform",
+                    message="Forbidden name: 'end_of_source'",
+                    suggestion="Omit trigger for end-of-source-only aggregation.",
+                )
+            ],
+        )
+        model_prose = "The pipeline is complete and valid."
+
+        with patch.object(service, "_runtime_preflight", return_value=invalid_preflight):
+            result = await service._finalize_no_tool_response(
+                content=model_prose,
+                state=bumped_state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+            )
+
+        # Augmentation prefix invariant: model prose preserved verbatim
+        # at the start of the message.
+        assert result.message.startswith(model_prose)
+        # System-attributed suffix carrying the validator's objection.
+        assert "[ELSPETH-SYSTEM]" in result.message
+        assert "Forbidden name" in result.message
+        assert "Suggested fix" in result.message
+        # Old replacement-shape framing must not appear.
+        assert "I cannot mark this pipeline complete" not in result.message
+        # raw_assistant_content carries the unaugmented prose for the
+        # audit trail and LLM history replay.
+        assert result.raw_assistant_content == model_prose
+        assert result.runtime_preflight is invalid_preflight
+
+    @pytest.mark.asyncio
+    async def test_empty_content_non_empty_state_invalid_preflight_augments_with_suffix_only(self) -> None:
+        """Edge case: state is non-empty, runtime preflight is invalid,
+        and the model emits empty assistant text on the finalize turn.
+
+        Under the post-elspeth-9cfbad6901 augmentation policy, empty
+        content + non-empty content + invalid preflight degenerates to
+        suffix-only output (the augmentation prefix invariant is
+        trivially satisfied because every string startswith ""). This
+        replaces the earlier replacement-shape guard that crashed with
+        AuditIntegrityError on this shape: the [INTERCEPTED] framing it
+        was protecting no longer exists, so the ambiguity it guarded
+        against is no longer load-bearing. The model's next
+        preview_pipeline call drives self-correction.
+        """
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -4513,7 +4598,7 @@ class TestEmptyStateFinalizePassthrough:
 
         with patch.object(service, "_runtime_preflight", return_value=invalid_preflight):
             result = await service._finalize_no_tool_response(
-                content="The pipeline is complete and valid.",
+                content="",
                 state=bumped_state,
                 initial_version=state.version,
                 user_id="user-1",
@@ -4522,105 +4607,15 @@ class TestEmptyStateFinalizePassthrough:
                 session_scope="session:test",
             )
 
-        # Synthesizer fired — original message replaced.
-        assert result.message != "The pipeline is complete and valid."
-        assert "I cannot mark this pipeline complete" in result.message
+        # Suffix-only message — system-attributed, names the validator's
+        # objection. The empty-content prefix invariant is trivially
+        # satisfied (every string startswith "").
+        assert result.message.startswith("[ELSPETH-SYSTEM]")
         assert "Forbidden name" in result.message
-        # No empty-state suffix.
-        assert "[ELSPETH-SYSTEM]" not in result.message
-        # raw_assistant_content preserved (matches synthesizer semantics).
-        assert result.raw_assistant_content == "The pipeline is complete and valid."
-
-    @pytest.mark.asyncio
-    async def test_empty_content_replacement_crashes_via_producer_invariant(self) -> None:
-        """End-to-end coverage for the producer-side replacement non-prefix
-        invariant. Reproduces the scenario flagged in PR review by
-        code-reviewer F1 and comment-analyzer C-2:
-
-        Multi-turn flow where state is non-empty (populated by prior tool
-        calls), runtime preflight is invalid, and the model emits empty
-        assistant content on the finalize turn. Without the producer-side
-        guard, the replacement branch would emit
-        ``ComposerResult(message=<synthetic>, raw_assistant_content="")``,
-        which the consumer-side discriminator at
-        ``routes._composer_history_content`` would silently misclassify as
-        empty-prose augmentation (every non-empty string startswith ""),
-        suppressing the ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX``
-        annotation from LLM history. The model would not learn its
-        completion claim was overruled and could re-claim completion next
-        turn.
-
-        The producer-side ``_enforce_replacement_non_prefix_invariant``
-        crashes with ``AuditIntegrityError`` to prevent the corrupt audit
-        row from being committed. The field-level decoupling that would
-        permit this shape is tracked at ``elspeth-7ae1732ab2``.
-        """
-        from elspeth.contracts.errors import AuditIntegrityError
-
-        catalog = _mock_catalog()
-        settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
-        # Non-empty state (model mutated state in earlier turns of the
-        # compose loop), so the empty-state augmentation path is skipped
-        # and the replacement branch fires.
-        state = (
-            _empty_state()
-            .with_source(
-                SourceSpec(
-                    plugin="csv",
-                    on_success="t1",
-                    options={"path": "/data/inputs/in.csv"},
-                    on_validation_failure="discard",
-                )
-            )
-            .with_output(
-                OutputSpec(
-                    name="main",
-                    plugin="csv",
-                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
-                    on_write_failure="discard",
-                )
-            )
-        )
-        bumped_state = replace(state, version=state.version + 1)
-        invalid_preflight = ValidationResult(
-            is_valid=False,
-            checks=[],
-            errors=[
-                ValidationError(
-                    component_id="t1",
-                    component_type="transform",
-                    message="Forbidden name: 'end_of_source'",
-                    suggestion="Omit trigger for end-of-source-only aggregation.",
-                )
-            ],
-        )
-
-        with (
-            patch.object(service, "_runtime_preflight", return_value=invalid_preflight),
-            pytest.raises(AuditIntegrityError) as exc_info,
-        ):
-            await service._finalize_no_tool_response(
-                content="",  # LLM emitted empty assistant text — the trigger
-                state=bumped_state,
-                initial_version=state.version,
-                user_id="user-1",
-                last_runtime_preflight=None,
-                runtime_preflight_cache=service._new_runtime_preflight_cache(),
-                session_scope="session:test",
-            )
-
-        message = str(exc_info.value)
-        assert "Tier 1" in message
-        assert "preflight_invalid_non_empty_state_replacement" in message
-        assert "replacement" in message
-        # The error names the consumer-side site that would have misrouted
-        # the row, so an SRE hitting this has the breadcrumb to fix it.
-        assert "routes._composer_history_content" in message
-        # The error names the architectural-debt issue that tracks the
-        # field-level paydown, so an SRE knows where to look for the
-        # long-term fix.
-        assert "elspeth-7ae1732ab2" in message
+        # raw_assistant_content carries the (empty) original prose so
+        # the audit row records what the model actually produced.
+        assert result.raw_assistant_content == ""
+        assert result.runtime_preflight is invalid_preflight
 
     @pytest.mark.asyncio
     async def test_empty_state_valid_preflight_preserves_message_verbatim(self) -> None:

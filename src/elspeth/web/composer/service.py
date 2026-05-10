@@ -751,6 +751,26 @@ _EMPTY_STATE_FINALIZE_SUFFIX_WITH_BLOCKER = (
     "the composer to retry with the plan it described above."
 )
 
+# Suffix appended to the model's prose when finalize-time runtime preflight
+# fails on a non-empty state. Companion to the empty-state pair above; the
+# difference is the suffix wording — empty-state asks the operator to refine
+# or retry, non-empty-state names the validator's specific objection so the
+# operator sees both the model's analysis and the validator's reason.
+# Single source of truth for the contract (issue elspeth-9cfbad6901).
+_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_WITH_DETAIL = (
+    "\n\n---\n\n"
+    "[ELSPETH-SYSTEM] Runtime preflight failed before this build could be "
+    "marked complete.\n\nCause: {detail}{suggestion_block}\n\n"
+    "The composer's analysis above is preserved verbatim; the validator's "
+    "objection is recorded here."
+)
+_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_BARE = (
+    "\n\n---\n\n"
+    "[ELSPETH-SYSTEM] Runtime preflight failed before this build could be "
+    "marked complete.\n\nThe composer's analysis above is preserved verbatim; "
+    "the validator's objection is recorded here."
+)
+
 
 _BUILD_INTENT_PHRASES: Final[tuple[str, ...]] = (
     "set up",
@@ -790,6 +810,7 @@ _INFORMATION_ONLY_PREFIXES: Final[tuple[str, ...]] = (
 _AugmentationBranch = Literal[
     "no_mutation_empty_state_augmentation",
     "preflight_invalid_empty_state_augmentation",
+    "preflight_invalid_non_empty_state_augmentation",
     "state_claim_grounding_correction",
 ]
 _ReplacementBranch = Literal["preflight_invalid_non_empty_state_replacement"]
@@ -919,6 +940,63 @@ def _compose_empty_state_message(content: str, *, blocker: str | None = None) ->
             to avoid emitting a degenerate ``Cause: \\n\\n`` suffix.
     """
     suffix = _EMPTY_STATE_FINALIZE_SUFFIX_WITH_BLOCKER.format(blocker=blocker) if blocker else _EMPTY_STATE_FINALIZE_SUFFIX
+    if not content:
+        return suffix.lstrip("\n").lstrip("-").lstrip()
+    return content + suffix
+
+
+def _compose_preflight_failure_message(content: str, *, runtime_result: ValidationResult) -> str:
+    """Build the user-facing message for the non-empty-state preflight-invalid path.
+
+    Surfaces the model's prose verbatim (panel-evals evidence shows it
+    typically carries substantive disclosure: removed nodes, chosen
+    operational semantics, the model's own diagnosis — see issue
+    elspeth-9cfbad6901). Appends a system-attributed suffix carrying the
+    technical preflight error so the operator sees both the model's
+    analysis and the validator's objection.
+
+    Companion to ``_compose_empty_state_message`` (preflight-invalid
+    empty-state branch). Both branches augment; the difference is the
+    suffix wording — empty-state asks the operator to refine or retry,
+    non-empty-state names the validator's specific objection.
+
+    Suffix template selection (longest-detail-wins fallback chain):
+    ``_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_WITH_DETAIL`` when
+    ``runtime_result`` carries a ValidationError or a failed check;
+    ``_PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_BARE`` when neither.
+    Future maintainers extending this function MUST keep the templates
+    in sync — edits should generally apply to both.
+
+    Args:
+        content: The model's actual prose. Preserved verbatim at the
+            start of the message. If empty, the suffix becomes the whole
+            message (matches ``_compose_empty_state_message``); the
+            augmentation prefix invariant holds trivially because every
+            string startswith "".
+        runtime_result: The failed ValidationResult from the final-gate
+            preflight. The first ValidationError's ``message`` and
+            optional ``suggestion`` populate the suffix; falls back to
+            the first failed check's ``detail``; falls back to the bare
+            template when the result has neither.
+    """
+    detail: str | None = None
+    suggestion: str | None = None
+    if runtime_result.errors:
+        first_error = runtime_result.errors[0]
+        detail = first_error.message
+        suggestion = first_error.suggestion
+    else:
+        failed_checks = [check for check in runtime_result.checks if not check.passed]
+        if failed_checks:
+            detail = failed_checks[0].detail
+    if detail:
+        suggestion_block = f"\n\nSuggested fix: {suggestion}" if suggestion else ""
+        suffix = _PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_WITH_DETAIL.format(
+            detail=detail,
+            suggestion_block=suggestion_block,
+        )
+    else:
+        suffix = _PREFLIGHT_INVALID_NONEMPTY_FINALIZE_SUFFIX_BARE
     if not content:
         return suffix.lstrip("\n").lstrip("-").lstrip()
     return content + suffix
@@ -1314,7 +1392,7 @@ class ComposerServiceImpl:
     ) -> ComposerResult:
         """Apply the deterministic final-gate check and build a ComposerResult.
 
-        Three exit shapes are produced (the
+        Four augmentation exit shapes are produced (the
         ``routes._composer_history_content`` discriminator depends on the
         ``content`` / ``raw_assistant_content`` relationship below):
 
@@ -1330,15 +1408,18 @@ class ComposerServiceImpl:
            augmentation shape as (1); ``raw_assistant_content`` carries
            the unaugmented prose so the LLM context is unaffected by the
            operator-facing suffix.
-        3. **Replacement (preflight-invalid non-empty state)** —
-           preflight is invalid and the state is non-empty (i.e. the
-           model claimed completion despite preflight failure).
-           ``content`` is replaced with a concrete preflight-failed
-           message that names the actual issues; the original assistant
-           text is preserved in ``raw_assistant_content`` for the audit
-           trail and the LLM-context channel prefixes the replacement
-           with ``_INTERCEPTED_ASSISTANT_HISTORY_PREFIX`` so the model
-           knows its claim was overruled.
+        3. **Preflight-invalid non-empty-state augmentation** —
+           preflight is invalid and the state is non-empty. Panel-evals
+           evidence (issue elspeth-9cfbad6901) showed the model's prose
+           in this case is typically substantive disclosure rather than
+           a false completion claim — the model names removed nodes,
+           chosen operational semantics, and its own diagnosis. The
+           prose is preserved verbatim with a system-attributed suffix
+           naming the validator's specific objection appended;
+           ``raw_assistant_content`` carries the unaugmented prose so
+           the LLM-context channel sees the model's own prose on
+           subsequent turns. Self-correction continues to land via the
+           model's next ``preview_pipeline`` call.
 
         When preflight is valid (or skipped because state did not
         change and ``last_runtime_preflight`` is ``None``) the response
@@ -1422,29 +1503,37 @@ class ComposerServiceImpl:
             return ComposerResult(message=content, state=state, tool_invocations=tool_invocations, llm_calls=llm_calls)
 
         if not runtime_result.is_valid:
-            # Two finalize shapes for invalid preflight, dispatched on whether
-            # the model could plausibly know better:
+            # Two finalize shapes for invalid preflight, dispatched on
+            # state structure. Both augment — the difference is suffix
+            # wording (issue elspeth-9cfbad6901 unified the policy after
+            # the original replacement-on-non-empty-state branch was
+            # found to discard substantive model disclosure):
             #
             # 1. Preflight-invalid empty-state augmentation: state is
             #    structurally empty. The model produced honest diagnostic
-            #    prose about what it tried and what blocked convergence. It
-            #    cannot have falsely claimed completion because there is no
-            #    state to claim. Pass the prose through and append a system
-            #    suffix. raw_assistant_content carries the unaugmented prose
-            #    so routes._composer_history_content can replay it to the
-            #    LLM on subsequent turns without the synthetic system text
-            #    (cf. elspeth-861b0c58f5 — the original synthesizer-replaces-
-            #    prose behavior corrupted both user view and LLM context).
+            #    prose about what it tried and what blocked convergence.
+            #    Pass the prose through and append a system suffix asking
+            #    the operator to refine or retry. raw_assistant_content
+            #    carries the unaugmented prose so
+            #    routes._composer_history_content replays it to the LLM
+            #    on subsequent turns without the synthetic system text
+            #    (cf. elspeth-861b0c58f5 — the original synthesizer-
+            #    replaces-prose behavior corrupted both user view and
+            #    LLM context).
             #
-            # 2. Replacement (non-empty state with invalid preflight): the
-            #    synthesizer path. The model produced state but claimed
-            #    completion when the pipeline doesn't preflight-pass.
-            #    Replace the lie with a concrete preflight-failed message
-            #    that names the actual issues. raw_assistant_content
-            #    carries the original lie for the audit trail; LLM history
-            #    reconstruction prefixes the replacement with
-            #    _INTERCEPTED_ASSISTANT_HISTORY_PREFIX so the model knows
-            #    its completion claim was overruled.
+            # 2. Preflight-invalid non-empty-state augmentation: state
+            #    has been populated AND preflight failed. Panel-evals
+            #    evidence (fork_coalesce__p4_adversarial_engineer,
+            #    boolean_routing__p3_marketingops; see issue
+            #    elspeth-9cfbad6901) shows the model's prose in this
+            #    case is typically substantive disclosure — what was
+            #    attempted, removed nodes, chosen semantics — rather
+            #    than a false completion claim. Pass the prose through
+            #    and append a system suffix naming the validator's
+            #    specific objection. The model's next preview_pipeline
+            #    call surfaces the failure on the self-correction loop;
+            #    the operator-facing suffix is stripped from LLM history
+            #    so the LLM sees only its own prose.
             if _state_is_structurally_empty(state):
                 augmented_message = _compose_empty_state_message(content)
                 _enforce_augmentation_prefix_invariant(
@@ -1460,14 +1549,14 @@ class ComposerServiceImpl:
                     tool_invocations=tool_invocations,
                     llm_calls=llm_calls,
                 )
-            replacement_message = self._runtime_preflight_failure_message(runtime_result)
-            _enforce_replacement_non_prefix_invariant(
-                branch="preflight_invalid_non_empty_state_replacement",
+            augmented_message = _compose_preflight_failure_message(content, runtime_result=runtime_result)
+            _enforce_augmentation_prefix_invariant(
+                branch="preflight_invalid_non_empty_state_augmentation",
                 content=content,
-                replacement=replacement_message,
+                augmented=augmented_message,
             )
             return ComposerResult(
-                message=replacement_message,
+                message=augmented_message,
                 state=state,
                 runtime_preflight=runtime_result,
                 raw_assistant_content=content,

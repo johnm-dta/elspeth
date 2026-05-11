@@ -3700,10 +3700,229 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   InspectAndConfirmTurn (Task 7.3)
+   Classes prefixed guided-inspect-*.  No chip styles — this widget owns
+   a column-table + editor layout, not a chip group.
+   --------------------------------------------------------------------------- */
+
+/* Main table */
+.guided-inspect-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-md);
+}
+
+.guided-inspect-th {
+  text-align: left;
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: 2px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.guided-inspect-tr:nth-child(even) {
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-inspect-td {
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  vertical-align: top;
+}
+
+/* Warnings aside — announced to screen readers via aria-label */
+.guided-inspect-warnings {
+  background-color: var(--color-surface-elevated);
+  border-left: 3px solid var(--color-warning, var(--color-accent));
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.guided-inspect-warnings-list {
+  margin: 0;
+  padding: 0 0 0 var(--space-md);
+}
+
+.guided-inspect-warning-item {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* Inspect-view action buttons */
+.guided-inspect-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.guided-inspect-confirm-btn,
+.guided-inspect-edit-btn {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-inspect-confirm-btn {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+}
+
+.guided-inspect-confirm-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-inspect-edit-btn {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+}
+
+.guided-inspect-edit-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-inspect-confirm-btn:focus-visible,
+.guided-inspect-edit-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Edit view — heading */
+.guided-inspect-edit-heading {
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--space-md) 0;
+}
+
+/* Edit view — column list */
+.guided-inspect-editor-list {
+  list-style: none;
+  margin: 0 0 var(--space-md) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.guided-inspect-editor-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.guided-inspect-editor-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  min-width: 72px;
+}
+
+.guided-inspect-editor-input {
+  flex: 1;
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 36px;
+}
+
+.guided-inspect-editor-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-inspect-remove-btn {
+  padding: var(--space-xs) var(--space-sm);
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 36px;
+  white-space: nowrap;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.guided-inspect-remove-btn:hover {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.guided-inspect-remove-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Edit view — action buttons (Cancel / Apply edits) */
+.guided-inspect-editor-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.guided-inspect-cancel-btn,
+.guided-inspect-apply-btn {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-inspect-cancel-btn {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+}
+
+.guided-inspect-cancel-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-inspect-apply-btn {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+}
+
+.guided-inspect-apply-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-inspect-cancel-btn:focus-visible,
+.guided-inspect-apply-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
-  .guided-chip-btn {
+  .guided-chip-btn,
+  .guided-inspect-confirm-btn,
+  .guided-inspect-edit-btn,
+  .guided-inspect-remove-btn,
+  .guided-inspect-cancel-btn,
+  .guided-inspect-apply-btn {
     transition: none;
   }
 }

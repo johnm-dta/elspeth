@@ -120,3 +120,15 @@ export interface SingleSelectPayload {
   options: Option[];
   allow_custom: boolean;
 }
+
+/** Wire: _Observed (protocol.py:30-33). Nested inside InspectAndConfirmPayload. */
+export interface Observed {
+  columns: string[];
+  samples: Record<string, unknown>[];
+  warnings: string[];
+}
+
+/** Wire: InspectAndConfirmPayload (protocol.py:36-37). */
+export interface InspectAndConfirmPayload {
+  observed: Observed;
+}

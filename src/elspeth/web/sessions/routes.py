@@ -2976,6 +2976,15 @@ def create_session_router() -> APIRouter:
                     likely_next="ELSPETH will prepare the composer prompt with the current pipeline.",
                 ),
             )
+            # Detect guided→freeform mode transition (spec §8.2).
+            # Recompose is a retried freeform chat call — progressive disclosure
+            # fires here on the same semantics as send_message (first freeform
+            # turn after guided_session.terminal is set uses the layered prompt).
+            _guided = state.guided_session
+            _guided_terminal_for_compose = (
+                _guided.terminal if (_guided is not None and _guided.terminal is not None and not _guided.transition_consumed) else None
+            )
+
             _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "recompose"})
             terminal_status: _ComposerRequestTerminalStatus = "failed"
             try:
@@ -2996,6 +3005,7 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=str(user.user_id),
                         progress=progress_sink,
+                        guided_terminal=_guided_terminal_for_compose,
                     )
                 except ComposerConvergenceError as exc:
                     terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
@@ -3174,6 +3184,31 @@ def create_session_router() -> APIRouter:
                         detail={"error_type": "composer_error", "detail": str(exc)},
                     ) from exc
 
+                # Compute the post-compose guided_session and composer_meta.
+                # Mirror of send_message §5a-§5b: if the transition prompt fired
+                # this turn, flip transition_consumed so subsequent turns use the
+                # freeform-only prompt.  guided_session rides in composer_meta (not
+                # a first-class column) — any save must propagate it forward.
+                _post_compose_guided: GuidedSession | None = result.state.guided_session
+                if _guided_terminal_for_compose is not None:
+                    # transition_consumed flip — _guided is non-None because
+                    # _guided_terminal_for_compose was derived from _guided.terminal.
+                    if _guided is None:
+                        raise RuntimeError(
+                            "guided_terminal_for_compose is set but guided_session is None — "
+                            "impossible state: transition gate should have blocked this path"
+                        )
+                    from dataclasses import replace as _replace_dc
+
+                    _post_compose_guided = _replace_dc(
+                        _guided,
+                        transition_consumed=True,
+                    )
+
+                _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+                if _post_compose_guided is not None:
+                    _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+
                 # Save state if version changed.
                 # Path 2 (post-compose runtime preflight): mirror of the
                 # send_message post-compose try/except — see the send_message
@@ -3203,7 +3238,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="recompose",
-                            composer_meta={"repair_turns_used": result.repair_turns_used},
+                            composer_meta=_post_compose_meta,
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -3254,6 +3289,31 @@ def create_session_router() -> APIRouter:
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
+                elif _guided_terminal_for_compose is not None and _post_compose_guided is not None:
+                    # Version unchanged but transition_consumed must be flipped.
+                    # Persist the updated guided_session in a new state row so
+                    # subsequent turns pick up transition_consumed=True.
+                    _existing_meta: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        _existing_meta = dict(deep_thaw(state_record.composer_meta))
+                    _transition_meta = {**_existing_meta, **_post_compose_meta}
+                    _transition_state = result.state
+                    _transition_state_d = _transition_state.to_dict()
+                    _transition_state_data = CompositionStateData(
+                        source=_transition_state_d["source"],
+                        nodes=_transition_state_d["nodes"],
+                        edges=_transition_state_d["edges"],
+                        outputs=_transition_state_d["outputs"],
+                        metadata_=_transition_state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=_transition_meta,
+                    )
+                    _transition_record = await service.save_composition_state(
+                        session.id,
+                        _transition_state_data,
+                    )
+                    post_compose_state_id = _transition_record.id
 
                 # Persist assistant message
                 assistant_msg = await service.add_message(

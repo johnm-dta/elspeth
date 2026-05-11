@@ -247,6 +247,18 @@ def _send_message(client: TestClient, session_id: str, content: str) -> dict:
     return resp.json()
 
 
+def _seed_user_message(client: TestClient, session_id: str, content: str = "retry this") -> None:
+    """Insert a user message directly so recompose finds a valid last-user-turn."""
+    service: SessionServiceImpl = client.app.state.session_service
+    asyncio.run(service.add_message(UUID(session_id), "user", content))
+
+
+def _recompose(client: TestClient, session_id: str) -> dict:
+    resp = client.post(f"/api/sessions/{session_id}/recompose")
+    assert resp.status_code == 200, f"recompose failed: {resp.status_code} {resp.text}"
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # Test: first freeform turn after exit uses transition prompt
 # ---------------------------------------------------------------------------
@@ -369,3 +381,97 @@ class TestTransitionPromptAfterCompletedTerminal:
         assert "## Mode Transition" in system_content, f"COMPLETED terminal must trigger transition prompt. Got: {system_content[:500]}"
         assert "completed_pipeline" in system_content, "COMPLETED terminal must use 'completed_pipeline' reason string"
         assert "LIFTED" in system_content
+
+
+# ---------------------------------------------------------------------------
+# Tests: recompose path mirrors send_message for progressive disclosure
+# ---------------------------------------------------------------------------
+
+
+class TestRecomposeTransitionPrompt:
+    """Recompose is a retried freeform chat call — spec §5.5 progressive
+    disclosure fires on the same semantics as send_message."""
+
+    def test_recompose_uses_transition_prompt_on_first_freeform_turn(self, composer_freeform_client: TestClient) -> None:
+        """First recompose after guided_session.terminal is set uses the layered prompt."""
+        session_id = _create_session(composer_freeform_client)
+
+        terminal = TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=TerminalReason.USER_PRESSED_EXIT,
+            pipeline_yaml=None,
+        )
+        _seed_terminal_guided_session(composer_freeform_client, session_id, terminal)
+        # Recompose requires the last conversation message to be a user turn.
+        _seed_user_message(composer_freeform_client, session_id, "try again after exit")
+
+        captured_messages: list[list[dict]] = []
+
+        async def _fake_acompletion(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            return _fake_chat_response()
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            side_effect=_fake_acompletion,
+        ):
+            _recompose(composer_freeform_client, session_id)
+
+        assert len(captured_messages) >= 1, "LLM should have been called once"
+        messages = captured_messages[0]
+        system_messages = [m for m in messages if m["role"] == "system"]
+        assert system_messages, "No system messages found"
+        system_content = system_messages[0]["content"]
+
+        assert "## Mode Transition" in system_content, f"Expected transition header in recompose system prompt, got: {system_content[:500]}"
+        assert "LIFTED" in system_content
+        assert "user_pressed_exit" in system_content
+
+    def test_recompose_persists_transition_consumed(self, composer_freeform_client: TestClient) -> None:
+        """After recompose fires the transition prompt, transition_consumed=True is persisted."""
+        session_id = _create_session(composer_freeform_client)
+
+        terminal = TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=TerminalReason.USER_PRESSED_EXIT,
+            pipeline_yaml=None,
+        )
+        _seed_terminal_guided_session(composer_freeform_client, session_id, terminal)
+        _seed_user_message(composer_freeform_client, session_id, "try again")
+
+        async def _fake_acompletion(**kwargs):
+            return _fake_chat_response()
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            side_effect=_fake_acompletion,
+        ):
+            _recompose(composer_freeform_client, session_id)
+
+        gs_dict = _get_current_guided_session(composer_freeform_client, session_id)
+        assert gs_dict.get("transition_consumed") is True, f"transition_consumed not set to True after recompose. GuidedSession: {gs_dict}"
+
+    def test_recompose_guided_session_persisted_in_composer_meta(self, composer_freeform_client: TestClient) -> None:
+        """guided_session is included in composer_meta after recompose, not silently dropped."""
+        session_id = _create_session(composer_freeform_client)
+
+        terminal = TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=TerminalReason.USER_PRESSED_EXIT,
+            pipeline_yaml=None,
+        )
+        _seed_terminal_guided_session(composer_freeform_client, session_id, terminal)
+        _seed_user_message(composer_freeform_client, session_id, "persist check")
+
+        async def _fake_acompletion(**kwargs):
+            return _fake_chat_response()
+
+        with patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            side_effect=_fake_acompletion,
+        ):
+            _recompose(composer_freeform_client, session_id)
+
+        gs_dict = _get_current_guided_session(composer_freeform_client, session_id)
+        assert gs_dict, "guided_session must be present in composer_meta after recompose"
+        assert "terminal" in gs_dict, "guided_session must retain terminal after recompose"

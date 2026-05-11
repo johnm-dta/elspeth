@@ -23,7 +23,10 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Final, Literal, NoReturn, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.guided.state_machine import TerminalState
 
 import structlog
 from opentelemetry import metrics
@@ -1607,7 +1610,7 @@ class ComposerServiceImpl:
         session_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
-        guided_terminal: Any | None = None,
+        guided_terminal: TerminalState | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop with dual-counter budget.
 
@@ -1735,7 +1738,7 @@ class ComposerServiceImpl:
         user_id: str | None = None,
         deadline: float = 0.0,
         progress: ComposerProgressSink | None = None,
-        guided_terminal: Any | None = None,
+        guided_terminal: TerminalState | None = None,
     ) -> ComposerResult:
         """Inner composition loop with dual-counter budget tracking.
 
@@ -2910,7 +2913,7 @@ class ComposerServiceImpl:
         chat_history: list[dict[str, Any]],
         state: CompositionState,
         user_message: str,
-        guided_terminal: Any | None = None,
+        guided_terminal: TerminalState | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list. Returns a NEW list on every call.
 

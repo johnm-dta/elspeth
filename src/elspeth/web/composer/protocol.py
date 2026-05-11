@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.guided.state_machine import TerminalState
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
@@ -620,7 +623,7 @@ class ComposerService(Protocol):
         session_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
-        guided_terminal: Any | None = None,
+        guided_terminal: TerminalState | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop.
 

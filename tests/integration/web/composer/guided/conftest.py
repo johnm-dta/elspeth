@@ -20,9 +20,11 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
@@ -76,6 +78,7 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
 
     # App state: minimal set required by session router
     app.state.session_service = session_service
+    app.state.session_engine = engine  # for guided step-2.5 recipe application
     app.state.blob_service = blob_service
     app.state.settings = WebSettings(
         data_dir=tmp_path,
@@ -86,13 +89,18 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
     )
     app.state.composer_service = None  # Not used in session router
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
+    app.state.catalog_service = create_catalog_service()
 
     # Audit recorder for test inspection (Phase 3 Task 3.4 will wire this)
     app.state.composer_recorder = BufferingRecorder()
 
-    # Mount session router
+    # Mount session router (sessions + guided endpoints)
     router = create_session_router()
     app.include_router(router)
+
+    # Mount blobs router so tests can upload blobs via /api/sessions/{id}/blobs/inline
+    blobs_router = create_blobs_router()
+    app.include_router(blobs_router)
 
     # Wrap in TestClient and yield
     client = TestClient(app)

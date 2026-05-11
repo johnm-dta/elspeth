@@ -5,6 +5,14 @@ See docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md §5.
 Trust tier: Tier 1 (audit). Coercion forbidden — every field crashes on
 malformed input. The freeze_fields contract applies because these structures
 are persisted and re-read across the audit trail.
+
+Serialisation:
+  Each type exposes ``to_dict()`` → plain JSON-serialisable dict and a
+  corresponding ``from_dict(d)`` classmethod.  ``from_dict`` is Tier 1
+  strict: it uses direct key access (never ``.get()``), constructs enums
+  directly (ValueError on unknown value), and chains exceptions via
+  ``from exc``.  The round-trip invariant holds for all types:
+      obj == type.from_dict(obj.to_dict())
 """
 
 from __future__ import annotations
@@ -14,7 +22,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnResponse, TurnType
 
 
@@ -42,6 +50,26 @@ class TerminalState:
     reason: TerminalReason | None
     pipeline_yaml: str | None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "kind": self.kind.value,
+            "reason": self.reason.value if self.reason is not None else None,
+            "pipeline_yaml": self.pipeline_yaml,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TerminalState:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                kind=TerminalKind(d["kind"]),
+                reason=TerminalReason(d["reason"]) if d["reason"] is not None else None,
+                pipeline_yaml=d["pipeline_yaml"],
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"TerminalState.from_dict: malformed record {d!r}") from exc
+
 
 @dataclass(frozen=True, slots=True)
 class TurnRecord:
@@ -52,6 +80,30 @@ class TurnRecord:
     payload_hash: str
     response_hash: str | None
     emitter: str  # "server" | "llm"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "step": self.step.value,
+            "turn_type": self.turn_type.value,
+            "payload_hash": self.payload_hash,
+            "response_hash": self.response_hash,
+            "emitter": self.emitter,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TurnRecord:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                step=GuidedStep(d["step"]),
+                turn_type=TurnType(d["turn_type"]),
+                payload_hash=d["payload_hash"],
+                response_hash=d["response_hash"],
+                emitter=d["emitter"],
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"TurnRecord.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +121,28 @@ class SourceResolved:
     def __post_init__(self) -> None:
         freeze_fields(self, "options", "observed_columns", "sample_rows")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "plugin": self.plugin,
+            "options": deep_thaw(self.options),
+            "observed_columns": list(deep_thaw(self.observed_columns)),
+            "sample_rows": [dict(deep_thaw(r)) for r in self.sample_rows],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SourceResolved:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                plugin=d["plugin"],
+                options=d["options"],
+                observed_columns=tuple(d["observed_columns"]),
+                sample_rows=tuple(dict(r) for r in d["sample_rows"]),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"SourceResolved.from_dict: malformed record {d!r}") from exc
+
 
 @dataclass(frozen=True, slots=True)
 class SinkOutputResolved:
@@ -85,6 +159,28 @@ class SinkOutputResolved:
     def __post_init__(self) -> None:
         freeze_fields(self, "options", "required_fields")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "plugin": self.plugin,
+            "options": deep_thaw(self.options),
+            "required_fields": list(deep_thaw(self.required_fields)),
+            "schema_mode": self.schema_mode,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SinkOutputResolved:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                plugin=d["plugin"],
+                options=d["options"],
+                required_fields=tuple(d["required_fields"]),
+                schema_mode=d["schema_mode"],
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"SinkOutputResolved.from_dict: malformed record {d!r}") from exc
+
 
 @dataclass(frozen=True, slots=True)
 class SinkResolved:
@@ -97,6 +193,18 @@ class SinkResolved:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "outputs")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {"outputs": [o.to_dict() for o in self.outputs]}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SinkResolved:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(outputs=tuple(SinkOutputResolved.from_dict(o) for o in d["outputs"]))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"SinkResolved.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +220,24 @@ class ChainProposal:
     def __post_init__(self) -> None:
         freeze_fields(self, "steps")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "steps": [dict(deep_thaw(s)) for s in self.steps],
+            "why": self.why,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ChainProposal:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                steps=tuple(dict(s) for s in d["steps"]),
+                why=d["why"],
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"ChainProposal.from_dict: malformed record {d!r}") from exc
+
 
 @dataclass(frozen=True, slots=True)
 class GuidedSession:
@@ -120,6 +246,10 @@ class GuidedSession:
     Persisted in CompositionState.guided_session. `terminal` becomes non-None
     when the wizard ends; subsequent freeform turns honour progressive
     disclosure (see §8.2 of the spec).
+
+    Serialisation: use ``to_dict()`` / ``from_dict()`` for persistence via
+    ``composer_meta["guided_session"]`` (see Task 3.5a implementation notes).
+    The frozen dataclass equality check is the round-trip invariant test.
     """
 
     step: GuidedStep
@@ -139,6 +269,44 @@ class GuidedSession:
             step_3_proposal=None,
             terminal=None,
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict.
+
+        All nested optional types serialise their presence — ``None`` round-
+        trips as ``None`` (never fabricated).
+        """
+        return {
+            "step": self.step.value,
+            "history": [r.to_dict() for r in self.history],
+            "step_1_result": self.step_1_result.to_dict() if self.step_1_result is not None else None,
+            "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
+            "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
+            "terminal": self.terminal.to_dict() if self.terminal is not None else None,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> GuidedSession:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data.
+
+        Used when restoring state from ``composer_meta["guided_session"]``.
+        KeyError, ValueError, and TypeError all indicate Tier 1 corruption.
+        """
+        try:
+            step_1_raw = d["step_1_result"]
+            step_2_raw = d["step_2_result"]
+            step_3_raw = d["step_3_proposal"]
+            terminal_raw = d["terminal"]
+            return cls(
+                step=GuidedStep(d["step"]),
+                history=tuple(TurnRecord.from_dict(r) for r in d["history"]),
+                step_1_result=SourceResolved.from_dict(step_1_raw) if step_1_raw is not None else None,
+                step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
+                step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
+                terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
 
 
 # ---------------------------------------------------------------------------

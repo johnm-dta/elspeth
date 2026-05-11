@@ -15,6 +15,7 @@ boundary instead of being silently reinterpreted by the route layer.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 import pydantic
@@ -207,6 +208,92 @@ class RunResponse(_StrictResponse):
     finished_at: datetime | None = None
     composition_version: int
     discard_summary: DiscardSummary | None = None
+
+
+class TurnRecordResponse(_StrictResponse):
+    """Wire representation of a single TurnRecord in the guided-session history."""
+
+    step: str
+    turn_type: str
+    payload_hash: str
+    response_hash: str | None
+    emitter: str
+
+
+class TerminalStateResponse(_StrictResponse):
+    """Wire representation of a TerminalState."""
+
+    kind: str
+    reason: str | None
+    pipeline_yaml: str | None
+
+
+class GuidedSessionResponse(_StrictResponse):
+    """Wire representation of the GuidedSession attached to a CompositionState."""
+
+    step: str
+    history: list[TurnRecordResponse]
+    terminal: TerminalStateResponse | None
+
+
+class TurnPayloadResponse(_StrictResponse):
+    """Opaque turn payload — type discriminated by ``type`` at the parent level.
+
+    ``payload`` carries the raw TypedDict contents for the turn (e.g.
+    ``SingleSelectPayload``, ``InspectAndConfirmPayload``).  Pydantic strict
+    mode does not apply to ``Any``-typed fields; the route handler guarantees
+    the payload is a plain dict at construction time.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    type: str
+    step_index: int
+    payload: JsonValue
+
+
+class GetGuidedResponse(_StrictResponse):
+    """Response for GET /api/sessions/{id}/guided."""
+
+    guided_session: GuidedSessionResponse
+    next_turn: TurnPayloadResponse | None
+    terminal: TerminalStateResponse | None
+    composition_state: CompositionStateResponse | None
+
+
+class GuidedRespondRequest(_RequestModel):
+    """Request body for POST /api/sessions/{id}/guided/respond.
+
+    Carries the user's typed response to the current guided turn.  All
+    fields from ``TurnResponse`` are optional at the HTTP boundary (Pydantic
+    coerces absent keys to ``None``); the route handler validates that the
+    combination is consistent with the current turn type.
+
+    ``control_signal`` is a plain string so that stale clients sending an
+    unknown signal value fail gracefully rather than crashing at the HTTP
+    boundary.  The route handler validates the value against the closed
+    ``ControlSignal`` enum.
+    """
+
+    chosen: list[str] | None = None
+    edited_values: dict[str, Any] | None = None
+    custom_inputs: list[str] | None = None
+    accepted_step_index: int | None = None
+    edit_step_index: int | None = None
+    control_signal: str | None = None
+
+
+class GuidedRespondResponse(_StrictResponse):
+    """Response for POST /api/sessions/{id}/guided/respond.
+
+    Mirrors GET /guided response shape so the frontend can replace its
+    cached guided_session in a single pass.
+    """
+
+    guided_session: GuidedSessionResponse
+    next_turn: TurnPayloadResponse | None
+    terminal: TerminalStateResponse | None
+    composition_state: CompositionStateResponse | None
 
 
 # Forward reference resolution

@@ -25,6 +25,7 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCall
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
+from elspeth.core.canonical import stable_hash
 from elspeth.core.dag.models import GraphValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
@@ -32,9 +33,36 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
+from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
 from elspeth.web.composer import yaml_generator
-from elspeth.web.composer.audit import audit_envelope, llm_call_audit_envelope
-from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.audit import BufferingRecorder, audit_envelope, llm_call_audit_envelope
+from elspeth.web.composer.guided.audit import (
+    emit_dropped_to_freeform,
+    emit_step_advanced,
+    emit_turn_answered,
+    emit_turn_emitted,
+)
+from elspeth.web.composer.guided.emitters import (
+    build_initial_step_1_turn,
+    build_step_1_schema_form_turn,
+    build_step_2_5_recipe_offer_turn,
+    build_step_2_multi_select_turn,
+    build_step_2_schema_form_turn,
+    build_step_2_single_select_turn,
+)
+from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.recipe_match import match_recipe
+from elspeth.web.composer.guided.state_machine import (
+    GuidedSession,
+    SourceResolved,
+    TerminalReason,
+    TurnRecord,
+    step_advance,
+)
+from elspeth.web.composer.guided.steps import (
+    handle_step_1_source,
+    handle_step_2_5_recipe_apply,
+)
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
@@ -74,11 +102,18 @@ from elspeth.web.sessions.schemas import (
     CreateSessionRequest,
     ForkSessionRequest,
     ForkSessionResponse,
+    GetGuidedResponse,
+    GuidedRespondRequest,
+    GuidedRespondResponse,
+    GuidedSessionResponse,
     MessageWithStateResponse,
     RevertStateRequest,
     RunResponse,
     SendMessageRequest,
     SessionResponse,
+    TerminalStateResponse,
+    TurnPayloadResponse,
+    TurnRecordResponse,
     ValidationEntryResponse,
 )
 
@@ -1512,6 +1547,418 @@ def _initial_composition_state_with_guided_session() -> CompositionState:
         metadata=PipelineMetadata(),
         version=1,
         guided_session=GuidedSession.initial(),
+    )
+
+
+async def _dispatch_guided_respond(
+    *,
+    state: CompositionState,
+    guided: GuidedSession,
+    current_step: GuidedStep,
+    current_turn_type: TurnType,
+    turn_response: Mapping[str, Any],
+    catalog: CatalogServiceProtocol,
+    recorder: BufferingRecorder,
+    user_id: str,
+    data_dir: str | None,
+    session_engine: Any,
+    session_id: str,
+) -> tuple[CompositionState, GuidedSession, Any | None]:
+    """Dispatch a guided respond to the correct step handler and next-turn emitter.
+
+    Pure routing logic: identifies which branch to take based on
+    ``current_step`` and ``current_turn_type``, calls the appropriate
+    side-effect step handler, advances the session pointer, and emits
+    the next turn.
+
+    Returns ``(updated_state, updated_session, next_turn_or_None)``.
+
+    The dispatcher is called only when ``guided.terminal is None``.  The
+    caller checks terminality before and after; the dispatcher never
+    terminates a session (that is ``step_advance``'s responsibility for
+    exit_to_freeform and the step-2.5 recipe-accept path).
+
+    Decision table:
+
+    +-------------------+---------------------------+---------------------------+
+    | step              | current_turn_type          | action                    |
+    +-------------------+---------------------------+---------------------------+
+    | STEP_1_SOURCE     | SINGLE_SELECT             | emit schema_form (source) |
+    | STEP_1_SOURCE     | SCHEMA_FORM               | handle_step_1_source;     |
+    |                   |                           | advance to STEP_2;        |
+    |                   |                           | emit SINGLE_SELECT (sink) |
+    | STEP_1_SOURCE     | INSPECT_AND_CONFIRM       | handle_step_1_source;     |
+    |                   |                           | (step_advance already      |
+    |                   |                           |  advanced to STEP_2);     |
+    |                   |                           | emit SINGLE_SELECT (sink) |
+    | STEP_2_SINK       | SINGLE_SELECT             | emit schema_form (sink)   |
+    | STEP_2_SINK       | SCHEMA_FORM               | emit multi_select_custom  |
+    | STEP_2_SINK       | MULTI_SELECT_WITH_CUSTOM  | handle_step_2_sink;       |
+    |                   |                           | (step_advance advanced     |
+    |                   |                           |  to STEP_2_5);            |
+    |                   |                           | match_recipe;             |
+    |                   |                           | emit recipe_offer or      |
+    |                   |                           | advance to STEP_3         |
+    | STEP_2_5_RECIPE   | RECIPE_OFFER chosen=accept| handled by step_advance   |
+    |                   |                           | (terminal set);           |
+    |                   |                           | caller detects terminal   |
+    | STEP_2_5_RECIPE   | RECIPE_OFFER              | handle_step_2_5 + apply   |
+    |                   | chosen=build_manually     | (step_advance advanced     |
+    |                   |                           |  to STEP_3)               |
+    +-------------------+---------------------------+---------------------------+
+
+    ``step_advance`` has already run; ``guided.step`` may already point to the
+    next step (when step_advance fired a step transition).  The dispatcher uses
+    ``current_step`` (before advance) and ``guided.step`` (after advance) to
+    detect transitions.
+    """
+    from dataclasses import replace as _replace
+
+    next_turn: Any | None = None
+
+    # --- STEP_1_SOURCE intra-step turns ----------------------------------
+    if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_1_SOURCE:
+        # step_advance did NOT advance the step — intra-step turn.
+        if current_turn_type is TurnType.SINGLE_SELECT:
+            # User picked a source plugin. Emit schema_form for the plugin options.
+            chosen = turn_response["chosen"] or []
+            if not chosen:
+                raise HTTPException(
+                    status_code=400,
+                    detail="single_select response at step 1 must include chosen plugin name.",
+                )
+            plugin_name = str(chosen[0])
+            next_turn = build_step_1_schema_form_turn(plugin_name, catalog)
+            new_record = TurnRecord(
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        if current_turn_type is TurnType.SCHEMA_FORM:
+            # User submitted source options. Call handle_step_1_source to commit.
+            edited = turn_response["edited_values"] or {}
+            resolved = SourceResolved(
+                plugin=str(edited.get("plugin", state.source.plugin if state.source else "")),
+                options=dict(edited.get("options", {})),
+                observed_columns=tuple(edited.get("observed_columns", [])),
+                sample_rows=tuple(dict(r) for r in edited.get("sample_rows", [])),
+            )
+            handler_result = handle_step_1_source(
+                state=state,
+                session=guided,
+                resolved=resolved,
+                catalog=catalog,
+                data_dir=data_dir,
+            )
+            if not handler_result.tool_result.success:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                )
+            state = handler_result.state
+            # Advance step pointer to STEP_2.
+            guided = _replace(
+                handler_result.session,
+                step=GuidedStep.STEP_2_SINK,
+            )
+            # Emit Step 2 initial turn.
+            next_turn = build_step_2_single_select_turn(catalog)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_step_advanced(
+                recorder,
+                prev=GuidedStep.STEP_1_SOURCE,
+                next_=GuidedStep.STEP_2_SINK,
+                reason="user_advanced",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        # INSPECT_AND_CONFIRM at STEP_1: step_advance already advanced to STEP_2.
+        # But in this branch guided.step is still STEP_1 — step_advance
+        # must have already advanced it.  This case is unreachable (step_advance
+        # advances for INSPECT_AND_CONFIRM → guided.step becomes STEP_2).
+        # Fall through to the post-advance branch below.
+
+    # --- STEP_1_SOURCE → STEP_2_SINK (step_advance fired for INSPECT_AND_CONFIRM)
+    if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
+        # step_advance advanced the step. Build SourceResolved from edited_values.
+        edited = turn_response["edited_values"] or {}
+        resolved = SourceResolved(
+            plugin=str(edited.get("plugin", "")),
+            options=dict(edited.get("options", {})),
+            observed_columns=tuple(edited.get("observed_columns", [])),
+            sample_rows=tuple(dict(r) for r in edited.get("sample_rows", [])),
+        )
+        handler_result = handle_step_1_source(
+            state=state,
+            session=guided,
+            resolved=resolved,
+            catalog=catalog,
+            data_dir=data_dir,
+        )
+        if not handler_result.tool_result.success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+            )
+        state = handler_result.state
+        guided = handler_result.session
+        next_turn = build_step_2_single_select_turn(catalog)
+        new_record = TurnRecord(
+            step=GuidedStep.STEP_2_SINK,
+            turn_type=TurnType(next_turn["type"]),
+            payload_hash=stable_hash(next_turn["payload"]),
+            response_hash=None,
+            emitter="server",
+        )
+        emit_turn_emitted(
+            recorder,
+            step=GuidedStep.STEP_2_SINK,
+            turn_type=TurnType(next_turn["type"]),
+            payload_hash=stable_hash(next_turn["payload"]),
+            payload_payload_id="",
+            emitter="server",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        guided = _replace(guided, history=(*guided.history, new_record))
+        return state, guided, next_turn
+
+    # --- STEP_2_SINK intra-step turns ------------------------------------
+    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_SINK:
+        if current_turn_type is TurnType.SINGLE_SELECT:
+            # User picked a sink plugin. Emit schema_form for the plugin options.
+            chosen = turn_response["chosen"] or []
+            if not chosen:
+                raise HTTPException(
+                    status_code=400,
+                    detail="single_select response at step 2 must include chosen plugin name.",
+                )
+            plugin_name = str(chosen[0])
+            next_turn = build_step_2_schema_form_turn(plugin_name, catalog)
+            new_record = TurnRecord(
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        if current_turn_type is TurnType.SCHEMA_FORM:
+            # User filled in sink options. Emit multi_select_with_custom for required fields.
+            # Observed columns come from step_1_result if available.
+            observed_columns: tuple[str, ...] = ()
+            if guided.step_1_result is not None:
+                observed_columns = tuple(guided.step_1_result.observed_columns)
+            next_turn = build_step_2_multi_select_turn(observed_columns)
+            new_record = TurnRecord(
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        if current_turn_type is TurnType.MULTI_SELECT_WITH_CUSTOM:
+            # step_advance already advanced the step to STEP_2_5 (via
+            # _advance_step_2). The new sink is encoded in step_advance's
+            # updated session (guided.step_2_result). Run match_recipe.
+            # Emit recipe_offer if matched; else advance to STEP_3 (out of scope).
+            if guided.step_2_result is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Dispatcher invariant: step_2_result must be set after MULTI_SELECT_WITH_CUSTOM advance.",
+                )
+            source = guided.step_1_result
+            sink = guided.step_2_result
+            if source is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Dispatcher invariant: step_1_result must be set before step 2 completes.",
+                )
+            recipe_match = match_recipe(source, sink)
+            if recipe_match is not None:
+                next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
+                new_record = TurnRecord(
+                    step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                    turn_type=TurnType(next_turn["type"]),
+                    payload_hash=stable_hash(next_turn["payload"]),
+                    response_hash=None,
+                    emitter="server",
+                )
+                emit_turn_emitted(
+                    recorder,
+                    step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                    turn_type=TurnType(next_turn["type"]),
+                    payload_hash=stable_hash(next_turn["payload"]),
+                    payload_payload_id="",
+                    emitter="server",
+                    composition_version=state.version,
+                    actor=user_id,
+                )
+                guided = _replace(guided, history=(*guided.history, new_record))
+                return state, guided, next_turn
+
+            # No recipe match — advance silently to Step 3 (chain solver).
+            # Step 3 is deferred to Phase 4; return no next_turn.
+            return state, guided, None
+
+    # --- STEP_2_SINK → STEP_2_5 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
+    # This branch handles the case where step_advance advanced the step AND
+    # we're now at STEP_2_5, but the turn_response is for MULTI_SELECT_WITH_CUSTOM.
+    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+        # step_advance already set guided.step_2_result and advanced to STEP_2_5.
+        if guided.step_1_result is None or guided.step_2_result is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Dispatcher invariant: step_1_result and step_2_result must be set.",
+            )
+        source = guided.step_1_result
+        sink = guided.step_2_result
+        recipe_match = match_recipe(source, sink)
+        if recipe_match is not None:
+            next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        return state, guided, None
+
+    # --- STEP_2_5_RECIPE_MATCH turns ------------------------------------
+    if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+        chosen = list(turn_response["chosen"] or [])
+        if chosen == ["accept"]:
+            # User accepted the recipe. Extract the slots from edited_values
+            # (user may have filled in required slots).
+            edited = turn_response["edited_values"] or {}
+            # Reconstruct slots from the last RECIPE_OFFER turn's payload
+            # and overlay with user-edited values.
+            recipe_turn_record = next(
+                (r for r in reversed(guided.history) if r.step == GuidedStep.STEP_2_5_RECIPE_MATCH),
+                None,
+            )
+            if recipe_turn_record is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Dispatcher invariant: recipe_offer TurnRecord missing at step 2.5.",
+                )
+
+            # The slots must be passed as edited_values from the client.
+            # The recipe_offer turn pre-populates partial slots; the user fills
+            # the rest via the recipe_offer form and sends them back in edited_values.
+            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
+
+            recipe_name = str(edited.get("recipe_name", ""))
+            slots = dict(edited.get("slots", {}))
+            match = _RecipeMatch(recipe_name=recipe_name, slots=slots)
+
+            handler_result = handle_step_2_5_recipe_apply(
+                state=state,
+                session=guided,
+                match=match,
+                catalog=catalog,
+                data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
+            )
+            if not handler_result.tool_result.success:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Recipe application failed: {handler_result.tool_result}",
+                )
+            state = handler_result.state
+            guided = handler_result.session
+            # terminal is now set on guided.terminal (TerminalKind.COMPLETED).
+            return state, guided, None
+
+        if chosen == ["build_manually"]:
+            # step_advance already advanced to STEP_3.
+            # Step 3 chain solver is deferred to Phase 4.
+            return state, guided, None
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"recipe_offer response must have chosen=['accept'] or chosen=['build_manually'], got {chosen!r}.",
+        )
+
+    # Unhandled branch — this is a dispatcher gap, not a user error.
+    raise AssertionError(
+        f"_dispatch_guided_respond: unhandled branch "
+        f"current_step={current_step!r}, current_turn_type={current_turn_type!r}, "
+        f"guided.step={guided.step!r}"
     )
 
 
@@ -3087,4 +3534,408 @@ def create_session_router() -> APIRouter:
             composition_state=_state_response(copied_state) if copied_state else None,
         )
 
+    @router.get("/{session_id}/guided", response_model=GetGuidedResponse)
+    async def get_guided(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GetGuidedResponse:
+        """Return the current guided-mode state for a session.
+
+        **Mutating on first visit:** if the current step has no emitted
+        TurnRecord in the guided session history, a turn is built and
+        persisted.  Subsequent fetches are idempotent — the existing
+        TurnRecord's payload_hash is returned verbatim.
+
+        If the session has no existing CompositionState, one is created
+        with ``GuidedSession.initial()`` attached (spec §5.2 default-guided
+        invariant).
+
+        Returns 404 if the session does not exist or does not belong to
+        the requesting user.
+        Returns 400 if the session's composition state has no guided_session
+        attached (freeform session — use /api/sessions/{id}/messages instead).
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        catalog: CatalogServiceProtocol = request.app.state.catalog_service
+        recorder = BufferingRecorder()
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            # Load or create CompositionState.
+            state_record = await service.get_current_state(session_id)
+            if state_record is None:
+                state = _initial_composition_state_with_guided_session()
+            else:
+                state = _state_from_record(state_record)
+
+            # Reject freeform sessions.
+            if state.guided_session is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                )
+
+            guided = state.guided_session
+            current_step = guided.step
+
+            # Idempotency check: if this step already has an emitted TurnRecord,
+            # return the existing payload without re-emitting.
+            existing_record_for_step: TurnRecord | None = next(
+                (r for r in reversed(guided.history) if r.step == current_step),
+                None,
+            )
+
+            # Always build the turn (deterministic from current state + catalog).
+            # Building is cheap and allows idempotent re-fetch to return the
+            # same payload without needing a payload store.
+            turn = build_initial_step_1_turn(
+                state,
+                blob_inspection=None,
+                catalog=catalog,
+            )
+            turn_type = TurnType(turn["type"])
+            payload_hash = stable_hash(turn["payload"])
+
+            state_record_out: CompositionStateRecord | None = state_record
+            if existing_record_for_step is None:
+                # First fetch for this step: record TurnRecord, persist, emit audit.
+                new_record = TurnRecord(
+                    step=current_step,
+                    turn_type=turn_type,
+                    payload_hash=payload_hash,
+                    response_hash=None,
+                    emitter="server",
+                )
+                from dataclasses import replace as _replace
+
+                new_guided = _replace(guided, history=(*guided.history, new_record))
+                new_state = _replace(state, guided_session=new_guided)
+
+                # Persist state with updated guided_session in composer_meta.
+                # Preserve any existing composer_meta keys (e.g. repair_turns_used).
+                existing_meta: dict[str, Any] = {}
+                if state_record is not None and state_record.composer_meta is not None:
+                    existing_meta = dict(deep_thaw(state_record.composer_meta))
+                new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+
+                state_d = new_state.to_dict()
+                state_data = CompositionStateData(
+                    source=state_d["source"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=state_d["metadata"],
+                    is_valid=False,
+                    validation_errors=None,
+                    composer_meta=new_composer_meta,
+                )
+                state_record_out = await service.save_composition_state(session_id, state_data)
+
+                # Emit audit event.
+                emit_turn_emitted(
+                    recorder,
+                    step=current_step,
+                    turn_type=turn_type,
+                    payload_hash=payload_hash,
+                    payload_payload_id="",  # No payload store for server-emitted turns yet.
+                    emitter="server",
+                    composition_version=new_state.version,
+                    actor=user.user_id,
+                )
+
+                # Drain recorder into the DB as role=tool audit rows.
+                tool_invocations = recorder.invocations
+                if tool_invocations:
+                    await _persist_tool_invocations(
+                        service,
+                        session_id,
+                        tool_invocations,
+                        state_record_out.id,
+                    )
+
+                guided = new_guided
+
+            # Build response.  On re-fetch the same turn is returned (deterministic
+            # rebuild) and the payload_hash matches what was recorded on first visit.
+            terminal = guided.terminal
+            return GetGuidedResponse(
+                guided_session=GuidedSessionResponse(
+                    step=guided.step.value,
+                    history=[
+                        TurnRecordResponse(
+                            step=r.step.value,
+                            turn_type=r.turn_type.value,
+                            payload_hash=r.payload_hash,
+                            response_hash=r.response_hash,
+                            emitter=r.emitter,
+                        )
+                        for r in guided.history
+                    ],
+                    terminal=TerminalStateResponse(
+                        kind=terminal.kind.value,
+                        reason=terminal.reason.value if terminal.reason is not None else None,
+                        pipeline_yaml=terminal.pipeline_yaml,
+                    )
+                    if terminal is not None
+                    else None,
+                ),
+                next_turn=TurnPayloadResponse(
+                    type=turn["type"],
+                    step_index=turn["step_index"],
+                    payload=dict(turn["payload"]),
+                ),
+                terminal=TerminalStateResponse(
+                    kind=terminal.kind.value,
+                    reason=terminal.reason.value if terminal.reason is not None else None,
+                    pipeline_yaml=terminal.pipeline_yaml,
+                )
+                if terminal is not None
+                else None,
+                composition_state=_state_response(state_record_out) if state_record_out is not None else None,
+            )
+
+    @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
+    async def post_guided_respond(
+        session_id: UUID,
+        body: GuidedRespondRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GuidedRespondResponse:
+        """Submit a user response to the current guided-mode turn.
+
+        **Dispatcher:** Identifies the current turn type from the last
+        ``TurnRecord`` in the session history, applies the response via
+        ``step_advance`` (pure), runs any required side-effect step handler,
+        persists the updated state, and emits audit events.
+
+        Returns the updated ``guided_session``, the next ``next_turn`` (or
+        ``None`` if the session has reached a terminal state), and the
+        ``terminal`` payload (or ``None`` while still active).
+
+        Raises 400 if the session has no ``guided_session`` attached.
+        Raises 409 if the guided session is already in a terminal state.
+        Raises 404 if the session does not exist or belong to the requesting user.
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        catalog: CatalogServiceProtocol = request.app.state.catalog_service
+        recorder = BufferingRecorder()
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            # Load state.
+            state_record = await service.get_current_state(session_id)
+            if state_record is None:
+                state = _initial_composition_state_with_guided_session()
+            else:
+                state = _state_from_record(state_record)
+
+            if state.guided_session is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                )
+
+            guided = state.guided_session
+
+            # Reject if session already terminal.
+            if guided.terminal is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session is already in a terminal state. No further responses accepted.",
+                )
+
+            # Derive the current turn type from the last TurnRecord for the
+            # current step.  Crash if history is empty — the caller must have
+            # fetched GET /guided first (which seeds the initial TurnRecord).
+            current_step = guided.step
+            existing_record: TurnRecord | None = next(
+                (r for r in reversed(guided.history) if r.step == current_step),
+                None,
+            )
+            if existing_record is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
+                )
+
+            current_turn_type = existing_record.turn_type
+
+            # Build the TurnResponse dict from the request body.
+            from dataclasses import replace as _replace
+
+            turn_response: TurnResponse = {
+                "chosen": body.chosen,
+                "edited_values": body.edited_values,
+                "custom_inputs": body.custom_inputs,
+                "accepted_step_index": body.accepted_step_index,
+                "edit_step_index": body.edit_step_index,
+                "control_signal": body.control_signal,
+            }
+
+            # Record the response_hash on the existing TurnRecord.
+            response_hash = stable_hash(turn_response)
+            updated_record = _replace(existing_record, response_hash=response_hash)
+            # Rebuild history tuple with response_hash stamped on this record.
+            updated_history = tuple(updated_record if r is existing_record else r for r in guided.history)
+            guided = _replace(guided, history=updated_history)
+
+            # Emit guided_turn_answered audit event.
+            emit_turn_answered(
+                recorder,
+                step=current_step,
+                turn_type=current_turn_type,
+                response_hash=response_hash,
+                response_payload_id="",
+                control_signal=body.control_signal,
+                composition_version=state.version,
+                actor=user.user_id,
+            )
+
+            # Run step_advance (pure — no I/O).
+            new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
+                guided,
+                turn_response,
+                current_turn_type=current_turn_type,
+            )
+
+            # Fan directives to emit_* helpers.
+            for directive in directives:
+                if directive.tool_name == "guided_step_advanced":
+                    args = dict(directive.arguments)
+                    emit_step_advanced(
+                        recorder,
+                        prev=GuidedStep(args["prev_step"]),
+                        next_=GuidedStep(args["next_step"]),
+                        reason=args["reason"],
+                        composition_version=state.version,
+                        actor=user.user_id,
+                    )
+                elif directive.tool_name == "guided_dropped_to_freeform":
+                    args = dict(directive.arguments)
+                    emit_dropped_to_freeform(
+                        recorder,
+                        prev=GuidedStep(args["prev_step"]),
+                        drop_reason=TerminalReason(args["drop_reason"]),
+                        validation_result=args.get("validation_result"),
+                        composition_version=state.version,
+                        actor=user.user_id,
+                    )
+
+            guided = new_guided
+            terminal = terminal_from_advance
+
+            # Run side-effect dispatcher if the session is not yet terminal.
+            # The dispatcher calls step handlers (handle_step_1_source,
+            # handle_step_2_sink, handle_step_2_5_recipe_apply) and emits
+            # the next turn based on the updated step + turn type.
+            next_turn: Any | None = None
+            settings = request.app.state.settings
+            data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
+            session_engine = getattr(request.app.state, "session_engine", None)
+
+            if terminal is None:
+                state, guided, next_turn = await _dispatch_guided_respond(
+                    state=state,
+                    guided=guided,
+                    current_step=current_step,
+                    current_turn_type=current_turn_type,
+                    turn_response=turn_response,
+                    catalog=catalog,
+                    recorder=recorder,
+                    user_id=user.user_id,
+                    data_dir=data_dir,
+                    session_engine=session_engine,
+                    session_id=str(session_id),
+                )
+                terminal = guided.terminal
+
+            # Persist updated state.
+            new_state = _replace(state, guided_session=guided)
+            existing_meta: dict[str, Any] = {}
+            if state_record is not None and state_record.composer_meta is not None:
+                existing_meta = dict(deep_thaw(state_record.composer_meta))
+            new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+
+            state_d = new_state.to_dict()
+            state_data = CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=False,
+                validation_errors=None,
+                composer_meta=new_composer_meta,
+            )
+            state_record_out = await service.save_composition_state(session_id, state_data)
+
+            # Drain recorder.
+            tool_invocations = recorder.invocations
+            if tool_invocations:
+                await _persist_tool_invocations(
+                    service,
+                    session_id,
+                    tool_invocations,
+                    state_record_out.id,
+                )
+
+            return GuidedRespondResponse(
+                guided_session=GuidedSessionResponse(
+                    step=guided.step.value,
+                    history=[
+                        TurnRecordResponse(
+                            step=r.step.value,
+                            turn_type=r.turn_type.value,
+                            payload_hash=r.payload_hash,
+                            response_hash=r.response_hash,
+                            emitter=r.emitter,
+                        )
+                        for r in guided.history
+                    ],
+                    terminal=TerminalStateResponse(
+                        kind=terminal.kind.value,
+                        reason=terminal.reason.value if terminal.reason is not None else None,
+                        pipeline_yaml=terminal.pipeline_yaml,
+                    )
+                    if terminal is not None
+                    else None,
+                ),
+                next_turn=TurnPayloadResponse(
+                    type=next_turn["type"],
+                    step_index=next_turn["step_index"],
+                    payload=dict(next_turn["payload"]),
+                )
+                if next_turn is not None
+                else None,
+                terminal=TerminalStateResponse(
+                    kind=terminal.kind.value,
+                    reason=terminal.reason.value if terminal.reason is not None else None,
+                    pipeline_yaml=terminal.pipeline_yaml,
+                )
+                if terminal is not None
+                else None,
+                composition_state=_state_response(state_record_out),
+            )
+
     return router
+
+
+def _guided_step_index(step: Any) -> int:
+    """Map a GuidedStep to its 0-based integer index.
+
+    Mirrors ``emitters._step_index``; defined here so the route handler
+    can reconstruct a re-fetch Turn without importing the emitters module
+    just for this utility.
+    """
+    from elspeth.web.composer.guided.protocol import GuidedStep
+
+    _ORDER: tuple[GuidedStep, ...] = (
+        GuidedStep.STEP_1_SOURCE,
+        GuidedStep.STEP_2_SINK,
+        GuidedStep.STEP_2_5_RECIPE_MATCH,
+        GuidedStep.STEP_3_TRANSFORMS,
+    )
+    return _ORDER.index(step)

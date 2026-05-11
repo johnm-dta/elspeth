@@ -1061,6 +1061,8 @@ class TestIDORCoverageDrift:
             "revert_state",
             "get_state_yaml",
             "fork_from_message",
+            "get_guided",
+            "post_guided_respond",
         }
     )
 
@@ -1214,6 +1216,8 @@ class TestIDORProtection:
     - ``POST /{session_id}/state/revert``    (revert_state)
     - ``GET  /{session_id}/state/yaml``      (get_state_yaml)
     - ``POST /{session_id}/fork``            (fork_from_message)
+    - ``GET  /{session_id}/guided``          (get_guided)
+    - ``POST /{session_id}/guided/respond``  (post_guided_respond)
 
     Counter-test: alice's own access continues to return 200 at the end,
     guarding against the regression where an over-eager 404 breaks
@@ -1338,6 +1342,26 @@ class TestIDORProtection:
                 "from_message_id": str(uuid.uuid4()),
                 "new_message_content": "hijacked",
             },
+        )
+        assert resp.status_code == 404
+
+        # Bob tries to GET guided state -- should be 404.  The guided
+        # endpoint reveals wizard step, history, and pending turn payloads.
+        # An ownership bypass would let an attacker read Alice's pipeline
+        # wizard state without authorization.  The ownership check in
+        # ``get_guided`` runs before the compose lock or catalog access.
+        resp = bob_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 404
+
+        # Bob tries to POST guided/respond — should be 404.  The respond
+        # endpoint can mutate pipeline state by driving step handlers.
+        # An ownership bypass would let an attacker submit guided responses
+        # against Alice's session and corrupt her pipeline state.  The
+        # ownership check in ``post_guided_respond`` runs before any state
+        # load or dispatch.
+        resp = bob_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"control_signal": "exit_to_freeform"},
         )
         assert resp.status_code == 404
 

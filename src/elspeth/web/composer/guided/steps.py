@@ -15,10 +15,25 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 
+from sqlalchemy import Engine
+
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.composer.guided.state_machine import GuidedSession, SinkResolved, SourceResolved
+from elspeth.web.composer.guided.recipe_match import RecipeMatch
+from elspeth.web.composer.guided.state_machine import (
+    GuidedSession,
+    SinkResolved,
+    SourceResolved,
+    TerminalKind,
+    TerminalState,
+)
 from elspeth.web.composer.state import CompositionState
-from elspeth.web.composer.tools import ToolResult, _execute_set_output, _execute_set_source
+from elspeth.web.composer.tools import (
+    ToolResult,
+    _execute_apply_pipeline_recipe,
+    _execute_set_output,
+    _execute_set_source,
+)
+from elspeth.web.composer.yaml_generator import generate_yaml
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,4 +159,61 @@ def handle_step_2_sink(
         state=current_state,
         session=dataclasses.replace(session, step_2_result=resolved),
         tool_result=last_result,
+    )
+
+
+def handle_step_2_5_recipe_apply(
+    *,
+    state: CompositionState,
+    session: GuidedSession,
+    match: RecipeMatch,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> StepHandlerResult:
+    """Apply the matched recipe and mark the session COMPLETED.
+
+    On success the returned state is the recipe-applied pipeline,
+    session.terminal is TerminalState(COMPLETED, reason=None,
+    pipeline_yaml=<rendered>), and tool_result is the canonical
+    ToolResult from _execute_apply_pipeline_recipe.
+
+    On failure the state and session are unchanged, tool_result
+    reflects the failure; the route layer will re-emit the recipe-
+    offer turn with the validation errors attached.
+    """
+    arguments: dict[str, object] = {
+        "recipe_name": match.recipe_name,
+        "slots": dict(match.slots),
+    }
+
+    tool_result = _execute_apply_pipeline_recipe(
+        arguments,
+        state,
+        catalog,
+        data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+
+    if not tool_result.success:
+        return StepHandlerResult(
+            state=state,
+            session=session,
+            tool_result=tool_result,
+        )
+
+    yaml_text = generate_yaml(tool_result.updated_state)
+    terminal = TerminalState(
+        kind=TerminalKind.COMPLETED,
+        reason=None,
+        pipeline_yaml=yaml_text,
+    )
+    new_session = dataclasses.replace(session, terminal=terminal)
+
+    return StepHandlerResult(
+        state=tool_result.updated_state,
+        session=new_session,
+        tool_result=tool_result,
     )

@@ -7,6 +7,8 @@ helpers; only the catalog is constructed via the public test seam
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from elspeth.web.composer.guided.state_machine import (
@@ -164,3 +166,144 @@ class TestStep2Handler:
                 resolved=SinkResolved(outputs=()),
                 catalog=catalog,
             )
+
+
+class TestStep25Handler:
+    """Tests for handle_step_2_5_recipe_apply.
+
+    The success test requires a seeded session engine (blob registered in the
+    DB) because _execute_apply_pipeline_recipe → _execute_set_pipeline calls
+    _resolve_source_blob, which reads the blob record from the session DB.
+    The failure test uses no catalog interaction (recipe-not-found is rejected
+    at apply_recipe before any state or catalog access).
+    """
+
+    @pytest.fixture
+    def _seeded(self, tmp_path):
+        """Seed a minimal session DB with one CSV blob.
+
+        Returns (engine, session_id, blob_id) for use in the success test.
+        Pattern matches tests/unit/web/composer/test_recipes.py::TestApplyRecipeEndToEnd._seeded.
+        """
+        from datetime import UTC, datetime
+
+        from sqlalchemy.pool import StaticPool
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.engine import create_session_engine
+        from elspeth.web.sessions.models import blobs_table, sessions_table
+        from elspeth.web.sessions.schema import initialize_session_schema
+
+        engine = create_session_engine(
+            "sqlite:///:memory:",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        initialize_session_schema(engine)
+        session_id = str(uuid4())
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        blob_id = str(uuid4())
+        storage_dir = tmp_path / "blobs" / session_id
+        storage_dir.mkdir(parents=True)
+        storage_path = storage_dir / f"{blob_id}_data.csv"
+        body = b"text,category\nHello world,greeting\nBye,farewell\n"
+        storage_path.write_bytes(body)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=blob_id,
+                    session_id=session_id,
+                    filename="data.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(storage_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+        return engine, session_id, blob_id
+
+    def _real_catalog(self):
+        """Real PluginManager so set_pipeline's prevalidation sees authentic schemas."""
+        from elspeth.plugins.infrastructure.manager import PluginManager
+        from elspeth.web.catalog.service import CatalogServiceImpl
+
+        pm = PluginManager()
+        pm.register_builtin_plugins()
+        return CatalogServiceImpl(pm)
+
+    def test_apply_recipe_terminates_completed_with_yaml(self, _seeded) -> None:
+        from elspeth.web.composer.guided.recipe_match import RecipeMatch
+        from elspeth.web.composer.guided.state_machine import TerminalKind
+        from elspeth.web.composer.guided.steps import handle_step_2_5_recipe_apply
+
+        engine, session_id, blob_id = _seeded
+        state = _empty_state()
+        catalog = self._real_catalog()
+
+        # Required slots for classify-rows-llm-jsonl per _RECIPE1_SLOTS:
+        # required: source_blob_id, classifier_template, model, api_key_secret
+        # optional with defaults: provider, label_field, required_input_fields, output_path
+        # api_key_secret becomes {secret_ref: NAME} — stripped before validation.
+        match = RecipeMatch(
+            recipe_name="classify-rows-llm-jsonl",
+            slots={
+                "source_blob_id": blob_id,
+                "classifier_template": "Classify the following text: {{ row['text'] }}",
+                "model": "anthropic/claude-3.5-sonnet",
+                "api_key_secret": "OPENROUTER_API_KEY",
+                "required_input_fields": ["text"],
+            },
+        )
+
+        result = handle_step_2_5_recipe_apply(
+            state=state,
+            session=GuidedSession.initial(),
+            match=match,
+            catalog=catalog,
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        assert result.tool_result.success is True, f"recipe application failed: {getattr(result.tool_result, 'data', result.tool_result)}"
+        assert result.state.source is not None
+        assert len(result.state.outputs) >= 1
+        assert result.session.terminal is not None
+        assert result.session.terminal.kind is TerminalKind.COMPLETED
+        assert result.session.terminal.reason is None
+        assert result.session.terminal.pipeline_yaml is not None
+        assert "source:" in result.session.terminal.pipeline_yaml
+
+    def test_apply_recipe_failure_returns_state_unchanged(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import RecipeMatch
+        from elspeth.web.composer.guided.steps import handle_step_2_5_recipe_apply
+
+        state = _empty_state()
+        result = handle_step_2_5_recipe_apply(
+            state=state,
+            session=GuidedSession.initial(),
+            match=RecipeMatch(
+                recipe_name="this-recipe-does-not-exist",
+                slots={},
+            ),
+            catalog=create_catalog_service(),
+        )
+
+        assert result.tool_result.success is False
+        assert result.state is state
+        assert result.session.terminal is None

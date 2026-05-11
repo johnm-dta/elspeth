@@ -453,26 +453,26 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=fd103b0d6c58a62c
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=8d77465a6c3530e3
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
-    rollback expected; programmer bugs still propagate
+    rollback expected; programmer bugs still propagate. FP rotated from fd103b0d6c58a62c by _DATA_ERROR_KEY constant insertion.
   safety: Rollback failure attached as add_note() on primary_exc with blob_id and "manual reconciliation required"; primary
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=8ca49fc9b52455e7
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=2d90cb68d4922fd8
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
-    primary DB exception
+    primary DB exception. FP rotated from 8ca49fc9b52455e7 by _DATA_ERROR_KEY constant insertion.
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=79e74330fe91e1de
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=ac151e3b318a5bcd
   owner: web-composer
   reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure mode
     for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure is
     NOT silent — a blob_id_not_uuid warning fact is prepended to facts.warnings so the audit trail records why redacted_identity
-    omits blob_id.
+    omits blob_id. FP rotated from 79e74330fe91e1de by _DATA_ERROR_KEY constant insertion.
   safety: blob_uuid=None on parse failure; inspection still runs against the resolved blob row (already validated by the _sync_get_blob
     lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the audit-bound facts.warnings
     tuple; integrity guards (status=ready, hash match) remain authoritative.
@@ -1170,51 +1170,51 @@ allow_hits:
     which is raw JSON from the DB. Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=a21ab0d22842792d
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=b2ee7a80ee10460c
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — options is an optional user input that may be omitted;
-    plugin is now validated with an explicit 422 check before this point; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    plugin is now validated with an explicit 422 check before this point; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing keys fall back to defaults (empty dict); no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=d83151090a5bef09
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=e721908298db3cf6
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — observed_columns is an optional user input that may be
-    omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=18bc8091cecd1a93
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=b1da5afefea0764b
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — sample_rows is an optional user input that may be omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — sample_rows is an optional user input that may be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=fadf554d2cc0aefa
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=d09cedd0417b4678
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — options is an optional user input that may be
-    omitted; plugin is now validated with an explicit 422 check before this point; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    omitted; plugin is now validated with an explicit 422 check before this point; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing key falls back to empty dict; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=ecf7d1a7765f8692
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=4ec1fb5db6288315
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — observed_columns is an optional user input that
-    may be omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    may be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=697b796e82f4084b
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=44eaa62f930e5a6c
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — sample_rows is an optional user input that may
-    be omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=9b0906221f37adaf
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=5c6bd309ba8475d8
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted recipe-offer payload — recipe_name and slots are optional fields the user
-    fills in when accepting a recipe; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    fills in when accepting a recipe; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing keys fall back to empty string/dict; failure propagates via handle_step_2_5_recipe_apply
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=343c53dceacf0de3
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=7ced99282cc4454b
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted recipe-offer payload — recipe_name and slots are optional fields the user
-    fills in when accepting a recipe; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    fills in when accepting a recipe; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing keys fall back to empty string/dict; failure propagates via handle_step_2_5_recipe_apply
   expires: null
 - key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
@@ -1411,145 +1411,145 @@ allow_hits:
     and cancellation now also drains the shielded future's eventual exception via add_done_callback so asyncio's GC handler
     cannot fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d67c463089811195
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=7b716b48f0be464b
   owner: web-sessions
   reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps shielded cancelled-LLM-call
-    audit persistence; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted routes.py when post_guided_respond was added.
+    audit persistence; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted routes.py when post_guided_respond was added.
   safety: Same as the prior entry — shielded persistence is best-effort; explicit raise preserves cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=b4cab8a430103035
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d751dcfc9fa4c949
   owner: web-sessions
   reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps the shielded progress
-    publish in the cancellation handler; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted routes.py when post_guided_respond was added.
+    publish in the cancellation handler; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted routes.py when post_guided_respond was added.
   safety: Same as the prior entry — shielded publish completes; explicit raise restores cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=ceaae83145693a82
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=cd95569a81303ada
   owner: web-sessions
   reason: Same as the prior recompose R7 entry — mirror of cancelled-LLM-call audit persistence suppress in recompose; FP
-    changed after ruff-format reformatted routes.py when post_guided_respond was added; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    changed after ruff-format reformatted routes.py when post_guided_respond was added; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=54e1a93dec1dca49
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=94db8ee65912e8eb
   owner: web-sessions
-  reason: Same as the prior recompose R7 entry — mirror of shielded-publish suppress in recompose; FP rotated by Step 3 wiring (Phase 4 Task 4.5)
+  reason: Same as the prior recompose R7 entry — mirror of shielded-publish suppress in recompose; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish)
     reformatted routes.py when post_guided_respond was added.
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=a2074b6b9a204d6c
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=9b981797d4e29246
   owner: web-sessions
-  reason: isinstance check on deserialized composition state source — Tier 3 boundary; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted
+  reason: isinstance check on deserialized composition state source — Tier 3 boundary; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted
     routes.py when post_guided_respond was added.
   safety: Validates structure from persisted state; same as prior fork_from_message R5 entry.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=6243220782dadf07
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=d91f3d75b2a547f3
   owner: web-sessions
-  reason: source_dict.get("options") on Tier 3 composition state — optional source options; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted
+  reason: source_dict.get("options") on Tier 3 composition state — optional source options; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted
     routes.py when post_guided_respond was added.
   safety: Returns None on miss, blob rewrite path is skipped; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=003cbeddfd82ae0f
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=e989522746daf395
   owner: web-sessions
   reason: isinstance(options, dict) validates persisted source.options before mutating nested fields during fork blob rewrite;
-    FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Non-dict raises AuditIntegrityError; no silent skip or coercion.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=aade5352874dbe15
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=228192e62a173a67
   owner: web-sessions
-  reason: options.get("blob_ref") on Tier 3 state source — blob_ref is optional; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted
+  reason: options.get("blob_ref") on Tier 3 state source — blob_ref is optional; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted
     routes.py when post_guided_respond was added.
   safety: Returns None on miss, handled by conditional below; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=d337312f75404830
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=cdb5bc83948436c8
   owner: web-sessions
-  reason: isinstance(old_ref, str) — blob_ref may be str or UUID from persisted state; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: isinstance(old_ref, str) — blob_ref may be str or UUID from persisted state; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Tier 3 boundary — persisted blob_ref type is not guaranteed.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=2dea03f78103b6da
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=b9e0f00815eec2d7
   owner: web-sessions
   reason: blob_map.get(old_uuid) — not every source reference is guaranteed to have a copied blob target; FP changed after
-    ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: None result only triggers secondary path/file rewrite probe; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=896daaea542adbfb
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=1bbeda95f80b81dd
   owner: web-sessions
-  reason: options.get(path_key) on persisted source options — path/file keys are optional; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: options.get(path_key) on persisted source options — path/file keys are optional; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: None result skips that key; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=c5e620eb808fa5fc
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=db3dce50fa69c3a4
   owner: web-sessions
   reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string persisted path/file values; FP
-    changed after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    changed after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Only string values participate in fallback rewrite; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=50fb6c7ce12df024
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=e2ef8cd067be6c4f
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the BlobQuotaExceededError path; FP changed
-    after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior fork_from_message R6 entry.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=0c0126c4062b9a55
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=b1ab3796f836f98e
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path; FP
-    changed after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    changed after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior fork_from_message R6 entry.
   expires: null
-- key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=781ddb89d39d8a3a
+- key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=1700385ad06141fd
   owner: web-sessions
   reason: App-scoped compose lock registry is initialized lazily on first session-router use rather than being required at
-    startup; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    startup; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _get_session_compose_lock_registry entry.
   expires: null
-- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=8e14e2088e4e222e
+- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=b6167fb60da6eef7
   owner: web-sessions
   reason: Optional LiteLLM/provider exception metadata — status_code is not guaranteed on every provider error object; FP
-    changed after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    changed after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _litellm_error_detail entry.
   expires: null
-- key: web/sessions/routes.py:R1:_state_response:fp=668cdf7bb1201c38
+- key: web/sessions/routes.py:R1:_state_response:fp=fe9244679a1a1e7d
   owner: web-sessions
-  reason: Unwrapping redact_source_storage_path() output — helper returns dict with "source" key; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: Unwrapping redact_source_storage_path() output — helper returns dict with "source" key; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Falls back to unredacted source_data (less privacy, not less safety); same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=94f4f5454a0cdb2d
+- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=48ecb12793971ee9
   owner: web-sessions
   reason: isinstance(runtime_preflight, _RuntimePreflightFailed) dispatches the _RuntimePreflightOutcome union type; FP changed
-    after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _composer_persisted_validation entry.
   expires: null
-- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=915df4b95472b886
+- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=01f3fd864beccc72
   owner: composer-audit
-  reason: Audit-system-failure exemption — per-tool-call audit row persistence is best-effort; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: Audit-system-failure exemption — per-tool-call audit row persistence is best-effort; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _persist_tool_invocations entry.
   expires: null
-- key: web/sessions/routes.py:R6:_persist_llm_calls:fp=90f88cebae57c5ac
+- key: web/sessions/routes.py:R6:_persist_llm_calls:fp=51507e1d8c695356
   owner: composer-audit
-  reason: Audit-system-failure exemption — per-LLM-call audit row persistence is best-effort; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: Audit-system-failure exemption — per-LLM-call audit row persistence is best-effort; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _persist_llm_calls entry.
   expires: null
-- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=fc626c25ee2f56c9
+- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=505dc4062758398f
   owner: web-sessions
-  reason: state.validate() may fail on structurally damaged partial-state from LLM convergence/crash; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: state.validate() may fail on structurally damaged partial-state from LLM convergence/crash; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _state_data_from_composer_state R6 entry.
   expires: null
-- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=da99f9dcc94f9c91
+- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=60ff974a2b265091
   owner: web-sessions
   reason: isinstance(runtime, ValidationResult) dispatches _RuntimePreflightOutcome union type for telemetry; FP changed after
-    ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+    ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _state_data_from_composer_state R5 entry.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=5395d6da427d5ec6
+- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=a6eba11e3bd8d777
   owner: web-sessions
-  reason: Convergence partial-state save may fail — SQLAlchemyError family; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: Convergence partial-state save may fail — SQLAlchemyError family; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _handle_convergence_error entry.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=13caa996a929f960
+- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=bcc44e9de96bb181
   owner: web-sessions
-  reason: Plugin-crash partial-state save may fail — SQLAlchemyError family; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: Plugin-crash partial-state save may fail — SQLAlchemyError family; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _handle_plugin_crash entry.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=92365f4bcab7bab8
+- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=1b8cd07b1091976e
   owner: web-sessions
-  reason: Runtime-preflight partial-state save may fail — SQLAlchemyError family; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
+  reason: Runtime-preflight partial-state save may fail — SQLAlchemyError family; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Same as prior _handle_runtime_preflight_failure entry.
   expires: null
 - key: web/app.py:R1:create_app:fp=298d81d738bfa3b0

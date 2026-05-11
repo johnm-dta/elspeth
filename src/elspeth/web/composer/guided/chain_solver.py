@@ -62,14 +62,8 @@ async def solve_chain(
     telemetry, and token accounting flow through the same plumbing.
 
     Args:
-        source: Resolved source from Step 1.
-        sink: Resolved sink from Step 2.
-        recipe_match: Optional matched recipe hint from Step 2.5.
-        repair_context: When provided, the LLM is being asked to repair a
-            previously proposed chain that failed validation. The value must
-            be the verbatim validation error text from the failing ToolResult.
-            Appended to the system prompt as a clearly-labelled REPAIR ATTEMPT
-            block so the LLM knows to correct the named errors rather than
+        repair_context: Verbatim validation error text from the failing ToolResult.
+            When set, the LLM is asked to correct the named errors rather than
             propose an independent first-pass chain.
     """
     skill = load_guided_skill()

@@ -76,6 +76,7 @@ _FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pip
 _FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
 _DEFAULT_SOURCE_VALIDATION_FAILURE: Final[str] = "discard"
+_DATA_ERROR_KEY: Final[str] = "error"
 _SOURCE_VALIDATION_FAILURE_DESCRIPTION: Final[str] = (
     "How to handle source validation failures. Use 'discard' to drop invalid rows without routing. "
     "Any other value, including 'quarantine', must match a configured output/sink name."
@@ -1721,7 +1722,7 @@ def _failure_result(
         updated_state=state,
         validation=validation,
         affected_nodes=(),
-        data={"error": error_msg},
+        data={_DATA_ERROR_KEY: error_msg},
     )
 
 
@@ -1804,7 +1805,7 @@ def _credential_wiring_contract_failure(
         validation=validation,
         affected_nodes=(),
         data={
-            "error": error_msg,
+            _DATA_ERROR_KEY: error_msg,
             "credential_fields": credential_fields,
             "components": (
                 {
@@ -5401,7 +5402,7 @@ def _execute_diff_pipeline(
         return _discovery_result(
             state,
             {
-                "error": "No baseline available. Load or create a session first.",
+                _DATA_ERROR_KEY: "No baseline available. Load or create a session first.",
                 "current_version": state.version,
             },
         )

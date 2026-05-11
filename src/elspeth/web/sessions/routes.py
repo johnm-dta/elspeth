@@ -85,6 +85,7 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
+from elspeth.web.composer.tools import _DATA_ERROR_KEY
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
@@ -2056,15 +2057,17 @@ async def _dispatch_guided_respond(
                         # No validation errors but a data-layer error message;
                         # use it verbatim so the LLM sees the actual fault.
                         raw_data = dict(failed_result.data)
-                        if "error" in raw_data:
-                            repair_context_lines = [str(raw_data["error"])]
+                        if _DATA_ERROR_KEY in raw_data:
+                            repair_context_lines = [str(raw_data[_DATA_ERROR_KEY])]
                     repair_context = "\n".join(repair_context_lines) or str(failed_result.validation)
 
                     # Obtain source/sink from the guided session for the repair call.
                     # Both must be non-None because Step 3 can only be reached after
                     # Steps 1 and 2 commit successfully (dispatcher invariant).
-                    assert guided.step_1_result is not None, "repair: step_1_result missing"
-                    assert guided.step_2_result is not None, "repair: step_2_result missing"
+                    if guided.step_1_result is None:
+                        raise RuntimeError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
+                    if guided.step_2_result is None:
+                        raise RuntimeError("repair: step_2_result is None — STEP_3 unreachable without Step 2 commit")
                     repair_proposal = await solve_chain(
                         source=guided.step_1_result,
                         sink=guided.step_2_result,

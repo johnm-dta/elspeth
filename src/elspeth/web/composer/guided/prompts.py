@@ -30,15 +30,9 @@ def load_guided_skill() -> str:
 def build_repair_addendum(*, validation_error: str) -> str:
     """Render the REPAIR ATTEMPT addendum appended to a repair solve_chain call.
 
-    The addendum appears after the GUIDED CONTEXT block in the system prompt.
-    It signals to the LLM that the previous proposal failed validation and
-    carries the verbatim validation error so the model can address the
-    specific problems rather than re-generating a generic first-pass chain.
-
     Args:
-        validation_error: Verbatim validation error text from the failing
-            ToolResult. Must not be paraphrased or fabricated — the text
-            comes from the audit trail (Tier 1 data).
+        validation_error: Validation error text, taken verbatim from the failing
+            ToolResult; Tier 1 audit data, no paraphrasing.
     """
     return (
         "REPAIR ATTEMPT — your previous proposal failed validation:\n"

@@ -7,11 +7,19 @@ helpers; only the catalog is constructed via the public test seam
 
 from __future__ import annotations
 
+import pytest
+
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
+    SinkOutputResolved,
+    SinkResolved,
     SourceResolved,
 )
-from elspeth.web.composer.guided.steps import StepHandlerResult, handle_step_1_source
+from elspeth.web.composer.guided.steps import (
+    StepHandlerResult,
+    handle_step_1_source,
+    handle_step_2_sink,
+)
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
 
@@ -75,3 +83,84 @@ class TestStep1Handler:
         assert result.tool_result.success is False
         assert result.state is state  # unchanged on failure
         assert result.session.step_1_result is None
+
+
+class TestStep2Handler:
+    def test_commits_outputs_to_state_on_success(self) -> None:
+        # Step 1 sets a CSV source with on_success="main".
+        # Then Step 2 attaches a json output named "main".
+        state = _empty_state()
+        session = GuidedSession.initial()
+        catalog = create_catalog_service()
+
+        step_1 = handle_step_1_source(
+            state=state,
+            session=session,
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "x.csv", "schema": {"mode": "observed"}},
+                observed_columns=("a",),
+                sample_rows=({"a": "1"},),
+            ),
+        )
+        assert step_1.tool_result.success is True
+
+        result = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=("a",),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+
+        assert result.tool_result.success is True
+        assert len(result.state.outputs) == 1
+        assert result.state.outputs[0].plugin == "json"
+        assert result.state.outputs[0].name == "main"
+        assert result.session.step_2_result is not None
+
+    def test_returns_failure_unchanged_when_plugin_unknown(self) -> None:
+        state = _empty_state()
+        catalog = create_catalog_service()
+
+        # _execute_set_output validates plugin-name first, before any source
+        # presence check — so this exercises the failure path on empty state.
+        result = handle_step_2_sink(
+            state=state,
+            session=GuidedSession.initial(),
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="DEFINITELY_NOT_A_REAL_PLUGIN_xyzzy",
+                        options={},
+                        required_fields=(),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+
+        assert result.tool_result.success is False
+        assert result.state is state  # identity: unchanged on failure
+        assert result.session.step_2_result is None
+
+    def test_refuses_empty_outputs(self) -> None:
+        catalog = create_catalog_service()
+
+        with pytest.raises(ValueError, match="empty list"):
+            handle_step_2_sink(
+                state=_empty_state(),
+                session=GuidedSession.initial(),
+                resolved=SinkResolved(outputs=()),
+                catalog=catalog,
+            )

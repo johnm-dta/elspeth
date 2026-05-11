@@ -102,3 +102,21 @@ export interface GuidedRespondResponse {
   terminal: TerminalState | null;
   composition_state: CompositionState | null;
 }
+
+// ── Per-turn payload shapes ───────────────────────────────────────────────────
+// Each widget owns its payload type; add yours when you implement the widget.
+// Field names use snake_case to mirror the wire (GuidedRespondRequest does too).
+//
+// SHARED across single_select / multi_select_with_custom / recipe_offer:
+export interface Option {
+  id: string;
+  label: string;
+  hint: string | null; // null, not optional — wire always sends the key
+}
+
+/** Wire: SingleSelectPayload (protocol.py:40-43). */
+export interface SingleSelectPayload {
+  question: string;
+  options: Option[];
+  allow_custom: boolean;
+}

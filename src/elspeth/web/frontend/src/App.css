@@ -3560,3 +3560,135 @@ summary:focus-visible {
 .catalog-status-message--center {
   text-align: center;
 }
+
+/* ---------------------------------------------------------------------------
+   Guided Mode Turn Widgets
+   Convention (Tasks 7.2-7.7): all guided widget classes share the
+   guided-* prefix and use CSS custom properties only — no hardcoded colours.
+   --------------------------------------------------------------------------- */
+
+/* Base wrapper — each widget is an isolated block in the chat stream */
+.guided-turn {
+  padding: var(--space-md) 0;
+}
+
+/* Chip-group fieldset — strips browser default fieldset chrome */
+.guided-chip-fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.guided-chip-legend {
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  font-weight: 600;
+  margin-bottom: var(--space-md);
+  padding: 0;
+}
+
+/* Chip group: horizontal wrapping row of option buttons */
+.guided-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* One option: button + optional hint stacked vertically */
+.guided-chip-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  max-width: 280px;
+}
+
+/* The option button itself */
+.guided-chip-btn {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  text-align: left;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-chip-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-chip-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Hint text — muted, associated via aria-describedby */
+.guided-chip-hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+/* Custom-input row (allow_custom=true) */
+.guided-custom-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.guided-custom-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.guided-custom-input {
+  flex: 1;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px;
+}
+
+.guided-custom-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-custom-submit-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: not-allowed;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px;
+}
+
+.guided-custom-submit-btn:not(:disabled) {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  cursor: pointer;
+}
+
+.guided-custom-submit-btn:not(:disabled):hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-custom-submit-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}

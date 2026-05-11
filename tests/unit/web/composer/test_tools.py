@@ -1070,12 +1070,22 @@ class TestUpsertEdge:
         assert "gate" in result.data["error"].lower()
 
     def test_edge_to_output_syncs_source_on_success(self) -> None:
-        """Edge from source to output updates source's on_success."""
+        """Edge from source to output updates source's on_success.
+
+        set_source is promoted to a Pydantic argument model with
+        extra='forbid'; all four required fields must be supplied
+        (Task 4).
+        """
         state = _empty_state()
         catalog = _mock_catalog()
         r1 = execute_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "old_stream", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "old_stream",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             state,
             catalog,
         )
@@ -5928,14 +5938,27 @@ class TestFailedMutationVersionStable:
 # ---------------------------------------------------------------------------
 
 
-class TestServiceKeyError:
-    """Tool raises KeyError on missing required argument — execute_tool propagates."""
+class TestServiceMissingArgToolArgumentError:
+    """Tool raises ToolArgumentError on missing required argument.
 
-    def test_missing_required_arg_raises_key_error(self) -> None:
+    Post Task 4 (set_source manifest promotion), missing required
+    arguments are caught at the Tier-3 boundary by
+    :class:`SetSourceArgumentsModel`; the handler re-raises
+    :class:`pydantic.ValidationError` as :class:`ToolArgumentError` so
+    the compose loop's ARG_ERROR routing at ``service.py:2480`` receives
+    the right exception class.  A bare ``KeyError`` (the prior shape) is
+    a plugin-bug indicator and would be routed to ``PLUGIN_CRASH`` —
+    that disposition is wrong for Tier-3 input.
+    """
+
+    def test_missing_required_arg_raises_tool_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
-        # set_source requires "plugin" — omitting it should raise KeyError
-        with pytest.raises(KeyError):
+        # set_source requires "plugin" — omitting it must raise
+        # ToolArgumentError (no longer KeyError) per Task 4.
+        with pytest.raises(ToolArgumentError):
             execute_tool("set_source", {}, state, catalog)
 
 

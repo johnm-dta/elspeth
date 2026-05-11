@@ -13,14 +13,18 @@ container types the spec promised and the guard could not detect.
 
 from __future__ import annotations
 
+import copy
+import json
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from types import UnionType
+from types import MappingProxyType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 
@@ -460,6 +464,152 @@ class ToolRedaction:
                 "(declarative entries express response shape via "
                 "policy.known_response_keys)."
             )
+
+
+def _summarize_set_source_options(options: dict[str, Any]) -> str:
+    """Summarizer for ``set_source.options`` (spec §4.2.6).
+
+    Wraps the existing :func:`redact_source_storage_path` helper so the
+    redacted view of options is computed via the same path-blob-ref logic
+    used by the legacy state-serialization redactor.  The output is the
+    canonical JSON form of the redacted options dict so it is reusable as
+    a hashable / loggable scalar in audit records.
+
+    Contract (spec §4.2.6, §9 RSK-03):
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+
+    ``default=str`` on :func:`json.dumps` ensures RSK-03 holds for values
+    that survive Pydantic coercion but are not natively JSON-serialisable
+    (``datetime``, ``bytes``, ``UUID``) — a future schema that admits
+    those types via :class:`typing.Any` would otherwise raise
+    :class:`TypeError` at the summarizer boundary.
+    """
+    redacted = redact_source_storage_path({"source": {"options": options}})
+    return json.dumps(
+        redacted["source"]["options"],
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+class SetSourceArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``set_source`` tool.
+
+    Mirrors the JSON schema currently consumed by ``_execute_set_source``
+    (``tools.py``) and the required-paths check at ``service.py``
+    ``_TOOL_REQUIRED_PATHS["set_source"]``.  The ``Annotated`` on
+    ``options`` drives mechanical redaction at the persistence boundary;
+    the model itself is also used at the dispatch boundary by
+    :meth:`Model.model_validate` so the LLM-supplied dict is validated
+    before ``_execute_set_source`` reads any field.
+
+    ``extra="forbid"`` is required (rev-2 M.1): without it the model
+    would silently accept fields the walker has no record of, breaking
+    the manifest/canonical-arguments parity invariant the adequacy
+    guard relies on.
+
+    Field set is exactly the four required keys from the JSON schema at
+    ``tools.py:631-655``.  Fields belonging to neighbouring tools
+    (``label``, ``blob_id``, ``inline_blob`` — those are on
+    ``set_source_from_blob`` / ``create_blob``) are intentionally absent
+    so ``extra="forbid"`` rejects misrouted argument shapes early.
+    """
+
+    plugin: str
+    on_success: str
+    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    on_validation_failure: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _redact_via_schema(
+    validated: BaseModel,
+    model_cls: type[BaseModel],
+) -> dict[str, Any]:
+    """Walk the validated model's schema; substitute Sensitive fields.
+
+    Tracer-bullet implementation (Task 4): supports only top-level
+    sensitive fields (``set_source.options`` is the only such field in
+    this commit).  Task 8 generalises this to nested paths under
+    containers and BaseModel descent.
+
+    Operates on ``model_dump()`` output (a plain dict) and substitutes
+    in-place on a deep copy so the input model and any external caller
+    references are not affected.  Returns the dict ready for serialization.
+    """
+    dumped = copy.deepcopy(validated.model_dump())
+    for node in walk_model_schema(model_cls, with_values=True):
+        marker = next((m for m in node.metadata if isinstance(m, _SensitiveMarker)), None)
+        if marker is None:
+            continue
+        if marker.summarizer is None:
+            # Task 8 decides the no-summarizer policy.  No reachable node
+            # in this tracer commit lacks a summarizer; pin that here so
+            # a future field-level omission surfaces immediately rather
+            # than passing silently with the original value preserved.
+            raise NotImplementedError(f"Sensitive field at path {node.path!r} has no summarizer; Task 8 defines the no-summarizer policy.")
+        # Tracer-bullet scope: top-level paths only.  Nested-path
+        # substitution requires the value_provider-driven path-walker
+        # added in Task 8.
+        if "." in node.path or "[" in node.path or "{" in node.path:
+            raise NotImplementedError(f"Nested-path Sensitive field at path {node.path!r}; Task 8 implements the general path walker.")
+        if node.value_provider is None:
+            # walk_model_schema(with_values=True) guarantees value_provider
+            # is not None; a None here is a walker bug, not external input.
+            raise AuditIntegrityError(
+                f"walk_model_schema yielded TraversalNode at {node.path!r} "
+                "with value_provider=None despite with_values=True. "
+                "This is an internal walker contract violation."
+            )
+        raw_value = node.value_provider(dumped)
+        summary = marker.summarizer(raw_value)
+        if not isinstance(summary, str):
+            raise AuditIntegrityError(f"Summarizer for path {node.path!r} returned {type(summary).__name__}, expected str (spec §4.2.6).")
+        dumped[node.path] = summary
+    return dumped
+
+
+def redact_tool_call_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    telemetry: RedactionTelemetry,
+) -> dict[str, Any]:
+    """Minimal tracer-bullet impl (spec §4.2.6).
+
+    Generalised in Task 8 to cover the declarative manifest branch and
+    full path-walker substitution.  In this commit only the type-driven
+    branch is wired and only the ``set_source`` manifest entry exists.
+
+    The handler MUST catch :class:`pydantic.ValidationError` raised here
+    and re-raise as :class:`ToolArgumentError` so the compose loop's
+    ARG_ERROR routing at ``service.py:2480`` receives the right exception
+    class.  A bare ``ValidationError`` escaping the handler hits the
+    catch-all and becomes :class:`ComposerPluginCrashError` → HTTP 500 —
+    the wrong disposition for Tier-3 input.
+    """
+    entry = MANIFEST[tool_name]
+    if entry.argument_model is not None:
+        telemetry.manifest_dispatch(tool_name=tool_name, shape="type_driven")
+        validated = entry.argument_model.model_validate(arguments)
+        return _redact_via_schema(validated, entry.argument_model)
+    # Declarative branch added in Task 8.
+    raise NotImplementedError(f"Declarative manifest entry for {tool_name!r} — see Task 8.")
+
+
+# Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
+# binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
+# rule "subsequent task waves extend the manifest by building a new
+# dict, then replacing the module-level binding — never by mutating
+# the proxy view".
+MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
+    {
+        "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
+    }
+)
 
 
 def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:

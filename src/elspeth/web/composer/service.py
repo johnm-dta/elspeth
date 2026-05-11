@@ -605,12 +605,33 @@ def _collect_required_paths(
 
 
 def _build_tool_required_paths_index() -> dict[str, tuple[_CompiledRequiredPath, ...]]:
-    """Build a lookup of required argument paths per tool definition."""
+    """Build a lookup of required argument paths per tool definition.
+
+    Tools listed in :data:`_PROMOTED_TOOL_NAMES` are deliberately excluded:
+    their argument schemas are owned end-to-end by the Pydantic models in
+    :mod:`elspeth.web.composer.redaction` (see ``MANIFEST``).  Keeping a
+    second source of truth here would let the dotted-path check and the
+    model drift apart — exactly the parity invariant the adequacy guard
+    (spec §4.4) is designed to prevent.
+
+    Subsequent task waves extend the set as each promoted tool lands.
+    """
     index: dict[str, tuple[_CompiledRequiredPath, ...]] = {}
     for defn in get_tool_definitions():
+        name = defn["name"]
+        if name in _PROMOTED_TOOL_NAMES:
+            continue
         parameters = cast(Mapping[str, object], defn["parameters"])
-        index[defn["name"]] = _collect_required_paths(parameters)
+        index[name] = _collect_required_paths(parameters)
     return index
+
+
+# Tools whose argument schemas are validated by a Pydantic
+# redaction-bearing model in :mod:`elspeth.web.composer.redaction`.
+# Excluded from :func:`_build_tool_required_paths_index` so the model
+# is the single source of truth for argument validity.  Extended as
+# Tasks 13/14/15 land additional promotions.
+_PROMOTED_TOOL_NAMES: frozenset[str] = frozenset({"set_source"})
 
 
 def _optional_ancestor_present(value: object, ancestor: RequiredPath) -> bool:

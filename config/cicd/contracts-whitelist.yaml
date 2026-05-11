@@ -563,6 +563,17 @@ allowed_dict_patterns:
   # is intentionally model-agnostic to avoid.
   - "src/elspeth/web/composer/redaction.py:provider:root"
 
+  # Tier-3 LLM tool-call argument boundary.  Task 4 introduces
+  # SetSourceArgumentsModel (Pydantic, extra="forbid"); the runtime walker
+  # consumes the LLM-supplied dict and emits the redacted dict ready for
+  # serialization to chat_messages.tool_calls.  The unstructured shape
+  # (dict[str, Any]) is intrinsic to the tool-call schema crossing the
+  # boundary; the structured shape exists on the model side via model_validate.
+  - "src/elspeth/web/composer/redaction.py:_summarize_set_source_options:options"
+  - "src/elspeth/web/composer/redaction.py:_redact_via_schema:return"
+  - "src/elspeth/web/composer/redaction.py:redact_tool_call_arguments:arguments"
+  - "src/elspeth/web/composer/redaction.py:redact_tool_call_arguments:return"
+
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Tool executor (Tier 3 LLM tool call arguments)
   # args dicts come from json.loads(tool_call.function.arguments) in the

@@ -41,7 +41,7 @@ from elspeth.web.composer.recipes import (
     apply_recipe,
     list_recipes,
 )
-from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.redaction import SetSourceArgumentsModel, redact_source_storage_path
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
     facts_to_dict,
@@ -2302,8 +2302,33 @@ def _execute_set_source(
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    """Set or replace the pipeline source."""
-    plugin = args["plugin"]
+    """Set or replace the pipeline source.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`SetSourceArgumentsModel` (the
+    single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["set_source"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.  A bare
+    ``ValidationError`` would escape into the catch-all
+    (``ComposerPluginCrashError`` → HTTP 500) — wrong disposition for
+    Tier-3 input.  Pattern: ``tools.py:2668, 2761, 2767, 2773, 2787, 2801``.
+    """
+    try:
+        validated = SetSourceArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="set_source arguments",
+            expected="object conforming to SetSourceArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    plugin = validated.plugin
+    options = validated.options
+
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(catalog, "source", plugin)
     if plugin_error is not None:
@@ -2315,7 +2340,6 @@ def _execute_set_source(
     # blob_ref + path lets the caller persist a path that disagrees with the
     # blob's canonical storage_path, breaking runtime resolution and
     # composer/runtime agreement.  See elspeth-07089fbaa3.
-    options = args.get("options", {})
     manual_blob_ref_error = _reject_manual_source_blob_ref(options, tool_name="set_source")
     if manual_blob_ref_error is not None:
         return _failure_result(state, manual_blob_ref_error)
@@ -2333,14 +2357,14 @@ def _execute_set_source(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    on_vf = args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
+    on_vf = validated.on_validation_failure
     prevalidation_error = _prevalidate_source(plugin, options, on_vf)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
 
     source = SourceSpec(
         plugin=plugin,
-        on_success=args["on_success"],
+        on_success=validated.on_success,
         options=options,
         on_validation_failure=on_vf,
     )

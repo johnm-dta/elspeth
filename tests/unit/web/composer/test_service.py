@@ -930,7 +930,20 @@ class TestComposerErrorHandling:
 
     @pytest.mark.asyncio
     async def test_malformed_arguments_returns_error(self) -> None:
-        """Malformed tool arguments return error, not crash."""
+        """Malformed tool arguments return error, not crash.
+
+        Post Task 4 (set_source manifest promotion): ``set_source`` no
+        longer goes through ``_TOOL_REQUIRED_PATHS`` / ``MissingRequiredPaths``.
+        The Pydantic model :class:`SetSourceArgumentsModel` validates at the
+        Tier-3 dispatch boundary and the handler re-raises
+        :class:`pydantic.ValidationError` as :class:`ToolArgumentError`.
+        ``error_class`` is therefore ``"ToolArgumentError"`` (the audit-side
+        envelope class) and the message names ``set_source arguments`` —
+        the LLM-facing payload is intentionally leak-safe and does NOT
+        echo individual missing field names; the ``__cause__`` chain on
+        the captured exception carries the structured Pydantic detail for
+        audit.
+        """
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -942,7 +955,7 @@ class TestComposerErrorHandling:
                 {
                     "id": "call_bad",
                     "name": "set_source",
-                    "arguments": {"plugin": "csv"},  # missing on_success
+                    "arguments": {"plugin": "csv"},  # missing on_success, options, on_validation_failure
                 }
             ],
         )
@@ -956,7 +969,7 @@ class TestComposerErrorHandling:
         _assert_no_mutation_empty_state_blocker(
             result,
             tool_name="set_source",
-            expected_detail="on_success, options, on_validation_failure",
+            expected_detail="ToolArgumentError",
         )
 
     @pytest.mark.asyncio
@@ -1290,7 +1303,24 @@ class TestComposerErrorHandling:
 
     @pytest.mark.asyncio
     async def test_missing_args_error_message_lists_keys(self) -> None:
-        """Missing required arguments should produce a clear error listing the keys."""
+        """Missing required arguments produce a structured, leak-safe error.
+
+        Post Task 4 (set_source manifest promotion) the dispatch boundary
+        for ``set_source`` is :class:`SetSourceArgumentsModel`; a missing
+        required field raises :class:`pydantic.ValidationError` which the
+        handler re-raises as :class:`ToolArgumentError`.  The LLM-facing
+        error payload uses the structurally safe-by-construction
+        ``ToolArgumentError`` message — operator-chosen argument name +
+        expected shape description + ``type(value).__name__``.  Raw field
+        values and missing-path detail intentionally do NOT appear in the
+        LLM echo (leak prevention by construction); they survive on
+        ``__cause__`` for auditors.
+
+        The argument name in the structured error is ``"set_source arguments"``
+        (handler-chosen — the model is the single source of truth and the
+        per-field detail belongs in ``__cause__``); the message identifies
+        the schema as ``SetSourceArgumentsModel``.
+        """
         catalog = _mock_catalog()
         settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
@@ -1312,11 +1342,12 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [bad_call, text]
             await service.compose("Setup", [], state)
 
-        # Verify the error message sent back to the LLM mentions the missing keys
+        # Verify the error message sent back to the LLM uses the structured
+        # ToolArgumentError form (no raw values, no per-field leak).
         tool_msg = mock_llm.call_args_list[1][0][0][-1]  # last message in second call
         error_content = json.loads(tool_msg["content"])
-        assert "on_success" in error_content["error"]
-        assert "missing required" in error_content["error"].lower()
+        assert "set_source arguments" in error_content["error"]
+        assert "SetSourceArgumentsModel" in error_content["error"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("arguments", [[], None, "oops"])

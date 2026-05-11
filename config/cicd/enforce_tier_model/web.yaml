@@ -1427,21 +1427,21 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=b882b14b17d64206
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=e3d940dd7b7ea311
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=eb728540da9b57ed
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=a938186d04e35b24
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
     Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R5:_has_sensitive:fp=3e518c18d7a6b338
+- key: web/composer/redaction.py:R5:_has_sensitive:fp=6f24e75027ce3ccc
   owner: web-composer
   reason: Marker-class discrimination over an Annotated metadata tuple (spec §4.2.5).
     The metadata comes from Python typing primitives at module load — not external
@@ -1451,7 +1451,7 @@ allow_hits:
   safety: Returns bool; never silently substitutes a default for malformed input —
     metadata tuple is always well-typed because we control its construction site.
   expires: null
-- key: web/composer/redaction.py:R5:_count_sensitive:fp=ec153c49f4dcc9ef
+- key: web/composer/redaction.py:R5:_count_sensitive:fp=d258fd23b6bde0d4
   owner: web-composer
   reason: Same as _has_sensitive — marker discrimination over Annotated metadata.
     The count is used solely to detect the spec §4.2.5 violation of multiple
@@ -1459,7 +1459,7 @@ allow_hits:
   safety: Returns int >= 0; downstream consumer raises on count > 1 with field
     name in the error message.
   expires: null
-- key: web/composer/redaction.py:R5:walk_model_schema:fp=7a2f4284b9c30167
+- key: web/composer/redaction.py:R5:walk_model_schema:fp=15ca23874ad35fe1
   owner: web-composer
   reason: Reflection over Python typing — isinstance(model, type) and issubclass(model,
     BaseModel) verify that the input is a pydantic schema class. There is no other
@@ -1468,7 +1468,7 @@ allow_hits:
   safety: Raises TypeError with descriptive message if a non-BaseModel is passed.
     No silent default; no coercion.
   expires: null
-- key: web/composer/redaction.py:R5:_walk_type:fp=bac61defc4595677
+- key: web/composer/redaction.py:R5:_walk_type:fp=fb3e3b345e8af380
   owner: web-composer
   reason: Reflection over Python typing — isinstance(field_type, type) and issubclass(field_type,
     BaseModel) tests whether a Union/container element is a nested model that
@@ -1477,7 +1477,7 @@ allow_hits:
   safety: If neither container nor BaseModel, falls through to the scalar-leaf
     emission branch. No silent error suppression.
   expires: null
-- key: web/composer/redaction.py:R5:_is_descendable:fp=6639e12e3db3f227
+- key: web/composer/redaction.py:R5:_is_descendable:fp=8ac030b772495552
   owner: web-composer
   reason: Reflection helper used during Union-arm fan-out — same BaseModel detection
     primitive as the surrounding walker. Decides whether a Union arm carries
@@ -1485,6 +1485,27 @@ allow_hits:
   safety: Returns bool; scalar arms are skipped explicitly; the rev-3 W8a path
     routes Annotated[scalar, Sensitive()] arms through _has_sensitive instead so
     Sensitive markers on scalar Union arms still emit a node.
+  expires: null
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=c24a4bd00827620d
+  owner: web-composer
+  reason: Marker-class discrimination over Annotated metadata tuple — identical to
+    _has_sensitive/_count_sensitive (spec §4.2.5). _SensitiveMarker is a sentinel
+    class introduced by Sensitive(); the only way to detect it inside an Annotated
+    metadata tuple is isinstance.
+  safety: Markers are constructed at module load from Python typing primitives —
+    never from external input. Mismatched metadata entries fall through to the
+    skip branch.
+  expires: null
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=0f8acdec9989d2f2
+  owner: web-composer
+  reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
+    the summarizer contract (spec §4.2.6) requires str return; a non-str return
+    means a summarizer is misimplemented and the audit record would be poisoned.
+    Offensive programming pattern per CLAUDE.md (Defensive Forbidden / Offensive
+    Encouraged) decision-test row "Can I detect an invalid state and throw a
+    meaningful error?".
+  safety: Raises AuditIntegrityError with the path and the offending type name so
+    the operator can identify the misbehaving summarizer.
   expires: null
 - key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=5b5a0d95b7682fd0
   owner: web-sessions
@@ -2366,98 +2387,98 @@ allow_hits:
   safety: Missing role leaves that message unmarked; the transform still preserves
     the original payload shape.
   expires: null
-- key: web/composer/service.py:R5:_optional_ancestor_present:fp=cfb5bea132780703
+- key: web/composer/service.py:R5:_optional_ancestor_present:fp=b7a2c4f11a0fc23f
   owner: composer-walker
   reason: Tier 3 LLM tool-call argument walker distinguishes absent optional ancestors
     from present malformed nested values.
   safety: Malformed shapes become structured argument errors returned to the LLM,
     not crashes or silent tool execution.
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=0e6e2be65f02241a
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=1e34eb7479b0167d
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=8978bf9c96fce5d0
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=ea42c11436f7a6b4
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=9c30ce82982aa430
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=d05240cdf2bf2c32
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=c9489dd8980e21c9
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=043480f8537ee20b
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks
     an internal per-compose cache for an existing result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache
     misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=1e29e8525c19384c
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=8e4a7526a6efb1a2
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider
     failures are converted into structured composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures
     are audited and returned as bounded tool results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=53695dd2f5d29efe
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=88e8da12a27d7c6c
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider
     failures are converted into structured composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures
     are audited and returned as bounded tool results.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=94fd4e4bba74bde0
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=958db2f5afda2a29
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=c923590ea93b79df
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=ac9bbfd059fb5f54
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=f24234953f514773
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=96b591a02a1bff8d
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=b6b18c9989ca5971
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=0e845d2cf03145b2
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=b4c6a923a47dea29
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9e1a5b94b288646a
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=307213d7e7fca31e
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=253ea848745b7422
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is
     made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=8eea6f7d6b11a269
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=61b09e34591486c3
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked
     before spending advisor budget or constructing prompts.

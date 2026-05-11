@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SingleSelectTurn } from "./SingleSelectTurn";
+import { nullResponse } from "@/test/guided-fixtures";
 import type { SingleSelectPayload } from "@/types/guided";
 import type { GuidedRespondRequest } from "@/types/guided";
 
@@ -37,19 +38,6 @@ const PAYLOAD_WITH_CUSTOM: SingleSelectPayload = {
   options: [{ id: "llm_classify", label: "LLM Classifier", hint: null }],
   allow_custom: true,
 };
-
-// Helper to make the null-field assertion concise
-function nullResponse(): Pick<
-  GuidedRespondRequest,
-  "edited_values" | "accepted_step_index" | "edit_step_index" | "control_signal"
-> {
-  return {
-    edited_values: null,
-    accepted_step_index: null,
-    edit_step_index: null,
-    control_signal: null,
-  };
-}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -152,5 +140,49 @@ describe("SingleSelectTurn — hint rendering", () => {
     render(<SingleSelectTurn payload={PAYLOAD_NO_CUSTOM} onSubmit={vi.fn()} />);
     const csvBtn = screen.getByRole("button", { name: "CSV File" });
     expect(csvBtn.getAttribute("aria-describedby")).toBeNull();
+  });
+});
+
+describe("SingleSelectTurn — DOM ID isolation (useId)", () => {
+  // Regression: GuidedHistory (Task 7.9) renders past turns alongside the
+  // active one; option IDs ("csv", "api") recur across turns. Hard-coded
+  // hint IDs (e.g. "hint-api") would collide. useId() prefixes per-instance.
+  it("two simultaneous instances with the same option ids have distinct hint IDs", () => {
+    render(
+      <div>
+        <SingleSelectTurn payload={PAYLOAD_NO_CUSTOM} onSubmit={vi.fn()} />
+        <SingleSelectTurn payload={PAYLOAD_NO_CUSTOM} onSubmit={vi.fn()} />
+      </div>,
+    );
+
+    const restBtns = screen.getAllByRole("button", { name: "REST API" });
+    expect(restBtns).toHaveLength(2);
+    const id0 = restBtns[0].getAttribute("aria-describedby");
+    const id1 = restBtns[1].getAttribute("aria-describedby");
+    expect(id0).toBeTruthy();
+    expect(id1).toBeTruthy();
+    expect(id0).not.toBe(id1);
+
+    // Both IDs must resolve to a unique hint element in the DOM.
+    expect(document.getElementById(id0!)).toBeTruthy();
+    expect(document.getElementById(id1!)).toBeTruthy();
+  });
+
+  it("two simultaneous instances with allow_custom have distinct input IDs", () => {
+    render(
+      <div>
+        <SingleSelectTurn payload={PAYLOAD_WITH_CUSTOM} onSubmit={vi.fn()} />
+        <SingleSelectTurn payload={PAYLOAD_WITH_CUSTOM} onSubmit={vi.fn()} />
+      </div>,
+    );
+
+    const inputs = screen.getAllByRole("textbox", { name: /custom/i });
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0].id).not.toBe(inputs[1].id);
+    // The <label htmlFor> must point to its own input, not the sibling's
+    // — this is what makes the per-label getByRole queries above work
+    // correctly across multiple instances.
+    expect(inputs[0].id).toBeTruthy();
+    expect(inputs[1].id).toBeTruthy();
   });
 });

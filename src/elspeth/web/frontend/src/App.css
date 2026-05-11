@@ -3563,8 +3563,15 @@ summary:focus-visible {
 
 /* ---------------------------------------------------------------------------
    Guided Mode Turn Widgets
-   Convention (Tasks 7.2-7.7): all guided widget classes share the
-   guided-* prefix and use CSS custom properties only — no hardcoded colours.
+   Conventions (Tasks 7.2-7.7):
+     - All guided widget classes share the guided-* prefix.
+     - Use CSS custom properties only — no hardcoded colours.
+     - All transitions/animations MUST have a matching
+       @media (prefers-reduced-motion: reduce) rule (see block at end of section).
+     - Shared chip styles (.guided-chip-btn, .guided-chip-group, .guided-chip-item,
+       .guided-chip-hint, .guided-chip-fieldset, .guided-chip-legend) are
+       designed for reuse by multi_select_with_custom and recipe_offer — do not
+       redefine equivalent styles in those widgets' code.
    --------------------------------------------------------------------------- */
 
 /* Base wrapper — each widget is an isolated block in the chat stream */
@@ -3691,4 +3698,12 @@ summary:focus-visible {
 .guided-custom-submit-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* Honour OS-level motion preferences. Any new transition/animation added in
+   the guided-* section above MUST be silenced here. */
+@media (prefers-reduced-motion: reduce) {
+  .guided-chip-btn {
+    transition: none;
+  }
 }

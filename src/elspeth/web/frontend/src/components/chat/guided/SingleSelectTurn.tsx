@@ -7,9 +7,19 @@
 //   - All 6 GuidedRespondRequest fields set explicitly; unused ones = null (no omission)
 //   - <fieldset>+<legend> for chip groups; <button type="button"> (never <div onClick>)
 //   - aria-describedby only wired when hint is non-null (no dangling IDs)
+//   - DOM IDs prefixed with React 18 useId() — multiple turn instances coexist in
+//     GuidedHistory (Task 7.9) and option IDs recur across turns; document-global
+//     IDs would collide
+//   - Visible labels (htmlFor / button text) ARE the accessible name; do not add
+//     redundant aria-label that overrides what sighted users see
 //   - CSS via App.css class names with design tokens; no hardcoded colours
+//
+// SHAPE NOTE for Tasks 7.3-7.7:
+// The chip-group structure (<fieldset>+<legend>+chip-button-group) applies to
+// single_select, multi_select_with_custom, and recipe_offer. schema_form and
+// propose_chain establish their own structures — do not blindly copy this layout.
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { GuidedRespondRequest, SingleSelectPayload } from "@/types/guided";
 
 interface SingleSelectTurnProps {
@@ -19,6 +29,13 @@ interface SingleSelectTurnProps {
 
 export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
   const [customText, setCustomText] = useState("");
+
+  // useId scopes DOM IDs per-instance so multiple SingleSelectTurns rendered
+  // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
+  // produce id collisions when option IDs ("csv", "api") recur across turns.
+  const reactId = useId();
+  const customInputId = `${reactId}-custom-input`;
+  const hintIdFor = (optionId: string) => `${reactId}-hint-${optionId}`;
 
   function handleOptionClick(optionId: string) {
     onSubmit({
@@ -48,10 +65,13 @@ export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
     <div className="guided-turn guided-single-select">
       <fieldset className="guided-chip-fieldset">
         <legend className="guided-chip-legend">{payload.question}</legend>
-        <div className="guided-chip-group" role="group">
+        {/* No role="group" on the inner div — <fieldset> already provides
+            group semantics; duplicating creates two nested groups in the
+            accessibility tree. */}
+        <div className="guided-chip-group">
           {payload.options.map((option) => {
             const hintId =
-              option.hint !== null ? `hint-${option.id}` : undefined;
+              option.hint !== null ? hintIdFor(option.id) : undefined;
             return (
               <div key={option.id} className="guided-chip-item">
                 <button
@@ -75,27 +95,30 @@ export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
 
       {payload.allow_custom && (
         <div className="guided-custom-row">
-          <label htmlFor="guided-custom-input" className="guided-custom-label">
+          <label htmlFor={customInputId} className="guided-custom-label">
             Custom
           </label>
           <input
-            id="guided-custom-input"
+            id={customInputId}
             type="text"
-            aria-label="Custom option"
             className="guided-custom-input"
             value={customText}
             onChange={(e) => setCustomText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && customText.trim()) {
+              if (e.key === "Enter") {
+                // preventDefault so a future <form> wrapper (e.g. SchemaFormTurn
+                // composition) doesn't double-submit. handleCustomSubmit
+                // already no-ops on empty — disabled-button + no-op
+                // early-return are the same predicate, deduplicated.
+                e.preventDefault();
                 handleCustomSubmit();
               }
             }}
-            placeholder="Describe your custom option…"
+            placeholder="Describe your custom option..."
           />
           <button
             type="button"
             className="guided-custom-submit-btn"
-            aria-label="Submit custom option"
             onClick={handleCustomSubmit}
             disabled={!customText.trim()}
           >

@@ -425,14 +425,35 @@ class HandlesNoSensitiveDataReason:
 
 @dataclass(frozen=True, slots=True)
 class ToolRedactionPolicy:
-    """Minimal stub for spec §4.2.3; Task 5 (HandlesNoSensitiveDataReason) /
-    Task 6 (ToolRedactionPolicy) will add field validators. Construction
-    shape is fixed by this commit's test set; Tasks 5/6 are pure
-    behavioural additions (new validators), not shape changes.
+    """Declarative redaction policy (spec §4.2.3). Used inside the ``policy``
+    field of a manifest entry whose argument surface is purely structural (no
+    Pydantic argument model declared). The type-driven shape (§4.2.1 with
+    ``argument_model`` set) is preferred for any tool that has, or would
+    benefit from, a redaction-bearing Pydantic argument model.
 
-    Declarative redaction policy. Used inside the `policy` field of a
-    manifest entry whose argument surface is purely structural (no
-    Pydantic argument model declared).
+    Four invariants are enforced at construction time:
+
+    1. **No orphan summarizers** — every key in ``argument_summarizers`` must
+       also appear in ``sensitive_argument_keys``. A summarizer for a key that
+       is not declared sensitive is dead code and silently misleads auditors
+       about which keys are redacted.
+
+    2. **``handles_no_sensitive_data=True`` requires a reason struct** — the
+       structured justification is part of the audit trail; an unexplained
+       exemption is forbidden (spec §4.2.3).
+
+    3. **``handles_no_sensitive_data=False`` forbids a reason struct** — the
+       reason struct is meaningful only for an exemption; for a tool with
+       sensitive data the redaction policy is the documentation.
+
+    4. **``handles_no_sensitive_data=False`` requires ``known_response_keys``**
+       — the allowlist defends against response-shape drift; unknown keys at
+       persistence time are fail-closed redacted with a fixed sentinel.
+
+    NOTE on freeze: ``argument_summarizers`` values are Callables;
+    ``deep_freeze`` passes Callables through unchanged (verified against
+    ``src/elspeth/contracts/freeze.py:78``). Identity-equality of summarizer
+    callables is the policy contract.
     """
 
     sensitive_argument_keys: tuple[str, ...] = ()
@@ -443,6 +464,35 @@ class ToolRedactionPolicy:
     handles_no_sensitive_data_reason_struct: HandlesNoSensitiveDataReason | None = None
 
     def __post_init__(self) -> None:
+        # Validators run BEFORE freeze_fields so they read mutable state.
+        # If any raise, the dataclass __init__ raises and the object is
+        # never returned — atomic construction failure.
+
+        orphan_summarizers = set(self.argument_summarizers) - set(self.sensitive_argument_keys)
+        if orphan_summarizers:
+            raise ValueError(
+                f"argument_summarizers keys {sorted(orphan_summarizers)} are not declared in "
+                f"sensitive_argument_keys; orphan summarizers indicate a policy bug."
+            )
+
+        if self.handles_no_sensitive_data and self.handles_no_sensitive_data_reason_struct is None:
+            raise ValueError(
+                "handles_no_sensitive_data=True requires a non-None "
+                "handles_no_sensitive_data_reason_struct. Build a "
+                "HandlesNoSensitiveDataReason instance with concrete fields."
+            )
+
+        if not self.handles_no_sensitive_data and self.handles_no_sensitive_data_reason_struct is not None:
+            raise ValueError("handles_no_sensitive_data_reason_struct is only meaningful when handles_no_sensitive_data=True.")
+
+        if not self.handles_no_sensitive_data and not self.known_response_keys:
+            raise ValueError(
+                "known_response_keys must be declared (non-empty) when "
+                "handles_no_sensitive_data=False. The allowlist defends "
+                "against response-shape drift; unknown keys at persistence "
+                "time are fail-closed redacted with a fixed sentinel."
+            )
+
         freeze_fields(
             self,
             "sensitive_argument_keys",

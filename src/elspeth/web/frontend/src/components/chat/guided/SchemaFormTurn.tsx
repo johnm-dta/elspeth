@@ -597,18 +597,23 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
               ? "Hide advanced"
               : `Show advanced (${optionalNames.length})`}
           </button>
-          {advancedExpanded && (
-            <div
-              id={optionalSectionId}
-              role="region"
-              aria-label="Optional fields"
-              className="guided-schema-optional-section"
-            >
-              {optionalNames.map((name, idx) =>
-                renderField(name, idx === 0),
-              )}
-            </div>
-          )}
+          {/* Container is rendered UNCONDITIONALLY so the toggle's
+              aria-controls reference resolves on initial render (before first
+              expansion). When collapsed, the `hidden` attribute removes it
+              from the accessibility tree AND hides it visually
+              (`[hidden] { display: none; }` is the browser default). The
+              CHILDREN are still gated on `advancedExpanded` so optional
+              fields don't run their ref callbacks until the user opts in. */}
+          <div
+            id={optionalSectionId}
+            role="region"
+            aria-label="Optional fields"
+            className="guided-schema-optional-section"
+            hidden={!advancedExpanded}
+          >
+            {advancedExpanded &&
+              optionalNames.map((name, idx) => renderField(name, idx === 0))}
+          </div>
         </>
       )}
 

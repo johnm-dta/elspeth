@@ -657,6 +657,21 @@ describe("focus management", () => {
 // ── 7a. WAI-ARIA contract for the advanced-toggle expand/collapse pair ──────
 
 describe("aria-controls / aria-expanded contract", () => {
+  it("aria-controls id resolves to a DOM element even when collapsed (initial render)", () => {
+    // Regression pin: in the collapsed (initial) state, aria-controls on the
+    // toggle button MUST point to an element that exists in the DOM.
+    // Otherwise the relationship is a dangling reference -- a screen-reader
+    // user discovering the toggle via Tab BEFORE first expansion cannot
+    // resolve "expanded/collapsed WHAT". The container survives collapse via
+    // the `hidden` attribute (which removes it from the AT tree and hides
+    // it visually) but keeps the id resolvable.
+    renderTurn(CSV_PAYLOAD);
+    const toggle = screen.getByRole("button", { name: /show advanced/i });
+    const controlsId = toggle.getAttribute("aria-controls");
+    expect(controlsId).toBeTruthy();
+    expect(document.getElementById(controlsId!)).not.toBeNull();
+  });
+
   it("toggle button's aria-controls points to the optional-fields region after expand", async () => {
     const user = userEvent.setup();
     renderTurn(CSV_PAYLOAD);

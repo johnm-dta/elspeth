@@ -9,6 +9,12 @@ import type {
   ApiError,
   ValidationResult,
 } from "@/types/api";
+import type {
+  GuidedSession,
+  TurnPayload,
+  TerminalState,
+  GuidedRespondRequest,
+} from "@/types/guided";
 import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
@@ -83,6 +89,12 @@ interface SessionState {
 
   // Shared selection state for cross-component sync (GraphView <-> SpecView)
   selectedNodeId: string | null;
+
+  // Guided-mode protocol state — all three are null when not in a guided session
+  guidedSession: GuidedSession | null;
+  guidedNextTurn: TurnPayload | null;
+  guidedTerminal: TerminalState | null;
+
   selectNode: (nodeId: string | null) => void;
 
   loadSessions: () => Promise<void>;
@@ -99,6 +111,10 @@ interface SessionState {
   loadStateVersions: () => Promise<void>;
   isLoadingVersions: boolean;
   revertToVersion: (stateId: string) => Promise<void>;
+  // Guided-mode actions
+  startGuided: (sessionId: string) => Promise<void>;
+  respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  exitToFreeform: () => Promise<void>;
   clearError: () => void;
   injectSystemMessage: (content: string, stableId?: string) => void;
   reset: () => void;
@@ -115,6 +131,9 @@ const initialState = {
   isLoadingVersions: false,
   error: null as string | null,
   selectedNodeId: null as string | null,
+  guidedSession: null as GuidedSession | null,
+  guidedNextTurn: null as TurnPayload | null,
+  guidedTerminal: null as TerminalState | null,
 };
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -142,6 +161,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         stateVersions: [],
         error: null,
         selectedNodeId: null, // Clear selection for new session
+        guidedSession: null,
+        guidedNextTurn: null,
+        guidedTerminal: null,
       }));
     } catch {
       set({ error: "Failed to create session. Please try again." });
@@ -169,6 +191,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 stateVersions: [],
                 isComposing: false,
                 selectedNodeId: null,
+                guidedSession: null,
+                guidedNextTurn: null,
+                guidedTerminal: null,
               }
             : {}),
         };
@@ -193,6 +218,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       isComposing: false,
       error: null,
       selectedNodeId: null, // Clear selection when switching sessions
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
     });
 
     try {
@@ -498,6 +526,65 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: "Failed to fork conversation. Please try again.",
       });
     }
+  },
+
+  async startGuided(sessionId: string) {
+    try {
+      const response = await api.getGuided(sessionId);
+      // Atomically replace all 4 wire fields — server is authoritative (spec §7.3)
+      set({
+        guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
+      });
+    } catch {
+      // Error path: set error string, leave existing guided state alone.
+      // Mirrors selectSession lines 207-209: set error, don't clobber fields
+      // that were already loaded. The caller can inspect error to decide whether
+      // to surface a retry prompt.
+      set({ error: "Failed to load guided session. Please try again." });
+    }
+  },
+
+  async respondGuided(body: GuidedRespondRequest) {
+    const { activeSessionId } = get();
+    // Offensive guard — caller must not invoke this without an active session.
+    // Per CLAUDE.md: "Proactively detect invalid states and throw meaningful
+    // exceptions." Using ?. to silently skip would mask a programmer error.
+    if (activeSessionId === null) {
+      throw new Error("respondGuided called without active session");
+    }
+    try {
+      const response = await api.respondGuided(activeSessionId, body);
+      // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
+      set({
+        guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
+      });
+    } catch (err) {
+      // Re-throw the invariant violation from the guard above — that's not a
+      // network error and must propagate to the caller unchanged.
+      if (err instanceof Error && err.message === "respondGuided called without active session") {
+        throw err;
+      }
+      set({ error: "Failed to submit guided response. Please try again." });
+    }
+  },
+
+  async exitToFreeform() {
+    // Sugar over respondGuided — sets control_signal and nulls all choice fields.
+    // All state mutation is handled by respondGuided.
+    await get().respondGuided({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "exit_to_freeform",
+    });
   },
 
   async loadStateVersions() {

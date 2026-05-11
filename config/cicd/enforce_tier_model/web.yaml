@@ -1427,19 +1427,64 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=f9cae2269932b86b
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=54d635d0a8a329ed
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=87ca61fbdfb63fd5
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=124739bda582e732
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
     Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
+  expires: null
+- key: web/composer/redaction.py:R5:_has_sensitive:fp=5fb99ae4dcab80fc
+  owner: web-composer
+  reason: Marker-class discrimination over an Annotated metadata tuple (spec §4.2.5).
+    The metadata comes from Python typing primitives at module load — not external
+    input. _SensitiveMarker is a sentinel class introduced by Sensitive(); isinstance
+    is the only mechanism to identify it among arbitrary metadata entries (pydantic
+    uses the same pattern internally). No defensive coercion of unknown data.
+  safety: Returns bool; never silently substitutes a default for malformed input —
+    metadata tuple is always well-typed because we control its construction site.
+  expires: null
+- key: web/composer/redaction.py:R5:_count_sensitive:fp=df85d291b886495a
+  owner: web-composer
+  reason: Same as _has_sensitive — marker discrimination over Annotated metadata.
+    The count is used solely to detect the spec §4.2.5 violation of multiple
+    Sensitive() markers in one field's Annotated tuple, which raises ValueError.
+  safety: Returns int >= 0; downstream consumer raises on count > 1 with field
+    name in the error message.
+  expires: null
+- key: web/composer/redaction.py:R5:walk_model_schema:fp=40865f016baa4c07
+  owner: web-composer
+  reason: Reflection over Python typing — isinstance(model, type) and issubclass(model,
+    BaseModel) verify that the input is a pydantic schema class. There is no other
+    way in Python to test "is this a BaseModel subclass?". Pydantic itself relies
+    on the same primitive throughout its public API.
+  safety: Raises TypeError with descriptive message if a non-BaseModel is passed.
+    No silent default; no coercion.
+  expires: null
+- key: web/composer/redaction.py:R5:_walk_type:fp=0ef5ef4aeee71583
+  owner: web-composer
+  reason: Reflection over Python typing — isinstance(field_type, type) and issubclass(field_type,
+    BaseModel) tests whether a Union/container element is a nested model that
+    requires further descent (spec §4.2.5). Same justification as walk_model_schema's
+    entry-point guard; no other Python primitive answers this question.
+  safety: If neither container nor BaseModel, falls through to the scalar-leaf
+    emission branch. No silent error suppression.
+  expires: null
+- key: web/composer/redaction.py:R5:_is_descendable:fp=241397d4205046a6
+  owner: web-composer
+  reason: Reflection helper used during Union-arm fan-out — same BaseModel detection
+    primitive as the surrounding walker. Decides whether a Union arm carries
+    structure worth descending into vs. being a scalar arm to skip.
+  safety: Returns bool; scalar arms are skipped explicitly; the rev-3 W8a path
+    routes Annotated[scalar, Sensitive()] arms through _has_sensitive instead so
+    Sensitive markers on scalar Union arms still emit a node.
   expires: null
 - key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=5b5a0d95b7682fd0
   owner: web-sessions

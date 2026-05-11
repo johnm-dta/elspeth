@@ -554,6 +554,15 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/yaml_generator.py:_strip_web_metadata:options"
   - "src/elspeth/web/composer/yaml_generator.py:_strip_web_metadata:return"
 
+  # Redaction — shared traversal iterator (§4.2.5)
+  # The value_provider closure receives the model's serialised root dict.
+  # The schema (BaseModel) is the typed contract; the dict is the run-time
+  # JSON-shape view the consumer passes in for path extraction. Typing the
+  # parameter more strictly would require generic-parameterising TraversalNode
+  # against an arbitrary BaseModel subclass, which the path-based abstraction
+  # is intentionally model-agnostic to avoid.
+  - "src/elspeth/web/composer/redaction.py:provider:root"
+
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Tool executor (Tier 3 LLM tool call arguments)
   # args dicts come from json.loads(tool_call.function.arguments) in the

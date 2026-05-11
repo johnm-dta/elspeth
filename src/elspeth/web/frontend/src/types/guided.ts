@@ -46,8 +46,8 @@ export interface TurnRecord {
   turn_type: TurnType;
   payload_hash: string;
   response_hash: string | null;
-  /** "server" or "llm" — enum not yet closed in spec §5; bare string for now. */
-  emitter: string;
+  /** Closed value domain (state_machine.py:75-82): server-emitted or LLM-emitted. */
+  emitter: "server" | "llm";
 }
 
 /** Wire: TerminalStateResponse (schemas.py:223-228). */

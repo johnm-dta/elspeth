@@ -66,25 +66,24 @@ describe("guided protocol types", () => {
     // attempt to assign it would be a TS compile error.
   });
 
-  it("TurnPayload.step_index is number", () => {
+  it("TurnPayload.step_index is number (compile-time) and 0-based ordinal", () => {
     const payload: TurnPayload = {
       type: "single_select",
       step_index: 0,
       payload: {},
     };
-    expect(typeof payload.step_index).toBe("number");
     expect(payload.step_index).toBe(0);
   });
 
-  it("GuidedSession has exactly step, history, terminal", () => {
-    // Exhaustiveness at compile time: the array type forces Keys to be
-    // constrained to keyof GuidedSession.
-    type Keys = keyof GuidedSession;
-    const expected: Keys[] = ["step", "history", "terminal"];
-    expect(expected).toHaveLength(3);
+  it("GuidedSession has exactly step, history, terminal — exhaustive", () => {
+    type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+    // Compile-time mutual-extends: adding/removing a key in GuidedSession
+    // makes this assignment fail tsc.
+    const _exact: Equals<keyof GuidedSession, "step" | "history" | "terminal"> = true;
+    expect(_exact).toBe(true);
   });
 
-  it("TurnRecord compiles with a well-formed sample", () => {
+  it("TurnRecord nullable response_hash is honoured", () => {
     const rec: TurnRecord = {
       step: "step_1_source",
       turn_type: "inspect_and_confirm",
@@ -92,7 +91,7 @@ describe("guided protocol types", () => {
       response_hash: null,
       emitter: "server",
     };
-    expect(rec.payload_hash).toBe("abc123");
+    expect(rec.response_hash).toBeNull();
   });
 
   it("GuidedRespondRequest compiles with all-null body", () => {

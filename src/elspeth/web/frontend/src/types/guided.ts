@@ -121,6 +121,29 @@ export interface SingleSelectPayload {
   allow_custom: boolean;
 }
 
+/** Wire: MultiSelectWithCustomPayload (protocol.py:46-50). */
+export interface MultiSelectWithCustomPayload {
+  question: string;
+  options: Option[];
+  /** Option IDs initially checked; subset of `options[].id`. */
+  default_chosen: string[];
+  /**
+   * Server-emitted label for the "let source decide" escape button, or null.
+   *
+   * NOTE: As of Task 7.4 this field is INTENTIONALLY NOT consumed by
+   * MultiSelectWithCustomTurn. The wire shape for the escape submission
+   * requires a cross-layer protocol decision: the plan describes
+   * `{edited_values: {schema_mode: "observed", required_fields: []}}`
+   * (no `outputs` wrapper, no plugin/options) but the only backend read
+   * site (state_machine.py:_advance_step_2 lines 476-483) unconditionally
+   * reads `edited_values["outputs"]` as a list of full output dicts. The
+   * widget owns neither the plugin nor the options needed to construct
+   * that array. Tracked as a follow-up; the field stays here because the
+   * backend still emits it (do not remove).
+   */
+  escape_label: string | null;
+}
+
 /** Wire: _Observed (protocol.py:30-33). Nested inside InspectAndConfirmPayload. */
 export interface Observed {
   columns: string[];

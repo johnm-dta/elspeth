@@ -3918,6 +3918,128 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   MultiSelectWithCustomTurn (Task 7.4)
+   Reuses guided-chip-btn / guided-chip-group / guided-chip-fieldset /
+   guided-chip-legend / guided-chip-item / guided-chip-hint for the option
+   chips (per the Task 7.2 SHAPE NOTE - chip-group family widgets share
+   the structure). The aria-pressed="true" selector below lights up the
+   pressed visual state - added here rather than in the chip-base block
+   because SingleSelectTurn does not use aria-pressed.
+   --------------------------------------------------------------------------- */
+
+/* Pressed-chip visual state for toggle-button chips. Applies wherever
+   aria-pressed="true" is set on a guided-chip-btn (currently only
+   MultiSelectWithCustomTurn). */
+.guided-chip-btn[aria-pressed="true"] {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border-color: var(--color-accent);
+}
+
+.guided-chip-btn[aria-pressed="true"]:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+  border-color: var(--color-btn-primary-bg-hover);
+}
+
+/* Custom-add row: reuses .guided-custom-label, .guided-custom-input,
+   .guided-custom-submit-btn from the SingleSelectTurn block above. */
+.guided-multi-custom-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+/* Added-customs strip: chip-styled list items with an X removal button. */
+.guided-multi-custom-list {
+  list-style: none;
+  margin: var(--space-sm) 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.guided-multi-custom-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.guided-multi-custom-chip-label {
+  line-height: 1;
+}
+
+.guided-multi-custom-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.guided-multi-custom-remove-btn:hover {
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.guided-multi-custom-remove-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Continue button row */
+.guided-multi-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.guided-multi-continue-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-multi-continue-btn:hover:not(:disabled) {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-multi-continue-btn:disabled {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.guided-multi-continue-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -3926,7 +4048,9 @@ summary:focus-visible {
   .guided-inspect-edit-btn,
   .guided-inspect-remove-btn,
   .guided-inspect-cancel-btn,
-  .guided-inspect-apply-btn {
+  .guided-inspect-apply-btn,
+  .guided-multi-custom-remove-btn,
+  .guided-multi-continue-btn {
     transition: none;
   }
 }

@@ -273,10 +273,30 @@ def _walk_type(
         return
 
     # Container descent.
+    #
+    # NOTE: bare `list` and bare `dict` (unparameterised) have get_origin() == None
+    # in Python's typing machinery, so they do NOT match the `origin in (list, tuple)`
+    # or `origin is dict` branches below. Guard them explicitly here so they raise
+    # ValueError instead of silently falling through to the scalar/leaf path.
+    if field_type is list:
+        raise ValueError(f"Field at path {path!r} uses a bare list; spec §4.2.5 requires a parameterised element type.")
+    if field_type is dict:
+        raise ValueError(f"Field at path {path!r} uses an unparameterised dict; spec §4.2.5 requires dict[str, X].")
+
     if origin in (list, tuple):
         args = get_args(field_type)
         if not args:
             raise ValueError(f"Field at path {path!r} uses a bare list/tuple; spec §4.2.5 requires a parameterised element type.")
+        # Fixed-length heterogeneous tuples (e.g. tuple[int, str]) are not supported.
+        # The only tuple form that can be descended into is the variable-length
+        # tuple[X, ...] form, identified by exactly two args where the second is
+        # Ellipsis.  Any other multi-arg tuple silently drops all but the first
+        # element type — the exact silent-pass failure the walker was written to
+        # prevent.
+        if origin is tuple and not (len(args) == 2 and args[1] is Ellipsis):
+            raise ValueError(
+                f"Field at path {path!r} uses a fixed-length tuple; spec §4.2.5 supports only the variable-length form tuple[X, ...]."
+            )
         element_type = args[0]
         yield from _walk_type(
             field_type=element_type,

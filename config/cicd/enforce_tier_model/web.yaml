@@ -1468,7 +1468,7 @@ allow_hits:
   safety: Raises TypeError with descriptive message if a non-BaseModel is passed.
     No silent default; no coercion.
   expires: null
-- key: web/composer/redaction.py:R5:_walk_type:fp=0ef5ef4aeee71583
+- key: web/composer/redaction.py:R5:_walk_type:fp=bdb4d9963cb1bf73
   owner: web-composer
   reason: Reflection over Python typing — isinstance(field_type, type) and issubclass(field_type,
     BaseModel) tests whether a Union/container element is a nested model that

@@ -270,6 +270,47 @@ def test_walk_three_arm_union() -> None:
     assert not any(p in paths for p in ("field[str]", "field[bool]"))
 
 
+def test_walk_bare_list_raises_value_error() -> None:
+    """Bare list (no element type) raises ValueError mentioning the field path."""
+
+    class M(BaseModel):
+        x: list  # type: ignore[type-arg]
+
+    with pytest.raises(ValueError, match="x"):
+        list(walk_model_schema(M))
+
+
+def test_walk_unparameterised_dict_raises_value_error() -> None:
+    """Bare dict (no type parameters) raises ValueError."""
+
+    class M(BaseModel):
+        x: dict  # type: ignore[type-arg]
+
+    with pytest.raises(ValueError, match="x"):
+        list(walk_model_schema(M))
+
+
+def test_walk_non_str_dict_key_raises_value_error() -> None:
+    """dict[int, str] raises ValueError mentioning the field path."""
+
+    class M(BaseModel):
+        x: dict[int, str]
+
+    with pytest.raises(ValueError, match="x"):
+        list(walk_model_schema(M))
+
+
+def test_walk_fixed_length_tuple_raises_value_error() -> None:
+    """tuple[int, str] (fixed-length heterogeneous) raises ValueError mentioning
+    the path and the requirement for variable-length form tuple[X, ...]."""
+
+    class M(BaseModel):
+        x: tuple[int, str]
+
+    with pytest.raises(ValueError, match="x"):
+        list(walk_model_schema(M))
+
+
 def test_walk_short_circuits_under_sensitive_container() -> None:
     """A Sensitive marker on a container suppresses descent into inner Sensitive markers.
 

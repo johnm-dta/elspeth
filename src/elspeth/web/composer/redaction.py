@@ -13,12 +13,14 @@ container types the spec promised and the guard could not detect.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from types import UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BaseModel
+
+from elspeth.contracts.freeze import freeze_fields
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 
@@ -354,6 +356,110 @@ def _is_descendable(t: Any) -> bool:
     if _is_union(origin):
         return True
     return origin in (list, tuple, dict)
+
+
+@dataclass(frozen=True, slots=True)
+class HandlesNoSensitiveDataReason:
+    """Minimal stub for spec §4.2.3; Task 5 (HandlesNoSensitiveDataReason) /
+    Task 6 (ToolRedactionPolicy) will add field validators. Construction
+    shape is fixed by this commit's test set; Tasks 5/6 are pure
+    behavioural additions (new validators), not shape changes.
+
+    sensitive_data_locations: where sensitive material actually lives if
+        not in this tool's arguments or responses.
+
+    why_arguments_safe: prose explanation of why every argument is safe
+        to persist verbatim.
+
+    why_responses_safe: same as above, for responses.
+    """
+
+    sensitive_data_locations: tuple[str, ...]
+    why_arguments_safe: str
+    why_responses_safe: str
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "sensitive_data_locations")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRedactionPolicy:
+    """Minimal stub for spec §4.2.3; Task 5 (HandlesNoSensitiveDataReason) /
+    Task 6 (ToolRedactionPolicy) will add field validators. Construction
+    shape is fixed by this commit's test set; Tasks 5/6 are pure
+    behavioural additions (new validators), not shape changes.
+
+    Declarative redaction policy. Used inside the `policy` field of a
+    manifest entry whose argument surface is purely structural (no
+    Pydantic argument model declared).
+    """
+
+    sensitive_argument_keys: tuple[str, ...] = ()
+    sensitive_response_keys: tuple[str, ...] = ()
+    known_response_keys: tuple[str, ...] = ()
+    argument_summarizers: Mapping[str, Callable[[Any], str]] = field(default_factory=dict)
+    handles_no_sensitive_data: bool = False
+    handles_no_sensitive_data_reason_struct: HandlesNoSensitiveDataReason | None = None
+
+    def __post_init__(self) -> None:
+        freeze_fields(
+            self,
+            "sensitive_argument_keys",
+            "sensitive_response_keys",
+            "known_response_keys",
+            "argument_summarizers",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRedaction:
+    """One manifest entry. Each entry is keyed by tool name in MANIFEST.
+
+    Exactly one of the two shapes must be populated:
+      • type-driven  — argument_model is not None
+      • declarative  — argument_model is None AND policy is not None
+
+    Both populated → ValueError (precedence is undefined; use one shape).
+    Neither populated → ValueError (every tool must have a redaction
+    declaration; the adequacy guard cannot consult what doesn't exist).
+
+    response_model is only valid alongside argument_model. Declarative
+    entries express response shape via policy.known_response_keys.
+    """
+
+    argument_model: type[BaseModel] | None = None
+    response_model: type[BaseModel] | None = None
+    policy: ToolRedactionPolicy | None = None
+
+    def __post_init__(self) -> None:
+        type_driven = self.argument_model is not None
+        declarative = self.policy is not None
+
+        if type_driven and declarative:
+            raise ValueError(
+                "ToolRedaction declared both argument_model and policy; "
+                "each manifest entry must choose exactly one shape. "
+                "If a tool has a Pydantic argument model with Sensitive[T] "
+                "annotations, the model is the single source of truth — "
+                "remove the policy. If the argument surface is purely "
+                "structural and does not benefit from Sensitive[T], "
+                "remove the argument_model and declare the policy."
+            )
+        if not type_driven and not declarative:
+            raise ValueError(
+                "ToolRedaction declared neither argument_model nor policy; "
+                "every manifest entry must declare its redaction shape. "
+                "If the tool genuinely handles no sensitive material, set "
+                "policy=ToolRedactionPolicy(handles_no_sensitive_data=True, "
+                "handles_no_sensitive_data_reason_struct=...) — the "
+                "structured reason is part of the audit trail."
+            )
+        if self.response_model is not None and not type_driven:
+            raise ValueError(
+                "response_model requires argument_model to also be set "
+                "(declarative entries express response shape via "
+                "policy.known_response_keys)."
+            )
 
 
 def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:

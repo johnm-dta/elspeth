@@ -1427,21 +1427,21 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=54d635d0a8a329ed
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=b882b14b17d64206
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=124739bda582e732
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=eb728540da9b57ed
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
     Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R5:_has_sensitive:fp=5fb99ae4dcab80fc
+- key: web/composer/redaction.py:R5:_has_sensitive:fp=3e518c18d7a6b338
   owner: web-composer
   reason: Marker-class discrimination over an Annotated metadata tuple (spec §4.2.5).
     The metadata comes from Python typing primitives at module load — not external
@@ -1451,7 +1451,7 @@ allow_hits:
   safety: Returns bool; never silently substitutes a default for malformed input —
     metadata tuple is always well-typed because we control its construction site.
   expires: null
-- key: web/composer/redaction.py:R5:_count_sensitive:fp=df85d291b886495a
+- key: web/composer/redaction.py:R5:_count_sensitive:fp=ec153c49f4dcc9ef
   owner: web-composer
   reason: Same as _has_sensitive — marker discrimination over Annotated metadata.
     The count is used solely to detect the spec §4.2.5 violation of multiple
@@ -1459,7 +1459,7 @@ allow_hits:
   safety: Returns int >= 0; downstream consumer raises on count > 1 with field
     name in the error message.
   expires: null
-- key: web/composer/redaction.py:R5:walk_model_schema:fp=40865f016baa4c07
+- key: web/composer/redaction.py:R5:walk_model_schema:fp=7a2f4284b9c30167
   owner: web-composer
   reason: Reflection over Python typing — isinstance(model, type) and issubclass(model,
     BaseModel) verify that the input is a pydantic schema class. There is no other
@@ -1468,7 +1468,7 @@ allow_hits:
   safety: Raises TypeError with descriptive message if a non-BaseModel is passed.
     No silent default; no coercion.
   expires: null
-- key: web/composer/redaction.py:R5:_walk_type:fp=bdb4d9963cb1bf73
+- key: web/composer/redaction.py:R5:_walk_type:fp=bac61defc4595677
   owner: web-composer
   reason: Reflection over Python typing — isinstance(field_type, type) and issubclass(field_type,
     BaseModel) tests whether a Union/container element is a nested model that
@@ -1477,7 +1477,7 @@ allow_hits:
   safety: If neither container nor BaseModel, falls through to the scalar-leaf
     emission branch. No silent error suppression.
   expires: null
-- key: web/composer/redaction.py:R5:_is_descendable:fp=241397d4205046a6
+- key: web/composer/redaction.py:R5:_is_descendable:fp=6639e12e3db3f227
   owner: web-composer
   reason: Reflection helper used during Union-arm fan-out — same BaseModel detection
     primitive as the surrounding walker. Decides whether a Union arm carries

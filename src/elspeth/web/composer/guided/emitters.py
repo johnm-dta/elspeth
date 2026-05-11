@@ -12,6 +12,7 @@ Exported:
     build_step_2_schema_form_turn — schema_form for a chosen sink plugin.
     build_step_2_multi_select_turn — multi_select_with_custom for required fields.
     build_step_2_5_recipe_offer_turn — recipe_offer from a RecipeMatch.
+    build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -27,6 +28,7 @@ from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
+    ProposeChainPayload,
     RecipeOfferPayload,
     SchemaFormPayload,
     SingleSelectPayload,
@@ -39,6 +41,7 @@ from elspeth.web.composer.guided.protocol import (
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
     from elspeth.web.composer.guided.recipe_match import RecipeMatch
+    from elspeth.web.composer.guided.state_machine import ChainProposal
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState
 
@@ -225,6 +228,52 @@ def build_step_2_5_recipe_offer_turn(
     return Turn(
         type=TurnType.RECIPE_OFFER.value,
         step_index=_step_index(GuidedStep.STEP_2_5_RECIPE_MATCH),
+        payload=payload,
+    )
+
+
+def build_step_3_propose_chain_turn(
+    proposal: ChainProposal,
+) -> Turn:
+    """Build a ``propose_chain`` Turn from a ChainProposal.
+
+    Emitted at Step 3 after ``solve_chain`` returns a complete chain proposal.
+
+    The ``blockers`` field is always ``[]`` for chain proposals emitted
+    server-side after a successful ``solve_chain`` call.  The LLM may use
+    ``blockers`` when it can only produce a partial chain; for the MVP we
+    do not surface that path — ``solve_chain`` either returns a complete
+    proposal or raises (so the dispatcher punts).
+
+    Args:
+        proposal: The chain proposal returned by ``solve_chain``.
+
+    Returns:
+        A ``Turn`` TypedDict ready for serialisation and hash.
+    """
+    from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.composer.guided.protocol import _ProposedStep
+
+    # Thaw the frozen ChainProposal step mappings into plain dicts so the
+    # payload is JSON-serialisable.  ``_ProposedStep`` is a TypedDict so
+    # mypy needs the explicit shape — the chain solver guarantees these
+    # keys (validate against the LLM tool schema at solve_chain time).
+    thawed_steps: list[_ProposedStep] = [
+        _ProposedStep(
+            plugin=str(s["plugin"]),
+            options=dict(deep_thaw(s["options"])),
+            rationale=str(s["rationale"]),
+        )
+        for s in proposal.steps
+    ]
+    payload: ProposeChainPayload = {
+        "steps": thawed_steps,
+        "why": proposal.why,
+        "blockers": [],
+    }
+    return Turn(
+        type=TurnType.PROPOSE_CHAIN.value,
+        step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
         payload=payload,
     )
 

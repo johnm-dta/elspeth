@@ -186,3 +186,60 @@ class TestPayloadValidation:
 
         with pytest.raises(ValueError):
             validate_payload("not_a_turn_type", {})  # type: ignore[arg-type]
+
+
+class TestBuildStep3ProposeChainTurn:
+    """Tests for the propose_chain emitter (Task 4.5)."""
+
+    def test_emits_propose_chain_with_step_index_3(self) -> None:
+        from elspeth.web.composer.guided.emitters import build_step_3_propose_chain_turn
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "passthrough",
+                    "options": {"schema": {"mode": "observed"}},
+                    "rationale": "no-op chain",
+                },
+            ),
+            why="rows already conform",
+        )
+
+        turn = build_step_3_propose_chain_turn(proposal)
+
+        assert turn["type"] == TurnType.PROPOSE_CHAIN.value
+        # STEP_3_TRANSFORMS is the 4th step (0-based index 3).
+        assert turn["step_index"] == 3
+
+    def test_payload_carries_steps_why_and_empty_blockers(self) -> None:
+        from elspeth.web.composer.guided.emitters import build_step_3_propose_chain_turn
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+
+        proposal = ChainProposal(
+            steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "r"},),
+            why="why-text",
+        )
+
+        turn = build_step_3_propose_chain_turn(proposal)
+        payload = turn["payload"]
+
+        assert set(payload.keys()) == {"steps", "why", "blockers"}
+        assert payload["why"] == "why-text"
+        # MVP-scope decision: blockers is always [] for server-emitted
+        # propose_chain — solve_chain raises rather than returning a
+        # partial proposal with blockers populated.
+        assert payload["blockers"] == []
+        assert payload["steps"][0]["plugin"] == "passthrough"
+
+    def test_payload_validates_against_propose_chain_schema(self) -> None:
+        from elspeth.web.composer.guided.emitters import build_step_3_propose_chain_turn
+        from elspeth.web.composer.guided.protocol import validate_payload
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+
+        proposal = ChainProposal(
+            steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "r"},),
+            why="ok",
+        )
+        turn = build_step_3_propose_chain_turn(proposal)
+        assert validate_payload(TurnType.PROPOSE_CHAIN, turn["payload"]) is None

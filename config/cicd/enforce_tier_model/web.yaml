@@ -1170,51 +1170,51 @@ allow_hits:
     which is raw JSON from the DB. Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=81efe147ebf9043e
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=a21ab0d22842792d
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — options is an optional user input that may be omitted;
-    plugin is now validated with an explicit 422 check before this point.
+    plugin is now validated with an explicit 422 check before this point; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing keys fall back to defaults (empty dict); no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=db8091fb82705ce0
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=d83151090a5bef09
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — observed_columns is an optional user input that may be
-    omitted.
+    omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=56171ebdf6748afd
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=18bc8091cecd1a93
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — sample_rows is an optional user input that may be omitted.
+  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — sample_rows is an optional user input that may be omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=f67da515c3fdaeb6
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=fadf554d2cc0aefa
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — options is an optional user input that may be
-    omitted; plugin is now validated with an explicit 422 check before this point.
+    omitted; plugin is now validated with an explicit 422 check before this point; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing key falls back to empty dict; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=3ef7b32f42b6cfc3
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=ecf7d1a7765f8692
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — observed_columns is an optional user input that
-    may be omitted.
+    may be omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=36c1a9b7fc65f39d
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=697b796e82f4084b
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — sample_rows is an optional user input that may
-    be omitted.
+    be omitted; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=e0a68f3bba01a2e8
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=9b0906221f37adaf
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted recipe-offer payload — recipe_name and slots are optional fields the user
-    fills in when accepting a recipe.
+    fills in when accepting a recipe; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing keys fall back to empty string/dict; failure propagates via handle_step_2_5_recipe_apply
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=baad85de0bd7f8e0
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=343c53dceacf0de3
   owner: web-sessions
   reason: edited.get() on Tier 3 user-submitted recipe-offer payload — recipe_name and slots are optional fields the user
-    fills in when accepting a recipe.
+    fills in when accepting a recipe; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Missing keys fall back to empty string/dict; failure propagates via handle_step_2_5_recipe_apply
   expires: null
 - key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
@@ -1411,145 +1411,145 @@ allow_hits:
     and cancellation now also drains the shielded future's eventual exception via add_done_callback so asyncio's GC handler
     cannot fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=fd7e80c36471095f
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d67c463089811195
   owner: web-sessions
   reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps shielded cancelled-LLM-call
-    audit persistence; FP changed after ruff-format reformatted routes.py when post_guided_respond was added.
+    audit persistence; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted routes.py when post_guided_respond was added.
   safety: Same as the prior entry — shielded persistence is best-effort; explicit raise preserves cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=11ea851be16cf4e3
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=b4cab8a430103035
   owner: web-sessions
   reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps the shielded progress
-    publish in the cancellation handler; FP changed after ruff-format reformatted routes.py when post_guided_respond was added.
+    publish in the cancellation handler; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted routes.py when post_guided_respond was added.
   safety: Same as the prior entry — shielded publish completes; explicit raise restores cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=b0164f850f3e04a3
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=ceaae83145693a82
   owner: web-sessions
   reason: Same as the prior recompose R7 entry — mirror of cancelled-LLM-call audit persistence suppress in recompose; FP
-    changed after ruff-format reformatted routes.py when post_guided_respond was added.
+    changed after ruff-format reformatted routes.py when post_guided_respond was added; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=8d2ea0eab664902a
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=54e1a93dec1dca49
   owner: web-sessions
-  reason: Same as the prior recompose R7 entry — mirror of shielded-publish suppress in recompose; FP changed after ruff-format
+  reason: Same as the prior recompose R7 entry — mirror of shielded-publish suppress in recompose; FP rotated by Step 3 wiring (Phase 4 Task 4.5)
     reformatted routes.py when post_guided_respond was added.
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=af5a556ad58ace4d
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=a2074b6b9a204d6c
   owner: web-sessions
-  reason: isinstance check on deserialized composition state source — Tier 3 boundary; FP changed after ruff-format reformatted
+  reason: isinstance check on deserialized composition state source — Tier 3 boundary; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted
     routes.py when post_guided_respond was added.
   safety: Validates structure from persisted state; same as prior fork_from_message R5 entry.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=5d6e55eff93c5873
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=6243220782dadf07
   owner: web-sessions
-  reason: source_dict.get("options") on Tier 3 composition state — optional source options; FP changed after ruff-format reformatted
+  reason: source_dict.get("options") on Tier 3 composition state — optional source options; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted
     routes.py when post_guided_respond was added.
   safety: Returns None on miss, blob rewrite path is skipped; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=9514364097170589
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=003cbeddfd82ae0f
   owner: web-sessions
   reason: isinstance(options, dict) validates persisted source.options before mutating nested fields during fork blob rewrite;
-    FP changed after ruff-format.
+    FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Non-dict raises AuditIntegrityError; no silent skip or coercion.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=8df87b4871417ecd
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=aade5352874dbe15
   owner: web-sessions
-  reason: options.get("blob_ref") on Tier 3 state source — blob_ref is optional; FP changed after ruff-format reformatted
+  reason: options.get("blob_ref") on Tier 3 state source — blob_ref is optional; FP rotated by Step 3 wiring (Phase 4 Task 4.5) reformatted
     routes.py when post_guided_respond was added.
   safety: Returns None on miss, handled by conditional below; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=247ba68517b436df
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=d337312f75404830
   owner: web-sessions
-  reason: isinstance(old_ref, str) — blob_ref may be str or UUID from persisted state; FP changed after ruff-format.
+  reason: isinstance(old_ref, str) — blob_ref may be str or UUID from persisted state; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Tier 3 boundary — persisted blob_ref type is not guaranteed.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=732516c835899a17
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=2dea03f78103b6da
   owner: web-sessions
   reason: blob_map.get(old_uuid) — not every source reference is guaranteed to have a copied blob target; FP changed after
-    ruff-format.
+    ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: None result only triggers secondary path/file rewrite probe; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=2676e4a4c9c503bc
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=896daaea542adbfb
   owner: web-sessions
-  reason: options.get(path_key) on persisted source options — path/file keys are optional; FP changed after ruff-format.
+  reason: options.get(path_key) on persisted source options — path/file keys are optional; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: None result skips that key; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=f926de07b8a8779c
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=c5e620eb808fa5fc
   owner: web-sessions
   reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string persisted path/file values; FP
-    changed after ruff-format.
+    changed after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Only string values participate in fallback rewrite; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=e90401537935e657
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=50fb6c7ce12df024
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the BlobQuotaExceededError path; FP changed
-    after ruff-format.
+    after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior fork_from_message R6 entry.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=ad4735d4c08a7e45
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=0c0126c4062b9a55
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path; FP
-    changed after ruff-format.
+    changed after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior fork_from_message R6 entry.
   expires: null
-- key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=0bd91249bb52f851
+- key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=781ddb89d39d8a3a
   owner: web-sessions
   reason: App-scoped compose lock registry is initialized lazily on first session-router use rather than being required at
-    startup; FP changed after ruff-format.
+    startup; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _get_session_compose_lock_registry entry.
   expires: null
-- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=187f2093f92be18f
+- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=8e14e2088e4e222e
   owner: web-sessions
   reason: Optional LiteLLM/provider exception metadata — status_code is not guaranteed on every provider error object; FP
-    changed after ruff-format.
+    changed after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _litellm_error_detail entry.
   expires: null
-- key: web/sessions/routes.py:R1:_state_response:fp=506c7bcad2e4f5bb
+- key: web/sessions/routes.py:R1:_state_response:fp=668cdf7bb1201c38
   owner: web-sessions
-  reason: Unwrapping redact_source_storage_path() output — helper returns dict with "source" key; FP changed after ruff-format.
+  reason: Unwrapping redact_source_storage_path() output — helper returns dict with "source" key; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Falls back to unredacted source_data (less privacy, not less safety); same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=5983abe8c38d77c1
+- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=94f4f5454a0cdb2d
   owner: web-sessions
   reason: isinstance(runtime_preflight, _RuntimePreflightFailed) dispatches the _RuntimePreflightOutcome union type; FP changed
-    after ruff-format.
+    after ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _composer_persisted_validation entry.
   expires: null
-- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=c157b69c8e36f39d
+- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=915df4b95472b886
   owner: composer-audit
-  reason: Audit-system-failure exemption — per-tool-call audit row persistence is best-effort; FP changed after ruff-format.
+  reason: Audit-system-failure exemption — per-tool-call audit row persistence is best-effort; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _persist_tool_invocations entry.
   expires: null
-- key: web/sessions/routes.py:R6:_persist_llm_calls:fp=36e8fd2a0da6478e
+- key: web/sessions/routes.py:R6:_persist_llm_calls:fp=90f88cebae57c5ac
   owner: composer-audit
-  reason: Audit-system-failure exemption — per-LLM-call audit row persistence is best-effort; FP changed after ruff-format.
+  reason: Audit-system-failure exemption — per-LLM-call audit row persistence is best-effort; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _persist_llm_calls entry.
   expires: null
-- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=cbdf0e1ae3fd8975
+- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=fc626c25ee2f56c9
   owner: web-sessions
-  reason: state.validate() may fail on structurally damaged partial-state from LLM convergence/crash; FP changed after ruff-format.
+  reason: state.validate() may fail on structurally damaged partial-state from LLM convergence/crash; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _state_data_from_composer_state R6 entry.
   expires: null
-- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=0e7fea70a9a346af
+- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=da99f9dcc94f9c91
   owner: web-sessions
   reason: isinstance(runtime, ValidationResult) dispatches _RuntimePreflightOutcome union type for telemetry; FP changed after
-    ruff-format.
+    ruff-format; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _state_data_from_composer_state R5 entry.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=839f4c25a3f5694c
+- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=5395d6da427d5ec6
   owner: web-sessions
-  reason: Convergence partial-state save may fail — SQLAlchemyError family; FP changed after ruff-format.
+  reason: Convergence partial-state save may fail — SQLAlchemyError family; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _handle_convergence_error entry.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=a68206ef6a1effba
+- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=13caa996a929f960
   owner: web-sessions
-  reason: Plugin-crash partial-state save may fail — SQLAlchemyError family; FP changed after ruff-format.
+  reason: Plugin-crash partial-state save may fail — SQLAlchemyError family; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _handle_plugin_crash entry.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=1b5f3002e41c0b36
+- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=92365f4bcab7bab8
   owner: web-sessions
-  reason: Runtime-preflight partial-state save may fail — SQLAlchemyError family; FP changed after ruff-format.
+  reason: Runtime-preflight partial-state save may fail — SQLAlchemyError family; FP rotated by Step 3 wiring (Phase 4 Task 4.5).
   safety: Same as prior _handle_runtime_preflight_failure entry.
   expires: null
 - key: web/app.py:R1:create_app:fp=298d81d738bfa3b0

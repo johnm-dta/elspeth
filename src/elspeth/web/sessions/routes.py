@@ -42,6 +42,7 @@ from elspeth.web.composer.guided.audit import (
     emit_turn_answered,
     emit_turn_emitted,
 )
+from elspeth.web.composer.guided.chain_solver import solve_chain
 from elspeth.web.composer.guided.emitters import (
     build_initial_step_1_turn,
     build_step_1_schema_form_turn,
@@ -49,6 +50,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_2_multi_select_turn,
     build_step_2_schema_form_turn,
     build_step_2_single_select_turn,
+    build_step_3_propose_chain_turn,
 )
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
@@ -63,6 +65,7 @@ from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
     handle_step_2_5_recipe_apply,
     handle_step_2_sink,
+    handle_step_3_chain_accept,
 )
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
@@ -1899,8 +1902,39 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-        # No recipe match — Step 3 (chain solver) is deferred to Phase 4.
-        return state, guided, None
+        # No recipe match — solve the chain via the LLM and emit propose_chain.
+        proposal = await solve_chain(source=source, sink=sink, recipe_match=None)
+        guided = _replace(guided, step=GuidedStep.STEP_3_TRANSFORMS, step_3_proposal=proposal)
+        next_turn = build_step_3_propose_chain_turn(proposal)
+        new_record = TurnRecord(
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            turn_type=TurnType.PROPOSE_CHAIN,
+            payload_hash=stable_hash(next_turn["payload"]),
+            response_hash=None,
+            emitter="server",
+        )
+        emit_step_advanced(
+            recorder,
+            prev=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            next_=GuidedStep.STEP_3_TRANSFORMS,
+            # System-driven advance: no recipe matched the (source, sink) topology,
+            # so the dispatcher hops STEP_2_5 → STEP_3 without operator input.
+            reason="auto_advanced",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        emit_turn_emitted(
+            recorder,
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            turn_type=TurnType.PROPOSE_CHAIN,
+            payload_hash=stable_hash(next_turn["payload"]),
+            payload_payload_id="",
+            emitter="server",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        guided = _replace(guided, history=(*guided.history, new_record))
+        return state, guided, next_turn
 
     # --- STEP_2_5_RECIPE_MATCH turns ------------------------------------
     if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
@@ -1950,13 +1984,87 @@ async def _dispatch_guided_respond(
             return state, guided, None
 
         if chosen == ["build_manually"]:
-            # step_advance already advanced to STEP_3.
-            # Step 3 chain solver is deferred to Phase 4.
-            return state, guided, None
+            # step_advance already advanced to STEP_3.  Solve the chain via the LLM.
+            if guided.step_1_result is None or guided.step_2_result is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Dispatcher invariant: step_1_result and step_2_result must be set at build_manually.",
+                )
+            source = guided.step_1_result
+            sink = guided.step_2_result
+            proposal = await solve_chain(source=source, sink=sink, recipe_match=None)
+            guided = _replace(guided, step_3_proposal=proposal)
+            next_turn = build_step_3_propose_chain_turn(proposal)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_CHAIN,
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_CHAIN,
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
 
         raise HTTPException(
             status_code=400,
             detail=f"recipe_offer response must have chosen=['accept'] or chosen=['build_manually'], got {chosen!r}.",
+        )
+
+    # --- STEP_3_TRANSFORMS turns ----------------------------------------
+    # The only response shape we handle in Phase 4 is ACCEPT on a
+    # propose_chain turn.  Reject and clarifying SINGLE_SELECT responses are
+    # deferred to Phase 5 (which adds re-solve, repair, and advisor flows).
+    if current_step is GuidedStep.STEP_3_TRANSFORMS:
+        if current_turn_type is TurnType.PROPOSE_CHAIN:
+            chosen = list(turn_response["chosen"] or [])
+            if chosen == ["accept"]:
+                if guided.step_3_proposal is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Dispatcher invariant: step_3_proposal must be set when accepting a propose_chain turn.",
+                    )
+                handler_result = handle_step_3_chain_accept(
+                    state=state,
+                    session=guided,
+                    proposal=guided.step_3_proposal,
+                    catalog=catalog,
+                    data_dir=data_dir,
+                    session_engine=session_engine,
+                    session_id=session_id,
+                )
+                if not handler_result.tool_result.success:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Step 3 chain commit failed: {handler_result.tool_result}",
+                    )
+                # handler_result.session.terminal is COMPLETED on success.
+                return handler_result.state, handler_result.session, None
+            if chosen == ["reject"]:
+                raise HTTPException(
+                    status_code=501,
+                    detail=(
+                        "Step 3 chain rejection is not yet implemented — Phase 5 will add "
+                        "re-solve and repair flows. Use exit-to-freeform to drop to freeform mode."
+                    ),
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"propose_chain response must have chosen=['accept'] or chosen=['reject'], got {chosen!r}.",
+            )
+        # SINGLE_SELECT clarifying-question response at STEP_3 — Phase 5.
+        raise HTTPException(
+            status_code=501,
+            detail="Step 3 clarifying question handling is not yet implemented — Phase 5.",
         )
 
     # Unhandled branch — this is a dispatcher gap, not a user error.

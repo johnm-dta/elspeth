@@ -89,12 +89,6 @@ interface SessionState {
 
   // Shared selection state for cross-component sync (GraphView <-> SpecView)
   selectedNodeId: string | null;
-
-  // Guided-mode protocol state — all three are null when not in a guided session
-  guidedSession: GuidedSession | null;
-  guidedNextTurn: TurnPayload | null;
-  guidedTerminal: TerminalState | null;
-
   selectNode: (nodeId: string | null) => void;
 
   loadSessions: () => Promise<void>;
@@ -111,6 +105,11 @@ interface SessionState {
   loadStateVersions: () => Promise<void>;
   isLoadingVersions: boolean;
   revertToVersion: (stateId: string) => Promise<void>;
+
+  // Guided-mode protocol state — all three are null when not in a guided session
+  guidedSession: GuidedSession | null;
+  guidedNextTurn: TurnPayload | null;
+  guidedTerminal: TerminalState | null;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
@@ -528,6 +527,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  // Guided-mode actions
   async startGuided(sessionId: string) {
     try {
       const response = await api.getGuided(sessionId);
@@ -564,12 +564,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedTerminal: response.terminal,
         compositionState: response.composition_state,
       });
-    } catch (err) {
-      // Re-throw the invariant violation from the guard above — that's not a
-      // network error and must propagate to the caller unchanged.
-      if (err instanceof Error && err.message === "respondGuided called without active session") {
-        throw err;
-      }
+    } catch {
       set({ error: "Failed to submit guided response. Please try again." });
     }
   },

@@ -307,3 +307,119 @@ class TestStep25Handler:
         assert result.tool_result.success is False
         assert result.state is state
         assert result.session.terminal is None
+
+
+class TestStep3Handler:
+    """Tests for handle_step_3_chain_accept.
+
+    The success test composes Step 1 (CSV source) + Step 2 (JSON sink) + Step 3
+    (transform chain) end-to-end to exercise the real _execute_set_pipeline
+    path. Stubs only at the LLM boundary (proposal is constructed in-test).
+
+    Uses `passthrough` as the transform plugin — it is the simplest transform
+    in the catalogue (only `schema` is required) and isolates the wiring
+    contract from plugin-config bookkeeping. The brief's `type_coerce` example
+    had the wrong options shape (`fields` instead of `conversions`) so I
+    switched to `passthrough` to avoid coupling the test to that drift.
+    """
+
+    def test_chain_accepted_commits_and_completes(self) -> None:
+        from elspeth.web.composer.guided.state_machine import (
+            ChainProposal,
+            TerminalKind,
+        )
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
+
+        state = _empty_state()
+        session = GuidedSession.initial()
+        catalog = create_catalog_service()
+
+        step_1 = handle_step_1_source(
+            state=state,
+            session=session,
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "x.csv", "schema": {"mode": "observed"}},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+        )
+        assert step_1.tool_result.success is True
+
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=("price",),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+        assert step_2.tool_result.success is True
+
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "passthrough",
+                    "options": {"schema": {"mode": "observed"}},
+                    "rationale": "echo rows; minimal transform for wiring proof",
+                },
+            ),
+            why="single-step chain verifying chain_in→main wiring",
+        )
+
+        result = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_2.session,
+            catalog=catalog,
+            proposal=proposal,
+        )
+
+        assert result.tool_result.success is True, f"set_pipeline failed: {getattr(result.tool_result, 'data', result.tool_result)}"
+        assert len(result.state.nodes) == 1
+        assert result.state.nodes[0].plugin == "passthrough"
+        assert result.state.nodes[0].input == "chain_in"
+        assert result.state.nodes[0].on_success == "main"
+        assert result.state.source is not None
+        assert result.state.source.on_success == "chain_in"  # rewired
+        assert result.session.terminal is not None
+        assert result.session.terminal.kind == TerminalKind.COMPLETED
+        assert result.session.terminal.reason is None
+        assert result.session.terminal.pipeline_yaml is not None
+        assert len(result.session.terminal.pipeline_yaml) > 0
+        assert result.session.step_3_proposal is proposal
+
+    def test_refuses_empty_proposal(self) -> None:
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
+
+        with pytest.raises(ValueError, match="zero steps"):
+            handle_step_3_chain_accept(
+                state=_empty_state(),
+                session=GuidedSession.initial(),
+                catalog=create_catalog_service(),
+                proposal=ChainProposal(steps=(), why="empty"),
+            )
+
+    def test_refuses_when_no_source(self) -> None:
+        from elspeth.web.composer.guided.state_machine import ChainProposal
+        from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
+
+        proposal = ChainProposal(
+            steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "x"},),
+            why="x",
+        )
+        with pytest.raises(ValueError, match=r"no.*source|committed source"):
+            handle_step_3_chain_accept(
+                state=_empty_state(),
+                session=GuidedSession.initial(),
+                catalog=create_catalog_service(),
+                proposal=proposal,
+            )

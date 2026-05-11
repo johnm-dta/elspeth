@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import Engine
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.recipe_match import RecipeMatch
 from elspeth.web.composer.guided.state_machine import (
+    ChainProposal,
     GuidedSession,
     SinkResolved,
     SourceResolved,
@@ -31,6 +33,7 @@ from elspeth.web.composer.tools import (
     ToolResult,
     _execute_apply_pipeline_recipe,
     _execute_set_output,
+    _execute_set_pipeline,
     _execute_set_source,
 )
 from elspeth.web.composer.yaml_generator import generate_yaml
@@ -211,6 +214,132 @@ def handle_step_2_5_recipe_apply(
         pipeline_yaml=yaml_text,
     )
     new_session = dataclasses.replace(session, terminal=terminal)
+
+    return StepHandlerResult(
+        state=tool_result.updated_state,
+        session=new_session,
+        tool_result=tool_result,
+    )
+
+
+def handle_step_3_chain_accept(
+    *,
+    state: CompositionState,
+    session: GuidedSession,
+    proposal: ChainProposal,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> StepHandlerResult:
+    """Commit *proposal* atomically via _execute_set_pipeline and terminate the session.
+
+    Reconstructs the full pipeline spec from the existing state.source +
+    state.outputs and the new transforms from the proposal. Source.on_success
+    is rewired to "chain_in" so the chain sits between source and sinks; the
+    last transform produces "main" so outputs (which were committed against
+    the source's original "main" label in Step 2) remain reachable.
+
+    Wiring for N transforms:
+        source.on_success="chain_in"
+        idx=0:   input="chain_in", on_success="chain_0" (or "main" if N==1)
+        idx=k:   input=f"chain_{k-1}", on_success=f"chain_{k}"   (0<k<N-1)
+        idx=N-1: input=f"chain_{N-2}", on_success="main"          (N>1)
+        outputs: unchanged — still consume "main"
+
+    On _execute_set_pipeline success the session terminal is COMPLETED with
+    rendered YAML and step_3_proposal is recorded. On failure the state and
+    session are unchanged and the route layer re-emits the propose_chain turn
+    with the validation errors.
+
+    Args:
+        state: Current composition state. MUST have a committed source and
+            at least one output (dispatcher invariant — Steps 1 and 2 must
+            have completed before Step 3).
+        session: Current guided session.
+        proposal: Chain proposal with one or more transform steps.
+        catalog: Plugin catalogue service.
+        data_dir: Optional data directory for blob path validation.
+        session_engine: Optional session DB engine (forwarded to
+            _execute_set_pipeline for inline-blob and source-blob support).
+        session_id: Optional session ID (forwarded with session_engine).
+
+    Raises:
+        ValueError: if the proposal has zero steps, or if state has no source
+            or no outputs (handler invariant violation — dispatcher guarantees
+            Step 1 and Step 2 have committed before reaching Step 3).
+    """
+    if not proposal.steps:
+        raise ValueError("step 3 proposal had zero steps; refusing empty commit")
+    if state.source is None:
+        raise ValueError("step 3 reached without a committed source; dispatcher bug")
+    if not state.outputs:
+        raise ValueError("step 3 reached without committed outputs; dispatcher bug")
+
+    n = len(proposal.steps)
+    node_args: list[dict[str, Any]] = []
+    for idx, step in enumerate(proposal.steps):
+        input_label = "chain_in" if idx == 0 else f"chain_{idx - 1}"
+        on_success_label = "main" if idx == n - 1 else f"chain_{idx}"
+        node_args.append(
+            {
+                "id": f"guided_xform_{idx}",
+                "node_type": "transform",
+                "plugin": step["plugin"],
+                "input": input_label,
+                "on_success": on_success_label,
+                "options": dict(step["options"]),
+            }
+        )
+
+    arguments: dict[str, Any] = {
+        "source": {
+            "plugin": state.source.plugin,
+            "on_success": "chain_in",  # rewired; was "main" pre-Step-3
+            "options": dict(state.source.options),
+            "on_validation_failure": state.source.on_validation_failure,
+        },
+        "nodes": node_args,
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": o.name,
+                "plugin": o.plugin,
+                "options": dict(o.options),
+                "on_write_failure": o.on_write_failure,
+            }
+            for o in state.outputs
+        ],
+        "metadata": {},
+    }
+
+    tool_result = _execute_set_pipeline(
+        arguments,
+        state,
+        catalog,
+        data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+
+    if not tool_result.success:
+        return StepHandlerResult(
+            state=state,
+            session=session,
+            tool_result=tool_result,
+        )
+
+    yaml_text = generate_yaml(tool_result.updated_state)
+    terminal = TerminalState(
+        kind=TerminalKind.COMPLETED,
+        reason=None,
+        pipeline_yaml=yaml_text,
+    )
+    new_session = dataclasses.replace(
+        session,
+        step_3_proposal=proposal,
+        terminal=terminal,
+    )
 
     return StepHandlerResult(
         state=tool_result.updated_state,

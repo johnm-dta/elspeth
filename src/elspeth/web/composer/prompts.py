@@ -16,6 +16,8 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
+from elspeth.web.composer.guided.state_machine import TerminalKind
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.skills import load_deployment_skill, load_skill
 from elspeth.web.composer.state import CompositionState
@@ -240,9 +242,6 @@ def build_messages(
     # ``data_dir is None → SYSTEM_PROMPT`` fast path bypassed it. The
     # @lru_cache on build_system_prompt makes repeat calls free.
     if guided_terminal is not None:
-        from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
-        from elspeth.web.composer.guided.state_machine import TerminalKind
-
         if guided_terminal.kind is TerminalKind.COMPLETED:
             reason_str = "completed_pipeline"
         else:

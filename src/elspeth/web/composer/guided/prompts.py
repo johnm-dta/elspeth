@@ -36,17 +36,7 @@ def _load_freeform_skill() -> str:
 
 
 def build_mode_transition_system_prompt(*, terminal_reason: str) -> str:
-    """Build the layered system prompt for the first freeform turn after guided mode exits.
-
-    Layer order (spec §8.2):
-      1. Guided-mode skill content (guided_pipeline.md)
-      2. Mode-transition header with reason and rules-lifted signal
-      3. Freeform-composer skill content (pipeline_composer.md)
-
-    Args:
-        terminal_reason: Resolved reason string — one of ``"user_pressed_exit"``,
-            ``"protocol_violation"``, ``"solver_exhausted"``, ``"completed_pipeline"``.
-    """
+    """Construct the layered guided→freeform transition prompt: guided skill + transition message + freeform skill."""
     guided = load_guided_skill()
     freeform = _load_freeform_skill()
     transition = (

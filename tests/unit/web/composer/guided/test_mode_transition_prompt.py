@@ -7,6 +7,11 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.web.composer.guided.prompts import (
+    _load_freeform_skill,
+    build_mode_transition_system_prompt,
+)
+
 
 class TestBuildModeTransitionSystemPrompt:
     """Tests for build_mode_transition_system_prompt."""
@@ -22,8 +27,6 @@ class TestBuildModeTransitionSystemPrompt:
     )
     def test_layered_content_all_reasons(self, reason: str) -> None:
         """Returned prompt contains guided-skill content, LIFTED signal, reason, and freeform content."""
-        from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
-
         result = build_mode_transition_system_prompt(terminal_reason=reason)
 
         # (a) guided-skill content present (guided_pipeline.md mentions "guided mode")
@@ -40,8 +43,6 @@ class TestBuildModeTransitionSystemPrompt:
 
     def test_layer_ordering(self) -> None:
         """Guided-skill content appears before transition header, before freeform-skill content."""
-        from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
-
         result = build_mode_transition_system_prompt(terminal_reason="user_pressed_exit")
 
         guided_pos = result.lower().find("guided mode")
@@ -57,16 +58,12 @@ class TestBuildModeTransitionSystemPrompt:
 
     def test_transition_header_literal(self) -> None:
         """Transition header matches spec §8.2 exactly."""
-        from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
-
         result = build_mode_transition_system_prompt(terminal_reason="solver_exhausted")
 
         assert "## Mode Transition — Guided → Freeform" in result
 
     def test_reason_in_transition_block(self) -> None:
         """The reason appears inside the transition header block (not elsewhere)."""
-        from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
-
         result = build_mode_transition_system_prompt(terminal_reason="completed_pipeline")
 
         assert "reason: completed_pipeline" in result
@@ -75,22 +72,16 @@ class TestBuildModeTransitionSystemPrompt:
 class TestLoadFreeformSkill:
     def test_is_cached(self) -> None:
         """Two calls return the same object (lru_cache contract)."""
-        from elspeth.web.composer.guided.prompts import _load_freeform_skill
-
         first = _load_freeform_skill()
         second = _load_freeform_skill()
 
         assert first is second
 
     def test_returns_non_empty_string(self) -> None:
-        from elspeth.web.composer.guided.prompts import _load_freeform_skill
-
         content = _load_freeform_skill()
         assert isinstance(content, str)
         assert len(content) > 0
 
     def test_contains_audit_primacy_marker(self) -> None:
-        from elspeth.web.composer.guided.prompts import _load_freeform_skill
-
         content = _load_freeform_skill()
         assert "Audit Primacy" in content

@@ -173,9 +173,7 @@ def _seed_terminal_guided_session(
 ) -> None:
     """Directly persist a GuidedSession with the given terminal into the DB.
 
-    Mirrors the pattern in the guided endpoints (routes.py:3857) without
-    driving through the wizard UI. Faster and more deterministic than
-    driving 8+ wizard steps.
+    Faster and more deterministic than driving 8+ wizard steps.
     """
     service: SessionServiceImpl = client.app.state.session_service
     session_uuid = UUID(session_id)

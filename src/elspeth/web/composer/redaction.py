@@ -364,16 +364,21 @@ def _is_descendable(t: Any) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class HandlesNoSensitiveDataReason:
-    """Minimal stub for spec §4.2.3; Task 5 (HandlesNoSensitiveDataReason) /
-    Task 6 (ToolRedactionPolicy) will add field validators. Construction
-    shape is fixed by this commit's test set; Tasks 5/6 are pure
-    behavioural additions (new validators), not shape changes.
+    """Structured justification required for handles_no_sensitive_data=True (spec §4.2.3).
 
-    sensitive_data_locations: where sensitive material actually lives if
-        not in this tool's arguments or responses.
+    Replaces rev-3's free-text string. Adequacy-guard validates each field at
+    construction time; the same constraints are checked at manifest-load time
+    by the adequacy guard (§4.4).
 
-    why_arguments_safe: prose explanation of why every argument is safe
-        to persist verbatim.
+    sensitive_data_locations: where sensitive material actually lives if not in
+        this tool's arguments or responses (e.g., 'server-side secret resolver',
+        'request headers stripped before tool dispatch'). Must be non-empty —
+        an empty list provides no signal to auditors.
+
+    why_arguments_safe: prose explanation of why every argument, including any
+        string-typed ones, is safe to persist verbatim. Adequacy-guard checks
+        length >= 32 chars (post-strip) and that the text does not exact-match
+        any other tool's why_arguments_safe (mass-copy uniqueness, §4.4.4).
 
     why_responses_safe: same as above, for responses.
     """
@@ -383,6 +388,38 @@ class HandlesNoSensitiveDataReason:
     why_responses_safe: str
 
     def __post_init__(self) -> None:
+        # Validators FIRST, then freeze-guard. Order matters: a future change
+        # that mutates a field as part of validation must not run after freeze.
+        if not self.sensitive_data_locations:
+            raise ValueError(
+                "HandlesNoSensitiveDataReason.sensitive_data_locations is empty. "
+                "Every declarative manifest entry must enumerate at least one "
+                "location where sensitive data could plausibly appear but does "
+                "not for this tool (e.g., 'response.body' for a tool that "
+                "returns only structural metadata). If the tool genuinely has "
+                "no plausible sensitive surface, declare so explicitly — e.g., "
+                "('no LLM-supplied inputs',). The list is part of the audit "
+                "trail; an empty list provides no information to auditors. "
+                "Alternatively, migrate the tool's arguments to a Pydantic "
+                "model with Sensitive[T] annotations (the type-driven "
+                "manifest-entry shape, §4.2.1)."
+            )
+        for label, value in (
+            ("why_arguments_safe", self.why_arguments_safe),
+            ("why_responses_safe", self.why_responses_safe),
+        ):
+            if len(value.strip()) < 32:
+                raise ValueError(
+                    f"HandlesNoSensitiveDataReason.{label} must be at least "
+                    "32 characters (excluding leading/trailing whitespace). "
+                    f"The current value strips to {len(value.strip())} characters. "
+                    "Auditors require enough context to understand WHY the "
+                    "tool's argument or response shape cannot carry sensitive "
+                    "data; a short label is insufficient. "
+                    "Spec §4.2.3 example: 'set_pipeline arguments are "
+                    "validated against a Pydantic model with extra=forbid; "
+                    "every field is structural metadata.'"
+                )
         freeze_fields(self, "sensitive_data_locations")
 
 

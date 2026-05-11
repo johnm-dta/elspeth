@@ -1411,16 +1411,18 @@ allow_hits:
     and cancellation now also drains the shielded future's eventual exception via add_done_callback so asyncio's GC handler
     cannot fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=7b716b48f0be464b
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=4f394ff64e8b1291
   owner: web-sessions
   reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps shielded cancelled-LLM-call
-    audit persistence; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted routes.py when post_guided_respond was added.
+    audit persistence; FP rotated by Task 5.2 (progressive-disclosure transition prompt) adding transition_consumed flip logic
+    before the CancelledError handler in send_message.
   safety: Same as the prior entry — shielded persistence is best-effort; explicit raise preserves cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d751dcfc9fa4c949
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d62b85dbb726d15a
   owner: web-sessions
   reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps the shielded progress
-    publish in the cancellation handler; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted routes.py when post_guided_respond was added.
+    publish in the cancellation handler; FP rotated by Task 5.2 (progressive-disclosure transition prompt) adding transition_consumed
+    flip logic before the CancelledError handler in send_message.
   safety: Same as the prior entry — shielded publish completes; explicit raise restores cancellation chain.
   expires: null
 - key: web/sessions/routes.py:R7:create_session_router:recompose:fp=cd95569a81303ada

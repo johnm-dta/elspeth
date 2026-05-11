@@ -620,6 +620,7 @@ class ComposerService(Protocol):
         session_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
+        guided_terminal: Any | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop.
 
@@ -632,6 +633,9 @@ class ComposerService(Protocol):
                 depend on SessionService (seam contract B).
             state: The current CompositionState.
             user_id: Current user ID. Passed through to secret tools.
+            guided_terminal: When set, the resolved TerminalState from the
+                completed guided session; triggers the layered mode-transition
+                prompt for this first freeform turn (spec §8.2).
 
         Returns:
             ComposerResult with assistant message and updated state.

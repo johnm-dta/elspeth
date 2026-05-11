@@ -258,6 +258,7 @@ class GuidedSession:
     step_2_result: SinkResolved | None
     step_3_proposal: ChainProposal | None
     terminal: TerminalState | None
+    transition_consumed: bool = False
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -283,6 +284,7 @@ class GuidedSession:
             "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
+            "transition_consumed": self.transition_consumed,
         }
 
     @classmethod
@@ -304,6 +306,7 @@ class GuidedSession:
                 step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
+                transition_consumed=d["transition_consumed"],
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise ValueError(f"GuidedSession.from_dict: malformed record {d!r}") from exc

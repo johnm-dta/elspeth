@@ -27,6 +27,40 @@ def load_guided_skill() -> str:
     return _SKILL_PATH.read_text(encoding="utf-8")
 
 
+@lru_cache(maxsize=1)
+def _load_freeform_skill() -> str:
+    """Load the freeform pipeline-composer skill. Cached per process; restart on edit."""
+    from elspeth.web.composer.skills import load_skill
+
+    return load_skill("pipeline_composer")
+
+
+def build_mode_transition_system_prompt(*, terminal_reason: str) -> str:
+    """Build the layered system prompt for the first freeform turn after guided mode exits.
+
+    Layer order (spec §8.2):
+      1. Guided-mode skill content (guided_pipeline.md)
+      2. Mode-transition header with reason and rules-lifted signal
+      3. Freeform-composer skill content (pipeline_composer.md)
+
+    Args:
+        terminal_reason: Resolved reason string — one of ``"user_pressed_exit"``,
+            ``"protocol_violation"``, ``"solver_exhausted"``, ``"completed_pipeline"``.
+    """
+    guided = load_guided_skill()
+    freeform = _load_freeform_skill()
+    transition = (
+        f"## Mode Transition — Guided → Freeform\n\n"
+        f"You have just exited guided mode (reason: {terminal_reason}).\n\n"
+        "The protocol restrictions above (closed turn taxonomy, read-only state, "
+        "legal-turn matrix) are LIFTED for the remainder of this session. You now "
+        "have the full freeform tool surface detailed below. The guided session's "
+        "outcome is recorded in `composition_state.guided_session` — "
+        "do not re-run any work it already accomplished."
+    )
+    return f"{guided}\n\n{transition}\n\n{freeform}"
+
+
 def build_repair_addendum(*, validation_error: str) -> str:
     """Render the REPAIR ATTEMPT addendum appended to a repair solve_chain call.
 

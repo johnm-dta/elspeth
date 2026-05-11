@@ -1,3 +1,18 @@
+/**
+ * Tests for src/api/client.ts (producer side).
+ *
+ * Strategy: vi.spyOn(globalThis, "fetch") — NOT vi.mock("./client").
+ *
+ * Consumer tests (e.g. src/stores/sessionStore.test.ts) mock the
+ * @/api/client module because they're testing wiring around it.  This
+ * file is the producer; mocking the module we import from would mock
+ * the unit under test.  We spy on the underlying fetch instead, which
+ * lets us exercise the real getGuided/respondGuided code paths
+ * including authHeaders() and parseResponse<T>().
+ *
+ * Future API-client tests should follow this same pattern.
+ */
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { getGuided, respondGuided } from "./client";
 import type {
@@ -60,9 +75,9 @@ function makeRespondResponse(): GuidedRespondResponse {
   };
 }
 
-// ── getGuided ────────────────────────────────────────────────────────────────
+// ── Suites ───────────────────────────────────────────────────────────────────
 
-describe("client.getGuided", () => {
+describe("api/client guided functions", () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -73,106 +88,99 @@ describe("client.getGuided", () => {
     fetchSpy.mockRestore();
   });
 
-  it("calls GET /api/sessions/:id/guided and returns parsed body", async () => {
-    const body = makeGetGuidedResponse();
-    fetchSpy.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => body,
-    } as Response);
+  describe("getGuided", () => {
+    it("calls GET /api/sessions/:id/guided and returns parsed body", async () => {
+      const body = makeGetGuidedResponse();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => body,
+      } as Response);
 
-    const result = await getGuided("sess-1");
+      const result = await getGuided("sess-1");
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/sessions/sess-1/guided");
-    expect(init.method).toBe("GET");
-    // GET has no Content-Type
-    expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
-    expect(result).toEqual(body);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/guided");
+      expect(init.method).toBe("GET");
+      expect(
+        (init.headers as Record<string, string>)["Content-Type"],
+      ).toBeUndefined();
+      expect(result).toEqual(body);
+    });
+
+    it("propagates AbortSignal to fetch", async () => {
+      const controller = new AbortController();
+      // Mock fetch to throw an AbortError when called — this simulates the
+      // native behaviour when the signal fires.  We don't actually abort here;
+      // we just confirm the signal was forwarded by inspecting the call args.
+      const abortError = new DOMException("Aborted", "AbortError");
+      fetchSpy.mockRejectedValue(abortError);
+
+      await expect(getGuided("sess-abort", controller.signal)).rejects.toThrow(
+        "Aborted",
+      );
+
+      const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(init.signal).toBe(controller.signal);
+    });
   });
 
-  it("propagates AbortSignal to fetch", async () => {
-    const controller = new AbortController();
-    // Mock fetch to throw an AbortError when called — this simulates the
-    // native behaviour when the signal fires.  We don't actually abort here;
-    // we just confirm the signal was forwarded by inspecting the call args.
-    const abortError = new DOMException("Aborted", "AbortError");
-    fetchSpy.mockRejectedValue(abortError);
+  describe("respondGuided", () => {
+    it("calls POST /api/sessions/:id/guided/respond and returns parsed body", async () => {
+      const body = makeRespondResponse();
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => body,
+      } as Response);
 
-    await expect(getGuided("sess-abort", controller.signal)).rejects.toThrow(
-      "Aborted",
-    );
+      const request = makeRespondRequest();
+      const result = await respondGuided("sess-1", request);
 
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(init.signal).toBe(controller.signal);
-  });
-});
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("/api/sessions/sess-1/guided/respond");
+      expect(init.method).toBe("POST");
+      expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+        "application/json",
+      );
+      // Verify the parsed shape rather than the raw byte sequence: JSON key
+      // ordering is incidental, and the server consumes the parsed object.
+      const bodyStr = init.body as string;
+      expect(JSON.parse(bodyStr)).toEqual(request);
+      expect(result).toEqual(body);
+    });
 
-// ── respondGuided ────────────────────────────────────────────────────────────
+    it("propagates AbortSignal to fetch", async () => {
+      const controller = new AbortController();
+      const abortError = new DOMException("Aborted", "AbortError");
+      fetchSpy.mockRejectedValue(abortError);
 
-describe("client.respondGuided", () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+      const request = makeRespondRequest();
+      await expect(
+        respondGuided("sess-abort", request, controller.signal),
+      ).rejects.toThrow("Aborted");
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, "fetch");
-  });
+      const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(init.signal).toBe(controller.signal);
+    });
 
-  afterEach(() => {
-    fetchSpy.mockRestore();
-  });
+    it("throws ApiError (does not swallow) when server returns 500", async () => {
+      // parseResponse throws an ApiError-shaped object for non-2xx responses.
+      // Use 500 to avoid the 401 interceptor which dynamically imports authStore.
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        json: async () => ({ detail: "boom" }),
+      } as Response);
 
-  it("calls POST /api/sessions/:id/guided/respond and returns parsed body", async () => {
-    const body = makeRespondResponse();
-    fetchSpy.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => body,
-    } as Response);
-
-    const request = makeRespondRequest();
-    const result = await respondGuided("sess-1", request);
-
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/sessions/sess-1/guided/respond");
-    expect(init.method).toBe("POST");
-    expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
-      "application/json",
-    );
-    expect(init.body).toBe(JSON.stringify(request));
-    expect(result).toEqual(body);
-  });
-
-  it("propagates AbortSignal to fetch", async () => {
-    const controller = new AbortController();
-    const abortError = new DOMException("Aborted", "AbortError");
-    fetchSpy.mockRejectedValue(abortError);
-
-    const request = makeRespondRequest();
-    await expect(
-      respondGuided("sess-abort", request, controller.signal),
-    ).rejects.toThrow("Aborted");
-
-    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(init.signal).toBe(controller.signal);
-  });
-
-  it("throws ApiError (does not swallow) when server returns 500", async () => {
-    // parseResponse throws an ApiError-shaped object for non-2xx responses.
-    // Use 500 to avoid the 401 interceptor which dynamically imports authStore.
-    fetchSpy.mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: "Internal Server Error",
-      json: async () => ({ detail: "boom" }),
-    } as Response);
-
-    const request = makeRespondRequest();
-    // Confirm the error propagates — we don't swallow it in respondGuided.
-    await expect(respondGuided("sess-err", request)).rejects.toMatchObject({
-      status: 500,
-      detail: "boom",
+      const request = makeRespondRequest();
+      await expect(respondGuided("sess-err", request)).rejects.toMatchObject({
+        status: 500,
+        detail: "boom",
+      });
     });
   });
 });

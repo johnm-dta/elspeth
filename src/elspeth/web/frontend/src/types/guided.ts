@@ -138,8 +138,10 @@ export interface MultiSelectWithCustomPayload {
    * site (state_machine.py:_advance_step_2 lines 476-483) unconditionally
    * reads `edited_values["outputs"]` as a list of full output dicts. The
    * widget owns neither the plugin nor the options needed to construct
-   * that array. Tracked as a follow-up; the field stays here because the
-   * backend still emits it (do not remove).
+   * that array. The field stays here because the backend still emits it
+   * (do not remove).
+   *
+   * Tracker: filigree elspeth-5e905f3c9d
    */
   escape_label: string | null;
 }

@@ -44,6 +44,27 @@
 //   The disable predicate is the same as the silent-no-op early-return on
 //   Enter — a single source of truth for "can this be added?".
 //
+// FOCUS MANAGEMENT ON CUSTOM-CHIP REMOVAL (WCAG 2.4.3 Focus Order):
+//   Removing a custom chip via Enter on the X button unmounts the focused
+//   element; the browser falls back to <body> and the keyboard user loses
+//   their place. We restore focus explicitly using the same ref + effect +
+//   firstRunRef pattern as InspectAndConfirmTurn (Task 7.3):
+//     - Removing chip at index i, with N customs remaining post-removal:
+//         * N > 0 and i < N  → focus the X button now at index i (the next
+//           chip in the original order takes the removed slot).
+//         * N > 0 and i == N → focus the X button at index N-1 (we removed
+//           the last chip; fall back one slot).
+//         * N == 0           → focus the custom-input field (list is now
+//           empty; the input is the entry point for adding more, and
+//           unlike the Add button it is always focusable — the Add button
+//           is disabled while the input is empty/whitespace, and focusing
+//           a disabled button is a no-op in HTML).
+//   The focus target is decided synchronously inside the click handler
+//   (BEFORE the state update fires) and stored in a ref. The effect, keyed
+//   on customs.length, reads the ref after the post-removal render commits.
+//   firstRunRef skips the initial mount so we don't steal focus from
+//   wherever the user actually was when the widget first appeared.
+//
 // NOTE: payload.escape_label is intentionally NOT rendered in this version.
 // The wire shape for the escape submission requires a cross-layer protocol
 // decision (frontend wire shape + backend handler branch in
@@ -52,12 +73,14 @@
 // `{edited_values: {schema_mode: "observed", required_fields: []}}` but
 // that contradicts the only backend read site, and this widget owns
 // neither the plugin name nor the options needed to construct the full
-// outputs[] array. Tracked as a follow-up; do NOT add the escape button
-// to this widget without resolving the contract first. The deferral is
-// pinned by tests (escape-button-not-rendered for both null and non-null
-// escape_label) so a future contributor can't quietly re-add it.
+// outputs[] array. Do NOT add the escape button to this widget without
+// resolving the contract first. The deferral is pinned by tests
+// (escape-button-not-rendered for both null and non-null escape_label)
+// so a future contributor can't quietly re-add it.
+//
+// Tracker: filigree elspeth-5e905f3c9d
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type {
   GuidedRespondRequest,
   MultiSelectWithCustomPayload,
@@ -91,6 +114,44 @@ export function MultiSelectWithCustomTurn({
   const reactId = useId();
   const customInputId = `${reactId}-custom-input`;
   const hintIdFor = (optionId: string) => `${reactId}-hint-${optionId}`;
+
+  // Focus-restoration refs for the custom-chip remove path (WCAG 2.4.3).
+  // The X buttons live inside .map() so we collect them into a ref-Map keyed
+  // by the custom value (which is unique within the list — the duplicate
+  // guard in canAddPending enforces it).  The custom-input ref is captured
+  // separately and used as the fallback when the list becomes empty (the
+  // Add button is disabled while pending is empty, so it can't be focused).
+  const removeBtnRefs = useRef<Map<string, HTMLButtonElement | null>>(
+    new Map(),
+  );
+  const customInputRef = useRef<HTMLInputElement | null>(null);
+
+  // After a remove, this ref holds either:
+  //   - a string (the value of the surviving chip whose X should receive focus)
+  //   - "__input__" (focus the custom-input; list is now empty)
+  //   - null        (no pending focus restoration; do nothing)
+  // The effect below consumes and clears it on each customs.length change.
+  const pendingFocusTarget = useRef<string | "__input__" | null>(null);
+
+  // Skip the first effect run: on initial widget mount the user did NOT
+  // remove anything — the widget appeared because a new turn arrived.
+  // Auto-focusing on mount would steal focus from wherever the user
+  // actually was. Same convention as InspectAndConfirmTurn (Task 7.3).
+  const firstRunRef = useRef(true);
+  useEffect(() => {
+    if (firstRunRef.current) {
+      firstRunRef.current = false;
+      return;
+    }
+    const target = pendingFocusTarget.current;
+    pendingFocusTarget.current = null;
+    if (target === null) return;
+    if (target === "__input__") {
+      customInputRef.current?.focus();
+      return;
+    }
+    removeBtnRefs.current.get(target)?.focus();
+  }, [selection.customs.length]);
 
   // Stable order: option-array order. The wire-response test pins this so a
   // future "sort alphabetically" refactor would visibly fail.
@@ -132,10 +193,33 @@ export function MultiSelectWithCustomTurn({
   }
 
   function handleRemoveCustom(value: string) {
-    setSelection((prev) => ({
-      ...prev,
-      customs: prev.customs.filter((c) => c !== value),
-    }));
+    // Decide focus target BEFORE the state update fires so the decision
+    // sees the pre-removal indices. After the removal:
+    //   - If anything remains and `value` was NOT the last chip, the chip
+    //     that was at index+1 takes the removed slot — focus its X button
+    //     (look up by the value of the surviving chip at the same index).
+    //   - If `value` WAS the last chip and others remain, focus the X
+    //     button of the new last chip (one slot back).
+    //   - If nothing remains, focus the Add button.
+    setSelection((prev) => {
+      const idx = prev.customs.indexOf(value);
+      // idx === -1 should be unreachable — the X button only renders for
+      // values currently in customs, and React unmounts the button when
+      // the value disappears. If it ever happens, no-op (safer than
+      // crashing a UI thread on a stale event).
+      if (idx === -1) return prev;
+      const next = prev.customs.filter((_, i) => i !== idx);
+      if (next.length === 0) {
+        pendingFocusTarget.current = "__input__";
+      } else if (idx < next.length) {
+        // The chip formerly at idx+1 now sits at idx.
+        pendingFocusTarget.current = next[idx];
+      } else {
+        // Removed the last chip; fall back to the new last chip.
+        pendingFocusTarget.current = next[next.length - 1];
+      }
+      return { ...prev, customs: next };
+    });
   }
 
   function handleContinue() {
@@ -199,6 +283,7 @@ export function MultiSelectWithCustomTurn({
           Custom field
         </label>
         <input
+          ref={customInputRef}
           id={customInputId}
           type="text"
           className="guided-custom-input"
@@ -234,6 +319,17 @@ export function MultiSelectWithCustomTurn({
             <li key={value} className="guided-multi-custom-chip">
               <span className="guided-multi-custom-chip-label">{value}</span>
               <button
+                ref={(el) => {
+                  // Keep the ref-Map in sync with mount/unmount lifecycle.
+                  // React invokes the callback with `el` on mount and `null`
+                  // on unmount; treating null as a delete prevents stale
+                  // entries pointing at detached nodes.
+                  if (el === null) {
+                    removeBtnRefs.current.delete(value);
+                  } else {
+                    removeBtnRefs.current.set(value, el);
+                  }
+                }}
                 type="button"
                 className="guided-multi-custom-remove-btn"
                 onClick={() => handleRemoveCustom(value)}

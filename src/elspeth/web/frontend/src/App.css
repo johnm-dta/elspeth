@@ -3572,6 +3572,11 @@ summary:focus-visible {
        .guided-chip-hint, .guided-chip-fieldset, .guided-chip-legend) are
        designed for reuse by multi_select_with_custom and recipe_offer — do not
        redefine equivalent styles in those widgets' code.
+     - `.guided-chip-btn[aria-pressed="true"]` lights the pressed visual.
+       Only set `aria-pressed` on chips that have toggle semantics
+       (currently only `multi_select_with_custom`); a chip without toggle
+       semantics must NOT carry `aria-pressed` or it will silently inherit
+       the pressed visual state.
    --------------------------------------------------------------------------- */
 
 /* Base wrapper — each widget is an isolated block in the chat stream */

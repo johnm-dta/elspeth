@@ -19,8 +19,14 @@
 //   - Duplicate of an existing custom OR an option ID → Add disabled.
 //
 // useId() pin: two simultaneous instances must have distinct element-level IDs
-// (custom-input id, hint ids) so GuidedHistory replay (Task 7.9) does not
-// produce DOM id collisions.
+// AND distinct DOM nodes (the resolved-node assertion catches the
+// duplicate-ID failure mode that string-distinctness alone would miss) so
+// GuidedHistory replay (Task 7.9) does not produce DOM id collisions.
+//
+// Focus restoration on custom-chip removal (WCAG 2.4.3): pinned by the
+// keyboard-transition tests at the bottom of this file. The convention
+// matches InspectAndConfirmTurn (Task 7.3) — refs + useEffect + firstRunRef
+// to skip initial mount. Future remove-path widgets should copy this.
 //
 // Escape branch coverage is INTENTIONALLY OUT OF SCOPE here — see the NOTE
 // in MultiSelectWithCustomTurn.tsx. Adding tests that pin the escape wire
@@ -444,7 +450,15 @@ describe("MultiSelectWithCustomTurn — DOM ID isolation (useId)", () => {
   // Regression: GuidedHistory (Task 7.9) renders past turns alongside the
   // active one; option IDs and custom-input labels recur across turns.
   // Hard-coded element IDs would collide. useId() prefixes per-instance.
-  it("two simultaneous instances with the same option ids have distinct hint IDs", () => {
+  //
+  // Each test below pins NODE distinctness (not just string distinctness).
+  // A buggy implementation that emitted two elements with the SAME id
+  // would still pass `id0 !== id1` if the IDs were assigned via different
+  // code paths, OR would silently produce duplicate IDs that
+  // getElementById resolves to the same node (both `.toBeTruthy()` pass
+  // because both queries return the same truthy node). The not.toBe()
+  // comparison on the resolved nodes catches both failure modes.
+  it("two simultaneous instances with the same option ids have distinct hint IDs and nodes", () => {
     render(
       <div>
         <MultiSelectWithCustomTurn
@@ -464,11 +478,14 @@ describe("MultiSelectWithCustomTurn — DOM ID isolation (useId)", () => {
     expect(id0).toBeTruthy();
     expect(id1).toBeTruthy();
     expect(id0).not.toBe(id1);
-    expect(document.getElementById(id0!)).toBeTruthy();
-    expect(document.getElementById(id1!)).toBeTruthy();
+    const node0 = document.getElementById(id0!);
+    const node1 = document.getElementById(id1!);
+    expect(node0).toBeTruthy();
+    expect(node1).toBeTruthy();
+    expect(node0).not.toBe(node1);
   });
 
-  it("two simultaneous instances have distinct custom-input IDs", () => {
+  it("two simultaneous instances have distinct custom-input IDs and nodes", () => {
     render(
       <div>
         <MultiSelectWithCustomTurn
@@ -486,5 +503,93 @@ describe("MultiSelectWithCustomTurn — DOM ID isolation (useId)", () => {
     expect(inputs[0].id).not.toBe(inputs[1].id);
     expect(inputs[0].id).toBeTruthy();
     expect(inputs[1].id).toBeTruthy();
+    expect(document.getElementById(inputs[0].id)).not.toBe(
+      document.getElementById(inputs[1].id),
+    );
+  });
+});
+
+describe("MultiSelectWithCustomTurn — focus restoration on custom-chip removal (WCAG 2.4.3)", () => {
+  // Removing a custom chip via the X button unmounts the focused element.
+  // Without explicit focus restoration, focus drops to <body> and the
+  // keyboard user loses their place. These tests pin the convention so
+  // future remove-path widgets (or refactors here) maintain it.
+  it("removing a non-last custom moves focus to the X button of the chip in the same slot", async () => {
+    const user = userEvent.setup();
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_NO_DEFAULT_NO_ESCAPE}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: /custom field/i });
+    const addBtn = screen.getByRole("button", { name: /^add$/i });
+
+    await user.type(input, "alpha_custom");
+    await user.click(addBtn);
+    await user.type(input, "beta_custom");
+    await user.click(addBtn);
+
+    // Remove "alpha_custom" (the first chip). The chip that was at index 1
+    // ("beta_custom") shifts into index 0 — its X button should receive focus.
+    await user.click(
+      screen.getByRole("button", { name: /remove alpha_custom/i }),
+    );
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /remove beta_custom/i }),
+    );
+  });
+
+  it("removing the last remaining custom moves focus to the custom-input field", async () => {
+    // The input is the empty-list focus target rather than the Add button
+    // because Add is disabled while the input is empty (focusing a disabled
+    // button is a no-op). The input is always focusable and is the entry
+    // point for adding more — sensible target either way.
+    const user = userEvent.setup();
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_NO_DEFAULT_NO_ESCAPE}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: /custom field/i });
+    const addBtn = screen.getByRole("button", { name: /^add$/i });
+
+    await user.type(input, "lonely_custom");
+    await user.click(addBtn);
+
+    await user.click(
+      screen.getByRole("button", { name: /remove lonely_custom/i }),
+    );
+
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("removing the trailing chip in a list of two moves focus to the new last chip's X button", async () => {
+    const user = userEvent.setup();
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_NO_DEFAULT_NO_ESCAPE}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: /custom field/i });
+    const addBtn = screen.getByRole("button", { name: /^add$/i });
+
+    await user.type(input, "first_added");
+    await user.click(addBtn);
+    await user.type(input, "second_added");
+    await user.click(addBtn);
+
+    // Remove the chip at index 1 (the trailing one). Focus should fall back
+    // to the X button of the new last chip (now "first_added" at index 0).
+    await user.click(
+      screen.getByRole("button", { name: /remove second_added/i }),
+    );
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /remove first_added/i }),
+    );
   });
 });

@@ -17,6 +17,28 @@ import type { GuidedRespondRequest } from "@/types/guided";
  *
  * Spread into an `expect(...).toEqual({...})` body to assert the unused
  * fields are explicitly null on the wire (not `undefined`, not omitted).
+ *
+ * USAGE: spread FIRST in the toEqual literal so explicitly-set fields override.
+ *
+ *   // CORRECT — explicit edited_values wins over nullResponse's edited_values=null
+ *   expect(body).toEqual({
+ *     ...nullResponse(),                  // <-- first
+ *     chosen: null,
+ *     custom_inputs: null,
+ *     edited_values: { columns, samples, warnings },  // <-- overrides
+ *   });
+ *
+ *   // WRONG — spreading last re-nulls edited_values; the test silently asserts null
+ *   expect(body).toEqual({
+ *     chosen: null,
+ *     edited_values: { columns, samples, warnings },
+ *     ...nullResponse(),                  // <-- clobbers edited_values
+ *   });
+ *
+ * InspectAndConfirmTurn (Task 7.3) sets `edited_values` on both submit paths
+ * and tripped this exact bug during initial development. Widgets in 7.4-7.7
+ * that set fields beyond `chosen` / `custom_inputs` MUST observe the same
+ * spread order.
  */
 export function nullResponse(): Pick<
   GuidedRespondRequest,

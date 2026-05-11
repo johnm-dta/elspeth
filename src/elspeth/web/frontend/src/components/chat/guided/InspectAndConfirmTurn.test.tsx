@@ -289,6 +289,65 @@ describe("InspectAndConfirmTurn — edit submit with remove", () => {
   });
 });
 
+// ── Focus management on view toggle ──────────────────────────────────────────
+// Convention for 7.5 / 7.6: when a widget toggles between view sub-states,
+// the action button that received the click is unmounted, dumping focus to
+// <body>. Widgets MUST restore focus explicitly so keyboard and screen-reader
+// users don't lose their place. These tests pin the invariant; future multi-
+// view widgets should replicate this regression pattern.
+
+describe("InspectAndConfirmTurn — focus management", () => {
+  it("entering edit mode focuses the first column input", async () => {
+    const user = userEvent.setup();
+    render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit columns..." }));
+
+    const inputs = screen.getAllByRole("textbox");
+    expect(document.activeElement).toBe(inputs[0]);
+  });
+
+  it("cancelling from edit mode focuses the 'Edit columns...' button", async () => {
+    const user = userEvent.setup();
+    render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit columns..." }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    const editBtn = screen.getByRole("button", { name: "Edit columns..." });
+    expect(document.activeElement).toBe(editBtn);
+  });
+
+  it("initial mount does NOT auto-focus the 'Edit columns...' button", () => {
+    // Regression: widget mounting because a new turn arrived should not
+    // steal focus from elsewhere on the page (e.g. the chat input).
+    const priorActive = document.activeElement;
+    render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={vi.fn()} />);
+
+    const editBtn = screen.getByRole("button", { name: "Edit columns..." });
+    expect(document.activeElement).not.toBe(editBtn);
+    // Focus should remain where it was (typically <body> in a fresh test env).
+    expect(document.activeElement).toBe(priorActive);
+  });
+});
+
+// ── Edit-mode heading semantics ──────────────────────────────────────────────
+
+describe("InspectAndConfirmTurn — edit-mode heading", () => {
+  it("'Edit columns' is rendered as a semantic heading (h3 — under ChatPanel's h2 session title)", async () => {
+    const user = userEvent.setup();
+    render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit columns..." }));
+
+    // getByRole("heading") finds h1-h6. level=3 nests beneath ChatPanel's
+    // session title <h2> (ChatPanel.tsx:138). Screen-reader users can now
+    // navigate to the editor via heading jump.
+    const heading = screen.getByRole("heading", { level: 3, name: "Edit columns" });
+    expect(heading).toBeTruthy();
+  });
+});
+
 // ── DOM ID isolation (useId) ──────────────────────────────────────────────────
 
 describe("InspectAndConfirmTurn — DOM ID isolation (useId)", () => {

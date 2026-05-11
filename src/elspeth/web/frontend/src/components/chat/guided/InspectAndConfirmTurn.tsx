@@ -18,16 +18,38 @@
 //   inspect-view: <table> of columns + samples, optional warnings <aside>, two actions
 //   edit-view:    per-column rename inputs + remove buttons, cancel/apply actions
 //
-// Edit-view state:
-//   editedColumns: string[] — starts as a copy of payload.observed.columns at
-//   edit-mode entry; mutated by renames and removals; null signals not-yet-entered.
-//   Rows (samples) and warnings pass through unchanged on both submit paths.
+// State encoding (load-bearing for 7.5 / 7.6 multi-view widgets):
+//   editorState: { columns: string[] } | null
+//   null     → inspect view; non-null → edit view, with the edited columns array.
+//   A single nullable struct makes illegal states unrepresentable: there is no
+//   way to be in "edit mode without edited columns" or "inspect mode while
+//   holding stale edits". TS narrowing inside `editorState !== null` proves
+//   `.columns` is set, removing the need for any `?? fallback` at submit time.
+//
+// Focus management (convention for 7.5 / 7.6):
+//   Toggling between inspect <-> edit unmounts the action buttons that received
+//   the click, dumping keyboard focus to <body>. We restore focus explicitly:
+//     - Entering edit mode  → focus the first column input.
+//     - Returning to inspect view → focus the "Edit columns..." button.
+//   Refs + an effect on `editorState !== null` perform the restore after the
+//   new view mounts. The effect skips its first run (initial widget mount)
+//   because the user hasn't requested a view change — they've just received
+//   a new turn from the protocol.
+//
+// Warnings accessibility (convention for 7.4-7.7 widgets with passive regions):
+//   The warnings <aside> does NOT declare its own aria-live region. The parent
+//   ChatPanel wraps turn content in role="log" aria-live="polite"
+//   (see ChatPanel.tsx:161-163), which announces the warnings on widget mount.
+//   ComposingIndicator follows the same "don't nest live regions" convention
+//   (see ComposingIndicator.test.tsx:99-103). If a future maintainer removes
+//   the parent live region, warnings will be silent — the contract is documented
+//   here so the dependency is discoverable.
 //
 // Wire-response shapes:
 //   "Looks right": edited_values = { columns, samples, warnings } verbatim from payload.observed
 //   "Apply edits": edited_values = { columns: <edited>, samples: payload.observed.samples, warnings: payload.observed.warnings }
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { GuidedRespondRequest, InspectAndConfirmPayload } from "@/types/guided";
 
 interface InspectAndConfirmTurnProps {
@@ -35,10 +57,13 @@ interface InspectAndConfirmTurnProps {
   onSubmit: (body: GuidedRespondRequest) => void;
 }
 
+/** Edit-mode state. `null` = inspect view; non-null = edit view. */
+interface EditorState {
+  columns: string[];
+}
+
 export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTurnProps) {
-  const [editing, setEditing] = useState(false);
-  // null = not yet entered edit mode; non-null = user is editing (may equal original)
-  const [editedColumns, setEditedColumns] = useState<string[] | null>(null);
+  const [editorState, setEditorState] = useState<EditorState | null>(null);
 
   // useId scopes DOM IDs per-instance so multiple InspectAndConfirmTurns rendered
   // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
@@ -46,6 +71,29 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
   const reactId = useId();
   const warningsId = `${reactId}-warnings`;
   const columnInputId = (index: number) => `${reactId}-col-${index}`;
+
+  // Focus-restoration refs. Attached only in the view that owns each element.
+  const firstEditInputRef = useRef<HTMLInputElement | null>(null);
+  const editButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  // Skip the first effect run: on initial widget mount the user did NOT toggle
+  // the view — the widget appeared because a new turn arrived. Auto-focusing
+  // the "Edit columns..." button on mount would steal focus from wherever the
+  // user actually was (e.g. the chat input). Only restore focus on subsequent
+  // toggles, which ARE user-initiated.
+  const firstRunRef = useRef(true);
+  const isEditing = editorState !== null;
+  useEffect(() => {
+    if (firstRunRef.current) {
+      firstRunRef.current = false;
+      return;
+    }
+    if (isEditing) {
+      firstEditInputRef.current?.focus();
+    } else {
+      editButtonRef.current?.focus();
+    }
+  }, [isEditing]);
 
   function handleLooksRight() {
     onSubmit({
@@ -63,39 +111,43 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
   }
 
   function handleOpenEditor() {
-    // Copy columns array so edits don't mutate the original payload
-    setEditedColumns([...payload.observed.columns]);
-    setEditing(true);
+    // Copy columns array so edits don't mutate the original payload.
+    setEditorState({ columns: [...payload.observed.columns] });
   }
 
   function handleCancelEdit() {
-    setEditing(false);
-    setEditedColumns(null);
+    setEditorState(null);
   }
 
   function handleRenameColumn(index: number, newName: string) {
-    setEditedColumns((prev) => {
+    setEditorState((prev) => {
       if (prev === null) return prev;
-      const next = [...prev];
+      const next = [...prev.columns];
       next[index] = newName;
-      return next;
+      return { columns: next };
     });
   }
 
   function handleRemoveColumn(index: number) {
-    setEditedColumns((prev) => {
+    setEditorState((prev) => {
       if (prev === null) return prev;
-      return prev.filter((_, i) => i !== index);
+      return { columns: prev.columns.filter((_, i) => i !== index) };
     });
   }
 
   function handleApplyEdits() {
-    // editedColumns is non-null when editing is true; assert to satisfy TS
-    const cols = editedColumns ?? payload.observed.columns;
+    // TS narrowing: this handler is only reachable from the edit-view branch
+    // (which guards `editorState !== null`), but the type system can't prove
+    // that across the render boundary. The early-return is an offensive
+    // invariant check — illegal state would be a code bug worth catching, not
+    // user data to coerce. Returning silently here matches the convention used
+    // in handleRenameColumn / handleRemoveColumn (state updaters fast-out when
+    // prev is null) and keeps the function total under TS narrowing.
+    if (editorState === null) return;
     onSubmit({
       chosen: null,
       edited_values: {
-        columns: cols,
+        columns: editorState.columns,
         samples: payload.observed.samples,
         warnings: payload.observed.warnings,
       },
@@ -107,13 +159,18 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
   }
 
   // ── Edit view ────────────────────────────────────────────────────────────────
-  if (editing) {
-    const cols = editedColumns ?? payload.observed.columns;
+  if (editorState !== null) {
     return (
       <div className="guided-turn guided-inspect-turn">
-        <p className="guided-inspect-edit-heading">Edit columns</p>
+        <h3 className="guided-inspect-edit-heading">Edit columns</h3>
         <ul className="guided-inspect-editor-list">
-          {cols.map((col, index) => (
+          {editorState.columns.map((col, index) => (
+            // Positional key: stable across renames (input keeps DOM identity ->
+            // focus and IME state survive typing). On removal, surviving keys
+            // shift and React reconciles the moved inputs as the same nodes with
+            // new value props — behaviourally correct under controlled inputs.
+            // Do NOT switch to `${reactId}-${col}` (content-based): renames
+            // would remount the input mid-typing and lose focus.
             <li key={`${reactId}-${index}`} className="guided-inspect-editor-row">
               <label
                 htmlFor={columnInputId(index)}
@@ -123,6 +180,7 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
               </label>
               <input
                 id={columnInputId(index)}
+                ref={index === 0 ? firstEditInputRef : null}
                 type="text"
                 className="guided-inspect-editor-input"
                 value={col}
@@ -209,6 +267,7 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
           Looks right
         </button>
         <button
+          ref={editButtonRef}
           type="button"
           className="guided-inspect-edit-btn"
           onClick={handleOpenEditor}

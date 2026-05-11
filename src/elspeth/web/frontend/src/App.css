@@ -3800,7 +3800,11 @@ summary:focus-visible {
 }
 
 /* Edit view — heading */
+/* Reset browser-default h3 sizing so the semantic heading bump (Task 7.3
+   reviewer M10) doesn't shift visual rank — it remains the same prominent
+   inline label as before, just navigable by screen-reader heading jump. */
 .guided-inspect-edit-heading {
+  font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--color-text);
   margin: 0 0 var(--space-md) 0;

@@ -1,0 +1,238 @@
+"""Integration tests for POST /api/sessions/{id}/guided/respond — error paths.
+
+Covers:
+  - exit_to_freeform control signal terminates the guided session (§5.3)
+  - POST /guided/respond after terminal state returns 409 (§9.4)
+  - POST /guided/respond before GET /guided (no TurnRecord) returns 400
+  - POST /guided/respond on a session not in guided mode returns 400
+
+HTTP transport: SyncASGITestClient (in-process, synchronous — same pattern
+as test_respond.py).
+
+Per spec §5.3, §9.4:
+  - Any control_signal="exit_to_freeform" → terminal.kind="exited_to_freeform",
+    terminal.reason="user_pressed_exit", next_turn=None
+  - Any respond after terminal → 409 Conflict
+"""
+
+from __future__ import annotations
+
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+# ---------------------------------------------------------------------------
+# Helpers (duplicated from test_respond.py — these are self-contained tests
+# that must not import from another test module to avoid coupling)
+# ---------------------------------------------------------------------------
+
+
+def _create_session(client: TestClient) -> str:
+    """Create a session and return its string id."""
+    resp = client.post("/api/sessions", json={"title": "error-path-test"})
+    assert resp.status_code == 201, resp.json()
+    return resp.json()["id"]
+
+
+def _get_guided(client: TestClient, session_id: str) -> dict:
+    """Fetch GET /guided and assert 200."""
+    resp = client.get(f"/api/sessions/{session_id}/guided")
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+def _respond_raw(client: TestClient, session_id: str, **kwargs) -> object:
+    """POST /guided/respond and return the raw response (any status)."""
+    return client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
+
+
+def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
+    """POST /guided/respond and assert 200."""
+    resp = _respond_raw(client, session_id, **kwargs)
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# exit_to_freeform — §5.3 manual exit
+# ---------------------------------------------------------------------------
+
+
+class TestExitToFreeform:
+    def test_exit_from_step_1_terminates(self, composer_test_client: TestClient) -> None:
+        """exit_to_freeform from step 1 (SINGLE_SELECT) terminates with user_pressed_exit."""
+        session_id = _create_session(composer_test_client)
+        # Seed the first TurnRecord by fetching GET /guided.
+        _get_guided(composer_test_client, session_id)
+
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            control_signal="exit_to_freeform",
+        )
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+
+        # Top-level terminal field.
+        assert body["terminal"] is not None
+        assert body["terminal"]["kind"] == "exited_to_freeform"
+        assert body["terminal"]["reason"] == "user_pressed_exit"
+        assert body["terminal"]["pipeline_yaml"] is None
+
+        # guided_session.terminal is also set.
+        gs = body["guided_session"]
+        assert gs["terminal"] is not None
+        assert gs["terminal"]["kind"] == "exited_to_freeform"
+        assert gs["terminal"]["reason"] == "user_pressed_exit"
+
+        # No further turn is emitted — wizard is done.
+        assert body["next_turn"] is None
+
+    def test_exit_from_step_1_intra_step_terminates(self, composer_test_client: TestClient) -> None:
+        """exit_to_freeform works from within an intra-step turn (SCHEMA_FORM).
+
+        Drives step 1 to SCHEMA_FORM (after SINGLE_SELECT response), then exits.
+        """
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        # Advance to SCHEMA_FORM.
+        _respond(composer_test_client, session_id, chosen=["csv"])
+
+        # Now exit from the SCHEMA_FORM turn.
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            control_signal="exit_to_freeform",
+        )
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        assert body["terminal"]["kind"] == "exited_to_freeform"
+        assert body["terminal"]["reason"] == "user_pressed_exit"
+        assert body["next_turn"] is None
+
+    def test_exit_terminal_is_persisted(self, composer_test_client: TestClient) -> None:
+        """After exit_to_freeform, GET /guided reflects the terminal state."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        _respond(
+            composer_test_client,
+            session_id,
+            control_signal="exit_to_freeform",
+        )
+
+        # Fetch guided state again — terminal must be persisted.
+        resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 200, resp.json()
+        guided = resp.json()["guided_session"]
+        assert guided["terminal"] is not None
+        assert guided["terminal"]["kind"] == "exited_to_freeform"
+
+
+# ---------------------------------------------------------------------------
+# 409 after terminal — §9.4 error matrix
+# ---------------------------------------------------------------------------
+
+
+class TestRespondAfterTerminal:
+    def _drive_to_terminal(self, client: TestClient, session_id: str) -> None:
+        """Drive the session to terminal via exit_to_freeform."""
+        _get_guided(client, session_id)
+        resp = _respond(client, session_id, control_signal="exit_to_freeform")
+        assert resp["terminal"] is not None
+
+    def test_respond_after_exit_returns_409(self, composer_test_client: TestClient) -> None:
+        """A second POST /guided/respond after terminal returns 409 Conflict."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_terminal(composer_test_client, session_id)
+
+        # Any subsequent respond must be rejected.
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            chosen=["csv"],
+        )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "terminal" in detail.lower()
+
+    def test_respond_after_exit_returns_409_regardless_of_payload(self, composer_test_client: TestClient) -> None:
+        """409 is returned even if the payload would be otherwise valid."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_terminal(composer_test_client, session_id)
+
+        # Try another exit_to_freeform — still 409.
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            control_signal="exit_to_freeform",
+        )
+
+        assert resp.status_code == 409
+
+    def test_repeated_409_responses_are_stable(self, composer_test_client: TestClient) -> None:
+        """Multiple responds after terminal all return 409, not 500 (idempotent rejection)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_terminal(composer_test_client, session_id)
+
+        for _ in range(3):
+            resp = _respond_raw(
+                composer_test_client,
+                session_id,
+                chosen=["csv"],
+            )
+            assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Pre-condition violations — respond without prior GET /guided
+# ---------------------------------------------------------------------------
+
+
+class TestRespondPreconditions:
+    def test_respond_without_prior_get_guided_returns_400(self, composer_test_client: TestClient) -> None:
+        """POST /guided/respond before GET /guided (no TurnRecord) returns 400.
+
+        The route requires at least one TurnRecord to exist for the current
+        step — it cannot infer the turn type without one.  Callers must always
+        fetch GET /guided first to seed the initial turn.
+        """
+        session_id = _create_session(composer_test_client)
+        # Do NOT call _get_guided — no TurnRecord exists yet.
+
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            chosen=["csv"],
+        )
+
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        # Should mention fetching GET /guided.
+        assert "guided" in detail.lower()
+
+    def test_respond_on_non_guided_session_returns_400(self, composer_test_client: TestClient) -> None:
+        """POST /guided/respond on a session with no guided_session returns 400.
+
+        Sessions only enter guided mode when created with guided=True (or when
+        the default guided session is initialised by the first GET /guided call).
+        A bare POST /api/sessions without the guided flag has no guided_session
+        and must be rejected with 400, not 500.
+
+        NOTE: In the current implementation, GET /guided auto-initialises the
+        guided session on first call, so this test creates a session and
+        bypasses the guided initialisation entirely by calling respond
+        against the initial empty state.
+        """
+        session_id = _create_session(composer_test_client)
+        # Do not call GET /guided — guided_session is None in initial state.
+
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            chosen=["csv"],
+        )
+
+        # Either 400 (no guided mode) or 400 (no TurnRecord) are acceptable —
+        # both indicate the call was rejected before doing any state mutation.
+        assert resp.status_code == 400

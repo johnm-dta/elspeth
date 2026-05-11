@@ -34,6 +34,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer.audit import audit_envelope, llm_call_audit_envelope
+from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
@@ -1494,6 +1495,26 @@ async def _handle_runtime_preflight_failure(
     return response_body
 
 
+def _initial_composition_state_with_guided_session() -> CompositionState:
+    """Construct a fresh CompositionState with a guided-mode session attached.
+
+    Per spec §5.2 / errata C7: new sessions default to guided. Every lazy-
+    create branch in this module must use this helper rather than building
+    CompositionState directly, so the default-guided invariant holds
+    uniformly across endpoints (send_message, recompose, the future
+    guided/respond endpoint added in Task 3.5).
+    """
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+        guided_session=GuidedSession.initial(),
+    )
+
+
 def create_session_router() -> APIRouter:
     """Create the session router with /api/sessions prefix."""
     router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -1660,14 +1681,7 @@ def create_session_router() -> APIRouter:
             #    for pre-send provenance (AD-7: user msg records what user saw).
             state_record = await service.get_current_state(session.id)
             if state_record is None:
-                state = CompositionState(
-                    source=None,
-                    nodes=(),
-                    edges=(),
-                    outputs=(),
-                    metadata=PipelineMetadata(),
-                    version=1,
-                )
+                state = _initial_composition_state_with_guided_session()
                 pre_send_state_id: UUID | None = None
             else:
                 state = _state_from_record(state_record)
@@ -2214,14 +2228,7 @@ def create_session_router() -> APIRouter:
             # Load current state
             state_record = await service.get_current_state(session.id)
             if state_record is None:
-                state = CompositionState(
-                    source=None,
-                    nodes=(),
-                    edges=(),
-                    outputs=(),
-                    metadata=PipelineMetadata(),
-                    version=1,
-                )
+                state = _initial_composition_state_with_guided_session()
                 pre_send_state_id: UUID | None = None
             else:
                 state = _state_from_record(state_record)

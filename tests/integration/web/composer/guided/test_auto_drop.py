@@ -272,7 +272,12 @@ class TestAutoDropOnSolverExhausted:
         )
         drop_args = drop_invocations[0]
         assert drop_args["drop_reason"] == "solver_exhausted"
-        assert drop_args["step_index"] == "step_3_transforms"
+        assert drop_args["prev_step"] == "step_3_transforms"
+        assert "validation_result" in drop_args, f"spec §9.1 requires validation_result on solver_exhausted drops; got: {drop_args}"
+        validation_result = drop_args["validation_result"]
+        assert isinstance(validation_result, dict)
+        assert validation_result["is_valid"] is False
+        assert "errors" in validation_result  # may be empty list, not absent
 
     def test_no_next_turn_after_auto_drop(self, composer_test_client: TestClient) -> None:
         """After auto-drop the next_turn must be None — wizard is terminal."""

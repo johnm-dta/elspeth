@@ -161,6 +161,7 @@ class TestEmitDroppedToFreeform:
         assert inv.tool_name == "guided_dropped_to_freeform"
         decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
         assert decoded["drop_reason"] == "solver_exhausted"
+        assert decoded["prev_step"] == "step_3_transforms"
         assert decoded["validation_result"] == {"errors": ["..."]}
         assert inv.result_canonical is None
 

@@ -242,7 +242,7 @@ def emit_dropped_to_freeform(
         actor: Stable identity of the driving actor.
     """
     payload: dict[str, Any] = {
-        "step_index": prev.value,
+        "prev_step": prev.value,
         "drop_reason": drop_reason.value,
     }
     if validation_result is not None:

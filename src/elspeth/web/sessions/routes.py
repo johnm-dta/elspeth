@@ -2090,15 +2090,15 @@ async def _dispatch_guided_respond(
                     # Repair also failed. Mark solver exhausted and auto-drop to freeform.
                     # Build the validation_result dict from the repair failure (Tier 1
                     # data — only real fields from ToolResult, no fabrication).
+                    # The repair always runs on the auto-drop path; validation_result is
+                    # always present per spec §9.1 (set when drop_reason="solver_exhausted").
+                    # An empty errors list is real audit data (the validator rejected without
+                    # producing structured errors), not fabrication.
                     repair_validation = repair_result.tool_result.validation
-                    validation_result_payload: dict[str, Any] | None = (
-                        {
-                            "is_valid": repair_validation.is_valid,
-                            "errors": [e.to_dict() for e in repair_validation.errors],
-                        }
-                        if repair_validation.errors
-                        else None
-                    )
+                    validation_result_payload: dict[str, Any] = {
+                        "is_valid": repair_validation.is_valid,
+                        "errors": [e.to_dict() for e in repair_validation.errors],
+                    }
 
                     new_guided, _terminal, directives = mark_solver_exhausted(
                         session=guided,

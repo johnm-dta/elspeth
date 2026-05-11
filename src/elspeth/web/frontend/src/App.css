@@ -4045,6 +4045,191 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   SchemaFormTurn (Task 7.5)
+   Classes prefixed guided-schema-*. No chip styles -- this widget owns a
+   form-field-per-row layout, not a chip group.
+   --------------------------------------------------------------------------- */
+
+/* One property row: label + control + optional hint/error stacked vertically */
+.guided-schema-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+/* Field label */
+.guided-schema-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+/* Text / number input */
+.guided-schema-input {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: border-color 0.1s ease;
+}
+
+.guided-schema-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Select dropdown */
+.guided-schema-select {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px;
+  cursor: pointer;
+  transition: border-color 0.1s ease;
+}
+
+.guided-schema-select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Checkbox row: inline checkbox + label side-by-side */
+.guided-schema-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Checkbox itself */
+.guided-schema-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+/* JSON-fallback textarea */
+.guided-schema-textarea {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  resize: vertical;
+  transition: border-color 0.1s ease;
+}
+
+.guided-schema-textarea:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Error state border for JSON textarea */
+.guided-schema-textarea--error {
+  border-color: var(--color-error, var(--color-accent));
+}
+
+/* Hint text -- muted, associated via aria-describedby */
+.guided-schema-hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+/* Inline error text for JSON parse failures */
+.guided-schema-error {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-error, var(--color-accent));
+  line-height: 1.4;
+}
+
+/* Required fields section */
+.guided-schema-required-section {
+  margin-bottom: var(--space-sm);
+}
+
+/* Optional fields section (shown when advanced is expanded) */
+.guided-schema-optional-section {
+  margin-top: var(--space-sm);
+}
+
+/* Show / Hide advanced toggle */
+.guided-schema-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  margin-top: var(--space-xs);
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.guided-schema-advanced-toggle:hover {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.guided-schema-advanced-toggle:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Continue action row */
+.guided-schema-actions {
+  display: flex;
+  margin-top: var(--space-md);
+}
+
+/* Continue button */
+.guided-schema-continue-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-schema-continue-btn:hover:not(:disabled) {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-schema-continue-btn:disabled {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.guided-schema-continue-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -4055,7 +4240,12 @@ summary:focus-visible {
   .guided-inspect-cancel-btn,
   .guided-inspect-apply-btn,
   .guided-multi-custom-remove-btn,
-  .guided-multi-continue-btn {
+  .guided-multi-continue-btn,
+  .guided-schema-input,
+  .guided-schema-select,
+  .guided-schema-textarea,
+  .guided-schema-advanced-toggle,
+  .guided-schema-continue-btn {
     transition: none;
   }
 }

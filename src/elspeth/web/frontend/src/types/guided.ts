@@ -157,3 +157,21 @@ export interface Observed {
 export interface InspectAndConfirmPayload {
   observed: Observed;
 }
+
+/**
+ * Wire: SchemaFormPayload (protocol.py:53-56).
+ *
+ * schema_block is the output of Pydantic ConfigModel.model_json_schema().
+ * The TS type uses Record<string, unknown> because the full JSON Schema spec
+ * is not reflected here -- only the subset handled by SchemaFormTurn is consumed
+ * (see SchemaFormTurn.tsx SCOPE NOTE for the supported field types).
+ *
+ * prefilled contains initial field values keyed by property name.
+ * Top-level keys in prefilled always correspond to top-level keys in
+ * schema_block.properties.
+ */
+export interface SchemaFormPayload {
+  plugin: string;
+  schema_block: Record<string, unknown>;
+  prefilled: Record<string, unknown>;
+}

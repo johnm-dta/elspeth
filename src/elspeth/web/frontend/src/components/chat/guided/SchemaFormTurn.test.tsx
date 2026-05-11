@@ -417,14 +417,14 @@ describe("prefill vs default precedence", () => {
     void user;
   });
 
-  it("shows '[]' in a JSON-fallback array textarea with no prefill and no default", async () => {
+  it("shows parseable JSON for a $ref field with no prefill and no default", async () => {
     const user = userEvent.setup();
-    // REF_PAYLOAD has nested_config with $ref and no prefill
+    // REF_PAYLOAD has nested_config with $ref and no prefill; initialValueFor
+    // emits "null" (a valid JSON literal) as the sentinel for object/$ref fields
     renderTurn(REF_PAYLOAD);
     await user.click(screen.getByRole("button", { name: /show advanced/i }));
     const textarea = screen.getByRole("textbox", { name: /nested config/i }) as HTMLTextAreaElement;
-    // null prefill -> render as "null" JSON for object/$ref
-    // (any JSON-valid representation is acceptable; pin round-trip)
+    // Pin round-trip: whatever value appears, it must be valid JSON
     expect(() => JSON.parse(textarea.value)).not.toThrow();
     void user;
   });

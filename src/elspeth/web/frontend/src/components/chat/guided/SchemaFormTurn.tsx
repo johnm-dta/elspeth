@@ -220,10 +220,12 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
   // Derive the ordered list of properties from the schema once.
   // schema_block.properties is a plain object; we preserve declaration order
   // (JS spec guarantees string-keyed insertion order on plain objects).
-  const properties = (payload.schema_block["properties"] ?? {}) as Record<
-    string,
-    PropSchema
-  >;
+  // Pydantic always emits the "properties" key -- even for models with no fields
+  // it emits `"properties": {}`. We do NOT defensively ?? {} here: if the wire
+  // somehow omits "properties", Object.keys(undefined) crashes loudly and
+  // attributably (per CLAUDE.md offensive programming). The EMPTY_SCHEMA_PAYLOAD
+  // test covers the legitimate `properties: {}` case.
+  const properties = payload.schema_block["properties"] as Record<string, PropSchema>;
   const propertyNames = Object.keys(properties);
 
   // Required fields: those listed in schema_block.required (may be absent).
@@ -409,7 +411,7 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
     const description = typeof prop["description"] === "string" ? prop["description"] : null;
     const inputId = fieldInputId(name);
     const hintId = description !== null ? fieldHintId(name) : undefined;
-    const errorId = fieldHintId(name) !== undefined ? fieldErrorId(name) : fieldErrorId(name);
+    const errorId = fieldErrorId(name);
     const hasError = (formState.errors[name] ?? "") !== "";
     const val = formState.values[name];
 

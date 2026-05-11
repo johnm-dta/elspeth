@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal.** Introduce a manifest-keyed redaction primitive (`MANIFEST: dict[str, ToolRedaction]`) that mirrors the project's existing `_TOOL_REQUIRED_PATHS: dict[str, ...]` precedent at `src/elspeth/web/composer/service.py:702`, alongside the function-pointer dispatch dicts at `src/elspeth/web/composer/tools.py:5250–5314`. Promote ~6–8 sensitive-touching composer tools to type-driven manifest entries with `Sensitive[T]`-annotated Pydantic argument models and `Model.model_validate` dispatch validation. Cover the remaining ~29–31 tools with declarative manifest entries. Enforce coverage and weakening with a single shared traversal iterator consumed by both the CI-time adequacy guard and the runtime walker, plus a content-keyed policy-hash snapshot and a CI-enforced PR-label gate. Close all four BLOCKERs and twelve warnings from `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json`.
+**Goal.** Introduce a manifest-keyed redaction primitive (`MANIFEST: dict[str, ToolRedaction]`) that mirrors the project's existing `_TOOL_REQUIRED_PATHS: dict[str, ...]` precedent at `src/elspeth/web/composer/service.py:702`, alongside the function-pointer dispatch dicts at `src/elspeth/web/composer/tools.py:5250–5314`. Promote ~6–8 sensitive-touching composer tools to type-driven manifest entries with `Sensitive[T]`-annotated Pydantic argument models and `Model.model_validate` dispatch validation; promoted handlers catch `pydantic.ValidationError` and re-raise as `ToolArgumentError` (per `tools.py:2668–2801` pattern), which is caught at `service.py:2480` and routes to ARG_ERROR. Cover the remaining ~29–31 tools with declarative manifest entries. Enforce coverage and weakening with a single shared traversal iterator consumed by both the CI-time adequacy guard and the runtime walker, plus a content-keyed policy-hash snapshot and a direction-aware CI-enforced PR-label gate. Close all prior BLOCKERs and warnings, plus the rev-2 BLOCKERs and MAJORs from `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`.
 
 **Architecture.** Pure redaction-layer work. Phase 1 schema is in place; this phase does not modify the database, the compose loop's transactional structure, or the frontend. The redaction layer is L3 (alongside the composer tools). The promotion wave touches handler dispatch within `tools.py` (still L3) — no upward layer hops. Tier-model and freeze-guard CI gates apply unchanged.
 
@@ -50,10 +50,13 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
 - `tests/unit/web/composer/test_redact_tool_call_arguments.py` — full-shape argument walker beyond the tracer-bullet path.
 - `tests/unit/web/composer/test_adequacy_guard.py` — the four assertions of §4.4.
 - `tests/unit/web/composer/redaction_policy_snapshot.json` — the committed snapshot covering all manifest entries.
-- `tests/unit/web/composer/test_promote_*.py` — one per promoted tool, asserting dispatch validation + redaction + ARG_ERROR routing on `ValidationError`.
-- `tests/unit/web/composer/test_compose_loop_unknown_tool_name.py` — confirms LLM-supplied unknown tool name routes to ARG_ERROR per `service.py:1836–1870`.
-- `.github/workflows/composer-redaction-gate.yml` — label-gate CI step.
-- `scripts/composer/bootstrap_redaction_snapshot.py` — one-time helper for snapshot generation; idempotent.
+- `tests/unit/web/composer/test_promote_*.py` — one per promoted tool, asserting dispatch validation + redaction + ARG_ERROR routing: handler catches `pydantic.ValidationError`, re-raises as `ToolArgumentError` (with `__cause__` being the `ValidationError`); `ToolArgumentError` caught at `service.py:2480` routes to ARG_ERROR.
+- `tests/unit/web/composer/test_compose_loop_unknown_tool_name.py` — pins existing routing: `tools.py:5481` `_failure_result` fall-through → compose loop records and continues.
+- `tests/unit/web/composer/test_redaction_completeness_property.py` — Hypothesis property test: no raw `Sensitive[T]` field value appears in `json.dumps(redact_tool_call_arguments(…))` (rev-2 BLOCKER_A MAJOR-4).
+- `tests/unit/web/composer/test_walker_guard_parity.py` — behavioural parity: `walk_model_schema(M, with_values=False)` == `walk_model_schema(M, with_values=True)` path-sets for each manifest entry model (rev-2 M_walker_guard_parity).
+- `tests/unit/web/composer/test_label_gate_direction.py` — direction-misclassification tests: (a) weakening + `policy-weaken-justified` → pass; (b) weakening + `policy-strengthen` → fail; (c) strengthening + `policy-strengthen` → pass; (d) strengthening + `policy-weaken-justified` → fail.
+- `.github/workflows/composer-redaction-gate.yml` — direction-aware label-gate CI step (rev-2 BLOCKER_B).
+- `scripts/cicd/bootstrap_redaction_snapshot.py` — relocated from `scripts/composer/` (that directory does not exist; rev-2 m_script_dir_missing; `scripts/cicd/` is the existing CI helper location alongside `enforce_tier_model.py`).
 
 ### Files to modify
 
@@ -66,6 +69,7 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
 - `src/elspeth/web/composer/service.py` compose-loop body — Phase 3 wires the loop.
 - `src/elspeth/web/frontend/` — Phase 4.
 - `.github/CODEOWNERS` — **not created.** The `@elspeth/security` team cannot exist on `johnm-dta/elspeth` (personal-account repo). Spec rev-5 §4.4.5 promotes the label-gate to primary control. (This is a rev-5 deviation from rev-4; see plan-review W9 / M10 / spec §12.2.)
+- `src/elspeth/contracts/composer_audit.py` — the `ComposerToolInvocation.arguments_canonical` field retains raw LLM-supplied arguments per spec §4.2.8 posture (a) intentional raw. Phase 3 MUST NOT redact this surface; the `arguments_hash` Tier-1 integrity invariant depends on it remaining unmodified at `begin_dispatch` / `begin_dispatch_or_arg_error` (`service.py:1930`).
 
 ---
 
@@ -274,6 +278,79 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       assert all(n.value_provider is None for n in nodes)
   ```
 
+  **Additional walker container-shape tests (rev-2 M_adequacy_mechanical_enforcement — 4 coverage gaps).** Add these four test functions to `test_walk_model_schema.py` before Step 2:
+
+  ```python
+  def test_walk_duplicate_sensitive_markers() -> None:
+      """Duplicate _SensitiveMarker in one field's Annotated tuple raises ValueError
+      (spec §4.2.5 promises this; rev-2 M_adequacy quality MAJOR-1 gap A)."""
+      from typing import Annotated
+      from pydantic import BaseModel
+      from elspeth.web.composer.redaction import Sensitive, walk_model_schema
+
+      class _DuplicateModel(BaseModel):
+          bad: Annotated[str, Sensitive(), Sensitive()]
+
+      with pytest.raises(ValueError, match="bad"):
+          list(walk_model_schema(_DuplicateModel))
+
+
+  def test_walk_list_of_list_of_basemodel() -> None:
+      """Iterator descends through two list levels (rev-2 quality MAJOR-1 gap B)."""
+      from typing import Annotated
+      from pydantic import BaseModel
+      from elspeth.web.composer.redaction import Sensitive, walk_model_schema
+
+      class _Inner(BaseModel):
+          secret: Annotated[str, Sensitive()]
+
+      class _Outer(BaseModel):
+          matrix: list[list[_Inner]]
+
+      nodes = list(walk_model_schema(_Outer))
+      paths = {n.path for n in nodes}
+      assert "matrix[*][*].secret" in paths
+      assert any(any(isinstance(m, _SensitiveMarker) for m in n.metadata)
+                 for n in nodes if n.path == "matrix[*][*].secret")
+
+
+  def test_walk_field_plus_annotated_combined() -> None:
+      """Sensitive() marker is detected regardless of FieldInfo position in Annotated
+      metadata tuple (rev-2 quality MAJOR-1 gap C)."""
+      from typing import Annotated
+      from pydantic import BaseModel, Field
+      from elspeth.web.composer.redaction import Sensitive, walk_model_schema
+
+      class _FieldAnnotatedModel(BaseModel):
+          combined: Annotated[str, Field(description="desc"), Sensitive()]
+
+      nodes = list(walk_model_schema(_FieldAnnotatedModel))
+      target = next((n for n in nodes if n.path == "combined"), None)
+      assert target is not None
+      assert any(isinstance(m, _SensitiveMarker) for m in target.metadata)
+
+
+  def test_walk_three_arm_union() -> None:
+      """Iterator descends into BaseModel arm of a 3-arm Union; skips non-BaseModel
+      arms cleanly without spurious yields (rev-2 quality MAJOR-1 gap D)."""
+      from typing import Union, Annotated
+      from pydantic import BaseModel
+      from elspeth.web.composer.redaction import Sensitive, walk_model_schema
+
+      class _InnerWithSecret(BaseModel):
+          secret: Annotated[str, Sensitive()]
+
+      class _UnionOuter(BaseModel):
+          field: Union[str, _InnerWithSecret, bool]
+
+      nodes = list(walk_model_schema(_UnionOuter))
+      paths = {n.path for n in nodes}
+      # Must find the nested secret via the BaseModel arm.
+      assert "field.secret" in paths
+      # Must NOT find spurious scalar-arm yields.
+      assert not any(p in paths for p in ("field[str]", "field[bool]"))
+  ```
+
   **Reviewer note:** if Pydantic 2.x's introspection capability cannot represent dict-key descent cleanly, the test fails and the iterator implementation must use a custom walk. Do not work around this with a half-measure.
 
 - [ ] **Step 2: Run the test to verify it fails.**
@@ -480,8 +557,15 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
 
   Closes plan-review W4 (telemetry duck-typing). The walker accepts a
   typed Protocol instance, never None.
+
+  Rev-2 M_telemetry_implementation: the OtelRedactionTelemetry impl uses
+  module-level create_counter() objects + .add() calls per the project's
+  established pattern at service.py:135, 148, 824, 868, 1172, 1182.
+  There is NO _increment_counter helper — that function does not exist.
   """
   from __future__ import annotations
+
+  from unittest.mock import MagicMock, call
 
   from elspeth.web.composer.redaction_telemetry import (
       NoopRedactionTelemetry,
@@ -493,36 +577,47 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       noop: RedactionTelemetry = NoopRedactionTelemetry()
       noop.unknown_response_key_redacted(tool_name="t")
       noop.manifest_dispatch(tool_name="t", shape="declarative")
+      noop.summarizer_error(tool_name="t")
 
 
   def test_noop_records_for_assertion_in_tests() -> None:
       noop = NoopRedactionTelemetry()
       noop.unknown_response_key_redacted(tool_name="set_source")
       noop.manifest_dispatch(tool_name="set_source", shape="type_driven")
+      noop.summarizer_error(tool_name="set_source")
       assert noop.unknown_response_key_calls == [{"tool_name": "set_source"}]
       assert noop.manifest_dispatch_calls == [{"tool_name": "set_source", "shape": "type_driven"}]
+      assert noop.summarizer_error_calls == [{"tool_name": "set_source"}]
 
 
-  def test_otel_telemetry_emits_named_counters(monkeypatch) -> None:
-      """Production impl wraps the project's structured-counter helper."""
+  def test_otel_telemetry_emits_via_module_level_counters(monkeypatch) -> None:
+      """Production impl uses module-level counter objects + .add() calls.
+
+      Rev-2 M_telemetry_implementation: patch the counter objects themselves,
+      not a nonexistent _increment_counter helper. The established OTel pattern
+      in this project (service.py:135, 148, 824, 868, 1172, 1182) is:
+          _FOO_COUNTER = metrics.get_meter(__name__).create_counter(...)
+          _FOO_COUNTER.add(1, {"label_key": value})
+      """
+      import elspeth.web.composer.redaction_telemetry as rt_mod
       from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
 
-      emitted: list[tuple[str, dict[str, str]]] = []
+      mock_unknown = MagicMock()
+      mock_dispatch = MagicMock()
+      mock_summarizer = MagicMock()
 
-      def fake_increment(name: str, **labels: str) -> None:
-          emitted.append((name, dict(labels)))
+      monkeypatch.setattr(rt_mod, "_UNKNOWN_RESPONSE_KEY_COUNTER", mock_unknown)
+      monkeypatch.setattr(rt_mod, "_MANIFEST_DISPATCH_COUNTER", mock_dispatch)
+      monkeypatch.setattr(rt_mod, "_SUMMARIZER_ERROR_COUNTER", mock_summarizer)
 
-      monkeypatch.setattr(
-          "elspeth.web.composer.redaction_telemetry._increment_counter",
-          fake_increment,
-      )
       tel = OtelRedactionTelemetry()
       tel.unknown_response_key_redacted(tool_name="set_source")
       tel.manifest_dispatch(tool_name="set_source", shape="type_driven")
-      assert emitted == [
-          ("composer.redaction.unknown_response_key_total", {"tool_name": "set_source"}),
-          ("composer.redaction.manifest_dispatch_total", {"tool_name": "set_source", "shape": "type_driven"}),
-      ]
+      tel.summarizer_error(tool_name="set_source")
+
+      mock_unknown.add.assert_called_once_with(1, {"tool_name": "set_source"})
+      mock_dispatch.add.assert_called_once_with(1, {"tool_name": "set_source", "shape": "type_driven"})
+      mock_summarizer.add.assert_called_once_with(1, {"tool_name": "set_source"})
   ```
 
 - [ ] **Step 2: Run, expect fail.**
@@ -530,18 +625,44 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
 - [ ] **Step 3: Add the module.**
 
   ```python
-  """OTel surface for the redaction walker (spec §4.2.4)."""
+  """OTel surface for the redaction walker (spec §4.2.4).
+
+  Rev-2 M_telemetry_implementation: uses module-level create_counter() objects
+  and .add() calls per the project's established pattern (service.py:135, 148,
+  824, 868, 1172, 1182). No _increment_counter helper — that does not exist.
+  """
   from __future__ import annotations
 
   from typing import Protocol
 
-  # _increment_counter is the project's structured-counter helper. Located in
-  # src/elspeth/telemetry/...; import lazily inside OtelRedactionTelemetry to
-  # keep the test impl free of the dependency.
+  from opentelemetry import metrics
+
+  _meter = metrics.get_meter(__name__)
+
+  _UNKNOWN_RESPONSE_KEY_COUNTER = _meter.create_counter(
+      "composer.redaction.unknown_response_key_redacted",
+      description="Count of unknown response keys substituted with the fixed sentinel.",
+  )
+
+  _MANIFEST_DISPATCH_COUNTER = _meter.create_counter(
+      "composer.redaction.manifest_dispatch",
+      description="Count of tool calls dispatched through the redaction manifest.",
+  )
+
+  _SUMMARIZER_ERROR_COUNTER = _meter.create_counter(
+      "composer.redaction.summarizer_errors_total",
+      description="Count of summarizer failures (exception OR non-string return) immediately before AuditIntegrityError raise.",
+  )
+
 
   class RedactionTelemetry(Protocol):
       def unknown_response_key_redacted(self, *, tool_name: str) -> None: ...
       def manifest_dispatch(self, *, tool_name: str, shape: str) -> None: ...
+      def summarizer_error(self, *, tool_name: str) -> None:
+          """Incremented immediately before AuditIntegrityError raise on
+          summarizer exception or non-str return. Wired in Task 7's walker code
+          path. (Rev-2 M_telemetry_implementation / M.8)"""
+          ...
 
 
   class NoopRedactionTelemetry:
@@ -549,6 +670,7 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       def __init__(self) -> None:
           self.unknown_response_key_calls: list[dict[str, str]] = []
           self.manifest_dispatch_calls: list[dict[str, str]] = []
+          self.summarizer_error_calls: list[dict[str, str]] = []
 
       def unknown_response_key_redacted(self, *, tool_name: str) -> None:
           self.unknown_response_key_calls.append({"tool_name": tool_name})
@@ -556,24 +678,22 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       def manifest_dispatch(self, *, tool_name: str, shape: str) -> None:
           self.manifest_dispatch_calls.append({"tool_name": tool_name, "shape": shape})
 
+      def summarizer_error(self, *, tool_name: str) -> None:
+          self.summarizer_error_calls.append({"tool_name": tool_name})
+
 
   class OtelRedactionTelemetry:
-      """Production impl. Emits named counters via the project's helper."""
+      """Production impl. Emits via module-level OTel counter objects."""
+
       def unknown_response_key_redacted(self, *, tool_name: str) -> None:
-          _increment_counter(
-              "composer.redaction.unknown_response_key_total",
-              tool_name=tool_name,
-          )
+          _UNKNOWN_RESPONSE_KEY_COUNTER.add(1, {"tool_name": tool_name})
 
       def manifest_dispatch(self, *, tool_name: str, shape: str) -> None:
-          _increment_counter(
-              "composer.redaction.manifest_dispatch_total",
-              tool_name=tool_name,
-              shape=shape,
-          )
-  ```
+          _MANIFEST_DISPATCH_COUNTER.add(1, {"tool_name": tool_name, "shape": shape})
 
-  The agent must locate the project's `_increment_counter` helper (or equivalent) by reading `src/elspeth/telemetry/` and import it cleanly. Do not invent a new counter helper. Memory: `feedback_no_slog_recommendations` — telemetry/audit primacy applies; counters belong in OTel telemetry, not slog.
+      def summarizer_error(self, *, tool_name: str) -> None:
+          _SUMMARIZER_ERROR_COUNTER.add(1, {"tool_name": tool_name})
+  ```
 
 - [ ] **Step 4: Run, expect pass.**
 
@@ -697,6 +817,7 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       label: str | None = None
       blob_id: str | None = None
       inline_blob: dict[str, Any] | None = None
+      model_config = ConfigDict(extra="forbid")  # rev-2 M.1 — prevents argument_canonical / walker discrepancy
       # ... any additional fields required by the existing schema ...
 
 
@@ -722,8 +843,9 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       entry = MANIFEST[tool_name]  # KeyError → AuditIntegrityError in full impl
       if entry.argument_model is not None:
           telemetry.manifest_dispatch(tool_name=tool_name, shape="type_driven")
-          # Validate (raises ValidationError; caller in compose loop
-          # routes to ARG_ERROR per service.py:1836-1870)
+          # Validate. Callers (promoted handlers) MUST catch pydantic.ValidationError
+          # and re-raise as ToolArgumentError — the compose loop catches
+          # ToolArgumentError at service.py:2480 and routes to ARG_ERROR.
           validated = entry.argument_model.model_validate(arguments)
           # Walk the model's fields, substituting Sensitive-marked ones.
           return _redact_via_schema(validated, entry.argument_model)
@@ -756,9 +878,20 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
       data_dir: str | None = None,
   ) -> ToolResult:
       # Validate the LLM-supplied arguments against the redaction-bearing
-      # model. ValidationError propagates; the compose loop catches at
-      # service.py:1836-1870 and routes to ARG_ERROR.
-      validated = SetSourceArgumentsModel.model_validate(arguments)
+      # model. MUST catch pydantic.ValidationError and re-raise as
+      # ToolArgumentError so the compose loop's ToolArgumentError handler at
+      # service.py:2480 routes to ARG_ERROR. A bare ValidationError escaping
+      # here hits service.py:2564 (catch-all → ComposerPluginCrashError →
+      # HTTP 500), which is the wrong disposition for Tier-3 input.
+      # Pattern from tools.py:2668, 2761, 2767, 2773, 2787, 2801.
+      try:
+          validated = SetSourceArgumentsModel.model_validate(arguments)
+      except pydantic.ValidationError as exc:
+          raise ToolArgumentError(
+              argument="set_source arguments",
+              expected="schema-conformant dict",
+              actual_type=type(exc).__name__,
+          ) from exc
       # Read typed attributes; the previous arguments["plugin"] etc. are
       # replaced with validated.plugin etc.
       plugin = validated.plugin
@@ -773,23 +906,32 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
   `tests/unit/web/composer/test_promote_set_source.py`:
 
   ```python
-  """ARG_ERROR routing for set_source ValidationError (spec §11 done-when)."""
+  """ARG_ERROR routing for set_source ToolArgumentError (spec §11 done-when).
+
+  Rev-2 BLOCKER_A: promoted handlers MUST catch pydantic.ValidationError and
+  re-raise as ToolArgumentError. The compose loop's ToolArgumentError handler
+  at service.py:2480 routes to ARG_ERROR. A bare ValidationError escaping the
+  handler hits service.py:2564 (→ ComposerPluginCrashError → HTTP 500) — wrong
+  disposition for Tier-3 input.
+  """
   from __future__ import annotations
 
+  import pydantic
   import pytest
-  from pydantic import ValidationError
 
+  from elspeth.web.composer.protocol import ToolArgumentError
   from elspeth.web.composer.tools import _execute_set_source
   # ... fixtures: build a CompositionState, a CatalogService, a data_dir ...
 
 
-  def test_invalid_arguments_raise_validation_error_for_compose_loop(state, catalog, tmp_path) -> None:
-      """The handler raises ValidationError; the compose loop's ARG_ERROR
-      handler at service.py:1836-1870 catches it (out-of-scope for this
-      unit test — but see test_compose_loop_validation_error_routing in
-      Task 17)."""
-      with pytest.raises(ValidationError):
+  def test_invalid_arguments_raise_tool_argument_error(state, catalog, tmp_path) -> None:
+      """The handler catches ValidationError and re-raises as ToolArgumentError.
+      The compose loop's handler at service.py:2480 catches ToolArgumentError
+      and routes to ARG_ERROR (out-of-scope for this unit test)."""
+      with pytest.raises(ToolArgumentError) as exc_info:
           _execute_set_source({}, state, catalog, str(tmp_path))
+      # __cause__ must be the pydantic ValidationError (from exc discipline)
+      assert isinstance(exc_info.value.__cause__, pydantic.ValidationError)
 
 
   def test_valid_arguments_dispatch_normally(state, catalog, tmp_path) -> None:
@@ -815,21 +957,55 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
 
   Expected: all existing tests pass (the typed-attribute change is internal; behaviour is unchanged for valid inputs). If any test fails because it was passing invalid arguments (e.g. missing required key) and the model now rejects, update the test to use valid arguments — that's the locked-in-buggy-expectations pattern (memory: `feedback_locked_in_buggy_expectations`).
 
-- [ ] **Step 8: Run the project gate.**
+- [ ] **Step 8 (NEW — rev-2 BLOCKER_A serialization boundary test): Pin the serialization boundary.**
 
-- [ ] **Step 9: Commit.**
+  Add to `test_redact_set_source.py` (or a dedicated `test_redact_set_source_serialization.py`):
+
+  ```python
+  import json
+  from elspeth.web.composer.redaction import redact_tool_call_arguments
+  from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+
+  _CANARY = "CANARY-SENSITIVE-PATH-DO-NOT-LEAK"
+
+  def test_serialization_boundary_canary_not_in_json_output() -> None:
+      """Pins that the sensitive value does NOT appear in json.dumps output.
+
+      This is the cross-boundary integration test (rev-2 BLOCKER_A quality
+      MAJOR-2). Phase 3 will pass the result of redact_tool_call_arguments
+      through json.dumps before writing to chat_messages.tool_calls; this
+      test verifies the canary never survives that serialization.
+      """
+      args = {"plugin": "csv", "options": {"path": _CANARY}}
+      result = redact_tool_call_arguments("set_source", args, telemetry=NoopRedactionTelemetry())
+      serialized = json.dumps(result, sort_keys=True)
+      assert _CANARY not in serialized, (
+          f"Sensitive canary value appeared in serialized output. "
+          f"Redaction did not remove it from the persistence path. "
+          f"Serialized: {serialized!r}"
+      )
+      # The key must still be present — redaction replaces the value, not the key.
+      assert "options" in serialized
+  ```
+
+- [ ] **Step 9: Run the project gate.**
+
+- [ ] **Step 10: Commit.**
 
   ```
   feat(composer/redaction): tracer-bullet — promote set_source to type-driven manifest entry
 
-  • Adds SetSourceArgumentsModel with Sensitive[T] annotation on options.
+  • Adds SetSourceArgumentsModel with extra="forbid" + Sensitive[T] annotation on options.
   • _execute_set_source now validates via Model.model_validate at the
-    dispatch boundary; ValidationError flows to compose-loop ARG_ERROR
-    (service.py:1836-1870).
+    dispatch boundary; handler catches pydantic.ValidationError and re-raises
+    as ToolArgumentError (pattern at tools.py:2668-2801); ToolArgumentError
+    caught at service.py:2480 routes to ARG_ERROR.
   • Adds redact_tool_call_arguments minimal impl (type-driven branch
     only); generalised in subsequent tasks.
   • First MANIFEST entry. Adequacy guard registry-equality assertion
     will remain red until Task 16 completes.
+  • Adds serialization boundary canary test pinning Phase 3 integration
+    contract (rev-2 BLOCKER_A).
 
   Validates the integration end-to-end on one path before the bulk
   Sensitive[T] promotion wave (Tasks 13-15) and declarative manifest
@@ -896,13 +1072,23 @@ TDD task. Test cases:
 - Response with all keys in `known_response_keys` and none in `sensitive_response_keys`: passthrough.
 - Response with key in `sensitive_response_keys` (no summarizer): substituted with `<redacted>`.
 - Response with key in `sensitive_response_keys` and summarizer present: substituted with summarizer output.
-- Response with unknown key (not in any declared set): substituted with the **fixed sentinel `<redacted-unknown-response-key>`** (no length disclosure, closes W6); `telemetry.unknown_response_key_redacted(tool_name=...)` called once per unknown key.
+- Response with unknown key (not in any declared set): substituted with the **fixed sentinel `<redacted-unknown-response-key>`** using `==` (string equality, not regex or prefix match — the sentinel is security-relevant; closes W6); `telemetry.unknown_response_key_redacted(tool_name=...)` called once per unknown key.
 - Response shape that satisfies a type-driven entry's `response_model`: walked via `walk_model_schema(response_model, with_values=True)`; `Sensitive`-annotated fields substituted.
-- Summarizer raises → `AuditIntegrityError` chained from the underlying exception. The test must assert the new exception is registered in `TIER_1_ERRORS` (spec §9 RSK-03 / §4.5).
-- Summarizer returns non-`str` (returns `dict`, `int`, `None`, etc.) → `AuditIntegrityError` with a typed message.
+- Summarizer raises → `AuditIntegrityError` chained from the underlying exception. **Immediately before `raise AuditIntegrityError(...)`, call `telemetry.summarizer_error(tool_name=tool_name)` so the counter fires before the request dies (rev-2 M.8).** The test MUST assert `telemetry.summarizer_error_calls` was called once in this path; use `NoopRedactionTelemetry` to capture it. The test must also assert the new exception is registered in `TIER_1_ERRORS` (spec §9 RSK-03 / §4.5).
+- Summarizer returns non-`str` (returns `dict`, `int`, `None`, etc.) → `AuditIntegrityError` with a typed message. **Same `telemetry.summarizer_error(tool_name=tool_name)` call immediately before `raise` (rev-2 M.8).** Test asserts `telemetry.summarizer_error_calls` was called.
 - Manifest entry missing for `tool_name` → `AuditIntegrityError`.
 
-Commit: `feat(composer/redaction): redact_tool_call_response with fixed-sentinel and crash discipline (§4.2.6, closes M2 M3 W5 W6)`.
+**Implementation note (rev-2 M.8):** The summarizer-error wiring must precede EVERY `raise AuditIntegrityError(...)` site reached via a summarizer failure (exception OR non-str return). Pattern:
+
+```python
+# summarizer raised or returned non-str
+telemetry.summarizer_error(tool_name=tool_name)  # counter BEFORE raise
+raise AuditIntegrityError(f"Summarizer for {tool_name!r} ...") from exc
+```
+
+The same pattern applies in Task 8 (`redact_tool_call_arguments` full implementation) which also has summarizer code paths.
+
+Commit: `feat(composer/redaction): redact_tool_call_response with fixed-sentinel, crash discipline, summarizer_error counter (§4.2.4, §4.2.6, closes M2 M3 W5 W6, M.8)`.
 
 ---
 
@@ -918,13 +1104,13 @@ Generalises the tracer-bullet (Task 4) impl to handle:
 - Type-driven entries: walks via `walk_model_schema(argument_model, with_values=True)`; substitutes `Sensitive`-marked nodes.
 - Declarative entries: walks `arguments` by `policy.sensitive_argument_keys`; missing keys are no-ops; present keys are summarized or sentinel-substituted.
 - Manifest entry missing → `AuditIntegrityError` (registry-consistency violation; the registry-equality adequacy assertion would normally catch this at CI, but the runtime walker must still crash if it is reached).
-- Summarizer raises → `AuditIntegrityError` (same discipline as Task 7).
-- Summarizer returns non-`str` → `AuditIntegrityError`.
+- Summarizer raises → `AuditIntegrityError` (same discipline as Task 7; call `telemetry.summarizer_error(tool_name=tool_name)` immediately before `raise` per rev-2 M.8).
+- Summarizer returns non-`str` → `AuditIntegrityError` (same `telemetry.summarizer_error` wiring).
 - Telemetry: `manifest_dispatch(tool_name=..., shape=...)` called once per invocation.
 
-TDD test set covers every cell of the §4.2.6 disposition table. The Task 4 tracer-bullet tests stay green throughout (they exercise the type-driven branch on `set_source`).
+TDD test set covers every cell of the §4.2.6 disposition table. The Task 4 tracer-bullet tests stay green throughout (they exercise the type-driven branch on `set_source`). Test assertions for summarizer-error paths must verify `telemetry.summarizer_error_calls` was called (using `NoopRedactionTelemetry`).
 
-Commit: `feat(composer/redaction): redact_tool_call_arguments full impl (§4.2.6)`.
+Commit: `feat(composer/redaction): redact_tool_call_arguments full impl with summarizer_error counter (§4.2.6, rev-2 M.8)`.
 
 ---
 
@@ -945,7 +1131,7 @@ Commit: `test(composer/redaction): adequacy guard registry-manifest set equality
 
 ---
 
-## Task 10: Adequacy guard — assertion 2 (per-entry shape walk)
+## Task 10: Adequacy guard — assertion 2 (per-entry shape walk) + assertion 5 (`extra="forbid"`)
 
 **Files:**
 
@@ -954,11 +1140,10 @@ Commit: `test(composer/redaction): adequacy guard registry-manifest set equality
 Implements the per-entry shape walk per spec §4.4.2:
 
 - For each manifest entry: walk `argument_model` (and `response_model`) via the shared iterator; assert each `TraversalNode` either has a `_SensitiveMarker` or is a scalar/non-redaction-eligible field.
-- For declarative entries: assert `policy` is internally consistent (already enforced by `__post_init__`; the guard re-asserts as defense in depth) AND assert `policy.sensitive_argument_keys ⊆ <documented argument-key set>` for the tool, where the documented set is collected by AST inspection of the handler function in `tools.py`.
+- For declarative entries: assert `policy` is internally consistent: `sensitive_argument_keys ⊆ known_response_keys ∪ argument_summarizers.keys()` and no orphan summarizers. **DO NOT perform AST inspection of handler source** (rev-2 M_adequacy_mechanical_enforcement M.3). AST inspection is implementation coupling — any handler using `args = arguments; args['x']`, destructuring, or helper delegation evades the scan. Tools requiring mechanical key-coverage guarantees MUST be promoted to type-driven Pydantic argument models with `extra="forbid"`.
+- **Fifth assertion — `extra="forbid"` on type-driven entries (rev-2 M.2):** For every type-driven manifest entry, assert `entry.argument_model.model_config.get("extra") == "forbid"`. This prevents the `arguments_canonical` / walker discrepancy described in spec §4.4.2.
 
-The AST-inspection helper is non-trivial. It uses `ast.parse(open(tools.py).read())` and walks `ast.Subscript` nodes whose `value` is `Name(id="arguments")` with `slice` literal `str`. Test the helper on a known fixture: a 5-line dummy handler function with three `arguments["x"]` literals.
-
-Commit: `test(composer/redaction): adequacy guard per-entry shape walk (§4.4.2, closes B2)`.
+Commit: `test(composer/redaction): adequacy guard per-entry shape walk + extra=forbid assertion (§4.4.2, closes B2, M.2, M.3)`.
 
 ---
 
@@ -984,17 +1169,20 @@ Commit: `test(composer/redaction): adequacy guard mass-copy uniqueness (§4.4.4,
 
 - Modify: `tests/unit/web/composer/test_adequacy_guard.py`
 - Create: `tests/unit/web/composer/redaction_policy_snapshot.json`
-- Create: `scripts/composer/bootstrap_redaction_snapshot.py`
+- Create: `scripts/cicd/bootstrap_redaction_snapshot.py` (**NOT** `scripts/composer/` — that directory does not exist; rev-2 m_script_dir_missing fix; `scripts/cicd/` is the existing CI helper location alongside `enforce_tier_model.py`)
 
 **Steps:**
 
-- [ ] Implement `_entry_hash(name, entry)` per spec §4.4.3 with the broadened coverage (every entry, not only declarative).
-- [ ] Implement `bootstrap_redaction_snapshot.py`: reads `MANIFEST`, computes the snapshot, writes the JSON file. Idempotent.
+- [ ] Implement `_entry_hash(name, entry)` per spec §4.4.3 with the broadened coverage (every entry, not only declarative). Include `sensitive_path_count` as a field in each snapshot entry (for the direction-aware label gate in Task 18 to use without needing a live Python run).
+- [ ] Implement `scripts/cicd/bootstrap_redaction_snapshot.py`: reads `MANIFEST`, computes the snapshot (including `sensitive_path_count`), writes the JSON file. Idempotent. No `mkdir -p scripts/composer/` step required.
 - [ ] The snapshot file at this task is *empty / not yet committed*. The test asserts `{name: _entry_hash(name, e) for name, e in MANIFEST.items()} == json.load(open(snapshot_path))`. Bootstrap is run at the end of Task 16 once all manifest entries exist; a pre-merge run regenerates the snapshot to capture the final state.
 - [ ] Test: confirm a removed `Sensitive()` annotation flips the hash for a type-driven entry.
 - [ ] Test: confirm a renamed key in `sensitive_argument_keys` flips the hash for a declarative entry.
+- [ ] **Hash-semantics tests (rev-2 BLOCKER_C):**
+  - Test: replacing a summarizer with a new function object flips the hash.
+  - Test (documents known false-negative): closing over a module-level variable, computing hash, mutating the variable WITHOUT replacing the summarizer, recomputing hash — assert the hash is UNCHANGED. Test docstring MUST say: "This is a known false-negative class; see spec §4.2.3 / §4.4.3. In-place mutation of closure-captured state does not flip the hash."
 
-Commit: `test(composer/redaction): adequacy guard policy-hash snapshot (§4.4.3, closes M9 W12)`.
+Commit: `test(composer/redaction): adequacy guard policy-hash snapshot + hash-semantics tests (§4.4.3, closes M9 W12, BLOCKER_C)`.
 
 ---
 
@@ -1011,20 +1199,21 @@ Commit: `test(composer/redaction): adequacy guard policy-hash snapshot (§4.4.3,
 Per-tool sub-task shape (repeated three times):
 
 - [ ] Read the handler. Document every `arguments["key"]` and `arguments.get("key")` site.
-- [ ] Define the Pydantic argument model, mirroring the existing required-paths schema. Annotate sensitive fields with `Sensitive[T]`. For `create_blob` and `update_blob`, the `content` field is `Annotated[str, Sensitive(summarizer=lambda b: f"<inline-blob:{len(b)}-bytes>")]`.
+- [ ] Define the Pydantic argument model, mirroring the existing required-paths schema. Set `model_config = ConfigDict(extra="forbid")` (rev-2 M.1). Annotate sensitive fields with `Sensitive[T]`. For `create_blob` and `update_blob`, the `content` field is `Annotated[str, Sensitive(summarizer=lambda b: f"<inline-blob:{len(b)}-bytes>")]`.
 - [ ] Add the manifest entry: `MANIFEST["create_blob"] = ToolRedaction(argument_model=CreateBlobArgumentsModel)` etc.
-- [ ] Promote the handler: `validated = Model.model_validate(arguments)`; replace `arguments["k"]` with `validated.k`.
+- [ ] Promote the handler: validate with `try: validated = Model.model_validate(arguments) except pydantic.ValidationError as exc: raise ToolArgumentError(...) from exc` (pattern from Task 4 and `tools.py:2668–2801`). Replace `arguments["k"]` with `validated.k`.
 - [ ] If `_TOOL_REQUIRED_PATHS[tool]` is now redundant, remove it; otherwise document why both are kept.
-- [ ] TDD per-tool test: ValidationError raised on invalid inputs; redaction substitutes Sensitive fields correctly.
+- [ ] TDD per-tool test: assert `ToolArgumentError` raised on invalid inputs (with `pydantic.ValidationError` as `__cause__`); redaction substitutes Sensitive fields correctly. (Pattern from Task 4 — do not duplicate the rationale here; cite Task 4.)
+- [ ] **Blob-tool summarizer type-variability step (rev-2 M_blob_summarizer_type_variability M.10):** Verify the summarizer for each blob tool's sensitive field handles every value type the Pydantic model admits. For `create_blob.content` (typed `str`): test the summarizer against `None` (verify `extra="forbid"` rejects it at model_validate; do NOT test the summarizer directly on `None`), empty string, ASCII string, non-ASCII string. The lambda `lambda b: f"<inline-blob:{len(b)}-bytes>"` is only safe for `str` — since `extra="forbid"` and Pydantic validates `content: str`, `None` or other types will be rejected before the summarizer runs; document this reasoning in the test.
 - [ ] Existing integration tests for the tool pass.
 
-Commit per tool (three commits): `feat(composer/redaction): promote {tool} to type-driven manifest entry`. Reviewer note in body: "Sensitive[T] promotion wave 2/4."
+Commit per tool (three commits): `feat(composer/redaction): promote {tool} to type-driven manifest entry`. Reviewer note in body: "Sensitive[T] promotion wave 2/4; extra=forbid; ToolArgumentError wrap pattern per Task 4."
 
 ---
 
 ## Task 14 (Sensitive[T] Wave 3): promote `set_pipeline`, `apply_pipeline_recipe`
 
-Same shape as Task 13 but for two tools that have more complex argument schemas. `set_pipeline` is special-cased in `execute_tool()` at `tools.py:5436` (it can own `source.inline_blob`); the promotion must preserve that branch.
+Same shape as Task 13 (including `model_config = ConfigDict(extra="forbid")`, the `try/except ValidationError → ToolArgumentError` wrap pattern, and `ToolArgumentError`-not-`ValidationError` test assertions) but for two tools that have more complex argument schemas. `set_pipeline` is special-cased in `execute_tool()` at `tools.py:5436` (it can own `source.inline_blob`); the promotion must preserve that branch.
 
 **Special caution for `set_pipeline`:** it has an extended dispatch signature (with `session_engine` / `session_id` kwargs). The Pydantic model only validates the LLM-supplied `arguments` dict; the kwargs are wired by the dispatcher at `execute_tool()` and are not user-facing. Document this in the model's docstring.
 
@@ -1041,7 +1230,7 @@ Two commits, one per tool.
 
 **Investigation step.** Read `_handle_patch_source_options` (`tools.py`), `_handle_patch_node_options`, `_handle_patch_output_options`. Determine whether their `options` dicts can carry secret-shaped values (e.g. credentials, paths). Three outcomes:
 
-1. The option dict is plugin-defined and unconstrained at composition time → promote to a Pydantic argument model where `options` is `Annotated[dict[str, Any], Sensitive(summarizer=...)]`.
+1. The option dict is plugin-defined and unconstrained at composition time → promote to a Pydantic argument model where `options` is `Annotated[dict[str, Any], Sensitive(summarizer=...)]`. Use `model_config = ConfigDict(extra="forbid")` and the `try/except ValidationError → ToolArgumentError` wrap pattern from Task 4.
 2. The option dict is purely structural (e.g. `{"name": "x"}`) → declarative manifest entry suffices; defer to Task 16.
 3. Mixed — some keys are sensitive, some aren't → declarative entry with explicit `sensitive_argument_keys` is the cleanest representation.
 
@@ -1054,7 +1243,7 @@ Surface the finding (with citations to the handler source) before promoting; if 
 **Files:**
 
 - Modify: `src/elspeth/web/composer/redaction.py` (populate `MANIFEST` for the remaining ~29-31 tools)
-- Run: `scripts/composer/bootstrap_redaction_snapshot.py` to regenerate snapshot
+- Run: `scripts/cicd/bootstrap_redaction_snapshot.py` to regenerate snapshot
 
 **Subdivision per plan-review W10.** This task is split into seven sub-tasks, one per registry, plus an inline-tools sub-task. Each sub-task is a separate commit so reviewers can read each registry's entries in isolation.
 
@@ -1093,7 +1282,7 @@ The full enumeration (37 tools total minus those promoted in Tasks 4, 13, 14, 15
   - Commit.
 
 - [ ] **16-final: regenerate snapshot.**
-  - Run `scripts/composer/bootstrap_redaction_snapshot.py`.
+  - Run `scripts/cicd/bootstrap_redaction_snapshot.py`.
   - Verify `tests/unit/web/composer/test_adequacy_guard.py` is now fully green (all four assertions pass).
   - Commit the snapshot file: `chore(composer/redaction): bootstrap redaction policy hash snapshot`.
 
@@ -1107,16 +1296,16 @@ After Task 16 the manifest covers every tool name in the dispatch registries; th
 
 - Create: `tests/unit/web/composer/test_compose_loop_unknown_tool_name.py`
 
-**Why this task.** Plan-review M7 / W3. The previous plan introduced a `MissingToolError` crash for LLM-hallucinated tool names. Spec rev-5 §4.2.6 makes this an explicit boundary discipline: an LLM-supplied unknown tool name is Tier-3 input and must route through `ARG_ERROR + continue`, not crash. The compose loop already does this at `service.py:1836-1870` (the existing pattern for invalid JSON arguments and missing required paths); this test pins the behaviour so a future change cannot regress.
+**Why this task.** Plan-review M7 / W3. The previous plan introduced a `MissingToolError` crash for LLM-hallucinated tool names. Spec rev-5 §4.2.6 / §5.7.5 makes this an explicit boundary discipline: an LLM-supplied unknown tool name is Tier-3 input and must route through `_failure_result` + continue, not crash. The dispatcher's fall-through at `tools.py:5481` already handles this. The compose loop records the failure and continues. The JSON-decode / non-dict pre-dispatch gate at `service.py:1836–1870` is a separate, earlier site for malformed arguments — NOT the site for unknown tool names.
 
 **Steps:**
 
-- [ ] **Read the existing fall-through.** `tools.py:5481` is the dispatcher's final `return _failure_result(state, f"Unknown tool: {tool_name}")` — the dispatcher returns a failure `ToolResult`, it does not raise. The compose-loop's handling of this result is at `service.py` somewhere AFTER `service.py:1836–1870` (the JSON-decode/non-dict ARG_ERROR pre-dispatch sites); read the surrounding code to find where the failure `ToolResult` flows. Document the actual error_class and audit-status the recorder receives in this path.
+- [ ] **Read the existing fall-through.** `tools.py:5481` is the dispatcher's final `return _failure_result(state, f"Unknown tool: {tool_name}")` — the dispatcher returns a failure `ToolResult`, it does not raise. Read the compose-loop's handling of this `ToolResult` (after `service.py:2480`'s `ToolArgumentError` catch block) to find where the failure `ToolResult` flows. Document the actual error_class and audit-status the recorder receives in this path.
 - [ ] **Construct the test scenario.** A compose-loop scenario where the LLM emits a tool call with `function.name = "this_tool_does_not_exist"`. Drive it through the actual `execute_tool` + recorder path (no production-bypass shortcut per spec §8.6 / CLAUDE.md test-path-integrity).
-- [ ] **Assert the observed behaviour.** The dispatcher returns a failure `ToolResult` (no exception propagates). The audit recorder records the invocation; the test pins **whatever `status` and `error_class` the recorder actually receives** (read the dispatcher / compose-loop integration first; do not guess). The LLM receives a `role=tool` message with the failure payload and the loop continues.
+- [ ] **Assert the observed behaviour with escalation rule (rev-2 m_task17_pinning_risk).** The dispatcher returns a failure `ToolResult` (no exception propagates). Verify the actual audit status produced for an unknown tool name. **If the actual status is `ARG_ERROR` (or the compose-loop constant for this condition), pin it.** If the actual status differs from `ARG_ERROR`, **report to operator — do not pin a non-`ARG_ERROR` status without escalation.** The LLM receives a `role=tool` message with the failure payload and the loop continues.
 - [ ] **Do not introduce a `MissingToolError` exception class.** The dispatcher's existing failure-`ToolResult` path is the correct shape; the test pins it. The previous plan's `MissingToolError` design treated Tier-3 input as a Tier-1 crash condition (closed by plan-review M7 / W3 and spec §4.2.6 / §5.7.5).
 
-Commit: `test(composer): pin compose-loop unknown-tool-name ARG_ERROR routing (closes M7 W3)`.
+Commit: `test(composer): pin compose-loop unknown-tool-name routing via tools.py:5481 (closes M7 W3)`.
 
 ---
 
@@ -1126,7 +1315,7 @@ Commit: `test(composer): pin compose-loop unknown-tool-name ARG_ERROR routing (c
 
 - Create: `.github/workflows/composer-redaction-gate.yml`
 
-**Workflow shape:**
+**Workflow shape (rev-2 BLOCKER_B direction-aware rewrite):**
 
 ```yaml
 name: composer-redaction-gate
@@ -1152,20 +1341,60 @@ jobs:
           git fetch origin main
           if git diff --quiet origin/main HEAD -- tests/unit/web/composer/redaction_policy_snapshot.json; then
             echo "snapshot_changed=false" >> "$GITHUB_OUTPUT"
+            echo "direction=none" >> "$GITHUB_OUTPUT"
           else
             echo "snapshot_changed=true" >> "$GITHUB_OUTPUT"
+            # Direction-aware check: sum sensitive_path_count across changed entries
+            # The snapshot includes a sensitive_path_count field per entry (Task 12).
+            # Compare PR head vs main to detect weakening (count decreased).
+            python3 - <<'PYEOF'
+import json, os, subprocess, sys
+
+base_json = subprocess.check_output(["git", "show", "origin/main:tests/unit/web/composer/redaction_policy_snapshot.json"])
+head_json = open("tests/unit/web/composer/redaction_policy_snapshot.json").read()
+
+base = json.loads(base_json)
+head = json.loads(head_json)
+
+changed_entries = {k for k in set(base) | set(head) if base.get(k) != head.get(k)}
+base_total = sum(base.get(k, {}).get("sensitive_path_count", 0) for k in changed_entries)
+head_total = sum(head.get(k, {}).get("sensitive_path_count", 0) for k in changed_entries)
+
+if head_total < base_total:
+    direction = "weaken"
+else:
+    direction = "strengthen"
+
+print(f"Changed entries: {sorted(changed_entries)}")
+print(f"Base sensitive_path_count (changed entries): {base_total}")
+print(f"Head sensitive_path_count (changed entries): {head_total}")
+print(f"Direction: {direction}")
+
+with open(f"{os.environ['GITHUB_OUTPUT']}", 'a') as f:
+    f.write(f"direction={direction}\n")
+PYEOF
           fi
-      - name: Assert label on snapshot change
+      - name: Assert correct direction label on snapshot change
         if: steps.diff.outputs.snapshot_changed == 'true'
         env:
           PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          DIRECTION: ${{ steps.diff.outputs.direction }}
         run: |
-          echo "$PR_LABELS" | jq -e 'any(. == "policy-strengthen" or . == "policy-weaken-justified")' \
-            || (echo "::error::redaction snapshot changed; PR must carry policy-strengthen OR policy-weaken-justified label"; exit 1)
-          if echo "$PR_LABELS" | jq -e 'any(. == "policy-weaken-justified")' >/dev/null; then
+          if [ "$DIRECTION" = "weaken" ]; then
+            # Weakening: ONLY policy-weaken-justified is valid
+            echo "$PR_LABELS" | jq -e 'any(. == "policy-weaken-justified")' \
+              || (echo "::error::snapshot diff shows coverage reduction (weakening); PR must carry policy-weaken-justified label, not policy-strengthen"; exit 1)
             echo "$PR_BODY" | grep -F "Redaction policy weakening rationale" \
               || (echo "::error::policy-weaken-justified label requires a 'Redaction policy weakening rationale' section in the PR body"; exit 1)
+            echo "$PR_LABELS" | jq -e 'any(. == "policy-strengthen")' \
+              && (echo "::error::snapshot diff shows weakening; policy-strengthen is incorrect for this change"; exit 1) || true
+          else
+            # Strengthening or neutral: ONLY policy-strengthen is valid
+            echo "$PR_LABELS" | jq -e 'any(. == "policy-strengthen")' \
+              || (echo "::error::redaction snapshot changed; PR must carry policy-strengthen label"; exit 1)
+            echo "$PR_LABELS" | jq -e 'any(. == "policy-weaken-justified")' \
+              && (echo "::error::snapshot diff shows no coverage reduction; do not use policy-weaken-justified for this change"; exit 1) || true
           fi
 ```
 
@@ -1173,8 +1402,13 @@ jobs:
 
 - [ ] The workflow runs only when one of the redaction-relevant paths changes; this is a soft scoping (a PR that changes the manifest implicitly changes the snapshot, so the workflow runs).
 - [ ] No CODEOWNERS file is created.
-- [ ] Add a `tests/unit/web/composer/test_label_gate_yaml.py` that parses the YAML and asserts the labels list is exact (`["policy-strengthen", "policy-weaken-justified"]`) — defends against silent label drift.
-- [ ] Document the workflow in `docs/guides/redaction-policy-changes.md` (NEW file): when to use which label, what the rationale section must contain, escalation path.
+- [ ] Add a `tests/unit/web/composer/test_label_gate_yaml.py` that parses the YAML and asserts the workflow is direction-aware (checks for `direction` output and separate weaken/strengthen branches).
+- [ ] Add `tests/unit/web/composer/test_label_gate_direction.py` covering all four combinations (rev-2 BLOCKER_B):
+  - (a) weakening diff + `policy-weaken-justified` → pass
+  - (b) weakening diff + `policy-strengthen` → fail with direction-mismatch message
+  - (c) strengthening diff + `policy-strengthen` → pass
+  - (d) strengthening diff + `policy-weaken-justified` → fail with "no coverage reduction" message
+- [ ] Document the workflow in `docs/guides/redaction-policy-changes.md` (NEW file): when to use which label, what the rationale section must contain, escalation path, single-owner governance note.
 
 Commit: `ci(composer/redaction): label-gate workflow (§4.4.5, closes B4 W9 M10)`.
 
@@ -1196,6 +1430,108 @@ Commit: `ci(composer/redaction): label-gate workflow (§4.4.5, closes B4 W9 M10)
   ```
 
 - [ ] Adequacy guard sanity bound (closes M4): time the guard's runtime; assert it completes in under 5 seconds for the current 37-tool set. The bound is order-of-magnitude, not a tight budget — flake-source guidance per spec §1.4.
+
+- [ ] **Hypothesis completeness property test (rev-2 BLOCKER_A MAJOR-4).** Create `tests/unit/web/composer/test_redaction_completeness_property.py`:
+
+  ```python
+  """Hypothesis property test: no Sensitive[T] field value reaches json.dumps output.
+
+  This is the load-bearing test that proves no Sensitive[T] field value reaches
+  serialization unchanged. Closes rev-2 BLOCKER_A (quality MAJOR-4).
+  settings(max_examples=50, deadline=None) for stable CI execution.
+  """
+  from __future__ import annotations
+
+  import json
+
+  import hypothesis
+  import hypothesis.strategies as st
+  import pytest
+  from hypothesis import given, settings
+
+  from elspeth.web.composer.redaction import MANIFEST, walk_model_schema, _SensitiveMarker
+  from elspeth.web.composer.redaction import redact_tool_call_arguments
+  from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+
+
+  @pytest.mark.parametrize(
+      "tool_name",
+      [name for name, entry in MANIFEST.items() if entry.argument_model is not None],
+  )
+  def test_no_sensitive_value_in_json_output(tool_name: str) -> None:
+      """For each type-driven manifest entry, verify no raw Sensitive field value
+      appears in the serialized output of redact_tool_call_arguments."""
+      entry = MANIFEST[tool_name]
+      model = entry.argument_model
+
+      @given(st.from_type(model))  # type: ignore[arg-type]
+      @settings(max_examples=50, deadline=None)
+      def check(payload: object) -> None:
+          args = payload.model_dump()
+          result = redact_tool_call_arguments(tool_name, args, telemetry=NoopRedactionTelemetry())
+          serialized = json.dumps(result, sort_keys=True)
+
+          # For each Sensitive-annotated field, the raw value must NOT appear.
+          sensitive_nodes = [
+              n for n in walk_model_schema(model, with_values=False)
+              if any(isinstance(m, _SensitiveMarker) for m in n.metadata)
+          ]
+          for node in sensitive_nodes:
+              raw_value = args
+              for part in node.path.split("."):
+                  if isinstance(raw_value, dict):
+                      raw_value = raw_value.get(part)
+                  else:
+                      break
+              if isinstance(raw_value, str) and raw_value:
+                  assert raw_value not in serialized, (
+                      f"Sensitive value at path {node.path!r} appeared in serialized output "
+                      f"for tool {tool_name!r}. Redaction failed to cover this path."
+                  )
+
+      check()
+  ```
+
+- [ ] **Walker-guard parity test (rev-2 M_walker_guard_parity).** Create `tests/unit/web/composer/test_walker_guard_parity.py`:
+
+  ```python
+  """Behavioural parity: walk_model_schema(M, with_values=False) == walk_model_schema(M, with_values=True)
+  path-sets for each manifest entry's argument model.
+
+  Pins the structural coupling claim: walker and guard cannot diverge in path
+  enumeration or marker detection because they share one iterator. Closes
+  rev-2 M_walker_guard_parity (quality MAJOR-3 + systems MINOR-1).
+  """
+  from __future__ import annotations
+
+  import pytest
+
+  from elspeth.web.composer.redaction import MANIFEST, TraversalNode, _SensitiveMarker, walk_model_schema
+
+
+  @pytest.mark.parametrize(
+      "tool_name",
+      [name for name, entry in MANIFEST.items() if entry.argument_model is not None],
+  )
+  def test_walker_guard_path_sets_are_identical(tool_name: str) -> None:
+      entry = MANIFEST[tool_name]
+      model = entry.argument_model
+
+      guard_nodes = list(walk_model_schema(model, with_values=False))
+      walker_nodes = list(walk_model_schema(model, with_values=True))
+
+      def has_sensitive(node: TraversalNode) -> bool:
+          return any(isinstance(m, _SensitiveMarker) for m in node.metadata)
+
+      guard_paths = {(n.path, has_sensitive(n)) for n in guard_nodes}
+      walker_paths = {(n.path, has_sensitive(n)) for n in walker_nodes}
+
+      assert guard_paths == walker_paths, (
+          f"Walker and guard path-sets diverged for tool {tool_name!r}.\n"
+          f"Only in guard: {guard_paths - walker_paths}\n"
+          f"Only in walker: {walker_paths - guard_paths}"
+      )
+  ```
 
 - [ ] Property test for the summarizer contract (spec §9 RSK-03): for every committed summarizer, generate ~10000 representative inputs (Hypothesis strategies match the field's declared type) and assert (i) the summarizer returns `str` for every input; (ii) the summarizer does not raise. Failure is a system bug; the test is a regression net.
 
@@ -1243,20 +1579,30 @@ Phase 2 ships the manifest-keyed redaction primitive, promotes a wave of ~6–8 
 - Loose-dict elimination for the ~29–31 tools that take declarative manifest entries in Phase 2.
 - Transition to an organisation-owned repo (would unlock CODEOWNERS team routing as defense-in-depth atop the label-gate; filed as a follow-up).
 
+**Phase 3 preconditions established in Phase 2 (rev-2 BLOCKER_A A.6):**
+
+- Phase 3 MUST call `redact_tool_call_arguments` only AFTER MANIFEST membership is confirmed for the dispatched tool name. `redact_tool_call_arguments` raises `AuditIntegrityError` on missing tool names — reserved for system-internal registry violations, NOT for Tier-3 LLM hallucinations. Unknown LLM-supplied tool names must route through `tools.py:5481` (`_failure_result`) BEFORE redaction is attempted.
+- Phase 3 MUST NOT thread redacted arguments through `begin_dispatch` / `begin_dispatch_or_arg_error` at `service.py:1930`. `arguments_canonical` retains raw LLM arguments per spec §4.2.8 posture (a). Redacted views land in `chat_messages` only.
+- Phase 3 must verify Tier-1 access controls on the MCP JSONL sidecar and `BufferingRecorder` surfaces before wiring.
+
 ## Test plan
 
-- All §8.1 redaction-policy unit tests pass; all six container-shape tests in `test_walk_model_schema.py` pass; tracer-bullet test (`test_redact_set_source.py`) passes; per-tool ValidationError-routing tests pass for all promoted tools; adequacy-guard four assertions pass; policy-hash snapshot equals committed file; compose-loop unknown-tool-name routing test pins existing ARG_ERROR behaviour; label-gate workflow YAML parses and the labels list is exact.
+- All §8.1 redaction-policy unit tests pass; all ten container-shape tests in `test_walk_model_schema.py` pass (original six plus four rev-2 additions); tracer-bullet test (`test_redact_set_source.py`) including serialization boundary canary test passes; per-tool `ToolArgumentError`-routing tests (with `pydantic.ValidationError` as `__cause__`) pass for all promoted tools; adequacy-guard five assertions pass (including `extra="forbid"` check); policy-hash snapshot equals committed file; hash-semantics tests (replacement flips hash; closure-state mutation does not) pass; compose-loop unknown-tool-name routing test pins `tools.py:5481` fall-through behaviour; direction-aware label-gate workflow passes direction-misclassification tests; Hypothesis completeness property test passes; walker-guard parity test passes.
 
 ## Phase 2 Done When
 
-- [ ] `tests/unit/web/composer/test_adequacy_guard.py` passes all four assertions.
-- [ ] Every promoted tool's dispatch validates via `Model.model_validate(arguments)` with `ValidationError` routing to `ARG_ERROR` per `service.py:1836-1870`.
+- [ ] `tests/unit/web/composer/test_adequacy_guard.py` passes all five assertions (registry-manifest set equality; per-entry shape walk; mass-copy uniqueness; policy-hash snapshot equality; `extra="forbid"` on type-driven entries).
+- [ ] Every promoted tool's dispatch validates via `Model.model_validate(arguments)`; promoted handlers catch `pydantic.ValidationError` and re-raise as `ToolArgumentError` (per `tools.py:2668–2801` pattern); `ToolArgumentError` is caught at `service.py:2480` and routes to `ARG_ERROR`.
 - [ ] Every manifest entry is either type-driven (`argument_model` set) or declarative (`policy` set), never both, never neither.
+- [ ] Every type-driven argument model sets `model_config = ConfigDict(extra="forbid")`.
 - [ ] `redaction_policy_snapshot.json` covers all manifest entries (type-driven + declarative) and is committed.
-- [ ] `composer-redaction-gate.yml` workflow exists and the labels list is `["policy-strengthen", "policy-weaken-justified"]` exactly.
+- [ ] `composer-redaction-gate.yml` workflow is direction-aware: computes `sensitive_path_count` per entry, rejects `policy-strengthen` on a weakening diff and `policy-weaken-justified` on a strengthening diff.
 - [ ] `composer.redaction.summarizer_errors_total` SLO threshold is asserted to be 0 in production telemetry config (RSK-03).
 - [ ] `composer.redaction.unknown_response_key_total` and `composer.redaction.manifest_dispatch_total` counters fire in a representative integration scenario.
-- [ ] Compose-loop unknown-tool-name routing test confirms LLM-supplied unknown tool names route to `ARG_ERROR` via the existing path.
+- [ ] Compose-loop unknown-tool-name routing test confirms LLM-supplied unknown tool names route via `tools.py:5481` `_failure_result` fall-through; the loop records and continues.
+- [ ] **Integration scenario pinned end-to-end (rev-2 BLOCKER_A).** At least one test exercises `redact_tool_call_arguments("set_source", args_with_canary, telemetry=NoopRedactionTelemetry())` → `json.dumps` → asserts (a) canary absent, (b) key present, (c) redacted value matches summarizer output.
+- [ ] **Hypothesis completeness property test passes (rev-2 BLOCKER_A).** `test_redaction_completeness_property.py` with `settings(max_examples=50, deadline=None)`.
+- [ ] **Walker-guard parity test passes (rev-2 M_walker_guard_parity).** `test_walker_guard_parity.py` asserts identical path-sets between `with_values=False` and `with_values=True` modes for each manifest entry's argument model.
 - [ ] No `.github/CODEOWNERS` file is created in this PR.
 - [ ] Project gate is green (pytest unit + integration; mypy; ruff; tier-model; freeze-guard).
 - [ ] Operator has been surfaced the deliverables and the PR-open decision is awaiting confirmation.
@@ -1273,7 +1619,7 @@ Phase 2 ships the manifest-keyed redaction primitive, promotes a wave of ~6–8 
 | **B4** Unconditional `gh pr create` | Task 20 (operator-confirmed; plan ends without PR open) |
 | **W1** ComposerTool name collision | No `ComposerTool` name introduced; Task 2's manifest type is `ToolRedaction` |
 | **W2** Calendar synchronicity | Task 5 (no `last_reviewed_iso`); content-keyed snapshot |
-| **W3** MissingToolError on Tier-3 hallucination | Task 17 (pins existing ARG_ERROR routing; no MissingToolError introduced) |
+| **W3** MissingToolError on Tier-3 hallucination | Task 17 (pins `tools.py:5481` `_failure_result` fall-through; no MissingToolError introduced; escalation rule: report to operator if actual status is not ARG_ERROR) |
 | **W4** Untyped telemetry | Task 3 (typed Protocol; no `None` default) |
 | **W5** Non-str summarizer return | Task 7 (assertion in walker; AuditIntegrityError) |
 | **W6** Length-disclosure sentinel | Task 7 (fixed sentinel `<redacted-unknown-response-key>`) |
@@ -1287,3 +1633,18 @@ Phase 2 ships the manifest-keyed redaction primitive, promotes a wave of ~6–8 
 | **M2** sorted() on non-string keys | Task 12 (`_entry_hash` sorts only `str`-typed key sets; manifest keys are tool names of `dict[str, ToolRedaction]`) |
 | **M3** Double JSON parse | Task 8 (walker accepts already-decoded `dict[str, Any]`; compose loop decodes once at `service.py:1838`) |
 | **M4** Adequacy guard CI scaling | Task 19 (sanity bound: < 5s for 37 tools) |
+
+**Appendix B — rev-2 plan-review finding closure (cross-reference to spec §12.3)**
+
+| Finding ID | Closed by |
+|---|---|
+| **BLOCKER_A** ValidationError routing + arguments_canonical + serialization boundary | Task 4 (ToolArgumentError wrap pattern + serialization boundary canary test); Tasks 13–15 (same pattern, citing Task 4); Task 19 (Hypothesis completeness property test + walker-guard parity test); Files NOT touched (composer_audit.py note); spec §4.2.6, §4.2.8, §11 Phase 3 preconditions |
+| **BLOCKER_B** Label-gate direction not enforced | Task 18 (direction-aware workflow with sensitive_path_count); test_label_gate_direction.py (4 combination tests) |
+| **BLOCKER_C** Summarizer purity / false-negative class | Task 12 (hash-semantics tests: replacement flips hash; closure-state mutation does not — with documented false-negative docstring); spec §4.2.3, §4.4.3 |
+| **M_adequacy_mechanical_enforcement** (M.1–M.4) | M.1: Tasks 4, 13, 14 (extra=forbid on all promoted models); M.2: Task 10 (fifth adequacy assertion for extra=forbid); M.3: Task 10 (AST inspection removed; declarative consistency check only); M.4: Task 1 (four additional walker container-shape tests) |
+| **M_telemetry_implementation** (M.6–M.8) | Task 3 (module-level create_counter() + .add() pattern; OtelRedactionTelemetry rewired; summarizer_error counter wired in Protocol and walker) |
+| **M_walker_guard_parity** (M.5) | Task 19 (test_walker_guard_parity.py) |
+| **M_governance_single_owner** (M.9) | docs/guides/redaction-policy-changes.md (new file with single-owner note) |
+| **M_blob_summarizer_type_variability** (M.10) | Task 13 (explicit type-variability verification step) |
+| **m_script_dir_missing** | Task 12 (script relocated to scripts/cicd/bootstrap_redaction_snapshot.py) |
+| **m_citation_hygiene** | Tasks 4, 17, 18 commit comments; spec §4.2.6, §4.4.2, §5.7.5, §8.1, §11, §12.2 |

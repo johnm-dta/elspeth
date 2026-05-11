@@ -1,0 +1,178 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { getGuided, respondGuided } from "./client";
+import type {
+  GetGuidedResponse,
+  GuidedRespondRequest,
+  GuidedRespondResponse,
+} from "@/types/guided";
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Minimal but well-formed GetGuidedResponse fixture. */
+function makeGetGuidedResponse(): GetGuidedResponse {
+  return {
+    guided_session: {
+      step: "step_1_source",
+      history: [],
+      terminal: null,
+    },
+    next_turn: null,
+    terminal: null,
+    composition_state: null,
+  };
+}
+
+/** Minimal GuidedRespondRequest — all optional fields null. */
+function makeRespondRequest(): GuidedRespondRequest {
+  return {
+    chosen: ["foo"],
+    edited_values: null,
+    custom_inputs: null,
+    accepted_step_index: null,
+    edit_step_index: null,
+    control_signal: null,
+  };
+}
+
+/** Minimal GuidedRespondResponse — same shape as GetGuidedResponse. */
+function makeRespondResponse(): GuidedRespondResponse {
+  return {
+    guided_session: {
+      step: "step_2_sink",
+      history: [
+        {
+          step: "step_1_source",
+          turn_type: "single_select",
+          payload_hash: "abc123",
+          response_hash: "def456",
+          emitter: "server",
+        },
+      ],
+      terminal: null,
+    },
+    next_turn: {
+      type: "single_select",
+      step_index: 1,
+      payload: { options: ["csv", "json"] },
+    },
+    terminal: null,
+    composition_state: null,
+  };
+}
+
+// ── getGuided ────────────────────────────────────────────────────────────────
+
+describe("client.getGuided", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("calls GET /api/sessions/:id/guided and returns parsed body", async () => {
+    const body = makeGetGuidedResponse();
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => body,
+    } as Response);
+
+    const result = await getGuided("sess-1");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/sessions/sess-1/guided");
+    expect(init.method).toBe("GET");
+    // GET has no Content-Type
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+    expect(result).toEqual(body);
+  });
+
+  it("propagates AbortSignal to fetch", async () => {
+    const controller = new AbortController();
+    // Mock fetch to throw an AbortError when called — this simulates the
+    // native behaviour when the signal fires.  We don't actually abort here;
+    // we just confirm the signal was forwarded by inspecting the call args.
+    const abortError = new DOMException("Aborted", "AbortError");
+    fetchSpy.mockRejectedValue(abortError);
+
+    await expect(getGuided("sess-abort", controller.signal)).rejects.toThrow(
+      "Aborted",
+    );
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(controller.signal);
+  });
+});
+
+// ── respondGuided ────────────────────────────────────────────────────────────
+
+describe("client.respondGuided", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("calls POST /api/sessions/:id/guided/respond and returns parsed body", async () => {
+    const body = makeRespondResponse();
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => body,
+    } as Response);
+
+    const request = makeRespondRequest();
+    const result = await respondGuided("sess-1", request);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/sessions/sess-1/guided/respond");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+      "application/json",
+    );
+    expect(init.body).toBe(JSON.stringify(request));
+    expect(result).toEqual(body);
+  });
+
+  it("propagates AbortSignal to fetch", async () => {
+    const controller = new AbortController();
+    const abortError = new DOMException("Aborted", "AbortError");
+    fetchSpy.mockRejectedValue(abortError);
+
+    const request = makeRespondRequest();
+    await expect(
+      respondGuided("sess-abort", request, controller.signal),
+    ).rejects.toThrow("Aborted");
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it("throws ApiError (does not swallow) when server returns 500", async () => {
+    // parseResponse throws an ApiError-shaped object for non-2xx responses.
+    // Use 500 to avoid the 401 interceptor which dynamically imports authStore.
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      json: async () => ({ detail: "boom" }),
+    } as Response);
+
+    const request = makeRespondRequest();
+    // Confirm the error propagates — we don't swallow it in respondGuided.
+    await expect(respondGuided("sess-err", request)).rejects.toMatchObject({
+      status: 500,
+      detail: "boom",
+    });
+  });
+});

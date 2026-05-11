@@ -62,6 +62,7 @@ from elspeth.web.composer.guided.state_machine import (
 from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
     handle_step_2_5_recipe_apply,
+    handle_step_2_sink,
 )
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
@@ -1581,30 +1582,38 @@ async def _dispatch_guided_respond(
     Decision table:
 
     +-------------------+---------------------------+---------------------------+
-    | step              | current_turn_type          | action                    |
+    | current_step      | guided.step (after adv.)  | action                    |
     +-------------------+---------------------------+---------------------------+
-    | STEP_1_SOURCE     | SINGLE_SELECT             | emit schema_form (source) |
-    | STEP_1_SOURCE     | SCHEMA_FORM               | handle_step_1_source;     |
-    |                   |                           | advance to STEP_2;        |
+    | STEP_1_SOURCE     | STEP_1_SOURCE             | intra-step; turn_type     |
+    |   (intra)         | (no advance fired)        | decides next turn:        |
+    |                   |                           | SINGLE_SELECT →           |
+    |                   |                           |   emit SCHEMA_FORM        |
+    |                   |                           | SCHEMA_FORM →             |
+    |                   |                           |   handle_step_1_source;   |
+    |                   |                           |   advance to STEP_2;      |
+    |                   |                           |   emit SINGLE_SELECT      |
+    | STEP_1_SOURCE     | STEP_2_SINK               | INSPECT_AND_CONFIRM path; |
+    |   (advancing)     | (step_advance fired)      | handle_step_1_source;     |
     |                   |                           | emit SINGLE_SELECT (sink) |
-    | STEP_1_SOURCE     | INSPECT_AND_CONFIRM       | handle_step_1_source;     |
-    |                   |                           | (step_advance already      |
-    |                   |                           |  advanced to STEP_2);     |
-    |                   |                           | emit SINGLE_SELECT (sink) |
-    | STEP_2_SINK       | SINGLE_SELECT             | emit schema_form (sink)   |
-    | STEP_2_SINK       | SCHEMA_FORM               | emit multi_select_custom  |
-    | STEP_2_SINK       | MULTI_SELECT_WITH_CUSTOM  | handle_step_2_sink;       |
-    |                   |                           | (step_advance advanced     |
-    |                   |                           |  to STEP_2_5);            |
+    | STEP_2_SINK       | STEP_2_SINK               | intra-step; turn_type     |
+    |   (intra)         | (no advance fired)        | decides next turn:        |
+    |                   |                           | SINGLE_SELECT →           |
+    |                   |                           |   emit SCHEMA_FORM        |
+    |                   |                           | SCHEMA_FORM →             |
+    |                   |                           |   emit MULTI_SELECT       |
+    |                   |                           | MULTI_SELECT →            |
+    |                   |                           |   unreachable here        |
+    |                   |                           |   (_advance_step_2 always |
+    |                   |                           |   fires for this type)    |
+    | STEP_2_SINK       | STEP_2_5_RECIPE_MATCH     | MULTI_SELECT path;        |
+    |   (advancing)     | (step_advance fired)      | handle_step_2_sink;       |
     |                   |                           | match_recipe;             |
-    |                   |                           | emit recipe_offer or      |
-    |                   |                           | advance to STEP_3         |
-    | STEP_2_5_RECIPE   | RECIPE_OFFER chosen=accept| handled by step_advance   |
-    |                   |                           | (terminal set);           |
-    |                   |                           | caller detects terminal   |
-    | STEP_2_5_RECIPE   | RECIPE_OFFER              | handle_step_2_5 + apply   |
-    |                   | chosen=build_manually     | (step_advance advanced     |
-    |                   |                           |  to STEP_3)               |
+    |                   |                           | emit RECIPE_OFFER or None |
+    | STEP_2_5_RECIPE   | STEP_2_5_RECIPE_MATCH     | RECIPE_OFFER chosen=      |
+    |   (intra/term.)   | (accept: no advance)      | accept → recipe apply;    |
+    |                   |                           | terminal=COMPLETED        |
+    | STEP_2_5_RECIPE   | STEP_3_TRANSFORMS         | RECIPE_OFFER chosen=      |
+    |   (advancing)     | (step_advance fired)      | build_manually → step 3   |
     +-------------------+---------------------------+---------------------------+
 
     ``step_advance`` has already run; ``guided.step`` may already point to the
@@ -1652,8 +1661,17 @@ async def _dispatch_guided_respond(
         if current_turn_type is TurnType.SCHEMA_FORM:
             # User submitted source options. Call handle_step_1_source to commit.
             edited = turn_response["edited_values"] or {}
+            # "plugin" is required — absence is Tier-3 evidence that the client
+            # sent a malformed payload; reject with 422 rather than fabricating
+            # a value from state.source (inference from adjacent fields is
+            # fabrication per CLAUDE.md §Three-Tier Trust Model).
+            if "plugin" not in edited:
+                raise HTTPException(
+                    status_code=422,
+                    detail="schema_form response must include 'plugin' in edited_values.",
+                )
             resolved = SourceResolved(
-                plugin=str(edited.get("plugin", state.source.plugin if state.source else "")),
+                plugin=str(edited["plugin"]),
                 options=dict(edited.get("options", {})),
                 observed_columns=tuple(edited.get("observed_columns", [])),
                 sample_rows=tuple(dict(r) for r in edited.get("sample_rows", [])),
@@ -1716,8 +1734,16 @@ async def _dispatch_guided_respond(
     if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
         # step_advance advanced the step. Build SourceResolved from edited_values.
         edited = turn_response["edited_values"] or {}
+        # "plugin" is required — absence is a malformed client payload; reject
+        # with 422 rather than fabricating an empty string (same boundary rule
+        # as the SCHEMA_FORM branch above).
+        if "plugin" not in edited:
+            raise HTTPException(
+                status_code=422,
+                detail="inspect_and_confirm response must include 'plugin' in edited_values.",
+            )
         resolved = SourceResolved(
-            plugin=str(edited.get("plugin", "")),
+            plugin=str(edited["plugin"]),
             options=dict(edited.get("options", {})),
             observed_columns=tuple(edited.get("observed_columns", [])),
             sample_rows=tuple(dict(r) for r in edited.get("sample_rows", [])),
@@ -1816,53 +1842,12 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-        if current_turn_type is TurnType.MULTI_SELECT_WITH_CUSTOM:
-            # step_advance already advanced the step to STEP_2_5 (via
-            # _advance_step_2). The new sink is encoded in step_advance's
-            # updated session (guided.step_2_result). Run match_recipe.
-            # Emit recipe_offer if matched; else advance to STEP_3 (out of scope).
-            if guided.step_2_result is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Dispatcher invariant: step_2_result must be set after MULTI_SELECT_WITH_CUSTOM advance.",
-                )
-            source = guided.step_1_result
-            sink = guided.step_2_result
-            if source is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Dispatcher invariant: step_1_result must be set before step 2 completes.",
-                )
-            recipe_match = match_recipe(source, sink)
-            if recipe_match is not None:
-                next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
-                new_record = TurnRecord(
-                    step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                    turn_type=TurnType(next_turn["type"]),
-                    payload_hash=stable_hash(next_turn["payload"]),
-                    response_hash=None,
-                    emitter="server",
-                )
-                emit_turn_emitted(
-                    recorder,
-                    step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                    turn_type=TurnType(next_turn["type"]),
-                    payload_hash=stable_hash(next_turn["payload"]),
-                    payload_payload_id="",
-                    emitter="server",
-                    composition_version=state.version,
-                    actor=user_id,
-                )
-                guided = _replace(guided, history=(*guided.history, new_record))
-                return state, guided, next_turn
-
-            # No recipe match — advance silently to Step 3 (chain solver).
-            # Step 3 is deferred to Phase 4; return no next_turn.
-            return state, guided, None
-
     # --- STEP_2_SINK → STEP_2_5 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
-    # This branch handles the case where step_advance advanced the step AND
-    # we're now at STEP_2_5, but the turn_response is for MULTI_SELECT_WITH_CUSTOM.
+    # step_advance sets guided.step=STEP_2_5_RECIPE_MATCH and populates
+    # guided.step_2_result for every MULTI_SELECT_WITH_CUSTOM response, so the
+    # intra-step branch (current_step==guided.step==STEP_2_SINK) for this turn
+    # type is structurally unreachable — _advance_step_2 always fires.
+    # This is the ONLY reachable MULTI_SELECT_WITH_CUSTOM dispatch point.
     if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
         # step_advance already set guided.step_2_result and advanced to STEP_2_5.
         if guided.step_1_result is None or guided.step_2_result is None:
@@ -1872,6 +1857,25 @@ async def _dispatch_guided_respond(
             )
         source = guided.step_1_result
         sink = guided.step_2_result
+
+        # Commit the sink to CompositionState.outputs via handle_step_2_sink.
+        # step_advance (pure) encoded the sink in guided.step_2_result but did
+        # NOT call _execute_set_output — that side-effect is our responsibility.
+        sink_handler_result = handle_step_2_sink(
+            state=state,
+            session=guided,
+            resolved=sink,
+            catalog=catalog,
+            data_dir=data_dir,
+        )
+        if not sink_handler_result.tool_result.success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Step 2 sink commit failed: {sink_handler_result.tool_result}",
+            )
+        state = sink_handler_result.state
+        guided = sink_handler_result.session
+
         recipe_match = match_recipe(source, sink)
         if recipe_match is not None:
             next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
@@ -1895,6 +1899,7 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
+        # No recipe match — Step 3 (chain solver) is deferred to Phase 4.
         return state, guided, None
 
     # --- STEP_2_5_RECIPE_MATCH turns ------------------------------------
@@ -3534,6 +3539,54 @@ def create_session_router() -> APIRouter:
             composition_state=_state_response(copied_state) if copied_state else None,
         )
 
+    def _build_get_guided_turn(
+        state: Any,
+        guided: Any,
+        *,
+        catalog: Any,
+    ) -> Any | None:
+        """Build the initial turn payload for the current guided step.
+
+        Called exclusively by ``get_guided`` to determine ``next_turn`` in the
+        response.  Each step has one canonical "initial" turn that is
+        deterministically rebuildable from ``(state, guided, catalog)`` alone:
+
+        - STEP_1_SOURCE: ``build_initial_step_1_turn`` (single_select or
+          inspect_and_confirm based on blob state; no blob facts on GET).
+        - STEP_2_SINK: ``build_step_2_single_select_turn`` (sink plugin list).
+        - STEP_2_5_RECIPE_MATCH: ``build_step_2_5_recipe_offer_turn`` if a
+          recipe was matched and recorded; ``None`` if no recipe matched
+          (session stays at this step but no turn exists — Phase 4 path).
+        - STEP_3_TRANSFORMS: not yet implemented; returns ``None``.
+
+        SCHEMA_FORM and MULTI_SELECT_WITH_CUSTOM turns are intra-step turns
+        emitted by POST /respond.  They are NOT re-emitted by GET /guided
+        because the chosen plugin name (needed to rebuild SCHEMA_FORM) is not
+        stored in the session.  GET /guided always returns the *initial* turn
+        for the current step, not the latest intra-step turn.  Clients that
+        need to restore intra-step context must re-submit the prior response.
+
+        Returns:
+            A ``Turn`` TypedDict, or ``None`` when the step has no rebuildable
+            initial turn (STEP_3 / no-recipe path).
+        """
+        step = guided.step
+        if step is GuidedStep.STEP_1_SOURCE:
+            return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
+        if step is GuidedStep.STEP_2_SINK:
+            return build_step_2_single_select_turn(catalog)
+        if step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+            # A recipe_offer TurnRecord exists iff a recipe was matched.
+            # Reconstruct by re-running match_recipe (deterministic).
+            if guided.step_1_result is not None and guided.step_2_result is not None:
+                recipe_match = match_recipe(guided.step_1_result, guided.step_2_result)
+                if recipe_match is not None:
+                    return build_step_2_5_recipe_offer_turn(recipe_match)
+            # No recipe matched — no initial turn for this step.
+            return None
+        # STEP_3_TRANSFORMS and beyond: not yet implemented (Phase 4).
+        return None
+
     @router.get("/{session_id}/guided", response_model=GetGuidedResponse)
     async def get_guided(
         session_id: UUID,
@@ -3587,20 +3640,21 @@ def create_session_router() -> APIRouter:
                 None,
             )
 
-            # Always build the turn (deterministic from current state + catalog).
-            # Building is cheap and allows idempotent re-fetch to return the
-            # same payload without needing a payload store.
-            turn = build_initial_step_1_turn(
-                state,
-                blob_inspection=None,
-                catalog=catalog,
-            )
-            turn_type = TurnType(turn["type"])
-            payload_hash = stable_hash(turn["payload"])
+            # Build the initial turn for the current step (deterministic from
+            # state + catalog).  Returns None for steps with no rebuildable
+            # initial turn (STEP_3 / no-recipe STEP_2_5 path) or when the
+            # session is already terminal.
+            turn = _build_get_guided_turn(state, guided, catalog=catalog) if guided.terminal is None else None
+            turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
+            payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
 
             state_record_out: CompositionStateRecord | None = state_record
-            if existing_record_for_step is None:
-                # First fetch for this step: record TurnRecord, persist, emit audit.
+            if existing_record_for_step is None and turn is not None:
+                # First fetch for this step AND a turn exists: record TurnRecord,
+                # persist, emit audit.  When turn is None (terminal state, STEP_3,
+                # or no-recipe STEP_2_5 path) there is no turn to record.
+                assert turn_type is not None  # guaranteed: turn is not None → type set
+                assert payload_hash is not None  # guaranteed: turn is not None → hash set
                 new_record = TurnRecord(
                     step=current_step,
                     turn_type=turn_type,
@@ -3685,7 +3739,9 @@ def create_session_router() -> APIRouter:
                     type=turn["type"],
                     step_index=turn["step_index"],
                     payload=dict(turn["payload"]),
-                ),
+                )
+                if turn is not None
+                else None,
                 terminal=TerminalStateResponse(
                     kind=terminal.kind.value,
                     reason=terminal.reason.value if terminal.reason is not None else None,
@@ -3819,7 +3875,7 @@ def create_session_router() -> APIRouter:
                         recorder,
                         prev=GuidedStep(args["prev_step"]),
                         drop_reason=TerminalReason(args["drop_reason"]),
-                        validation_result=args.get("validation_result"),
+                        validation_result=args["validation_result"],
                         composition_version=state.version,
                         actor=user.user_id,
                     )
@@ -3834,7 +3890,7 @@ def create_session_router() -> APIRouter:
             next_turn: Any | None = None
             settings = request.app.state.settings
             data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
-            session_engine = getattr(request.app.state, "session_engine", None)
+            session_engine = request.app.state.session_engine
 
             if terminal is None:
                 state, guided, next_turn = await _dispatch_guided_respond(

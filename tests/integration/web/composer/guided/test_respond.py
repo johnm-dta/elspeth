@@ -269,11 +269,16 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
 
         body = _respond(
             composer_test_client,
             session_id,
-            edited_values={"path": "out.jsonl", "schema": {"mode": "observed"}},
+            edited_values={
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
         )
 
         assert body["next_turn"]["type"] == "multi_select_with_custom"
@@ -290,10 +295,15 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
         _respond(
             composer_test_client,
             session_id,
-            edited_values={"path": "out.jsonl", "schema": {"mode": "observed"}},
+            edited_values={
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
         )
 
         # Confirm required fields — "label" matches the classify-rows recipe's keyword set
@@ -304,7 +314,11 @@ class TestStep2IntraStep:
                 "outputs": [
                     {
                         "plugin": "json",
-                        "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": output_path,
+                            "schema": {"mode": "observed"},
+                            "collision_policy": "auto_increment",
+                        },
                         "required_fields": ["text", "label"],
                         "schema_mode": "observed",
                     }
@@ -318,6 +332,57 @@ class TestStep2IntraStep:
         payload = body["next_turn"]["payload"]
         assert "recipe_name" in payload
         assert payload["recipe_name"] == "classify-rows-llm-jsonl"
+
+    def test_multi_select_response_commits_sink_to_state(self, composer_test_client: TestClient) -> None:
+        """M1: MULTI_SELECT_WITH_CUSTOM → step 2.5 transition commits sink to composition_state.outputs.
+
+        Verifies C2 fix: handle_step_2_sink IS called on the MULTI_SELECT_WITH_CUSTOM
+        → step 2.5 transition.  Before the fix, state.outputs was empty because
+        handle_step_2_sink was never called; the recipe-apply path (step 2.5) would
+        then fail with a missing sink when generating YAML.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out_sink_commit.jsonl")
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+        )
+
+        # The MULTI_SELECT response that triggers step 2 → 2.5 advance.
+        body = _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "outputs": [
+                    {
+                        "plugin": "json",
+                        "options": {
+                            "path": output_path,
+                            "schema": {"mode": "observed"},
+                            "collision_policy": "auto_increment",
+                        },
+                        "required_fields": ["text", "label"],
+                        "schema_mode": "observed",
+                    }
+                ]
+            },
+        )
+
+        # Step advanced to 2.5.
+        assert body["guided_session"]["step"] == "step_2_5_recipe_match"
+
+        # Composition state must have at least one output — sink was committed.
+        cs = body["composition_state"]
+        assert cs is not None, "composition_state missing from response"
+        outputs = cs.get("outputs", {})
+        assert outputs, "composition_state.outputs is empty after MULTI_SELECT advance — handle_step_2_sink was not called (C2 regression)"
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +400,7 @@ class TestStep25RecipeAccept:
         (``_execute_set_source`` requires the path to be under {data_dir}/blobs/).
         """
         blob_id, storage_path = _seed_blob(client, session_id)
+        output_path = _outputs_path(client, "out.jsonl")
 
         _get_guided(client, session_id)
         # Step 1: pick csv
@@ -352,13 +418,20 @@ class TestStep25RecipeAccept:
         )
         # Step 2: pick json sink
         _respond(client, session_id, chosen=["json"])
-        # Step 2: fill json options
+        # Step 2: fill json options — path must be under {data_dir}/outputs/
+        # collision_policy is required by the json sink validator.
         _respond(
             client,
             session_id,
-            edited_values={"path": "out.jsonl", "schema": {"mode": "observed"}},
+            edited_values={
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
         )
-        # Step 2: declare required fields ("category" matches classify keyword)
+        # Step 2: declare required fields ("category" matches classify keyword).
+        # output_path must be under {data_dir}/outputs/ and collision_policy must
+        # be set (handle_step_2_sink calls _execute_set_output which validates).
         body = _respond(
             client,
             session_id,
@@ -366,7 +439,11 @@ class TestStep25RecipeAccept:
                 "outputs": [
                     {
                         "plugin": "json",
-                        "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": output_path,
+                            "schema": {"mode": "observed"},
+                            "collision_policy": "auto_increment",
+                        },
                         "required_fields": ["text", "category"],
                         "schema_mode": "observed",
                     }

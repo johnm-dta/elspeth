@@ -1170,53 +1170,40 @@ allow_hits:
     which is raw JSON from the DB. Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=625deb17ed7151a9
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=81efe147ebf9043e
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
+  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — options is an optional user input that may be omitted;
+    plugin is now validated with an explicit 422 check before this point.
+  safety: Missing keys fall back to defaults (empty dict); no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=212a41c4dd1330f5
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=db8091fb82705ce0
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
+  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — observed_columns is an optional user input that may be
+    omitted.
+  safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=e6471c792d6b7650
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=56171ebdf6748afd
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
+  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — sample_rows is an optional user input that may be omitted.
+  safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=ea2fdfb5ce4ae744
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=f67da515c3fdaeb6
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
+  reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — options is an optional user input that may be
+    omitted; plugin is now validated with an explicit 422 check before this point.
+  safety: Missing key falls back to empty dict; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=5fb0545704a4c843
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=3ef7b32f42b6cfc3
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
+  reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — observed_columns is an optional user input that
+    may be omitted.
+  safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=c298f7b070018c34
+- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=36c1a9b7fc65f39d
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
-  expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=c96e8f4bfc007521
-  owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
-  expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=42a6a255408e9d43
-  owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — plugin, options, observed_columns, and sample_rows are
-    all optional user inputs that may be omitted.
-  safety: Missing keys fall back to defaults (empty dict/tuple/list); no fabricated values
+  reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — sample_rows is an optional user input that may
+    be omitted.
+  safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
 - key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=e0a68f3bba01a2e8
   owner: web-sessions
@@ -1505,18 +1492,6 @@ allow_hits:
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path; FP
     changed after ruff-format.
   safety: Same as prior fork_from_message R6 entry.
-  expires: null
-- key: web/sessions/routes.py:R1:create_session_router:post_guided_respond:fp=a8fe360358c3e6f0
-  owner: web-sessions
-  reason: args.get("validation_result") on emit_turn_answered args dict — validation_result is an optional audit field not
-    required for every turn answer.
-  safety: Returns None on miss; emit_turn_answered handles None validation_result gracefully.
-  expires: null
-- key: web/sessions/routes.py:R2:create_session_router:post_guided_respond:fp=246249499fc36720
-  owner: web-sessions
-  reason: getattr(request.app.state, "session_engine", None) — session_engine is not a required startup attribute (it is set
-    in app.py and test fixtures, but may be absent in minimal test harnesses that don't exercise recipe apply).
-  safety: None is passed to handle_step_2_5_recipe_apply which returns a failure result if session_engine is None; no crash.
   expires: null
 - key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=0bd91249bb52f851
   owner: web-sessions

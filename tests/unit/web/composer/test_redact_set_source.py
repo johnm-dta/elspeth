@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Annotated
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from elspeth.web.composer.redaction import (
     MANIFEST,
     REDACTED_BLOB_SOURCE_PATH,
+    Sensitive,
     SetSourceArgumentsModel,
+    _redact_via_schema,
     _summarize_set_source_options,
     redact_tool_call_arguments,
 )
@@ -178,3 +181,66 @@ def test_serialization_boundary_canary_not_in_json_output() -> None:
         f"Serialized: {serialized!r}"
     )
     assert "options" in serialized  # key preserved, value redacted
+
+
+# ---------------------------------------------------------------------------
+# Task-4 → Task-8 staging boundary: NotImplementedError pin tests
+# ---------------------------------------------------------------------------
+
+
+def test_redact_via_schema_raises_for_sensitive_field_without_summarizer() -> None:
+    """Pin the Task-4 → Task-8 staging boundary.
+
+    _redact_via_schema is intentionally tracer-bullet scope (set_source only,
+    top-level Sensitive fields with summarizers).  When a field is declared
+    ``Annotated[T, Sensitive()]`` WITHOUT a summarizer, the tracer-bullet impl
+    raises ``NotImplementedError`` so Task 8's scope is mechanically explicit at
+    the code level.  A future Task 8 refactor must not silently turn this into
+    'returns wrong answer'.
+
+    Raise site: redaction.py line ~553 —
+        ``if marker.summarizer is None: raise NotImplementedError(...)``
+    Condition triggered: top-level field with a ``_SensitiveMarker`` whose
+    ``summarizer`` attribute is ``None`` (i.e., ``Sensitive()`` called with no
+    keyword argument).
+    """
+
+    class _StubModel(BaseModel):
+        secret: Annotated[str, Sensitive()]  # no summarizer
+
+    validated = _StubModel.model_validate({"secret": "x"})
+    with pytest.raises(NotImplementedError):
+        _redact_via_schema(validated, _StubModel)
+
+
+def test_redact_via_schema_raises_for_nested_sensitive_path() -> None:
+    """Pin the Task-4 → Task-8 staging boundary (nested path).
+
+    _redact_via_schema is intentionally tracer-bullet scope (set_source only,
+    top-level Sensitive fields).  When a Sensitive marker is encountered at a
+    NESTED path — e.g., a nested BaseModel field whose subfield carries
+    ``Sensitive(summarizer=...)`` — ``walk_model_schema`` yields a node with
+    path ``"payload.inner_secret"`` (containing a dot).  The tracer-bullet
+    impl raises ``NotImplementedError`` rather than silently performing a
+    shallow substitution.  Task 8 generalises; this test pins the staging
+    boundary so Task 8 cannot silently regress to 'returns wrong answer'.
+
+    Raise site: redaction.py line ~558 —
+        ``if "." in node.path or "[" in node.path or "{" in node.path:
+            raise NotImplementedError(...)``
+    Condition triggered: node path ``"payload.inner_secret"`` contains ``"."``
+    because ``inner_secret`` is a field on a nested BaseModel (``_InnerModel``)
+    reached via the ``payload`` field of the outer model.  The inner field MUST
+    carry a summarizer so that the no-summarizer raise (line ~553) does not fire
+    first — i.e., we reach the nested-path guard cleanly.
+    """
+
+    class _InnerModel(BaseModel):
+        inner_secret: Annotated[str, Sensitive(summarizer=lambda v: "<redacted>")]
+
+    class _OuterModel(BaseModel):
+        payload: _InnerModel
+
+    validated = _OuterModel.model_validate({"payload": {"inner_secret": "x"}})
+    with pytest.raises(NotImplementedError):
+        _redact_via_schema(validated, _OuterModel)

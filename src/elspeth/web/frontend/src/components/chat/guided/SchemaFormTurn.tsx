@@ -52,6 +52,13 @@
 //   "single source of truth" convention -- the same error set drives both the inline
 //   error message and the continue-disabled predicate.
 //
+// EMPTY OPTIONAL NUMERIC:
+//   Submitted as null per the Tier 2 type contract -- an empty string in a numeric
+//   slot would violate the schema-declared type at the trust boundary. Null preserves
+//   the "edited_values includes EVERY property" invariant while letting the server
+//   distinguish "user explicitly cleared" from "field was never offered." Required
+//   numeric fields are blocked by canSubmit so they never reach this branch.
+//
 // STATE SPLIT:
 //   formState: { values, errors } -- owned by the form; submitted on Continue.
 //   advancedExpanded: boolean     -- owned separately; orthogonal to form values.
@@ -258,6 +265,12 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
   const fieldInputId = (name: string) => `${reactId}-field-${name}`;
   const fieldHintId = (name: string) => `${reactId}-hint-${name}`;
   const fieldErrorId = (name: string) => `${reactId}-error-${name}`;
+  // Optional-fields region id: paired with the toggle button's aria-controls so
+  // assistive tech announces "expanded/collapsed <Optional fields>" not just
+  // "expanded/collapsed". Convention-setting for Task 7.9 (GuidedHistory) which
+  // is also a collapsible region -- both widgets land the WAI-ARIA pattern
+  // together rather than copying a gap.
+  const optionalSectionId = `${reactId}-optional-section`;
 
   // Partition properties into required / optional based on schema.required.
   const requiredNames = propertyNames.filter((n) => requiredFields.has(n));
@@ -370,6 +383,15 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
     // JSON-fallback fields are re-parsed here; any parse error would have
     // already been caught by hasParseErrors and canSubmit would be false, so
     // this parse is guaranteed to succeed at submit time.
+    //
+    // EMPTY OPTIONAL NUMERIC: an empty string in a number-int / number-float
+    // field is submitted as null, NOT as "" (which would violate the Tier 2
+    // type contract -- the schema declares int/float and the widget owes the
+    // declared type at the trust boundary). Required-empty numerics are
+    // already blocked by canSubmit and never reach this branch.
+    // Rationale: null preserves the "edited_values includes EVERY property"
+    // invariant documented in the file header, while letting the server
+    // distinguish "user explicitly cleared" from "field was never offered."
     const edited_values: Record<string, unknown> = {};
     for (const name of propertyNames) {
       const ft = inferFieldType(properties[name]);
@@ -378,12 +400,21 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
         // raw is the textarea string; parse it back to the structured value.
         // canSubmit guarantees no parse errors here.
         edited_values[name] = JSON.parse(raw as string);
-      } else if (ft === "number-int") {
-        const n = parseInt(raw as string, 10);
-        edited_values[name] = isNaN(n) ? raw : n;
-      } else if (ft === "number-float") {
-        const n = parseFloat(raw as string);
-        edited_values[name] = isNaN(n) ? raw : n;
+      } else if (ft === "number-int" || ft === "number-float") {
+        // Empty -> null (Tier 2 type contract). Otherwise parse to number.
+        // canSubmit guarantees required numerics are non-empty.
+        if ((raw as string) === "") {
+          edited_values[name] = null;
+        } else {
+          const n =
+            ft === "number-int"
+              ? parseInt(raw as string, 10)
+              : parseFloat(raw as string);
+          // NaN means the user typed something the input accepted but isn't a
+          // number (e.g. "1e" mid-typing). Submit null to honour the type
+          // contract -- an unparseable string would corrupt the audit trail.
+          edited_values[name] = isNaN(n) ? null : n;
+        }
       } else if (ft === "checkbox") {
         edited_values[name] = raw as boolean;
       } else {
@@ -560,13 +591,19 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
             className="guided-schema-advanced-toggle"
             onClick={() => setAdvancedExpanded((prev) => !prev)}
             aria-expanded={advancedExpanded}
+            aria-controls={optionalSectionId}
           >
             {advancedExpanded
               ? "Hide advanced"
               : `Show advanced (${optionalNames.length})`}
           </button>
           {advancedExpanded && (
-            <div className="guided-schema-optional-section">
+            <div
+              id={optionalSectionId}
+              role="region"
+              aria-label="Optional fields"
+              className="guided-schema-optional-section"
+            >
               {optionalNames.map((name, idx) =>
                 renderField(name, idx === 0),
               )}
@@ -575,13 +612,17 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
         </>
       )}
 
-      {/* Continue action */}
+      {/* Continue action.
+          aria-disabled mirrors disabled because some screen readers skip
+          disabled buttons entirely; aria-disabled keeps the announcement in
+          the AT tree while still preventing click activation. */}
       <div className="guided-schema-actions">
         <button
           type="button"
           className="guided-schema-continue-btn"
           onClick={handleContinue}
           disabled={!canSubmit}
+          aria-disabled={!canSubmit}
         >
           Continue
         </button>

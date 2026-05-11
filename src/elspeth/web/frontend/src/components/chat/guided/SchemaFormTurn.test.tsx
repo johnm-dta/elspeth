@@ -375,13 +375,11 @@ describe("required vs advanced split", () => {
 // ── 3. Prefill-vs-default precedence ─────────────────────────────────────────
 
 describe("prefill vs default precedence", () => {
-  it("shows the prefilled value for a field present in prefilled", async () => {
-    const user = userEvent.setup();
+  it("shows the prefilled value for a field present in prefilled", () => {
     renderTurn(NUMERIC_PAYLOAD);
     // mode is required and prefilled with "read"
     const select = screen.getByRole("combobox", { name: /mode/i });
     expect((select as HTMLSelectElement).value).toBe("read");
-    void user; // prevent unused-variable lint
   });
 
   it("shows the schema default for an optional field not in prefilled", async () => {
@@ -414,7 +412,6 @@ describe("prefill vs default precedence", () => {
     const textarea = screen.getByRole("textbox", { name: /tags/i }) as HTMLTextAreaElement;
     // Prefilled is ["alpha","beta"] -- should appear as JSON
     expect(JSON.parse(textarea.value)).toEqual(["alpha", "beta"]);
-    void user;
   });
 
   it("shows parseable JSON for a $ref field with no prefill and no default", async () => {
@@ -426,7 +423,6 @@ describe("prefill vs default precedence", () => {
     const textarea = screen.getByRole("textbox", { name: /nested config/i }) as HTMLTextAreaElement;
     // Pin round-trip: whatever value appears, it must be valid JSON
     expect(() => JSON.parse(textarea.value)).not.toThrow();
-    void user;
   });
 });
 
@@ -509,6 +505,37 @@ describe("submit wire shape", () => {
     expect(edited_values).toHaveProperty("tags");
     expect((edited_values as Record<string, unknown>)["tags"]).toEqual(["alpha", "beta"]);
   });
+
+  it("optional numeric field left blank submits as null, NOT empty string", async () => {
+    // Tier 2 type contract: a numeric-typed slot must not receive a string.
+    // The widget owes the schema-declared type at the trust boundary.
+    const blankNumericPayload: SchemaFormPayload = {
+      plugin: "x",
+      schema_block: {
+        type: "object",
+        properties: {
+          name: { type: "string", title: "Name" },
+          // optional integer: no default, no prefill -> initial value ""
+          batch_size: { type: "integer", title: "Batch size" },
+        },
+        required: ["name"],
+      },
+      prefilled: {},
+    };
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<SchemaFormTurn payload={blankNumericPayload} onSubmit={onSubmit} />);
+
+    // Fill the required string and continue (leaving batch_size blank)
+    await user.type(screen.getByRole("textbox", { name: /name/i }), "x");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    const { edited_values } = onSubmit.mock.calls[0][0];
+    // batch_size MUST appear (every-property invariant) but as null, not ""
+    expect(edited_values).toHaveProperty("batch_size");
+    expect((edited_values as Record<string, unknown>)["batch_size"]).toBeNull();
+    expect((edited_values as Record<string, unknown>)["batch_size"]).not.toBe("");
+  });
 });
 
 // ── 5. Continue disabled invariant ────────────────────────────────────────────
@@ -557,7 +584,7 @@ describe("Continue disabled invariant", () => {
     expect(screen.getByRole("button", { name: /continue/i })).not.toBeDisabled();
   });
 
-  it("disables Continue when all fields are optional and advanced is collapsed (all-optional schema always enabled)", () => {
+  it("all-optional schema enables Continue immediately", () => {
     // With no required fields, Continue is always enabled since there's nothing blocking
     renderTurn(ALL_OPTIONAL_PAYLOAD);
     expect(screen.getByRole("button", { name: /continue/i })).not.toBeDisabled();
@@ -624,6 +651,57 @@ describe("focus management", () => {
     // After collapse, focus goes to the toggle button
     const showBtn = screen.getByRole("button", { name: /show advanced/i });
     expect(document.activeElement).toBe(showBtn);
+  });
+});
+
+// ── 7a. WAI-ARIA contract for the advanced-toggle expand/collapse pair ──────
+
+describe("aria-controls / aria-expanded contract", () => {
+  it("toggle button's aria-controls points to the optional-fields region after expand", async () => {
+    const user = userEvent.setup();
+    renderTurn(CSV_PAYLOAD);
+    const toggle = screen.getByRole("button", { name: /show advanced/i });
+    const controlsId = toggle.getAttribute("aria-controls");
+    expect(controlsId).toBeTruthy();
+    // aria-expanded reflects collapsed state initially
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(toggle);
+    // After expand, the region with that id must exist in the DOM
+    const region = document.getElementById(controlsId!);
+    expect(region).not.toBeNull();
+    // And aria-expanded flips
+    const hideBtn = screen.getByRole("button", { name: /hide advanced/i });
+    expect(hideBtn).toHaveAttribute("aria-expanded", "true");
+    expect(hideBtn.getAttribute("aria-controls")).toBe(controlsId);
+  });
+
+  it("optional-fields region announces itself as a labelled region", async () => {
+    const user = userEvent.setup();
+    renderTurn(CSV_PAYLOAD);
+    await user.click(screen.getByRole("button", { name: /show advanced/i }));
+    // role=region + aria-label gives screen readers a discoverable landmark
+    const region = screen.getByRole("region", { name: /optional fields/i });
+    expect(region).toBeInTheDocument();
+  });
+});
+
+// ── 7b. aria-disabled belt-and-braces on Continue ───────────────────────────
+
+describe("aria-disabled mirrors disabled on Continue", () => {
+  it("Continue carries aria-disabled when canSubmit is false", () => {
+    renderTurn(CSV_PAYLOAD);
+    // path is required and empty -> Continue disabled
+    const continueBtn = screen.getByRole("button", { name: /continue/i });
+    expect(continueBtn).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("Continue drops aria-disabled when canSubmit becomes true", async () => {
+    const user = userEvent.setup();
+    renderTurn(CSV_PAYLOAD);
+    await user.type(screen.getByRole("textbox", { name: /path/i }), "/data");
+    const continueBtn = screen.getByRole("button", { name: /continue/i });
+    expect(continueBtn).toHaveAttribute("aria-disabled", "false");
   });
 });
 

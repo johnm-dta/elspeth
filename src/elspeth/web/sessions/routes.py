@@ -59,6 +59,7 @@ from elspeth.web.composer.guided.state_machine import (
     SourceResolved,
     TerminalReason,
     TurnRecord,
+    mark_solver_exhausted,
     step_advance,
 )
 from elspeth.web.composer.guided.steps import (
@@ -2043,10 +2044,80 @@ async def _dispatch_guided_respond(
                     session_id=session_id,
                 )
                 if not handler_result.tool_result.success:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Step 3 chain commit failed: {handler_result.tool_result}",
+                    # Initial commit failed. Attempt one LLM repair: feed the
+                    # validation errors back as a system-prompt addendum and
+                    # ask the LLM to produce a corrected chain.
+                    #
+                    # Validation error text is Tier 1 audit data — taken verbatim
+                    # from the ToolResult; no paraphrasing or fabrication.
+                    failed_result = handler_result.tool_result
+                    repair_context_lines = [e.message for e in failed_result.validation.errors]
+                    if not repair_context_lines and failed_result.data is not None:
+                        # No validation errors but a data-layer error message;
+                        # use it verbatim so the LLM sees the actual fault.
+                        raw_data = dict(failed_result.data)
+                        if "error" in raw_data:
+                            repair_context_lines = [str(raw_data["error"])]
+                    repair_context = "\n".join(repair_context_lines) or str(failed_result.validation)
+
+                    # Obtain source/sink from the guided session for the repair call.
+                    # Both must be non-None because Step 3 can only be reached after
+                    # Steps 1 and 2 commit successfully (dispatcher invariant).
+                    assert guided.step_1_result is not None, "repair: step_1_result missing"
+                    assert guided.step_2_result is not None, "repair: step_2_result missing"
+                    repair_proposal = await solve_chain(
+                        source=guided.step_1_result,
+                        sink=guided.step_2_result,
+                        recipe_match=None,
+                        repair_context=repair_context,
                     )
+                    repair_result = handle_step_3_chain_accept(
+                        # state is the original pre-attempt state — _execute_set_pipeline
+                        # is validate-then-mutate: on failure the state is untouched,
+                        # so handler_result.state is the same object as `state`.
+                        state=state,
+                        session=guided,
+                        proposal=repair_proposal,
+                        catalog=catalog,
+                        data_dir=data_dir,
+                        session_engine=session_engine,
+                        session_id=session_id,
+                    )
+                    if repair_result.tool_result.success:
+                        # Repair succeeded: wizard completes normally.
+                        return repair_result.state, repair_result.session, None
+
+                    # Repair also failed. Mark solver exhausted and auto-drop to freeform.
+                    # Build the validation_result dict from the repair failure (Tier 1
+                    # data — only real fields from ToolResult, no fabrication).
+                    repair_validation = repair_result.tool_result.validation
+                    validation_result_payload: dict[str, Any] | None = (
+                        {
+                            "is_valid": repair_validation.is_valid,
+                            "errors": [e.to_dict() for e in repair_validation.errors],
+                        }
+                        if repair_validation.errors
+                        else None
+                    )
+
+                    new_guided, _terminal, directives = mark_solver_exhausted(
+                        session=guided,
+                        validation_result=validation_result_payload,
+                    )
+                    for directive in directives:
+                        if directive.tool_name == "guided_dropped_to_freeform":
+                            args = dict(directive.arguments)
+                            emit_dropped_to_freeform(
+                                recorder,
+                                prev=GuidedStep(args["prev_step"]),
+                                drop_reason=TerminalReason(args["drop_reason"]),
+                                validation_result=args["validation_result"],
+                                composition_version=state.version,
+                                actor=user_id,
+                            )
+                    # Return 200 with terminal — auto-drop is a clean wizard outcome.
+                    return state, new_guided, None
+
                 # handler_result.session.terminal is COMPLETED on success.
                 return handler_result.state, handler_result.session, None
             if chosen == ["reject"]:

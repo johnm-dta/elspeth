@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from elspeth.web.composer.guided.prompts import (
+    build_repair_addendum,
     build_step_3_context_block,
     load_guided_skill,
 )
@@ -53,15 +54,31 @@ async def solve_chain(
     source: SourceResolved,
     sink: SinkResolved,
     recipe_match: RecipeMatch | None = None,
+    repair_context: str | None = None,
 ) -> ChainProposal:
     """Invoke the LLM with the guided skill, expect a propose_chain turn back.
 
     Reuses the same _litellm_acompletion path as freeform composer so audit,
     telemetry, and token accounting flow through the same plumbing.
+
+    Args:
+        source: Resolved source from Step 1.
+        sink: Resolved sink from Step 2.
+        recipe_match: Optional matched recipe hint from Step 2.5.
+        repair_context: When provided, the LLM is being asked to repair a
+            previously proposed chain that failed validation. The value must
+            be the verbatim validation error text from the failing ToolResult.
+            Appended to the system prompt as a clearly-labelled REPAIR ATTEMPT
+            block so the LLM knows to correct the named errors rather than
+            propose an independent first-pass chain.
     """
     skill = load_guided_skill()
     context_block = build_step_3_context_block(source=source, sink=sink, recipe_match=recipe_match)
-    system_prompt = f"{skill}\n\n{context_block}"
+    if repair_context is not None:
+        repair_addendum = build_repair_addendum(validation_error=repair_context)
+        system_prompt = f"{skill}\n\n{context_block}\n\n{repair_addendum}"
+    else:
+        system_prompt = f"{skill}\n\n{context_block}"
     response = await _litellm_acompletion(
         model="anthropic/claude-3.5-sonnet",
         messages=[{"role": "system", "content": system_prompt}],

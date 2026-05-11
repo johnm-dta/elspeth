@@ -13,6 +13,40 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
+def _make_propose_chain_response(plugin: str = "type_coerce") -> SimpleNamespace:
+    """Build a LiteLLM-shaped propose_chain response for the given plugin."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": plugin,
+                                                    "options": {"fields": [{"name": "price", "type": "float"}]},
+                                                    "rationale": "test rationale",
+                                                }
+                                            ],
+                                            "why": "bridge str→float for arithmetic",
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
 @pytest.mark.asyncio
 async def test_returns_chain_proposal() -> None:
     from elspeth.web.composer.guided.chain_solver import solve_chain
@@ -80,3 +114,104 @@ async def test_returns_chain_proposal() -> None:
     assert len(proposal.steps) == 1
     assert proposal.steps[0]["plugin"] == "type_coerce"
     assert proposal.why == "bridge str→float for arithmetic"
+
+
+@pytest.mark.asyncio
+async def test_repair_context_appears_in_system_prompt() -> None:
+    """solve_chain with repair_context= appends the repair addendum to the system prompt.
+
+    Verifies that the repair context is visible in the messages passed to
+    _litellm_acompletion — proving the addendum reaches the LLM.
+    """
+    from elspeth.web.composer.guided.chain_solver import solve_chain
+    from elspeth.web.composer.guided.state_machine import (
+        SinkOutputResolved,
+        SinkResolved,
+        SourceResolved,
+    )
+
+    repair_error = "plugin 'bad_plugin' not found in catalogue"
+
+    fake_response = _make_propose_chain_response()
+
+    captured_calls: list = []
+
+    async def _capture(**kwargs):  # type: ignore[no-untyped-def]
+        captured_calls.append(kwargs)
+        return fake_response
+
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        side_effect=_capture,
+    ):
+        await solve_chain(
+            source=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+            sink=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={},
+                        required_fields=("price",),
+                        schema_mode="fixed",
+                    ),
+                )
+            ),
+            repair_context=repair_error,
+        )
+
+    assert len(captured_calls) == 1
+    messages = captured_calls[0]["messages"]
+    system_content = messages[0]["content"]
+    # The repair addendum must be present verbatim.
+    assert "REPAIR ATTEMPT" in system_content
+    assert repair_error in system_content
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_without_repair_context_has_no_repair_section() -> None:
+    """solve_chain without repair_context= does not add a REPAIR ATTEMPT section."""
+    from elspeth.web.composer.guided.chain_solver import solve_chain
+    from elspeth.web.composer.guided.state_machine import (
+        SinkOutputResolved,
+        SinkResolved,
+        SourceResolved,
+    )
+
+    fake_response = _make_propose_chain_response()
+    captured_calls: list = []
+
+    async def _capture(**kwargs):  # type: ignore[no-untyped-def]
+        captured_calls.append(kwargs)
+        return fake_response
+
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        side_effect=_capture,
+    ):
+        await solve_chain(
+            source=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+            sink=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={},
+                        required_fields=("price",),
+                        schema_mode="fixed",
+                    ),
+                )
+            ),
+        )
+
+    assert len(captured_calls) == 1
+    system_content = captured_calls[0]["messages"][0]["content"]
+    assert "REPAIR ATTEMPT" not in system_content

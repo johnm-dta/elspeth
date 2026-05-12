@@ -164,6 +164,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedNextTurn: null,
         guidedTerminal: null,
       }));
+      // Auto-start guided mode.  New sessions are created with
+      // GuidedSession.initial() already attached by the backend (spec §5.2,
+      // errata C7).  startGuided's own catch block handles failures without
+      // clobbering the session we just set above.
+      void get().startGuided(session.id);
     } catch {
       set({ error: "Failed to create session. Please try again." });
     }
@@ -228,6 +233,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         api.fetchCompositionState(id),
       ]);
       set({ messages, compositionState });
+
+      // Auto-start guided mode for the selected session.
+      //
+      // Per spec §5.2 and errata C7: new sessions are created with
+      // GuidedSession.initial() already attached by the backend.  The
+      // GET /guided endpoint auto-initialises on first call and returns the
+      // current step (or terminal state for sessions that have already
+      // exited to freeform).
+      //
+      // startGuided is fire-and-forget here: its own catch block sets the
+      // error field without clobbering the session/messages/compositionState
+      // we just loaded.  ChatPanel's guided-mode discriminator falls through
+      // to the freeform surface when guidedSession is null (startup race) or
+      // when terminal.kind === "exited_to_freeform" — both safe.
+      void get().startGuided(id);
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);

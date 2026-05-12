@@ -4322,7 +4322,12 @@ def _execute_set_pipeline(
                 branches=branches,
                 policy=n.policy,
                 merge=n.merge,
-                trigger=n.trigger,
+                # ``n.trigger`` is a typed :class:`_NodeTriggerModel` (or None) per F3 —
+                # convert to a plain dict at the NodeSpec boundary because
+                # :class:`NodeSpec.trigger` is typed ``Mapping[str, Any] | None`` and
+                # is deep-frozen by ``freeze_fields("trigger")``; the freeze contract
+                # requires a Mapping, not a Pydantic model instance.
+                trigger=n.trigger.model_dump() if n.trigger is not None else None,
                 output_mode=n.output_mode,
                 expected_output_count=n.expected_output_count,
             )

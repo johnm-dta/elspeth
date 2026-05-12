@@ -1108,6 +1108,32 @@ class _SetPipelineSourceModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _NodeTriggerModel(BaseModel):
+    """Typed sub-model for ``nodes[*].trigger`` (aggregation early-batch trigger).
+
+    Mirrors the JSON schema declared at ``tools.py:735-755`` field-for-field:
+    a ``count`` row-threshold (``int | None``), a ``timeout_seconds`` wall-clock
+    threshold (``float | None``), and an optional boolean-expression
+    ``condition`` (``str | None``) evaluated over runtime batch state
+    (``row['batch_count']`` and ``row['batch_age_seconds']``).
+
+    Every field is a closed-list scalar per spec §4.4.2 — no Sensitive marker
+    is required.  The ``condition`` string is a composer-author-supplied
+    boolean expression (matches the composer's grammar discipline) and does
+    NOT carry user-data values.
+
+    ``extra="forbid"`` aligns with the JSON schema's ``additionalProperties:
+    False`` so the LLM cannot smuggle unmodelled keys past the redaction
+    boundary.
+    """
+
+    count: int | None = None
+    timeout_seconds: float | None = None
+    condition: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class _PipelineNodeModel(BaseModel):
     """Nested model for ``set_pipeline.nodes[*]``.
 
@@ -1124,20 +1150,20 @@ class _PipelineNodeModel(BaseModel):
     :func:`Field(default_factory=dict)` (matches the handler's
     ``n.get("options", {})``).
 
-    Sensitive marker on ``options`` / ``routes`` / ``trigger``
-    ----------------------------------------------------------
-    These are LLM-supplied dicts that routinely carry secret-ref markers
-    (``api_key: {"secret_ref": ...}``), filesystem paths
-    (``path: "/data/in.csv"``), prompt templates (``template: "..."``),
-    and gate route maps.  Without a Sensitive annotation the adequacy
-    guard (§4.4.2) fails closed on the inspection-resistant
-    ``dict[str, Any]`` field type; with the annotation the persistence
-    boundary collapses the field to the path-redacting canonical-JSON
-    summary that :func:`_summarize_set_source_options` already supplies
-    for source-side options.
+    Sensitive marker on ``options``
+    -------------------------------
+    ``options`` is an LLM-supplied dict that routinely carries secret-ref
+    markers (``api_key: {"secret_ref": ...}``), filesystem paths
+    (``path: "/data/in.csv"``), and prompt templates (``template: "..."``).
+    Without a Sensitive annotation the adequacy guard (§4.4.2) fails
+    closed on the inspection-resistant ``dict[str, Any]`` field type;
+    with the annotation the persistence boundary collapses the field to
+    the path-redacting canonical-JSON summary that
+    :func:`_summarize_set_source_options` already supplies for source-
+    side options.
 
     The summarizer is reused (NOT a new node-specific one) because
-    ``redact_source_storage_path`` is content-agnostic: it walks the
+    :func:`redact_source_storage_path` is content-agnostic: it walks the
     incoming dict, replaces ``path`` values when an adjacent ``blob_ref``
     is present, and leaves every other key verbatim.  That behaviour is
     correct for ``nodes[*].options`` too — if a node's options happen to
@@ -1145,6 +1171,29 @@ class _PipelineNodeModel(BaseModel):
     transform), the redaction applies.  Future work (Task 16) may
     introduce a node-shape-aware summarizer that also redacts the LLM
     prompt template field.
+
+    ``routes`` and ``trigger`` typing
+    ---------------------------------
+    ``routes`` is ``dict[str, str]``: route labels (``"true"``, ``"false"``,
+    or custom labels) → sink/connection identifier strings (per the JSON
+    schema at ``tools.py:715-722``).  The closed-list element type makes the
+    field structurally exempt from the §4.4.2 Sensitive requirement: the
+    walker descends to a ``str``-typed leaf, which is in the closed-list
+    scalar set.
+
+    ``trigger`` is a typed sub-model :class:`_NodeTriggerModel`.  Mirroring
+    the JSON schema (``tools.py:735-755``) field-for-field makes every
+    walked node a closed-list scalar, so the Sensitive requirement falls
+    away.
+
+    These two fields previously carried a Sensitive marker that satisfied
+    the adequacy guard MECHANICALLY but did no actual redaction (the shared
+    content-agnostic summarizer passes them through verbatim).  Replacing
+    the ``dict[str, Any]`` types with structural typings drops the markers
+    and strengthens boundary validation (e.g., ``routes: {"true": 42}`` is
+    now rejected at Pydantic validation instead of silently passing through
+    to become an audit fact).  See F3 in
+    ``notes/composer-phase-2-followup-prompt-F1-F6.md``.
     """
 
     id: str
@@ -1155,12 +1204,12 @@ class _PipelineNodeModel(BaseModel):
     on_error: str | None = None
     options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
     condition: str | None = None
-    routes: Annotated[dict[str, Any] | None, Sensitive(summarizer=_summarize_set_source_options)] = None
+    routes: dict[str, str] | None = None
     fork_to: list[str] | None = None
     branches: list[str] | None = None
     policy: str | None = None
     merge: str | None = None
-    trigger: Annotated[dict[str, Any] | None, Sensitive(summarizer=_summarize_set_source_options)] = None
+    trigger: _NodeTriggerModel | None = None
     output_mode: str | None = None
     expected_output_count: int | None = None
 

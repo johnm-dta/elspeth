@@ -19,8 +19,11 @@ Tests pin:
   * valid dispatch produces a working pipeline (functional smoke),
   * :func:`redact_tool_call_arguments` collapses every Sensitive surface
     (``source.options``, ``source.inline_blob.content``,
-    ``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``,
-    ``outputs[*].options``) via the declared summarizers.
+    ``nodes[*].options``, ``outputs[*].options``) via the declared
+    summarizers, and passes structurally-typed fields
+    (``nodes[*].routes``: ``dict[str, str]``; ``nodes[*].trigger``: typed
+    sub-model) through verbatim (F3 — see
+    ``notes/composer-phase-2-followup-prompt-F1-F6.md``).
 """
 
 from __future__ import annotations
@@ -395,14 +398,29 @@ def test_redaction_substitutes_inline_blob_content_via_summarizer() -> None:
 
 
 def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
-    """``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``, and
-    ``outputs[*].options`` are all collapsed by the shared summarizer.
+    """``nodes[*].options`` and ``outputs[*].options`` are collapsed by the
+    shared summarizer; ``nodes[*].routes`` and ``nodes[*].trigger`` pass
+    through verbatim under their structural typings (F3).
 
-    The adequacy guard (§4.4.2) enforces that every ``dict[str, Any]``
-    field carries a Sensitive marker; this test pins the resulting
-    persistence-boundary behaviour for each surface.
+    Two channels for two surfaces:
+
+    *  ``options`` (both node and output) is typed ``dict[str, Any]`` and
+       carries a Sensitive marker — the §4.4.2 adequacy guard's
+       inspection-resistant case.  The summarizer collapses the dict to
+       a JSON-string preview.
+
+    *  ``routes`` is ``dict[str, str]`` (route-label → sink/connection
+       identifier) and ``trigger`` is a typed :class:`_NodeTriggerModel`
+       — the §4.4.2 structural-exemption case.  No Sensitive marker is
+       needed because the walker descends to closed-list scalars
+       (``str``, ``int|None``, ``float|None``, ``str|None``).  The
+       redactor returns these fields verbatim — that's the F3 contract.
     """
     tel = NoopRedactionTelemetry()
+    # ``_CANARY_TRIGGER`` is parked on ``trigger.condition`` (the only
+    # ``str`` slot in the typed sub-model) to give the regression check a
+    # value-bearing leaf.  Putting it on ``count`` would require an int
+    # canary; ``condition`` keeps the canary as a string.
     args = {
         "source": {"plugin": "csv", "on_success": "rows"},
         "nodes": [
@@ -412,7 +430,7 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
                 "input": "rows",
                 "options": {"template": _CANARY_NODE_OPT},
                 "routes": {"true": _CANARY_ROUTES},
-                "trigger": {"every_n_rows": _CANARY_TRIGGER},
+                "trigger": {"condition": _CANARY_TRIGGER},
             }
         ],
         "edges": [],
@@ -425,19 +443,33 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
         ],
     }
     redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
-    # Each Sensitive dict collapses to a str (the summarizer's JSON output).
+    # ``options`` (Sensitive ``dict[str, Any]``) collapses to a str — the
+    # summarizer's canonical-JSON output.
     assert isinstance(redacted["nodes"][0]["options"], str)
-    assert isinstance(redacted["nodes"][0]["routes"], str)
-    assert isinstance(redacted["nodes"][0]["trigger"], str)
     assert isinstance(redacted["outputs"][0]["options"], str)
+    # ``routes`` and ``trigger`` pass through with their original shapes
+    # — structurally exempt under §4.4.2 (closed-list scalar element types).
+    assert redacted["nodes"][0]["routes"] == {"true": _CANARY_ROUTES}
+    # ``trigger`` is dumped from :class:`_NodeTriggerModel` via the
+    # redaction walker's BaseModel descent — the redacted shape carries
+    # every declared field (the absent ``count`` / ``timeout_seconds``
+    # slots surface as ``None``, matching the model defaults).  The
+    # canary lives on ``condition``; the other slots are present but
+    # null.
+    assert redacted["nodes"][0]["trigger"] == {
+        "condition": _CANARY_TRIGGER,
+        "count": None,
+        "timeout_seconds": None,
+    }
     # NB: the path-redacting summarizer does NOT redact arbitrary keys
     # (only ``path`` + ``blob_ref`` pairs), so the canary values DO
     # appear inside the summarized JSON-string by design.  The test
-    # therefore asserts the structural shape: the field type is no
-    # longer ``dict`` once redaction runs.
+    # therefore asserts the structural shape: the option-field type is no
+    # longer ``dict`` once redaction runs, and the routes/trigger fields
+    # remain typed Python containers (not collapsed strings).
     serialized = json.dumps(redacted, sort_keys=True)
     # Every canary appears exactly ONCE in the serialised output — inside
-    # its own field's JSON string, not at any other surface.
+    # its own field, not at any other surface.
     assert serialized.count(_CANARY_NODE_OPT) == 1
     assert serialized.count(_CANARY_ROUTES) == 1
     assert serialized.count(_CANARY_TRIGGER) == 1

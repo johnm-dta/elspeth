@@ -150,8 +150,8 @@
     "shape": "declarative"
   },
   "set_pipeline": {
-    "hash": "00da6f3969ebaf58b480cb69548328a3d96b0bedfefdbf7b92d887a6de5a0f5c",
-    "sensitive_path_count": 6,
+    "hash": "b6b40d081710f873910400e49073b21846085b9ffcef09f05320c991e6e401cc",
+    "sensitive_path_count": 4,
     "shape": "type_driven"
   },
   "set_source": {

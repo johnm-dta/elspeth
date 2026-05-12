@@ -1442,14 +1442,14 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=1e156e36ff948491
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=13750ad634c5ac73
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=4e40df3b7365132f
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=a208a507f69ab8df
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
@@ -1501,7 +1501,7 @@ allow_hits:
     routes Annotated[scalar, Sensitive()] arms through _has_sensitive instead so
     Sensitive markers on scalar Union arms still emit a node.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=6847db1de8104528
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=fb96e3bb449fe9a6
   owner: web-composer
   reason: Marker-class discrimination over Annotated metadata tuple — identical to
     _has_sensitive/_count_sensitive (spec §4.2.5). _SensitiveMarker is a sentinel
@@ -1511,7 +1511,7 @@ allow_hits:
     never from external input. Mismatched metadata entries fall through to the
     skip branch.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=c94b973b477e033f
+- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=501f6d7c97464118
   owner: web-composer
   reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
     the summarizer contract (spec §4.2.6) requires str return; a non-str return
@@ -1525,7 +1525,7 @@ allow_hits:
   safety: Raises AuditIntegrityError with the path and the offending type name so
     the operator can identify the misbehaving summarizer.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_policy:fp=a03e4dad269c046d
+- key: web/composer/redaction.py:R5:_redact_via_policy:fp=2788fa9ea9e657d1
   owner: web-composer
   reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
     declarative-branch counterpart of the _redact_via_schema._apply isinstance

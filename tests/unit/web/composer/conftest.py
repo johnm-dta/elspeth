@@ -76,6 +76,7 @@ from elspeth.web.composer.redaction import (
     SetSourceFromBlobArgumentsModel,
     ToolRedaction,
     _InlineBlobModel,
+    _NodeTriggerModel,
     _PipelineEdgeModel,
     _PipelineMetadataModel,
     _PipelineNodeModel,
@@ -178,12 +179,19 @@ def _pipeline_node_strategy() -> st.SearchStrategy[_PipelineNodeModel]:
         on_error=st.one_of(st.none(), st.text()),
         options=_OPTIONS_STRATEGY,
         condition=st.one_of(st.none(), st.text()),
-        routes=st.one_of(st.none(), _OPTIONS_STRATEGY),
+        # F3: ``routes`` is now ``dict[str, str]`` (route-label → sink/connection
+        # identifier); generate strings only.  ``trigger`` is a typed
+        # :class:`_NodeTriggerModel`; defer to ``st.from_type`` so future field
+        # additions to the trigger sub-model are picked up automatically.
+        routes=st.one_of(
+            st.none(),
+            st.dictionaries(st.text(min_size=1, max_size=8), st.text(max_size=16), max_size=3),
+        ),
         fork_to=st.one_of(st.none(), st.lists(st.text(), max_size=3)),
         branches=st.one_of(st.none(), st.lists(st.text(), max_size=3)),
         policy=st.one_of(st.none(), st.text()),
         merge=st.one_of(st.none(), st.text()),
-        trigger=st.one_of(st.none(), _OPTIONS_STRATEGY),
+        trigger=st.one_of(st.none(), st.from_type(_NodeTriggerModel)),
         output_mode=st.one_of(st.none(), st.text()),
         expected_output_count=st.one_of(st.none(), st.integers()),
     )

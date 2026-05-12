@@ -4564,7 +4564,18 @@ Manual: in Chrome devtools, set `prefers-reduced-motion: reduce`; verify step-ad
 ### Task 9.1: Recipe-match happy path
 
 **Files:**
-- Create: `src/elspeth/web/frontend/tests/playwright/composer-guided.spec.ts`
+- Create: `src/elspeth/web/frontend/tests/e2e/composer-guided.spec.ts`
+
+> **Plan-vs-reality drift correction (logged 2026-05-12 by Phase 9 controller):**
+> The original plan body assumed (a) the test path lives at `tests/playwright/`, (b) `data-testid="new-session"` and `data-testid="blob-upload"` exist, (c) Step 1 includes `InspectAndConfirmTurn` ("Looks right" button), and (d) ≤7 clicks suffices for the happy path. None of those held when verified empirically.
+>
+> 1. **Path:** the existing E2E suite lives at `src/elspeth/web/frontend/tests/e2e/`, not `tests/playwright/`. Patterns: `tests/e2e/helpers/api.ts` (out-of-band auth + REST), `tests/e2e/page-objects/composer-page.ts`. The `playwright.config.ts` auto-launches uvicorn (:8451) + Vite (:5173) under `webServer` with `composerSettingsEnv` isolation. Use those.
+> 2. **Selectors:** no `data-testid` exists on any guided widget (verified). Use role/text selectors (`getByRole("button", { name: "..." })`) per the existing E2E pattern. Do NOT add testids to production widgets.
+> 3. **InspectAndConfirmTurn is unreachable on the live emission path:** `routes.py:_build_get_guided_turn` hardcodes `blob_inspection=None`, so the only call site of `build_initial_step_1_turn` never takes the `inspect_and_confirm` branch. The widget's response handler exists, but the server never emits it. Filed as a follow-up. The actual happy path is `SINGLE_SELECT (source)` → `SCHEMA_FORM (source options)` → `SINGLE_SELECT (sink)` → `SCHEMA_FORM (sink options)` → `MULTI_SELECT_WITH_CUSTOM (required fields)` → `RECIPE_OFFER (Apply recipe)` → `CompletionSummary (Save and exit)`.
+> 4. **Click budget:** ≤9 clicks under the actual happy path (each SCHEMA_FORM step adds a fill-and-Continue not present in the original plan; required-fields adds an Add+Continue pair). The 30s wall-clock SLA is unchanged and still well within reach (recipe match is deterministic — zero LLM calls).
+> 5. **Backend wire-shape bugs blocked the original plan**: HTTP 422 at SchemaFormTurn submission, HTTP 500 at MultiSelectWithCustomTurn submission. Both fixed pre-Task-9.1 (commits `e05e02b2` + `a5df0b6c`).
+>
+> The pseudocode below has been rewritten against the corrected happy path. Treat it as illustrative — verify actual button labels by reading widget source or probing the running backend before locking in selectors.
 
 - [ ] **Step 1: Write the happy-path E2E**
 
@@ -4573,27 +4584,39 @@ test("guided demo path: CSV → classify-rows-llm-jsonl", async ({ page }) => {
   const start = Date.now();
   let clicks = 0;
 
-  await page.goto("/");
-  // 1. Create new session
-  await page.click('[data-testid="new-session"]'); clicks++;
-  // 2. Attach CSV blob
-  await page.setInputFiles('[data-testid="blob-upload"]', "fixtures/orders.csv");
-  // 3. Step 1: pick CSV, confirm columns
-  await page.click('button:has-text("CSV")'); clicks++;
-  await page.click('button:has-text("Looks right")'); clicks++;
-  // 4. Step 2: pick JSONL, declare required field "category"
-  await page.click('button:has-text("JSONL")'); clicks++;
-  await page.fill('[placeholder*="custom"]', "category");
-  await page.click('button:has-text("Add")');
-  await page.click('button:has-text("Continue")');
-  // 5. Step 2.5: apply recipe
-  await page.click('button:has-text("Apply recipe")'); clicks++;
-  // 6. Termination: save and exit
-  await expect(page.locator("text=Save and exit")).toBeVisible();
-  await page.click('button:has-text("Save and exit")'); clicks++;
+  // Out-of-band: create session + upload CSV blob via REST helpers in
+  // tests/e2e/helpers/api.ts (authedContext, createSession, uploadBlob).
+  // Session-create + blob-upload are NOT counted as clicks.
+  // Then navigate the SPA to the session URL.
+
+  // 1. Step 1 source: pick "csv" chip in SingleSelectTurn.
+  await page.getByRole("button", { name: /csv/i }).click(); clicks++;
+
+  // 2. Step 1 source options: SchemaFormTurn — fill required fields, Continue.
+  await page.getByLabel(/path/i).fill("/tmp/playwright-orders.csv");
+  await page.getByRole("button", { name: /continue/i }).click(); clicks++;
+
+  // 3. Step 2 sink: pick "json" (or "jsonl") chip in SingleSelectTurn.
+  await page.getByRole("button", { name: /json/i }).click(); clicks++;
+
+  // 4. Step 2 sink options: SchemaFormTurn — fill required fields, Continue.
+  await page.getByLabel(/path/i).fill("/tmp/playwright-output.jsonl");
+  await page.getByRole("button", { name: /continue/i }).click(); clicks++;
+
+  // 5. Step 2 required fields: declare "category" via custom input + Add, Continue.
+  await page.getByPlaceholder(/custom/i).fill("category");
+  await page.getByRole("button", { name: /^add$/i }).click(); clicks++;
+  await page.getByRole("button", { name: /continue/i }).click(); clicks++;
+
+  // 6. Step 2.5 recipe pre-match offer: Apply recipe.
+  await page.getByRole("button", { name: /apply recipe/i }).click(); clicks++;
+
+  // 7. Termination: CompletionSummary — Save and exit.
+  await expect(page.getByRole("button", { name: /save and exit/i })).toBeVisible();
+  await page.getByRole("button", { name: /save and exit/i }).click(); clicks++;
 
   // Demo SLA assertions
-  expect(clicks).toBeLessThanOrEqual(7); // a few more than 4 because of session creation + blob attach
+  expect(clicks).toBeLessThanOrEqual(9);  // happy path under corrected step sequence
   expect(Date.now() - start).toBeLessThan(30_000);
 });
 ```
@@ -4604,7 +4627,7 @@ test("guided demo path: CSV → classify-rows-llm-jsonl", async ({ page }) => {
 
 ```bash
 git add -u
-git commit -m "test(frontend/playwright): guided demo path E2E + SLA assertion
+git commit -m "test(frontend/e2e): guided demo path recipe-match E2E + SLA assertion
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```

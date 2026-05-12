@@ -1608,6 +1608,209 @@ def redact_tool_call_arguments(
     return _redact_via_policy(tool_name, arguments, policy, telemetry=telemetry)
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16a — _DISCOVERY_TOOLS, 12 tools).
+#
+# Every tool in ``_DISCOVERY_TOOLS`` (tools.py:5500-5513) is read-only over the
+# composer state and returns only cached/derived plugin-registry metadata,
+# validator output, or structural state summaries.  None of these handlers
+# accept LLM-supplied dict-shaped option payloads or return raw blob/secret
+# content.  Each is declared with ``handles_no_sensitive_data=True`` and a
+# distinct ``HandlesNoSensitiveDataReason`` that an auditor can read to
+# understand WHY this specific tool's argument/response surface cannot carry
+# sensitive material — copy-paste justification is rejected at CI by the
+# mass-copy uniqueness assertion (§4.4.4, Task 11).
+#
+# The §4.4.2 ``dict[str, Any]`` fail-closed rule applies only to type-driven
+# entries (Pydantic models walked via ``walk_model_schema``).  Declarative
+# entries express their argument surface through ``sensitive_argument_keys``;
+# all _DISCOVERY_TOOLS take only scalar string arguments (or no arguments
+# at all), so ``sensitive_argument_keys`` is empty for every entry here.
+# ---------------------------------------------------------------------------
+
+
+_LIST_SOURCES_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("plugin registry catalogue — cached, read-only metadata served from CatalogService",),
+    why_arguments_safe=(
+        "list_sources accepts no arguments — the JSON schema at tools.py:604 declares "
+        "an empty properties object with empty required, so the LLM cannot place any "
+        "value on this surface; the handler reads zero keys from the arguments dict."
+    ),
+    why_responses_safe=(
+        "Response is the cached source-plugin descriptor list (name + summary per plugin) "
+        "produced by CatalogService.list_sources; it is registry metadata composed at "
+        "module import time, carries no user payload, and never references credentials."
+    ),
+)
+
+
+_LIST_TRANSFORMS_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("plugin registry catalogue — cached, read-only metadata served from CatalogService",),
+    why_arguments_safe=(
+        "list_transforms accepts no arguments — the JSON schema at tools.py:609 declares "
+        "an empty properties object with empty required, so no LLM-supplied content can "
+        "reach the dispatch site; the handler reads zero keys from the arguments dict."
+    ),
+    why_responses_safe=(
+        "Response is the cached transform-plugin descriptor list (name + summary per plugin) "
+        "produced by CatalogService.list_transforms; it is registry metadata composed at "
+        "module import time, carries no operator data, and never references row content."
+    ),
+)
+
+
+_LIST_SINKS_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("plugin registry catalogue — cached, read-only metadata served from CatalogService",),
+    why_arguments_safe=(
+        "list_sinks accepts no arguments — the JSON schema at tools.py:614 declares an "
+        "empty properties object with empty required, so the LLM cannot place any value "
+        "on this surface; the handler reads zero keys from the arguments dict."
+    ),
+    why_responses_safe=(
+        "Response is the cached sink-plugin descriptor list (name + summary per plugin) "
+        "produced by CatalogService.list_sinks; it is registry metadata composed at "
+        "module import time, carries no destination credentials, and never references payload."
+    ),
+)
+
+
+_GET_PLUGIN_SCHEMA_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("plugin registry catalogue — published JSON schema definitions served from CatalogService",),
+    why_arguments_safe=(
+        "get_plugin_schema arguments are two scalar strings (plugin_type, name) selecting "
+        "a plugin in the catalogue; neither is operator-supplied content and the catalogue "
+        "rejects unknown values with ValueError surfaced as a tool-failure result."
+    ),
+    why_responses_safe=(
+        "Response is the published plugin configuration schema — a Pydantic schema dict that "
+        "names options and types but contains no operator-supplied values, no credentials, "
+        "and no row payloads; it is the same schema available via plugin documentation."
+    ),
+)
+
+
+_GET_EXPRESSION_GRAMMAR_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("gate-expression grammar reference — static reference text returned by get_expression_grammar",),
+    why_arguments_safe=(
+        "get_expression_grammar accepts no arguments — the JSON schema at tools.py:640 "
+        "declares an empty properties object with empty required, so no LLM-supplied "
+        "content can reach the dispatch site; the handler returns a constant grammar."
+    ),
+    why_responses_safe=(
+        "Response is the static gate-expression syntax reference returned by "
+        "get_expression_grammar(); it is a documentation string composed at module load "
+        "time, identical for every invocation, and carries no session or operator data."
+    ),
+)
+
+
+_EXPLAIN_VALIDATION_ERROR_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("validation-error explainer — text-pattern lookup against canned guidance strings",),
+    why_arguments_safe=(
+        "explain_validation_error accepts a single error_text scalar string the LLM "
+        "echoes back from a previous validator response; that text was itself emitted "
+        "by the validator and contains no operator-supplied row content or credentials."
+    ),
+    why_responses_safe=(
+        "Response is canned guidance text plus the matched error category; it is a "
+        "lookup against module-level guidance tables and contains no session state, "
+        "no plugin option values, and no row payload — only fix-it explanations."
+    ),
+)
+
+
+_GET_PLUGIN_ASSISTANCE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("plugin-published assistance text — registry-side guidance keyed by issue_code",),
+    why_arguments_safe=(
+        "get_plugin_assistance arguments are two scalar strings (plugin_name, issue_code) "
+        "selecting plugin-published guidance; neither carries operator data, and unknown "
+        "values surface as a tool-failure result rather than passing payload to the handler."
+    ),
+    why_responses_safe=(
+        "Response is the plugin's published guidance struct (summary, suggested_fixes, "
+        "example_before, example_after); it is documentation authored at plugin packaging "
+        "time, carries no session payload, and contains no credentials or row content."
+    ),
+)
+
+
+_LIST_MODELS_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("LLM provider model catalogue — names and counts, no credentials or completions",),
+    why_arguments_safe=(
+        "list_models accepts only an optional provider prefix string and an optional "
+        "integer limit; both are pure filtering parameters and the handler validates "
+        "them against the provider registry without touching session state or secrets."
+    ),
+    why_responses_safe=(
+        "Response is a provider summary or model-id list scoped by the provider filter; "
+        "model identifiers are public catalogue values published by the LLM providers "
+        "themselves, and the handler never includes API keys, completions, or PII."
+    ),
+)
+
+
+_LIST_RECIPES_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("pipeline recipe registry — named recipe declarations bundled at packaging time",),
+    why_arguments_safe=(
+        "list_recipes accepts no arguments — the JSON schema at tools.py:1466 declares "
+        "an empty properties object with empty required, so the LLM cannot place any "
+        "value on this surface; the handler enumerates the static recipe registry."
+    ),
+    why_responses_safe=(
+        "Response is the static recipe registry (recipe_name + slot schema per recipe) "
+        "produced by list_recipes(); recipes are bundled scaffolds composed at packaging "
+        "time and contain no operator slot values — only the slot-schema declarations."
+    ),
+)
+
+
+_GET_PIPELINE_STATE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("in-memory composition state — structural metadata about the session pipeline",),
+    why_arguments_safe=(
+        "get_pipeline_state accepts only an optional component selector string (a node id, "
+        "an output name, 'source', or a full-state alias); the handler indexes into the "
+        "composer state by this name and never echoes LLM-supplied payload into the result."
+    ),
+    why_responses_safe=(
+        "Response mirrors the operator's own composition — plugin names, node ids, and "
+        "connection wiring — already visible to the operator in the composer UI; the "
+        "redaction policy for the underlying mutation tools (set_source, set_pipeline, "
+        "patch_*_options) governs how option values reach this state in the first place."
+    ),
+)
+
+
+_PREVIEW_PIPELINE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("validation snapshot — composition-state validator output plus runtime preflight",),
+    why_arguments_safe=(
+        "preview_pipeline accepts no arguments — the JSON schema at tools.py:1296 declares "
+        "an empty properties object with empty required, so the LLM cannot place any "
+        "value on this surface; the handler reads the current composer state directly."
+    ),
+    why_responses_safe=(
+        "Response is the validation summary plus structural source/node/output overview; "
+        "validator entries name fields by path without quoting LLM-supplied option values, "
+        "and the preview does NOT execute the pipeline so no row payload is materialised."
+    ),
+)
+
+
+_DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("pre/post state diff — structural change list versus the session baseline",),
+    why_arguments_safe=(
+        "diff_pipeline accepts no arguments — the JSON schema at tools.py:1323 declares "
+        "an empty properties object with empty required, so the LLM cannot place any "
+        "value on this surface; the handler diffs current state against the baseline."
+    ),
+    why_responses_safe=(
+        "Response is the structural change-set (added/removed/modified nodes/edges/outputs) "
+        "produced by diff_states; both sides of the diff are the operator's own pipeline "
+        "composition and the diff reports field names plus before/after summaries — not "
+        "row payload — so no execution data crosses this surface."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -1615,15 +1818,92 @@ def redact_tool_call_arguments(
 # the proxy view".
 MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
     {
+        # Wave 1 (Task 4) — set_source.
         "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
+        # Wave 2 (Task 13) — blob-write tools.
         "create_blob": ToolRedaction(argument_model=CreateBlobArgumentsModel),
         "update_blob": ToolRedaction(argument_model=UpdateBlobArgumentsModel),
         "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
+        # Wave 3 (Task 14) — full-pipeline mutations.
         "set_pipeline": ToolRedaction(argument_model=SetPipelineArgumentsModel),
         "apply_pipeline_recipe": ToolRedaction(argument_model=ApplyPipelineRecipeArgumentsModel),
+        # Wave 4 (Task 15) — option-patch tools.
         "patch_source_options": ToolRedaction(argument_model=PatchSourceOptionsArgumentsModel),
         "patch_node_options": ToolRedaction(argument_model=PatchNodeOptionsArgumentsModel),
         "patch_output_options": ToolRedaction(argument_model=PatchOutputOptionsArgumentsModel),
+        # Wave 5 (Task 16a) — _DISCOVERY_TOOLS, 12 declarative entries.
+        "list_sources": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_SOURCES_REASON,
+            )
+        ),
+        "list_transforms": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_TRANSFORMS_REASON,
+            )
+        ),
+        "list_sinks": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_SINKS_REASON,
+            )
+        ),
+        "get_plugin_schema": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_GET_PLUGIN_SCHEMA_REASON,
+            )
+        ),
+        "get_expression_grammar": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_GET_EXPRESSION_GRAMMAR_REASON,
+            )
+        ),
+        "explain_validation_error": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_EXPLAIN_VALIDATION_ERROR_REASON,
+            )
+        ),
+        "get_plugin_assistance": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_GET_PLUGIN_ASSISTANCE_REASON,
+            )
+        ),
+        "list_models": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_MODELS_REASON,
+            )
+        ),
+        "list_recipes": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_RECIPES_REASON,
+            )
+        ),
+        "get_pipeline_state": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_GET_PIPELINE_STATE_REASON,
+            )
+        ),
+        "preview_pipeline": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_PREVIEW_PIPELINE_REASON,
+            )
+        ),
+        "diff_pipeline": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_DIFF_PIPELINE_REASON,
+            )
+        ),
     }
 )
 

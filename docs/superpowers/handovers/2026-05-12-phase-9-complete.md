@@ -2,8 +2,8 @@
 
 **Status: complete with deferrals.** Phase 9 surfaced six integration bugs in the recipe-match happy path; five were fixed in-session, the sixth is the explicit gating blocker for the demo SLA assertion and is deferred to a follow-up phase. The Phase 9 dispatch brief's three-task scope (9.1 + 9.2 + 9.3) collapsed under the weight of the bug discoveries. What Phase 9 actually delivered is described below in honest terms — it is not what the dispatch brief envisioned, but it is what the system needed.
 
-**Top of branch at close:** `888624d8 test(frontend/e2e): re-fixme spec: Gap 5 fixed, Gap 6 blocks Apply recipe`
-**Phase 9 commit range:** `616545f2..HEAD` (8 commits inclusive of the dispatch-brief landing).
+**Top of branch at close:** the handover commit (`138fee54`) sits on top of `888624d8 test(frontend/e2e): re-fixme spec: Gap 5 fixed, Gap 6 blocks Apply recipe`.
+**Phase 9 commit range:** `616545f2..HEAD` (9 commits — the eight substantive commits below plus this handover).
 
 ---
 
@@ -16,7 +16,7 @@
 
 ---
 
-## What landed (8 commits)
+## What landed (9 commits — 8 substantive + this handover)
 
 | Commit | Subject | Class |
 |---|---|---|
@@ -28,6 +28,7 @@
 | `9ae407a2` | `test(frontend/e2e): guided demo path recipe-match E2E + SLA assertion (fixme)` | E2E spec scaffolding + uploadBlob helper + sessionStore guided wiring (Gap 1) |
 | `74ea68eb` | `fix(web/composer): recipe slot resolver reads composer-canonical blob_ref` | Gap 5 (HTTP 400 at Apply recipe) — resolves elspeth-obs-a8a9bc010a, also injects blob_ref through source resolver path |
 | `888624d8` | `test(frontend/e2e): re-fixme spec: Gap 5 fixed, Gap 6 blocks Apply recipe` | Documentation of Gap 6 in spec header; test re-fixme |
+| `138fee54` | `docs(handover): land composer guided-mode phase 9 complete handover` | This document. |
 
 ### Two notable commits with broader-than-headline blast radius
 

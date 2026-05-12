@@ -2,6 +2,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useComposer } from "@/hooks/useComposer";
+import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
 import { MessageBubble } from "./MessageBubble";
 import { ComposingIndicator } from "./ComposingIndicator";
 import { ChatInput } from "./ChatInput";
@@ -89,7 +90,7 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   // after step advance.  Without this, a step-advancing button click unmounts
   // the button before the browser can return focus elsewhere, so focus falls to
   // <body>.  Keyboard users then have to Tab from the very top to reach the new
-  // turn widget — unacceptable for the demo SLA budget and for general a11y.
+  // turn widget — unacceptable for general a11y.
   //
   // Keyed on step_index: fires only when the guided wizard advances to a new
   // step, not on every store mutation that produces a new TurnPayload object
@@ -100,8 +101,7 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   // original defect and the chosen Option (c) implementation.
   useEffect(() => {
     if (!guidedLogRef.current) return;
-    const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-    const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE);
+    const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
     first?.focus();
   }, [guidedNextTurn?.step_index]);
 

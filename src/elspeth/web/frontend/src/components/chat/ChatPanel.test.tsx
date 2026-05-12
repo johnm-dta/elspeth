@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPanel } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -439,13 +439,24 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
     return { step: "step_1_source", history: [], terminal: null };
   }
 
+  // Options are intentionally distinct per step so that test 2's assertion at
+  // step 1 can only pass if the effect actually re-fired (i.e. the button it
+  // checks — "Database" — only exists in step 1's render, not step 0's).
+  // Step 0 → "CSV" / "API"; step 1 → "Database" / "Streaming".
   function singleSelectTurn(stepIndex: number): TurnPayload {
+    const options: SingleSelectPayload["options"] =
+      stepIndex === 0
+        ? [
+            { id: "csv", label: "CSV", hint: null },
+            { id: "api", label: "API", hint: null },
+          ]
+        : [
+            { id: "database", label: "Database", hint: null },
+            { id: "streaming", label: "Streaming", hint: null },
+          ];
     const payload: SingleSelectPayload = {
       question: "Which source plugin should we use?",
-      options: [
-        { id: "csv", label: "CSV", hint: null },
-        { id: "api", label: "API", hint: null },
-      ],
+      options,
       allow_custom: false,
     };
     return { type: "single_select", step_index: stepIndex, payload };
@@ -490,14 +501,19 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
     });
 
     // Advance to step 1 with a new turn payload.
-    useSessionStore.setState({
-      guidedNextTurn: singleSelectTurn(1),
+    act(() => {
+      useSessionStore.setState({
+        guidedNextTurn: singleSelectTurn(1),
+      });
     });
 
-    // Focus should still land on the first button in the new turn.
+    // Focus should land on the first button of the step-1 turn ("Database").
+    // The label only exists in step 1's options, so this assertion can only pass
+    // if the focus effect re-fired after step_index changed (not if focus simply
+    // persisted at the same DOM position as step 0).
     await waitFor(() => {
       expect(document.activeElement).toBe(
-        screen.getByRole("button", { name: "CSV" }),
+        screen.getByRole("button", { name: "Database" }),
       );
     });
   });
@@ -528,8 +544,10 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 
     // Issue a same-step store mutation: new object reference, same step_index.
     // The effect dep [guidedNextTurn?.step_index] should NOT re-fire.
-    useSessionStore.setState({
-      guidedNextTurn: { ...singleSelectTurn(0) },
+    act(() => {
+      useSessionStore.setState({
+        guidedNextTurn: { ...singleSelectTurn(0) },
+      });
     });
 
     // Flush React updates — give the effect a chance to incorrectly re-fire.

@@ -2064,6 +2064,30 @@ def _sync_get_blob(engine: Engine, blob_id: str, session_id: str | None = None) 
         return _blob_row_to_tool_dict(row)
 
 
+def _sync_get_blob_by_storage_path(
+    engine: Engine,
+    storage_path: str,
+    session_id: str,
+) -> BlobToolRecord | None:
+    """Look up a blob by its canonical storage_path within a session.
+
+    Used by ``handle_step_1_source`` (steps.py) to detect whether a path
+    supplied via the guided SchemaForm resolves to an already-uploaded blob.
+    When it does, the blob_id (= blob["id"]) can be injected as ``blob_ref``
+    into ``SourceResolved.options`` so that the recipe slot resolvers in
+    ``recipe_match.py`` have access to the UUID they need.
+
+    Returns None if no blob row matches the path, which is the correct
+    representation for path-based sources that are not blob-backed.
+    """
+    with engine.connect() as conn:
+        query = select(blobs_table).where(blobs_table.c.session_id == session_id).where(blobs_table.c.storage_path == storage_path)
+        row = conn.execute(query).first()
+        if row is None:
+            return None
+        return _blob_row_to_tool_dict(row)
+
+
 def _sync_list_blobs(engine: Engine, session_id: str) -> list[dict[str, Any]]:
     """Synchronous blob listing for use in the tool executor thread."""
     with engine.connect() as conn:

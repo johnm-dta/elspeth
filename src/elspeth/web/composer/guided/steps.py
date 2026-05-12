@@ -35,6 +35,7 @@ from elspeth.web.composer.tools import (
     _execute_set_output,
     _execute_set_pipeline,
     _execute_set_source,
+    _sync_get_blob_by_storage_path,
 )
 from elspeth.web.composer.yaml_generator import generate_yaml
 
@@ -65,6 +66,8 @@ def handle_step_1_source(
     resolved: SourceResolved,
     catalog: CatalogService,
     data_dir: str | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
 ) -> StepHandlerResult:
     """Commit *resolved* as the pipeline source via _execute_set_source.
 
@@ -79,6 +82,25 @@ def handle_step_1_source(
 
     The session step pointer is NOT advanced here — that is the
     dispatcher's (route handler's) responsibility in Task 3.4.
+
+    blob_ref enrichment
+    ~~~~~~~~~~~~~~~~~~~
+    If the source options contain a ``path`` key and ``session_engine`` /
+    ``session_id`` are provided, we look up the blob by storage_path.  When
+    a blob row is found the blob UUID is injected as ``blob_ref`` into the
+    stored ``step_1_result.options`` (the ``SourceResolved`` snapshot).
+
+    This lets the recipe slot resolvers in ``recipe_match.py`` read
+    ``source.options["blob_ref"]`` even when the operator supplied the path
+    via the guided SchemaForm rather than the ``set_source_from_blob`` tool.
+    The lookup is authoritative (DB query) rather than path-parsing, so it
+    cannot be fooled by paths that coincidentally look like blob paths but
+    aren't registered blobs.
+
+    If no matching blob is found (path-only source, not blob-backed), the
+    enrichment is silently skipped — recipe matching will not populate
+    ``source_blob_id`` and the recipe offer is omitted, which is the correct
+    behavior for non-blob sources.
     """
     args = {
         "plugin": resolved.plugin,
@@ -96,9 +118,25 @@ def handle_step_1_source(
             tool_result=tool_result,
         )
 
+    # Attempt to enrich step_1_result with blob_ref when the source path
+    # points to an uploaded blob.  This is the authoritative lookup —
+    # we query by storage_path rather than parsing the filename.
+    enriched_resolved = resolved
+    source_path = resolved.options.get("path")
+    if source_path is not None and session_engine is not None and session_id is not None:
+        blob = _sync_get_blob_by_storage_path(session_engine, str(source_path), session_id)
+        if blob is not None:
+            # Inject blob_ref into the SourceResolved snapshot so that
+            # _classify_slot_resolver (recipe_match.py) can read it.
+            # The original options are Tier-3 (user-submitted SchemaForm
+            # values); we add blob_ref as an authoritative overlay from our
+            # own DB (Tier 1 source), so no .get() or coercion needed here.
+            enriched_options: dict[str, Any] = {**dict(resolved.options), "blob_ref": blob["id"]}
+            enriched_resolved = dataclasses.replace(resolved, options=enriched_options)
+
     return StepHandlerResult(
         state=tool_result.updated_state,
-        session=dataclasses.replace(session, step_1_result=resolved),
+        session=dataclasses.replace(session, step_1_result=enriched_resolved),
         tool_result=tool_result,
     )
 

@@ -1688,6 +1688,8 @@ async def _dispatch_guided_respond(
                 resolved=resolved,
                 catalog=catalog,
                 data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
             )
             if not handler_result.tool_result.success:
                 raise HTTPException(
@@ -1760,6 +1762,8 @@ async def _dispatch_guided_respond(
             resolved=resolved,
             catalog=catalog,
             data_dir=data_dir,
+            session_engine=session_engine,
+            session_id=session_id,
         )
         if not handler_result.tool_result.success:
             raise HTTPException(

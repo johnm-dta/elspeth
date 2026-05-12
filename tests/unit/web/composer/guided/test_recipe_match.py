@@ -17,11 +17,16 @@ from elspeth.web.composer.guided.state_machine import (
 # ---------------------------------------------------------------------------
 
 
-def _make_csv_source(blob_id: str = "blob-123") -> SourceResolved:
-    """Return a minimal CSV SourceResolved with a blob_id in options."""
+def _make_csv_source(blob_ref: str = "a1b2c3d4-0000-0000-0000-000000000001") -> SourceResolved:
+    """Return a minimal CSV SourceResolved with blob_ref in options.
+
+    ``blob_ref`` is the composer-canonical key for the blob UUID, written by
+    ``_execute_set_source_from_blob`` and by the ``handle_step_1_source``
+    blob-enrichment path in steps.py.
+    """
     return SourceResolved(
         plugin="csv",
-        options={"blob_id": blob_id},
+        options={"blob_ref": blob_ref},
         observed_columns=("id", "text"),
         sample_rows=({"id": "1", "text": "hello"},),
     )
@@ -97,18 +102,20 @@ class TestClassifyRecipeMatch:
 
     def test_classify_slot_label_field_uses_keyword_match(self) -> None:
         """label_field is the keyword-matching field, not necessarily [0]."""
-        source = _make_csv_source(blob_id="blob-xyz")
+        source = _make_csv_source(blob_ref="a1b2c3d4-0000-0000-0000-00000000abcd")
         sink = _make_single_json_sink(required_fields=("record_id", "label"))
         match = match_recipe(source, sink)
         assert match is not None
         assert match.slots["label_field"] == "label"
 
-    def test_classify_slot_source_blob_id_populated_from_options(self) -> None:
-        source = _make_csv_source(blob_id="test-blob-456")
+    def test_classify_slot_source_blob_id_populated_from_blob_ref(self) -> None:
+        """source_blob_id slot is populated from source.options['blob_ref']."""
+        blob_uuid = "a1b2c3d4-0000-0000-0000-000000000099"
+        source = _make_csv_source(blob_ref=blob_uuid)
         sink = _make_single_json_sink(required_fields=("tag",))
         match = match_recipe(source, sink)
         assert match is not None
-        assert match.slots["source_blob_id"] == "test-blob-456"
+        assert match.slots["source_blob_id"] == blob_uuid
 
     def test_classify_slot_output_path_from_sink_options(self) -> None:
         source = _make_csv_source()
@@ -181,7 +188,8 @@ class TestSplitThresholdRecipeMatch:
 
     def test_split_threshold_slots_use_correct_names(self) -> None:
         """Slot map keys must match _RECIPE2_SLOTS declarations (C8 verification)."""
-        source = _make_csv_source(blob_id="blob-789")
+        blob_uuid = "a1b2c3d4-0000-0000-0000-000000000789"
+        source = _make_csv_source(blob_ref=blob_uuid)
         sink = _make_two_json_sink(above_path="my/above.jsonl", below_path="my/below.jsonl")
         match = match_recipe(source, sink)
         assert match is not None
@@ -191,7 +199,7 @@ class TestSplitThresholdRecipeMatch:
             "above_output_path",
             "below_output_path",
         }
-        assert match.slots["source_blob_id"] == "blob-789"
+        assert match.slots["source_blob_id"] == blob_uuid
         assert match.slots["above_output_path"] == "my/above.jsonl"
         assert match.slots["below_output_path"] == "my/below.jsonl"
 
@@ -242,32 +250,38 @@ class TestNoMatch:
 
 
 # ---------------------------------------------------------------------------
-# Source blob_id missing from options (boundary coercion)
+# Source blob_ref missing from options (invariant violation — offensive crash)
 # ---------------------------------------------------------------------------
 
 
-class TestMissingBlobId:
-    def test_classify_source_blob_id_empty_when_options_has_no_blob_id(self) -> None:
-        """source.options without blob_id → source_blob_id is empty string."""
+class TestMissingBlobRef:
+    def test_classify_raises_when_blob_ref_absent(self) -> None:
+        """source.options without blob_ref → ValueError (state-machine invariant).
+
+        The slot resolver must only be reached for blob-backed sources.
+        When blob_ref is absent it means handle_step_1_source (steps.py)
+        did not enrich the options, which is a dispatcher bug — crash loudly
+        rather than silently producing an empty source_blob_id that fails
+        recipe validation with an opaque error later.
+        """
         source = SourceResolved(
             plugin="csv",
-            options={},  # no blob_id
+            options={},  # no blob_ref
             observed_columns=("text",),
             sample_rows=(),
         )
         sink = _make_single_json_sink(required_fields=("category",))
-        match = match_recipe(source, sink)
-        assert match is not None
-        assert match.slots["source_blob_id"] == ""
+        with pytest.raises(ValueError, match="blob_ref"):
+            match_recipe(source, sink)
 
-    def test_threshold_source_blob_id_empty_when_options_has_no_blob_id(self) -> None:
+    def test_threshold_raises_when_blob_ref_absent(self) -> None:
+        """split-by-numeric-threshold resolver also crashes on missing blob_ref."""
         source = SourceResolved(
             plugin="csv",
-            options={},  # no blob_id
+            options={},  # no blob_ref
             observed_columns=("amount",),
             sample_rows=(),
         )
         sink = _make_two_json_sink()
-        match = match_recipe(source, sink)
-        assert match is not None
-        assert match.slots["source_blob_id"] == ""
+        with pytest.raises(ValueError, match="blob_ref"):
+            match_recipe(source, sink)

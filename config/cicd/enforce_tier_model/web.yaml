@@ -453,26 +453,27 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=8d77465a6c3530e3
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=7c3e82fb37e046c6
   owner: web-composer
   reason: Narrow OSError around storage_path.write_bytes(old_content) rollback — disk faults during post-replace divergence
-    rollback expected; programmer bugs still propagate. FP rotated from fd103b0d6c58a62c by _DATA_ERROR_KEY constant insertion.
+    rollback expected; programmer bugs still propagate. FP rotated from 8d77465a6c3530e3 by _sync_get_blob_by_storage_path
+    insertion above _sync_list_blobs.
   safety: Rollback failure attached as add_note() on primary_exc with blob_id and "manual reconciliation required"; primary
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=2d90cb68d4922fd8
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=5888ba3f1c2fbf1b
   owner: web-composer
   reason: Narrow OSError around tombstone restore after a failed blob delete — compensation disk faults must not bury the
-    primary DB exception. FP rotated from 8ca49fc9b52455e7 by _DATA_ERROR_KEY constant insertion.
+    primary DB exception. FP rotated from 2d90cb68d4922fd8 by _sync_get_blob_by_storage_path insertion.
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=ac151e3b318a5bcd
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=ae604775045ea882
   owner: web-composer
   reason: Tier-3 trust boundary — UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure mode
     for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure is
     NOT silent — a blob_id_not_uuid warning fact is prepended to facts.warnings so the audit trail records why redacted_identity
-    omits blob_id. FP rotated from 79e74330fe91e1de by _DATA_ERROR_KEY constant insertion.
+    omits blob_id. FP rotated from ac151e3b318a5bcd by _sync_get_blob_by_storage_path insertion.
   safety: blob_uuid=None on parse failure; inspection still runs against the resolved blob row (already validated by the _sync_get_blob
     lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the audit-bound facts.warnings
     tuple; integrity guards (status=ready, hash match) remain authoritative.
@@ -2261,43 +2262,36 @@ allow_hits:
     .get above; both branches converge on empty string when neither key is present.
   safety: Empty string when neither key is present; downstream format_failure_samples handles empty messages gracefully.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=de84351ad6bfe956
+- key: web/composer/guided/steps.py:R1:handle_step_1_source:fp=b40a0ef1edd0fd19
   owner: composer-guided
-  reason: Tier-3 boundary coercion in slot resolver — source.options is user/LLM-supplied external data (Tier 3). .get("blob_id",
-    "") is the documented coercion at this boundary; an empty-string sentinel means "operator must supply via recipe_offer
-    turn". Per module docstring and Errata C8.
-  safety: Empty string sentinel propagates to the recipe_offer turn where the operator is explicitly asked to supply the blob_id.
-    No silent data loss.
+  reason: Tier-3 boundary detection in blob-enrichment path — resolved.options is user/LLM-supplied SchemaForm data (Tier 3).
+    .get("path") with None default detects presence of a path key without fabricating a value; None means no path was submitted
+    and the enrichment lookup is skipped entirely.
+  safety: None causes the blob lookup branch to be skipped (all three guards must be non-None); no blob_ref is injected and
+    step_1_result is stored unchanged. The enrichment is opportunistic — absence of path leaves recipe match in the correct
+    no-blob_ref state.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=a6c6f31ab3c80323
+- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=3b92b7e07cfd1037
   owner: composer-guided
   reason: Tier-3 boundary coercion in slot resolver — sink.outputs[0].options is user/LLM-supplied external data (Tier 3).
     .get("path", default) is the documented coercion at this boundary; default path propagates to the recipe_offer turn for
-    operator confirmation. Per module docstring and Errata C8.
+    operator confirmation. FP rotated from a6c6f31ab3c80323 by blob_id→blob_ref conversion (classify resolver rewrite).
   safety: Default path value matches the registered SlotSpec default in _RECIPE1_SLOTS["output_path"]; operator confirms or
     overrides via recipe_offer turn.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=594f7aa0183fa90e
-  owner: composer-guided
-  reason: Tier-3 boundary coercion in slot resolver — source.options is user/LLM-supplied external data (Tier 3). .get("blob_id",
-    "") is the documented coercion at this boundary; an empty-string sentinel means "operator must supply via recipe_offer
-    turn". Per module docstring and Errata C8.
-  safety: Empty string sentinel propagates to the recipe_offer turn where the operator is explicitly asked to supply the blob_id.
-    No silent data loss.
-  expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=04eea8af1e9b234a
+- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=aceba16af59b73b5
   owner: composer-guided
   reason: Tier-3 boundary coercion in slot resolver — sink.outputs[0].options is user/LLM-supplied external data (Tier 3).
     .get("path", default) is the documented coercion at this boundary; default path propagates to the recipe_offer turn for
-    operator confirmation. Per module docstring and Errata C8.
+    operator confirmation. FP rotated from 04eea8af1e9b234a by blob_id→blob_ref conversion (threshold resolver rewrite).
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["above_output_path"]; operator confirms
     or overrides via recipe_offer turn.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=6c8bcb44b83e0e72
+- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=3e175261cb3f249d
   owner: composer-guided
   reason: Tier-3 boundary coercion in slot resolver — sink.outputs[1].options is user/LLM-supplied external data (Tier 3).
     .get("path", default) is the documented coercion at this boundary; default path propagates to the recipe_offer turn for
-    operator confirmation. Per module docstring and Errata C8.
+    operator confirmation. FP rotated from 6c8bcb44b83e0e72 by blob_id→blob_ref conversion (threshold resolver rewrite).
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["below_output_path"]; operator confirms
     or overrides via recipe_offer turn.
   expires: null

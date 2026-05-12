@@ -6,13 +6,25 @@ returns a :class:`RecipeMatch` with a **partial** slot map — only the slots
 derivable from observed (source, sink) state are populated. The operator fills
 the remaining required slots via a ``recipe_offer`` turn at Step 2.5.
 
-Boundary contract for ``.get()`` usage
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``source.options`` and ``sink.outputs[0].options`` are Tier-3 inputs
-(user/LLM-supplied via the source/sink spec). The ``.get(key, default)``
-calls in the slot resolvers are the documented coercion at this boundary:
-an empty-string sentinel (for blob ids) or a default path (for output paths)
-signals "operator must supply or confirm via the ``recipe_offer`` turn".
+Boundary contract for slot resolvers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Two kinds of values are read from ``source.options`` and
+``sink.outputs[i].options``:
+
+``blob_ref`` (``source.options["blob_ref"]``)
+    The composer-canonical blob UUID, written by
+    ``_execute_set_source_from_blob`` (tools.py) **and** by
+    ``handle_step_1_source`` (steps.py) when the submitted path resolves to
+    a known uploaded blob.  This is Tier-2 data (already validated by our
+    own code) — direct subscript access is mandatory, no ``.get()``.  A
+    missing ``blob_ref`` crashes with an informative ``ValueError`` (the
+    resolver must only be called after blob-backed source commit).
+
+Output paths (``sink.outputs[i].options.get("path", default)``)
+    User/LLM-supplied via the SchemaForm, so genuinely Tier-3.  A default
+    is the documented coercion: an absent path produces a rubber-stampable
+    suggested value that the operator can confirm or change via the
+    ``recipe_offer`` turn.
 
 Predicates match on **topology only** (source plugin + sink output count and
 plugin). They do NOT return False just because some required slots cannot be
@@ -125,17 +137,26 @@ def _classify_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mappi
     rubber-stamp the default via the ``recipe_offer`` turn, so it should be
     the most likely correct value.
 
-    ``source.options`` is a Tier-3 input; ``.get("blob_id", "")`` is the
-    documented coercion at this boundary — an empty string means "operator
-    must supply via the recipe_offer turn".
+    ``source.options["blob_ref"]`` is the composer-canonical blob UUID.
+    It is written by ``_execute_set_source_from_blob`` for blob-upload flows
+    and by ``handle_step_1_source`` (steps.py) for SchemaForm flows where
+    the submitted path resolves to an uploaded blob.  A missing ``blob_ref``
+    is a state-machine invariant violation — this resolver must only be
+    reached for blob-backed sources.
     """
-    # source.options is Tier-3 (user/LLM-supplied); .get is boundary coercion.
-    blob_id = source.options.get("blob_id", "")
+    if "blob_ref" not in source.options:
+        raise ValueError(
+            "Recipe slot resolver requires source.options['blob_ref'] "
+            "(set by _execute_set_source_from_blob or handle_step_1_source "
+            "blob enrichment path); source options present: "
+            f"{sorted(source.options.keys())}"
+        )
+    blob_ref = source.options["blob_ref"]
     output_path = sink.outputs[0].options.get("path", "outputs/classified.jsonl")
     # Pick the first keyword-matching required_field; predicate guarantees one exists.
     label_field = next(n for n in sink.outputs[0].required_fields if n in _CLASSIFY_KEYWORDS)
     return {
-        "source_blob_id": blob_id,
+        "source_blob_id": blob_ref,
         "output_path": output_path,
         "label_field": label_field,
     }
@@ -157,15 +178,23 @@ def _split_threshold_slot_resolver(source: SourceResolved, sink: SinkResolved) -
     Provides: ``source_blob_id``, ``above_output_path``, ``below_output_path``.
     User-fillable: ``field``, ``threshold``.
 
-    ``source.options`` and ``sink.outputs[i].options`` are Tier-3 inputs;
-    ``.get(key, default)`` is the documented coercion at this boundary.
+    ``source.options["blob_ref"]`` is the composer-canonical blob UUID;
+    same contract as ``_classify_slot_resolver`` — must be present.
+    ``sink.outputs[i].options.get("path", default)`` is Tier-3 with a
+    rubber-stampable suggested default.
     """
-    # source.options is Tier-3 (user/LLM-supplied); .get is boundary coercion.
-    blob_id = source.options.get("blob_id", "")
+    if "blob_ref" not in source.options:
+        raise ValueError(
+            "Recipe slot resolver requires source.options['blob_ref'] "
+            "(set by _execute_set_source_from_blob or handle_step_1_source "
+            "blob enrichment path); source options present: "
+            f"{sorted(source.options.keys())}"
+        )
+    blob_ref = source.options["blob_ref"]
     above_path = sink.outputs[0].options.get("path", "outputs/above.jsonl")
     below_path = sink.outputs[1].options.get("path", "outputs/below.jsonl")
     return {
-        "source_blob_id": blob_id,
+        "source_blob_id": blob_ref,
         "above_output_path": above_path,
         "below_output_path": below_path,
     }

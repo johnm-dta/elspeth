@@ -7,6 +7,10 @@ import { ComposingIndicator } from "./ComposingIndicator";
 import { ChatInput } from "./ChatInput";
 import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
+import { CompletionSummary } from "./guided/CompletionSummary";
+import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { GuidedHistory } from "./guided/GuidedHistory";
+import { GuidedTurn } from "./guided/GuidedTurn";
 import type { BlobMetadata, ChatMessage } from "@/types/api";
 
 interface ChatPanelProps {
@@ -27,6 +31,12 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const composerProgress = useSessionStore((s) => s.composerProgress);
   const clearError = useSessionStore((s) => s.clearError);
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage);
+  // Guided-mode discriminator state.  Selectors are hoisted here (not inside a
+  // branch) to comply with React's Rules of Hooks; the discriminator early
+  // returns below decide which surface to render based on these values.
+  const guidedSession = useSessionStore((s) => s.guidedSession);
+  const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
+  const respondGuided = useSessionStore((s) => s.respondGuided);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const { sendMessage, retryMessage, isComposing, error } = useComposer();
@@ -122,6 +132,51 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
       >
         Select a session from the sidebar, or create a new one to get
         started.
+      </div>
+    );
+  }
+
+  // ── Guided-mode discriminator ────────────────────────────────────────────────
+  //
+  // Precedence (intentional):
+  //   1. terminal.kind === "completed"  → CompletionSummary surface.
+  //   2. active guided session + non-null next turn  → GuidedTurn surface.
+  //   3. anything else (no guidedSession, exited_to_freeform terminal, or a
+  //      transient state where guidedSession is set but guidedNextTurn is null)
+  //      → fall through to the freeform body below.
+  //
+  // The completed branch is checked FIRST so that a stale `guidedNextTurn`
+  // alongside a completed terminal still surfaces the summary (correct UX)
+  // rather than dispatching a widget.
+  //
+  // Both branches preserve `id="chat-main"` so the skip-link target is honoured;
+  // the modifier class (`--guided` / `--completed`) provides a per-branch hook
+  // for future CSS without coupling layout to the freeform surface.
+  if (guidedSession?.terminal?.kind === "completed") {
+    return (
+      <div
+        id="chat-main"
+        className="chat-panel chat-panel--completed"
+        aria-label="Pipeline summary"
+      >
+        <CompletionSummary terminal={guidedSession.terminal} />
+      </div>
+    );
+  }
+
+  if (guidedSession && !guidedSession.terminal && guidedNextTurn) {
+    return (
+      <div
+        id="chat-main"
+        className="chat-panel chat-panel--guided"
+        aria-label="Guided composer"
+      >
+        <GuidedHistory history={guidedSession.history} />
+        <GuidedTurn
+          turn={guidedNextTurn}
+          onSubmit={(body) => void respondGuided(body)}
+        />
+        <ExitToFreeformButton />
       </div>
     );
   }

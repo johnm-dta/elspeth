@@ -1571,6 +1571,7 @@ async def _dispatch_guided_respond(
     data_dir: str | None,
     session_engine: Any,
     session_id: str,
+    model: str,
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
 
@@ -2046,7 +2047,7 @@ async def _dispatch_guided_respond(
             return state, guided, next_turn
 
         # No recipe match — solve the chain via the LLM and emit propose_chain.
-        proposal = await solve_chain(source=source, sink=sink, recipe_match=None)
+        proposal = await solve_chain(model=model, source=source, sink=sink, recipe_match=None)
         guided = _replace(guided, step=GuidedStep.STEP_3_TRANSFORMS, step_3_proposal=proposal)
         next_turn = build_step_3_propose_chain_turn(proposal)
         new_record = TurnRecord(
@@ -2196,7 +2197,7 @@ async def _dispatch_guided_respond(
                 )
             source = guided.step_1_result
             sink = guided.step_2_result
-            proposal = await solve_chain(source=source, sink=sink, recipe_match=None)
+            proposal = await solve_chain(model=model, source=source, sink=sink, recipe_match=None)
             guided = _replace(guided, step_3_proposal=proposal)
             next_turn = build_step_3_propose_chain_turn(proposal)
             new_record = TurnRecord(
@@ -2271,6 +2272,7 @@ async def _dispatch_guided_respond(
                     if guided.step_2_result is None:
                         raise RuntimeError("repair: step_2_result is None — STEP_3 unreachable without Step 2 commit")
                     repair_proposal = await solve_chain(
+                        model=model,
                         source=guided.step_1_result,
                         sink=guided.step_2_result,
                         recipe_match=None,
@@ -4493,6 +4495,7 @@ def create_session_router() -> APIRouter:
                         data_dir=data_dir,
                         session_engine=session_engine,
                         session_id=str(session_id),
+                        model=settings.composer_model,
                     )
                 except InvariantError as exc:
                     raise HTTPException(

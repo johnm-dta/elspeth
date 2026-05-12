@@ -17,7 +17,11 @@ from elspeth.web.composer.guided.state_machine import (
     SinkResolved,
     SourceResolved,
 )
-from elspeth.web.composer.service import _litellm_acompletion
+from elspeth.web.composer.service import (
+    _COMPOSER_LLM_TEMPERATURE,
+    _composer_llm_seed_for_model,
+    _litellm_acompletion,
+)
 
 # CLOSED LIST — turn_type enum mirrors TurnType in protocol.py; do not extend
 # without updating the legal-turn matrix.
@@ -52,6 +56,7 @@ _GUIDED_LLM_TOOLS: list[dict[str, Any]] = [
 
 async def solve_chain(
     *,
+    model: str,
     source: SourceResolved,
     sink: SinkResolved,
     recipe_match: RecipeMatch | None = None,
@@ -63,6 +68,8 @@ async def solve_chain(
     telemetry, and token accounting flow through the same plumbing.
 
     Args:
+        model: LiteLLM model identifier from settings.composer_model.  Required —
+            callers must be explicit; no hard-coded default.
         repair_context: Verbatim validation error text from the failing ToolResult.
             When set, the LLM is asked to correct the named errors rather than
             propose an independent first-pass chain.
@@ -74,12 +81,17 @@ async def solve_chain(
         system_prompt = f"{skill}\n\n{context_block}\n\n{repair_addendum}"
     else:
         system_prompt = f"{skill}\n\n{context_block}"
-    response = await _litellm_acompletion(
-        model="anthropic/claude-3.5-sonnet",
-        messages=[{"role": "system", "content": system_prompt}],
-        tools=_GUIDED_LLM_TOOLS,
-        tool_choice={"type": "function", "function": {"name": "emit_turn"}},
-    )
+    seed = _composer_llm_seed_for_model(model)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "system", "content": system_prompt}],
+        "tools": _GUIDED_LLM_TOOLS,
+        "tool_choice": {"type": "function", "function": {"name": "emit_turn"}},
+        "temperature": _COMPOSER_LLM_TEMPERATURE,
+    }
+    if seed is not None:
+        kwargs["seed"] = seed
+    response = await _litellm_acompletion(**kwargs)
     name, arguments = _extract_tool_call(response)
     if name != "emit_turn":
         raise InvariantError(f"chain solver expected emit_turn, got {name!r}")

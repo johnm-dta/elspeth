@@ -93,6 +93,7 @@ async def test_returns_chain_proposal() -> None:
         return_value=fake_response,
     ):
         proposal = await solve_chain(
+            model="anthropic/claude-3-opus",
             source=SourceResolved(
                 plugin="csv",
                 options={},
@@ -145,6 +146,7 @@ async def test_repair_context_appears_in_system_prompt() -> None:
         side_effect=_capture,
     ):
         await solve_chain(
+            model="anthropic/claude-3-opus",
             source=SourceResolved(
                 plugin="csv",
                 options={},
@@ -194,6 +196,7 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
         side_effect=_capture,
     ):
         await solve_chain(
+            model="anthropic/claude-3-opus",
             source=SourceResolved(
                 plugin="csv",
                 options={},
@@ -215,3 +218,58 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
     assert len(captured_calls) == 1
     system_content = captured_calls[0]["messages"][0]["content"]
     assert "REPAIR ATTEMPT" not in system_content
+
+
+@pytest.mark.asyncio
+async def test_model_and_temperature_passed_to_litellm() -> None:
+    """solve_chain passes the supplied model and temperature=0.0 to _litellm_acompletion.
+
+    Asymmetry probe: if model=model is reverted to a hard-coded string, the
+    ``captured_calls[0]["model"] == TEST_MODEL`` assertion fails.
+    """
+    from elspeth.web.composer.guided.chain_solver import solve_chain
+    from elspeth.web.composer.guided.state_machine import (
+        SinkOutputResolved,
+        SinkResolved,
+        SourceResolved,
+    )
+
+    TEST_MODEL = "openai/gpt-4o-mini"
+
+    fake_response = _make_propose_chain_response()
+    captured_calls: list = []
+
+    async def _capture(**kwargs):  # type: ignore[no-untyped-def]
+        captured_calls.append(kwargs)
+        return fake_response
+
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        side_effect=_capture,
+    ):
+        await solve_chain(
+            model=TEST_MODEL,
+            source=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+            sink=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={},
+                        required_fields=("price",),
+                        schema_mode="fixed",
+                    ),
+                )
+            ),
+        )
+
+    assert len(captured_calls) == 1
+    call = captured_calls[0]
+    # Model must be the caller-supplied value, not any hard-coded string.
+    assert call["model"] == TEST_MODEL
+    # Temperature must match the composer constant (0.0) for deterministic output.
+    assert call["temperature"] == 0.0

@@ -195,9 +195,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
             That replacement IS the "new content" event that SRs need to hear
             about — hence the wrapping log region.
 
-          Load-bearing for InspectAndConfirmTurn.tsx:39-46 (the widget's
-          warnings <aside> deliberately omits its own aria-live region under
-          the convention that the parent ChatPanel wraps turn content in one).
+          Load-bearing for `InspectAndConfirmTurn.tsx` — search for the
+          "Warnings accessibility" comment block (the widget's warnings <aside>
+          deliberately omits its own aria-live region under the convention that
+          the parent ChatPanel wraps turn content in one).
         */}
         <GuidedHistory history={guidedSession.history} />
         <div

@@ -43,7 +43,8 @@
 //   region (see `ChatPanel.tsx` — search for `chat-panel-guided-log`), which
 //   announces the warnings on widget mount.
 //   ComposingIndicator follows the same "don't nest live regions" convention
-//   (see ComposingIndicator.test.tsx:99-103). If a future maintainer removes
+//   (see `ComposingIndicator.test.tsx` — the "ComposingIndicator live region
+//   scope" describe block). If a future maintainer removes
 //   the parent live region, warnings will be silent — the contract is documented
 //   here so the dependency is discoverable.
 //

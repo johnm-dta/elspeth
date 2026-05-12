@@ -317,8 +317,9 @@ describe("ChatPanel mode discriminator", () => {
   it("wraps the guided turn surface in a role=log aria-live=polite region (Task 8.2 a11y)", () => {
     // Task 8.2 a11y fix: the guided branch must wrap the live turn surface in
     // role="log" aria-live="polite" so screen readers are notified when a new
-    // turn arrives.  InspectAndConfirmTurn.tsx:39-46 documents the dependency
-    // (its warnings <aside> omits its own live region in favour of the parent).
+    // turn arrives.  InspectAndConfirmTurn.tsx ("Warnings accessibility"
+    // comment block) documents the dependency (its warnings <aside> omits its
+    // own live region in favour of the parent).
     // This test pins the contract on the parent side.
     useSessionStore.setState({
       activeSessionId: "session-guided",

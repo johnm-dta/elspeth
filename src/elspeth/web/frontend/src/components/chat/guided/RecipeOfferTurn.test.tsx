@@ -112,6 +112,24 @@ const NUMERIC_UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
   ],
 };
 
+// Dedicated int-slot fixture (finding I1).  inputTypeForSlot() branches on
+// `slotType === "int" || slotType === "float"` — the "float" branch is pinned
+// by NUMERIC_UNSATISFIED_PAYLOAD above; this fixture independently pins the
+// "int" branch so a regression that drops `"int" ||` would fail.
+const INT_UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
+  recipe_name: "limit-batch-size",
+  slots: { source_blob_id: "blob-int" },
+  alternatives: ["build_manually"],
+  unsatisfied_slots: [
+    {
+      name: "batch_size",
+      slot_type: "int",
+      description: "Maximum rows per batch",
+      required: true,
+    },
+  ],
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -405,6 +423,23 @@ describe("RecipeOfferTurn — unsatisfied_slots editable form", () => {
     expect(applyBtn).toBeDisabled();
   });
 
+  it("Apply button stays DISABLED when a required slot contains only whitespace", async () => {
+    // Finding I2: applyDisabled uses `value.trim() === ""` so whitespace-only
+    // input does not satisfy a required slot.  A regression to `value === ""`
+    // (dropping .trim()) would silently let "   " enable Apply.  Fill the
+    // other two required slots with real values so only the whitespace slot
+    // is the gating constraint; the trim() is therefore load-bearing.
+    const user = userEvent.setup();
+    renderWidget(UNSATISFIED_PAYLOAD);
+    const applyBtn = screen.getByRole("button", { name: /apply recipe/i });
+
+    await user.type(screen.getByLabelText(/model/i), "anthropic-claude");
+    await user.type(screen.getByLabelText(/api_key_secret/i), "OPENROUTER_API_KEY");
+    // classifier_template gets only whitespace -- must NOT enable Apply.
+    await user.type(screen.getByLabelText(/classifier_template/i), "   ");
+    expect(applyBtn).toBeDisabled();
+  });
+
   it("Apply button enables once every required slot has a non-empty value", async () => {
     const user = userEvent.setup();
     renderWidget(UNSATISFIED_PAYLOAD);
@@ -465,6 +500,16 @@ describe("RecipeOfferTurn — unsatisfied_slots editable form", () => {
     renderWidget(NUMERIC_UNSATISFIED_PAYLOAD);
     const thresholdInput = screen.getByLabelText(/threshold/i);
     expect(thresholdInput).toHaveAttribute("type", "number");
+  });
+
+  it("renders int slot inputs with type='number' (independent pin from float branch)", () => {
+    // Finding I1: inputTypeForSlot() branches on `slot_type === "int" || "float"`.
+    // The float branch is covered above; this test independently pins the int
+    // branch.  Dropping `"int" ||` from inputTypeForSlot would cause an int slot
+    // to fall through to type="text", which this assertion catches.
+    renderWidget(INT_UNSATISFIED_PAYLOAD);
+    const batchSizeInput = screen.getByLabelText(/batch_size/i);
+    expect(batchSizeInput).toHaveAttribute("type", "number");
   });
 
   it("renders str slot inputs with type='text' (NEVER type='password')", () => {

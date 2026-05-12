@@ -1,5 +1,5 @@
 allow_hits:
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=b5b1d34b5d81a046
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=57d0a263a79cd691
   owner: composer-guided
   reason: Protocol boundary validator — isinstance(turn_type, TurnType) at Tier 3 entry point where untrusted payloads arrive
     from client, distinguishes valid TurnType enum member from arbitrary string to reject malformed protocol messages early

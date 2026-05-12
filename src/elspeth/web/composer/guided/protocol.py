@@ -9,6 +9,8 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any, TypedDict
 
+from elspeth.web.composer.recipes import SlotType
+
 
 class TurnType(StrEnum):
     """The closed taxonomy of turn types the protocol allows."""
@@ -71,13 +73,16 @@ class ProposeChainPayload(TypedDict):
 class _RecipeSlotInput(TypedDict):
     """Wire shape for one unsatisfied required slot in a recipe_offer turn.
 
-    ``slot_type`` mirrors :data:`elspeth.web.composer.recipes.SlotType`.
-    The frontend renders an editable input keyed by ``name`` and submits the
-    typed value back as part of ``edited_values.slots``.
+    ``slot_type`` reuses :data:`elspeth.web.composer.recipes.SlotType` directly
+    so the wire schema cannot drift from the source-of-truth Literal: adding a
+    new member to ``SlotType`` immediately fails type-checking here, in the
+    emitter, and (mirrored manually) in ``guided.ts``. The frontend renders an
+    editable input keyed by ``name`` and submits the typed value back as part
+    of ``edited_values.slots``.
     """
 
     name: str
-    slot_type: str  # one of recipes.SlotType: "blob_id"/"str"/"float"/"int"/"str_list"
+    slot_type: SlotType
     description: str
     required: bool
 

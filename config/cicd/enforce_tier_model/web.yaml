@@ -1427,14 +1427,14 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=6cf0e1e3dcaf36fc
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=5245b474dfa2f99d
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=ea32349a35718a06
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=8e88ccecb1792df4
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.

@@ -1974,6 +1974,147 @@ _SET_OUTPUT_REASON = HandlesNoSensitiveDataReason(
 )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16c — _BLOB_DISCOVERY_TOOLS, 4 tools).
+#
+# ``list_blobs``, ``get_blob_metadata``, and ``inspect_source`` return only
+# structural blob facts (id, filename, mime_type, size, observed headers,
+# inferred types) and never return raw blob content.  ``get_blob_content`` IS
+# the content-returning tool and is the singular type-driven entry in this
+# wave with a response_model: declarative entries have no response_summarizers
+# field (Task 7 review finding) so the per-key byte-count summary required by
+# the spec §4.7 disposition can only be applied via the schema walker on a
+# response_model with ``Annotated[str, Sensitive(summarizer=...)]``.
+# ---------------------------------------------------------------------------
+
+
+_LIST_BLOBS_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("session blob inventory — id/filename/mime_type/size_bytes per blob, no raw content",),
+    why_arguments_safe=(
+        "list_blobs accepts no arguments — the JSON schema at tools.py:1329 declares an "
+        "empty properties object with empty required, so the LLM cannot place any value "
+        "on this surface; the handler enumerates the session's blob inventory directly."
+    ),
+    why_responses_safe=(
+        "Response is the blob-inventory list — operator-uploaded filenames, mime_types, "
+        "and structural metadata per blob — but never the raw blob content; payload bytes "
+        "are exposed only via get_blob_content whose policy applies a length-only summary."
+    ),
+)
+
+
+_GET_BLOB_METADATA_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("session blob metadata — filename / mime_type / size / status / hash, no content bytes",),
+    why_arguments_safe=(
+        "get_blob_metadata accepts a single blob_id scalar string selecting one inventory "
+        "row; blob_ids are UUIDs assigned by the composer service and contain no operator "
+        "payload; the handler indexes a session-scoped lookup and rejects unknown ids."
+    ),
+    why_responses_safe=(
+        "Response is the single-blob metadata row — id, filename, mime_type, size_bytes, "
+        "status, content_hash — operator-uploaded labels but never the raw bytes; payload "
+        "exposure is gated to get_blob_content whose policy summarises content by length."
+    ),
+)
+
+
+def _summarize_blob_content(content: str) -> str:
+    """Summarizer for ``get_blob_content.content`` (Task 16c).
+
+    Discloses only the byte-length of the UTF-8 encoded content, never the
+    bytes themselves.  Mirrors :func:`_summarize_inline_blob_content` in form
+    so the audit trail's content-length signal is uniform across blob-write
+    and blob-read tools (the LLM may funnel the same payload through
+    create_blob / update_blob / get_blob_content).
+
+    Contract (spec §4.2.6, §9 RSK-03):
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+    """
+    return f"<blob-content:{len(content.encode('utf-8'))}-bytes>"
+
+
+class GetBlobContentArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``get_blob_content`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:1444-1455`` and its
+    required-paths (``blob_id``).  The argument surface carries no sensitive
+    material — ``blob_id`` is a UUID identity — so no fields are Sensitive.
+
+    ``get_blob_content`` is type-driven (not declarative) because the
+    response surface IS sensitive: ``content`` carries the operator's
+    uploaded blob payload and must be summarized to a length-only scalar
+    before reaching ``chat_messages.tool_calls``.  Declarative entries have
+    no ``response_summarizers`` field (Task 7 review finding); the only way
+    to attach a per-key summarizer is via a ``Annotated[T, Sensitive(...)]``
+    on a response model walked by ``walk_model_schema``.
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    neighbouring tools (``filename``, ``mime_type``, ``content`` —
+    those are on ``create_blob`` / ``update_blob``) are intentionally
+    absent so ``extra="forbid"`` rejects misrouted argument shapes early.
+    """
+
+    blob_id: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetBlobContentResponseModel(BaseModel):
+    """Redaction-bearing response model for the ``get_blob_content`` tool.
+
+    Mirrors the handler's ``_discovery_result`` payload shape at
+    ``tools.py:3695-3705`` — the dict passed as ``ToolResult.data`` contains
+    exactly the keys ``blob_id``, ``filename``, ``mime_type``, ``content``,
+    ``truncated``, ``size_bytes``.
+
+    ``content`` carries :class:`Sensitive` with :func:`_summarize_blob_content`
+    so the audit-side ``chat_messages.tool_calls`` record substitutes a
+    fixed-form ``<blob-content:N-bytes>`` scalar in place of the raw payload
+    text — disclosing size only, which is also visible via
+    :attr:`size_bytes` independently (a structural fact about the blob).
+
+    ``filename`` and ``mime_type`` are operator-supplied at blob upload time
+    and reach this response from the blobs table; they are NOT marked
+    Sensitive because they appear unredacted in the create_blob/update_blob
+    argument surfaces and in the list_blobs/get_blob_metadata responses,
+    and demoting them here without demoting them everywhere would produce a
+    misleading audit signal (the value is visible to the auditor through
+    other tools and the redaction would not actually conceal it).
+
+    ``extra="forbid"`` is required (rev-2 M.1) and matches the closed-set
+    handler shape: any future addition of a content-bearing key (e.g.,
+    ``preview``) MUST be declared here so the walker visits it and the
+    adequacy guard's per-entry shape walk surfaces the need for a Sensitive
+    marker.  Without ``extra="forbid"`` a new key would silently slip past
+    the walker into the audit trail unredacted.
+    """
+
+    blob_id: str
+    filename: str
+    mime_type: str
+    content: Annotated[str, Sensitive(summarizer=_summarize_blob_content)]
+    truncated: bool
+    size_bytes: int
+
+    model_config = ConfigDict(extra="forbid")
+
+
+_INSPECT_SOURCE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("source inspection facts — headers / types / URL candidates, never raw row content",),
+    why_arguments_safe=(
+        "inspect_source accepts a single blob_id scalar string selecting one inventory "
+        "row; the handler reads at most 8 KiB and parses at most 100 rows, returning only "
+        "structural facts; the JSON schema at tools.py:1505-1513 has no other properties."
+    ),
+    why_responses_safe=(
+        "Response is the SourceInspectionFacts struct — observed headers, inferred scalar "
+        "types per column, URL candidate count, and warnings; the inspector explicitly never "
+        "returns raw row content (tools.py:3724 docstring) so payload bytes never appear."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2124,6 +2265,29 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 argument_summarizers={"options": _summarize_set_source_options},
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_SET_OUTPUT_REASON,
+            )
+        ),
+        # Wave 5 (Task 16c) — _BLOB_DISCOVERY_TOOLS, 4 entries (3 declarative + 1 type-driven).
+        "list_blobs": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_BLOBS_REASON,
+            )
+        ),
+        "get_blob_metadata": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_GET_BLOB_METADATA_REASON,
+            )
+        ),
+        "get_blob_content": ToolRedaction(
+            argument_model=GetBlobContentArgumentsModel,
+            response_model=GetBlobContentResponseModel,
+        ),
+        "inspect_source": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_INSPECT_SOURCE_REASON,
             )
         ),
     }

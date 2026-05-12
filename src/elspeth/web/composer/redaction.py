@@ -2140,6 +2140,56 @@ _DELETE_BLOB_REASON = HandlesNoSensitiveDataReason(
 )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16e — _SECRET_DISCOVERY_TOOLS,
+# 2 tools).
+#
+# Secret values are resolved server-side at execution time by the secret
+# service; they never traverse the composer tool surface.  ``list_secret_refs``
+# and ``validate_secret_ref`` operate on secret NAMES only — discovering which
+# references the operator has wired and whether the current user can resolve
+# them at execution.  The named-vs-valued distinction is the entire reason
+# the secret-ref mechanism exists; surfacing it explicitly in the audit-trail
+# justification is policy-correct.
+# ---------------------------------------------------------------------------
+
+
+_LIST_SECRET_REFS_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=(
+        "server-side secret resolver — secret values resolved at execution time, never echoed",
+        "secret-ref registry — references carry NAMES and SCOPES only, not values",
+    ),
+    why_arguments_safe=(
+        "list_secret_refs accepts no arguments — the JSON schema at tools.py:1519 declares "
+        "an empty properties object with empty required, so the LLM cannot place any "
+        "value on this surface; the handler enumerates the user's accessible references."
+    ),
+    why_responses_safe=(
+        "Response is the user-scoped secret reference inventory — names and scopes per "
+        "ref — but never values; values live behind the secret-service resolver and are "
+        "materialised only at pipeline execution, never in any composer tool response."
+    ),
+)
+
+
+_VALIDATE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=(
+        "server-side secret resolver — secret values resolved at execution time, never echoed",
+        "secret-ref existence check — yes/no flag plus scope, never the value",
+    ),
+    why_arguments_safe=(
+        "validate_secret_ref accepts a single scalar name string identifying the secret "
+        "reference to check; names are operator-chosen labels (e.g., 'OPENROUTER_API_KEY') "
+        "registered via the secret service and never the underlying credential value."
+    ),
+    why_responses_safe=(
+        "Response is the existence/accessibility flag plus the matching scope — boolean "
+        "and scope label only; the secret VALUE is resolved only at pipeline execution "
+        "time by the server-side resolver and never enters the composer tool surface."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2320,6 +2370,19 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
+            )
+        ),
+        # Wave 5 (Task 16e) — _SECRET_DISCOVERY_TOOLS, 2 entries.
+        "list_secret_refs": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_SECRET_REFS_REASON,
+            )
+        ),
+        "validate_secret_ref": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_VALIDATE_SECRET_REF_REASON,
             )
         ),
     }

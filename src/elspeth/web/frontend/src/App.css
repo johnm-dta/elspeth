@@ -4232,7 +4232,13 @@ summary:focus-visible {
 
 /* ---------------------------------------------------------------------------
    ProposeChainTurn (Task 7.6)
-   Classes prefixed guided-propose-*. Card-list layout — no chip styles.
+   Classes prefixed guided-propose-*. Card-list layout -- no chip styles.
+
+   CARD-STYLE REUSE (Task 7.7): .guided-propose-step-card is SHARED with
+   RecipeOfferTurn.  It provides pure card chrome (surface-elevated, border-strong,
+   radius-lg, padding space-md) with no step-list-specific styling.  RecipeOfferTurn
+   applies it to a single card div; ProposeChainTurn applies it to each <li> in the
+   step list.  New recipe-specific rules live in the guided-recipe-* namespace below.
    --------------------------------------------------------------------------- */
 
 /* Overall rationale paragraph shown above the step cards */
@@ -4394,6 +4400,137 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   RecipeOfferTurn (Task 7.7)
+   Classes prefixed guided-recipe-*. Single-card layout.
+
+   Card chrome reuse: .guided-propose-step-card (Task 7.6, App.css:4285-4290)
+   is applied as the outer card shell.  guided-recipe-* rules cover the
+   recipe-specific interior: name heading, slots definition list, alternatives
+   list, and action row with two buttons.
+   --------------------------------------------------------------------------- */
+
+/* Recipe name as <h3> -- reset default <h3> margin and pin font-size to base
+   so the browser's default <h3> sizing does not leak in.  Same pattern as
+   .guided-propose-step-plugin (Task 7.6). */
+.guided-recipe-name {
+  margin: 0 0 var(--space-md) 0;
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+}
+
+/* Slot definition list */
+.guided-recipe-slots {
+  margin: 0 0 var(--space-sm) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* Each slot row: key and value side-by-side */
+.guided-recipe-slot-row {
+  display: flex;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.guided-recipe-slot-key {
+  color: var(--color-text-muted);
+  min-width: 120px;
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.guided-recipe-slot-val {
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+  margin: 0; /* dd default margin reset */
+}
+
+/* Alternatives section -- only rendered when payload.alternatives is non-empty */
+.guided-recipe-alternatives {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.guided-recipe-alternatives-heading {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-xs) 0;
+}
+
+.guided-recipe-alternatives-list {
+  margin: 0;
+  padding-left: var(--space-lg);
+}
+
+.guided-recipe-alternative-item {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono, monospace);
+  margin-bottom: var(--space-xs);
+}
+
+/* Action row: Apply recipe + Build manually buttons */
+.guided-recipe-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+/* Apply recipe -- primary action */
+.guided-recipe-apply-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-recipe-apply-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-recipe-apply-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Build manually -- secondary action */
+.guided-recipe-build-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-recipe-build-btn:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+
+.guided-recipe-build-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -4410,7 +4547,9 @@ summary:focus-visible {
   .guided-schema-textarea,
   .guided-schema-advanced-toggle,
   .guided-schema-continue-btn,
-  .guided-propose-accept-btn {
+  .guided-propose-accept-btn,
+  .guided-recipe-apply-btn,
+  .guided-recipe-build-btn {
     transition: none;
   }
 }

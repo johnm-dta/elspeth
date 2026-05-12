@@ -206,3 +206,39 @@ export interface ProposeChainPayload {
   why: string;
   blockers: string[];
 }
+
+/**
+ * Wire: RecipeOfferPayload (protocol.py:71-74).
+ *
+ * recipe_name  -- matched recipe identifier.
+ * slots        -- already-resolved slot values (Mapping[str, Any] on the wire).
+ *                 Typed as Record<string, unknown> — callers must not assume
+ *                 any specific value shape.
+ * alternatives -- alternative recipe names or control signals the server may
+ *                 suggest.  In the current backend (emitters.py:226), this is
+ *                 always ["build_manually"].  Display when non-empty; the
+ *                 "Build manually" button already acts on that signal, so
+ *                 rendering it here is advisory only (informs the user other
+ *                 paths exist — or may exist once the recipe catalogue grows).
+ *
+ * Submit shapes (verified against routes.py:1943-2023):
+ *   Apply recipe:   { chosen: ["accept"],
+ *                     edited_values: { recipe_name, slots },  ← ECHO REQUIRED
+ *                     custom_inputs: null, accepted_step_index: null,
+ *                     edit_step_index: null, control_signal: null }
+ *   Build manually: { chosen: ["build_manually"],
+ *                     edited_values: null, custom_inputs: null,
+ *                     accepted_step_index: null, edit_step_index: null,
+ *                     control_signal: null }
+ *
+ * NOTE: The "Apply recipe" path MUST send edited_values with recipe_name and
+ * slots.  The backend (routes.py:1965-1967) reads edited_values to reconstruct
+ * the RecipeMatch; if edited_values is null it falls back to ("", {}) which
+ * causes handle_step_2_5_recipe_apply to fail.  This differs from the plan-body
+ * description which stated edited_values: null -- the plan body was incomplete.
+ */
+export interface RecipeOfferPayload {
+  recipe_name: string;
+  slots: Record<string, unknown>;
+  alternatives: string[];
+}

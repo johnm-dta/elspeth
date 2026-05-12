@@ -4230,6 +4230,166 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   ProposeChainTurn (Task 7.6)
+   Classes prefixed guided-propose-*. Card-list layout — no chip styles.
+   --------------------------------------------------------------------------- */
+
+/* Overall rationale paragraph shown above the step cards */
+.guided-propose-why {
+  font-size: var(--font-size-base);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-md);
+  line-height: 1.5;
+}
+
+/* Blockers section — only rendered when payload.blockers is non-empty */
+.guided-propose-blockers {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.guided-propose-blockers-heading {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-warning);
+  margin-bottom: var(--space-xs);
+}
+
+.guided-propose-blockers-list {
+  margin: 0;
+  padding-left: var(--space-lg);
+}
+
+.guided-propose-blocker-item {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  margin-bottom: var(--space-xs);
+}
+
+/* Ordered list of step cards — reset list styles; numbers shown by .guided-propose-step-number */
+.guided-propose-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* Individual step card */
+.guided-propose-step-card {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
+}
+
+/* Card header: step number badge + plugin name */
+.guided-propose-step-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+/* Circular step number badge */
+.guided-propose-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: var(--color-badge-transform-bg);
+  border: 1px solid var(--color-badge-transform-border);
+  color: var(--color-badge-transform);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Plugin name heading */
+.guided-propose-step-plugin {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+}
+
+/* Options key-value definition list */
+.guided-propose-options {
+  margin: 0 0 var(--space-sm) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* Each option row: key and value side-by-side */
+.guided-propose-option-row {
+  display: flex;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.guided-propose-option-key {
+  color: var(--color-text-muted);
+  min-width: 120px;
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.guided-propose-option-val {
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+  margin: 0; /* dd default margin reset */
+}
+
+/* LLM's rationale for this step */
+.guided-propose-step-rationale {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Action row: Accept proposal button */
+.guided-propose-actions {
+  display: flex;
+  margin-top: var(--space-md);
+}
+
+/* Accept proposal button */
+.guided-propose-accept-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-propose-accept-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-propose-accept-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -4245,7 +4405,8 @@ summary:focus-visible {
   .guided-schema-select,
   .guided-schema-textarea,
   .guided-schema-advanced-toggle,
-  .guided-schema-continue-btn {
+  .guided-schema-continue-btn,
+  .guided-propose-accept-btn {
     transition: none;
   }
 }

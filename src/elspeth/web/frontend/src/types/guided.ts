@@ -175,3 +175,33 @@ export interface SchemaFormPayload {
   schema_block: Record<string, unknown>;
   prefilled: Record<string, unknown>;
 }
+
+/**
+ * Wire: _ProposedStep (protocol.py:59-62). One step in a proposed chain.
+ *
+ * options is an arbitrary plugin options dict (Mapping[str, Any] on the wire);
+ * typed as Record<string, unknown> -- callers must not assume any specific shape.
+ */
+export interface ProposedStep {
+  plugin: string;
+  options: Record<string, unknown>;
+  rationale: string;
+}
+
+/**
+ * Wire: ProposeChainPayload (protocol.py:64-68).
+ *
+ * steps    -- ordered list of proposed transforms.
+ * why      -- LLM's overall rationale for the proposal.
+ * blockers -- obstacles identified by the LLM (may be empty).
+ *
+ * Submit shape (verified against routes.py:2030-2137):
+ *   Accept all: { chosen: ["accept"], ... all other fields null }
+ *   Reject / per-step Edit / Ask advisor: NOT wired in Phase 4.
+ *   See observation elspeth-obs-98eab6aa67 for Phase 5 catch-up tracking.
+ */
+export interface ProposeChainPayload {
+  steps: ProposedStep[];
+  why: string;
+  blockers: string[];
+}

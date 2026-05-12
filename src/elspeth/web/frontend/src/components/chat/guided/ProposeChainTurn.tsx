@@ -1,0 +1,177 @@
+// src/components/chat/guided/ProposeChainTurn.tsx
+//
+// Guided-mode widget for the propose_chain turn type (Task 7.6).
+// Conventions inherited from SingleSelectTurn (Task 7.2 template),
+// InspectAndConfirmTurn (Task 7.3), MultiSelectWithCustomTurn (Task 7.4),
+// and SchemaFormTurn (Task 7.5).
+//
+//   - Props: { payload: ProposeChainPayload; onSubmit: (body: GuidedRespondRequest) => void }
+//   - onSubmit is SYNC -- the widget constructs the body; the store awaits the round-trip
+//   - All 6 GuidedRespondRequest fields set explicitly; unused ones = null (no omission)
+//   - <button type="button"> (never <div onClick>)
+//   - DOM IDs prefixed with React 18 useId() -- multiple turn instances coexist in
+//     GuidedHistory (Task 7.9) and element IDs would collide without per-instance scoping
+//   - Visible labels (button text) ARE the accessible name; no redundant aria-label
+//   - CSS via App.css class names with design tokens; no hardcoded colours
+//
+// SHAPE NOTE (differs from chip-group widgets):
+// propose_chain uses a card-list layout (per Task 7.2 SHAPE NOTE which explicitly
+// excludes propose_chain from the chip-group family).  Each step is a card.
+// No <fieldset>/<legend>.  The accept button is at the bottom of the card list.
+//
+// SCOPE -- submitted buttons (verified against routes.py:2030-2137):
+//   WIRED:   "Accept proposal" -> chosen: ["accept"] -> pipeline committed
+//   DROPPED: per-step Edit  -> backend has no handler; would HTTP 400
+//   DROPPED: Reject         -> backend returns HTTP 501 (Phase 5 stub)
+//   DROPPED: Ask advisor    -> backend has no handler; would HTTP 400
+// The three dropped paths are tracked in filigree obs elspeth-obs-98eab6aa67
+// and must be added in Phase 5 once the backend handlers are wired.
+//
+// WIRE-SHAPE (single submit path):
+//   Accept proposal: { chosen: ["accept"], custom_inputs: null, edited_values: null,
+//                      accepted_step_index: null, edit_step_index: null, control_signal: null }
+// All 6 GuidedRespondRequest fields are explicit on the one handler.
+//
+// OPTIONS RENDERING:
+//   step.options is an arbitrary mapping (Mapping[str, Any] on the wire).  Each
+//   key-value pair is rendered as a <dl> definition list: <dt> for the key,
+//   <dd> for the value.  Non-scalar values (arrays, objects) are stringified via
+//   JSON.stringify so they remain human-readable without a full JSON viewer.
+//   This is the simplest renderable shape for the demo path; a richer diff view
+//   (collapsible JSON tree etc.) is deferred to a future task.
+//
+// STATE:
+//   Zero widget-side state.  Each button click immediately constructs and emits
+//   the body literal -- no intermediate state is accumulated.  No view
+//   transitions, so the firstRunRef focus-skip pattern from InspectAndConfirmTurn
+//   and SchemaFormTurn is not needed.
+//
+// FOCUS MANAGEMENT:
+//   No programmatic focus on mount or on interaction.  All four prior widgets
+//   that use focus management do so because a view transition reveals new content
+//   (InspectAndConfirmTurn, SchemaFormTurn) or a destructive interaction removes
+//   an element (MultiSelectWithCustomTurn).  ProposeChainTurn renders statically;
+//   no equivalent trigger exists.
+
+import { useId } from "react";
+import type { GuidedRespondRequest, ProposeChainPayload } from "@/types/guided";
+
+interface ProposeChainTurnProps {
+  payload: ProposeChainPayload;
+  onSubmit: (body: GuidedRespondRequest) => void;
+}
+
+/**
+ * Format a single option value for display in the key-value definition list.
+ *
+ * Scalars (string, number, boolean) are coerced to string.  Null/undefined
+ * render as "null".  Arrays and objects are JSON-stringified so the user sees
+ * the structure without a full JSON editor component.
+ */
+function formatOptionValue(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
+export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
+  // useId scopes DOM IDs per-instance so multiple ProposeChainTurns rendered
+  // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
+  // produce id collisions when per-card IDs recur across turns.
+  const reactId = useId();
+  const cardId = (index: number) => `${reactId}-step-${index}`;
+  const optionsId = (index: number) => `${reactId}-opts-${index}`;
+
+  function handleAccept() {
+    onSubmit({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  }
+
+  return (
+    <div className="guided-turn guided-propose-chain">
+      {/* Overall rationale paragraph */}
+      <p className="guided-propose-why">{payload.why}</p>
+
+      {/* Blockers list -- only rendered when non-empty (negative-space pin #3) */}
+      {payload.blockers.length > 0 && (
+        <div className="guided-propose-blockers">
+          <p className="guided-propose-blockers-heading">Blockers identified:</p>
+          <ul className="guided-propose-blockers-list">
+            {payload.blockers.map((blocker, idx) => (
+              <li key={idx} className="guided-propose-blocker-item">
+                {blocker}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Step cards -- card-list layout, one card per step */}
+      <ol className="guided-propose-steps">
+        {payload.steps.map((step, idx) => {
+          const optKeys = Object.keys(step.options as Record<string, unknown>);
+          return (
+            <li
+              key={idx}
+              id={cardId(idx)}
+              className="guided-propose-step-card"
+              aria-label={`Step ${idx + 1}: ${step.plugin}`}
+            >
+              <div className="guided-propose-step-header">
+                <span className="guided-propose-step-number">
+                  {idx + 1}
+                </span>
+                <span className="guided-propose-step-plugin">{step.plugin}</span>
+              </div>
+
+              {/* Options as a key-value definition list.
+                  <dl> is used because (key, value) pairs semantically form a
+                  description/definition relationship -- <dt> for key, <dd> for
+                  value.  A <table> would be heavier; a plain div grid would
+                  lose the semantic association between keys and their values. */}
+              {optKeys.length > 0 && (
+                <dl id={optionsId(idx)} className="guided-propose-options">
+                  {optKeys.map((key) => (
+                    <div key={key} className="guided-propose-option-row">
+                      <dt className="guided-propose-option-key">{key}</dt>
+                      <dd className="guided-propose-option-val">
+                        {formatOptionValue(
+                          (step.options as Record<string, unknown>)[key],
+                        )}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+
+              <p className="guided-propose-step-rationale">{step.rationale}</p>
+            </li>
+          );
+        })}
+      </ol>
+
+      {/* Action row -- Accept proposal only.
+          Reject, per-step Edit, and Ask advisor are deferred to Phase 5:
+          the backend returns HTTP 501 / HTTP 400 for those paths today.
+          See filigree observation elspeth-obs-98eab6aa67. */}
+      <div className="guided-propose-actions">
+        <button
+          type="button"
+          className="guided-propose-accept-btn"
+          onClick={handleAccept}
+        >
+          Accept proposal
+        </button>
+      </div>
+    </div>
+  );
+}

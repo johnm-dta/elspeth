@@ -717,6 +717,68 @@ class SetSourceArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _summarize_inline_blob_content(content: str) -> str:
+    """Summarizer for blob-content fields (``create_blob.content``,
+    ``update_blob.content``) — spec §4.2.6, plan Task 13 / rev-2 M.10.
+
+    The blob ``content`` field is the LLM-supplied raw bytes of a session
+    blob: URLs, JSON snippets, CSV seed data, or arbitrary text that may
+    contain operator-sensitive material.  Persisting the raw payload in
+    ``chat_messages.tool_calls`` would mirror that material into the audit
+    trail beyond its intended retention surface (the blob row itself, the
+    canonical record of file content).  The summarizer collapses the
+    payload to a fixed-form scalar ``<inline-blob:N-bytes>`` where ``N``
+    is the byte-length of the UTF-8 encoded content — disclosing size
+    only (a structural fact already inferable from the persisted blob
+    row's ``size_bytes`` column), never content.
+
+    Contract (spec §4.2.6, §9 RSK-03):
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+
+    Type-variability discipline (rev-2 M.10): the type-driven argument
+    models for ``create_blob`` and ``update_blob`` declare
+    ``content: Annotated[str, Sensitive(summarizer=...)]`` plus
+    ``model_config = ConfigDict(extra="forbid")``.  Pydantic's ``str``
+    validation rejects ``None``, ``int``, ``bool``, ``list``, ``dict``,
+    and any other non-string before the summarizer is invoked, so this
+    function is reached only with a genuine ``str``.  ``len(b)`` on a
+    Python ``str`` measures code points; we explicitly UTF-8 encode to
+    measure the wire-format byte-length the persistence boundary actually
+    sees, matching the ``size_bytes`` column the handler computes.
+    """
+    return f"<inline-blob:{len(content.encode('utf-8'))}-bytes>"
+
+
+class CreateBlobArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``create_blob`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:1362-1397`` for the
+    ``create_blob`` definition and the required-paths the schema enforces
+    (``filename``, ``mime_type``, ``content``; ``description`` optional).
+    The ``Annotated`` on ``content`` substitutes a length-disclosing
+    scalar at the persistence boundary so the raw blob payload never
+    enters ``chat_messages.tool_calls`` (rev-2 M.10).
+
+    ``extra="forbid"`` is required (rev-2 M.1): the walker enumerates the
+    declared field set and the adequacy guard relies on canonical-args/
+    walker parity.  A stray field that Pydantic silently accepted would
+    leak through every gate (manifest dispatch, persistence, adequacy).
+
+    Fields belonging to neighbouring tools (``blob_id`` — that is on
+    ``update_blob`` / ``set_source_from_blob`` / ``delete_blob`` /
+    ``get_blob_content`` / ``inspect_source``) are intentionally absent
+    so ``extra="forbid"`` rejects misrouted argument shapes early.
+    """
+
+    filename: str
+    mime_type: str
+    content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
+    description: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 def _redact_via_schema(
     tool_name: str,
     validated: BaseModel,
@@ -945,6 +1007,7 @@ def redact_tool_call_arguments(
 MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
     {
         "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
+        "create_blob": ToolRedaction(argument_model=CreateBlobArgumentsModel),
     }
 )
 

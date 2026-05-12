@@ -41,7 +41,7 @@ from elspeth.web.composer.recipes import (
     apply_recipe,
     list_recipes,
 )
-from elspeth.web.composer.redaction import SetSourceArgumentsModel, redact_source_storage_path
+from elspeth.web.composer.redaction import CreateBlobArgumentsModel, SetSourceArgumentsModel, redact_source_storage_path
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
     facts_to_dict,
@@ -2968,18 +2968,43 @@ def _execute_create_blob(
     Uses the same storage layout and safety functions as BlobServiceImpl:
     sanitize_filename() for path traversal defence, content_hash() for
     SHA-256, per-session subdirectory, and atomic quota enforcement.
+
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`CreateBlobArgumentsModel` (the single source of truth for
+    the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["create_blob"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).  On :class:`pydantic.ValidationError` we
+    re-raise as :class:`ToolArgumentError` so the compose loop's
+    ARG_ERROR routing at ``service.py:2480`` receives the right
+    exception class (Task 13 / Wave 2; mirrors Task 4 pattern at
+    ``tools.py:2320-2327``).
+
+    The validated ``model_dump()`` is then fed to ``_prepare_blob_create``
+    which still performs the MIME-type allowlist check and
+    :func:`sanitize_filename` traversal-defence — those are semantic
+    Tier-3 checks (value-based) that Pydantic's type validation cannot
+    express.
     """
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
     if data_dir is None:
         return _failure_result(state, "Blob tools require data_dir for storage.")
 
-    # _prepare_blob_create raises ToolArgumentError on invalid LLM
-    # arguments (CEC1 channel discipline). Letting it propagate routes
-    # the audit row to ARG_ERROR (which is the truthful classification:
-    # the LLM provided unusable input) rather than masking it as a
-    # SUCCESS-with-success=False ToolResult via _failure_result.
-    prepared = _prepare_blob_create(arguments, data_dir=data_dir, session_id=session_id)
+    try:
+        validated = CreateBlobArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="create_blob arguments",
+            expected="object conforming to CreateBlobArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    # _prepare_blob_create still raises ToolArgumentError on semantic
+    # Tier-3 violations (disallowed MIME type, un-sanitizable filename).
+    # The Pydantic model catches type/shape violations; _prepare_blob_create
+    # catches value-domain violations.  Both route via ToolArgumentError
+    # to ARG_ERROR (CEC1 channel discipline).
+    prepared = _prepare_blob_create(validated.model_dump(), data_dir=data_dir, session_id=session_id)
 
     quota_error = _persist_prepared_blob_create(prepared, session_engine=session_engine, session_id=session_id)
     if quota_error is not None:

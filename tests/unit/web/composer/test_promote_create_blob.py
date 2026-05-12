@@ -1,0 +1,280 @@
+"""ARG_ERROR routing + redaction for ``create_blob`` (Task 13 / Wave 2).
+
+Companion to ``test_promote_set_source.py`` (Task 4); rev-2 BLOCKER_A
+applies: promoted handlers MUST catch :class:`pydantic.ValidationError`
+and re-raise as :class:`ToolArgumentError`.  A bare ``ValidationError``
+escaping the handler hits ``service.py:2564`` (→
+:class:`ComposerPluginCrashError` → HTTP 500) — wrong disposition for
+Tier-3 input.
+
+Tests pin:
+  * exception-class + ``__cause__`` chain on invalid arguments,
+  * valid dispatch produces a ready blob (functional smoke),
+  * :func:`redact_tool_call_arguments` substitutes the
+    ``<inline-blob:N-bytes>`` summarizer at the persistence boundary,
+  * blob-tool summarizer type-variability (rev-2 M.10): the summarizer
+    is safe for every ``str`` value Pydantic admits (empty, ASCII,
+    non-ASCII) because ``extra="forbid"`` + ``content: str`` rejects
+    everything but ``str`` BEFORE the summarizer runs.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy.pool import StaticPool
+
+from elspeth.web.composer.protocol import ToolArgumentError
+from elspeth.web.composer.redaction import (
+    MANIFEST,
+    CreateBlobArgumentsModel,
+    _summarize_inline_blob_content,
+    redact_tool_call_arguments,
+)
+from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.tools import _execute_create_blob
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+def _empty_state() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _mock_catalog() -> MagicMock:
+    # _execute_create_blob does not read from the catalog; a bare MagicMock
+    # is sufficient.  This mirrors test_promote_set_source.py's discipline:
+    # don't instantiate the real CatalogService here unless the path under
+    # test actually consults it.
+    return MagicMock()
+
+
+def _session_engine_with_session() -> tuple[Any, str]:
+    """Minimal session DB with one row, matching test_tools.py helper."""
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="test-user",
+                auth_provider_type="local",
+                title="Test Session",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return engine, session_id
+
+
+# ---------------------------------------------------------------------------
+# Manifest shape pin (parity with test_redact_set_source.py)
+# ---------------------------------------------------------------------------
+
+
+def test_create_blob_manifest_entry_is_type_driven() -> None:
+    entry = MANIFEST["create_blob"]
+    assert entry.argument_model is CreateBlobArgumentsModel
+    assert entry.policy is None
+
+
+# ---------------------------------------------------------------------------
+# ARG_ERROR routing — bare ValidationError must NOT escape the handler
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteCreateBlobArgErrorRouting:
+    def test_empty_arguments_raise_tool_argument_error(self) -> None:
+        """A bare ``{}`` is missing all three required fields."""
+        engine, session_id = _session_engine_with_session()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_create_blob(
+                {},
+                _empty_state(),
+                _mock_catalog(),
+                data_dir="/tmp",
+                session_engine=engine,
+                session_id=session_id,
+            )
+        # __cause__ chain MUST preserve the underlying ValidationError
+        # so auditors can inspect missing fields without the LLM-facing
+        # message exposing raw Tier-3 argument values.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wrong_type_raises_tool_argument_error(self) -> None:
+        """Pydantic rejects ``content: int`` before the handler reads it."""
+        engine, session_id = _session_engine_with_session()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_create_blob(
+                {
+                    "filename": "seed.txt",
+                    "mime_type": "text/plain",
+                    "content": 42,  # not str
+                },
+                _empty_state(),
+                _mock_catalog(),
+                data_dir="/tmp",
+                session_engine=engine,
+                session_id=session_id,
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_extra_field_raises_tool_argument_error(self) -> None:
+        """extra='forbid' on the model rejects stray fields at Tier-3."""
+        engine, session_id = _session_engine_with_session()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_create_blob(
+                {
+                    "filename": "seed.txt",
+                    "mime_type": "text/plain",
+                    "content": "hello",
+                    "blob_id": "stray",  # belongs on update_blob / set_source_from_blob
+                },
+                _empty_state(),
+                _mock_catalog(),
+                data_dir="/tmp",
+                session_engine=engine,
+                session_id=session_id,
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_valid_arguments_dispatch_normally(self, tmp_path: Path) -> None:
+        """Functional smoke: a valid call produces a ready blob."""
+        engine, session_id = _session_engine_with_session()
+        result = _execute_create_blob(
+            {
+                "filename": "seed.txt",
+                "mime_type": "text/plain",
+                "content": "hello world",
+            },
+            _empty_state(),
+            _mock_catalog(),
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert result.success is True
+        assert result.data is not None
+        assert result.data["filename"] == "seed.txt"
+        assert result.data["mime_type"] == "text/plain"
+        assert result.data["size_bytes"] == len(b"hello world")
+
+
+# ---------------------------------------------------------------------------
+# Redaction at the persistence boundary
+# ---------------------------------------------------------------------------
+
+
+_CANARY = "CANARY-INLINE-BLOB-CONTENT-DO-NOT-LEAK"
+
+
+def test_redaction_substitutes_content_via_summarizer() -> None:
+    """``content`` is replaced by the ``<inline-blob:N-bytes>`` summarizer.
+
+    Verifies that the canary value never appears in the redacted dict
+    OR its JSON serialisation — closing the same persistence-boundary
+    cross-check Task 4 pinned for ``set_source``.
+    """
+    tel = NoopRedactionTelemetry()
+    args = {
+        "filename": "seed.txt",
+        "mime_type": "text/plain",
+        "content": _CANARY,
+    }
+    redacted = redact_tool_call_arguments("create_blob", args, telemetry=tel)
+    # Structural keys preserved.
+    assert redacted["filename"] == "seed.txt"
+    assert redacted["mime_type"] == "text/plain"
+    # Sensitive substitution: content is now the summarizer's str output.
+    assert isinstance(redacted["content"], str)
+    expected = f"<inline-blob:{len(_CANARY.encode('utf-8'))}-bytes>"
+    assert redacted["content"] == expected
+    # Canary MUST NOT appear anywhere in the redacted dict or its JSON form.
+    serialized = json.dumps(redacted, sort_keys=True)
+    assert _CANARY not in serialized, (
+        "Sensitive canary value appeared in serialized output. "
+        "Redaction did not remove it from the persistence path. "
+        f"Serialized: {serialized!r}"
+    )
+    # Telemetry recorded the manifest dispatch with the type-driven shape.
+    assert tel.manifest_dispatch_calls == [{"tool_name": "create_blob", "shape": "type_driven"}]
+
+
+# ---------------------------------------------------------------------------
+# Blob-tool summarizer type-variability (rev-2 M.10)
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizerTypeVariability:
+    """Pin rev-2 M.10: verify the summarizer is safe for every ``str`` value
+    the Pydantic model admits.  Non-``str`` types (``None``, ``int``, ``bool``,
+    ``list``, ``dict``) are rejected by ``content: str`` + ``extra="forbid"``
+    BEFORE the summarizer runs — the lambda is never reached for them.
+
+    Implication: the summarizer's signature can safely assume ``str`` and
+    use ``len(content.encode("utf-8"))``.  This is the contract Pydantic
+    enforces; this test pins the contract so a future schema change that
+    relaxes ``content`` to ``str | bytes`` (or similar) fails loudly here
+    rather than silently producing a wrong byte count.
+    """
+
+    def test_summarizer_safe_for_empty_string(self) -> None:
+        assert _summarize_inline_blob_content("") == "<inline-blob:0-bytes>"
+
+    def test_summarizer_safe_for_ascii_string(self) -> None:
+        assert _summarize_inline_blob_content("hello") == "<inline-blob:5-bytes>"
+
+    def test_summarizer_safe_for_non_ascii_string(self) -> None:
+        # "héllo" is 6 bytes in UTF-8 (h=1, é=2, l=1, l=1, o=1).
+        assert _summarize_inline_blob_content("héllo") == "<inline-blob:6-bytes>"
+
+    def test_pydantic_model_rejects_none_before_summarizer(self) -> None:
+        """``None`` never reaches the summarizer.
+
+        ``content: str`` + ``extra="forbid"`` is Pydantic's strict-mode
+        validation: a ``None`` value triggers ``ValidationError`` at
+        :meth:`model_validate` time.  The test fixes this contract so the
+        summarizer's safety claim (``content`` is always ``str``) is not
+        a free-floating comment but a mechanically-enforced invariant.
+        """
+        with pytest.raises(PydanticValidationError):
+            CreateBlobArgumentsModel.model_validate(
+                {
+                    "filename": "x.txt",
+                    "mime_type": "text/plain",
+                    "content": None,
+                }
+            )
+
+    def test_pydantic_model_rejects_non_string_content(self) -> None:
+        """Same as above for ``int`` — Pydantic strict-validates ``content: str``."""
+        with pytest.raises(PydanticValidationError):
+            CreateBlobArgumentsModel.model_validate(
+                {
+                    "filename": "x.txt",
+                    "mime_type": "text/plain",
+                    "content": 42,
+                }
+            )

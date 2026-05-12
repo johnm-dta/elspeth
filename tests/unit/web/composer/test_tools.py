@@ -7100,6 +7100,19 @@ class TestCreateBlobTypeGuard:
     test_service.py) patch execute_tool at the seam and cannot prove the
     real handler raises the right class. This test drives the handler
     end-to-end through execute_tool() dispatch.
+
+    Post Task 13 (Wave 2 — ``create_blob`` manifest promotion): the
+    Tier-3 type guard now lives in :class:`CreateBlobArgumentsModel`
+    via Pydantic's strict ``content: str`` validation.  The handler
+    catches :class:`pydantic.ValidationError` and re-raises as
+    :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327`` /
+    Task 4); the LLM-facing message names the argument-bundle and the
+    Pydantic model, not the offending value (rev-2 BLOCKER_A leak
+    discipline).  Memory:
+    ``feedback_locked_in_buggy_expectations`` — the previous
+    ``"'content' must be a string, got int"`` assertion pinned the
+    legacy ``_prepare_blob_create`` message; the new boundary fires
+    earlier with a leak-safe shell.
     """
 
     @pytest.fixture(autouse=True)
@@ -7136,12 +7149,20 @@ class TestCreateBlobTypeGuard:
             )
 
     def test_non_string_content_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
         state = _empty_state()
 
-        with pytest.raises(ToolArgumentError, match=r"'content' must be a string, got int"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value is not echoed (the
+        # full Pydantic detail survives on __cause__ for auditors).
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'create_blob arguments' must be object conforming to CreateBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "create_blob",
                 {
@@ -7155,6 +7176,10 @@ class TestCreateBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail
+        # (rev-2 BLOCKER_A leak discipline: full detail audit-side,
+        # leak-safe shell LLM-side).
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------

@@ -1203,35 +1203,13 @@ allow_hits:
     pattern which would have crashed deep in the comprehension on a non-iterable.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=eafccf78781770d8
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=c62857823fd15c3b
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['plugin'] must be a non-empty
-    string per the server-side state_machine contract (see test_state_machine.test_initial_session_advances_after_source_confirmed);
-    isinstance here is offensive validation (raises HTTPException 400 with the offending value in the detail), not error
-    suppression. Replaces the previous silent str(edited['plugin']) coercion.
-  safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
-  expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=d4d75e0f7d0db601
-  owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['options'] must be a Mapping
-    per the server-side state_machine contract; isinstance here is offensive validation (raises HTTPException 400 with the
-    actual type in the detail), not error suppression. Replaces the previous silent dict(edited.get("options", {})) default.
-  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
-  expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=4be385491212b4dd
-  owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['observed_columns'] must
-    be a list per the server-side state_machine contract; isinstance here is offensive validation (raises HTTPException 400
-    with the actual type in the detail), not error suppression. Replaces the previous silent tuple(edited.get("observed_columns", []))
-    default.
-  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
-  expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=2230df199fe835a4
-  owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['sample_rows'] must be a
-    list per the server-side state_machine contract; isinstance here is offensive validation (raises HTTPException 400 with
-    the actual type in the detail), not error suppression. Replaces the previous silent tuple(dict(r) for r in edited.get("sample_rows", []))
-    pattern.
+  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['columns'] must be a list
+    per the narrow wire contract (Pair 5a); isinstance here is offensive validation (raises HTTPException 400 with the actual
+    type in the detail), not error suppression. The guard is HTTP-reachable as 400 because _advance_step_1's
+    ``tuple(str(c) for c in columns_raw)`` coercion would silently accept a scalar string (iterating its characters), so the
+    dispatcher catches non-list here before that coercion runs. Resolves elspeth-obs-57451bbaa6.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
 - key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=690a1fa6374c17d1

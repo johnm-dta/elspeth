@@ -208,6 +208,54 @@ class SinkResolved:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceIntent:
+    """Source plugin name, options, and observed inspection facts captured during Step 1.
+
+    Persisted in GuidedSession.step_1_source_intent as a mid-Step-1 staging
+    field.  The INSPECT_AND_CONFIRM emit site writes it; _advance_step_1 reads it
+    when processing the INSPECT_AND_CONFIRM response to construct SourceResolved.
+
+    It is cleared (set to None) as part of the same atomic replace() that
+    consumes it, so it cannot be misread by a later step.
+
+    Frozen, audit-tier: same freeze contract as SourceResolved and SinkIntent.
+    options is a Mapping because the source schema can contain arbitrary types;
+    observed_columns and sample_rows are Sequences for the same reason;
+    freeze_fields enforces deep immutability on all container fields.
+    """
+
+    plugin: str
+    options: Mapping[str, Any]
+    observed_columns: Sequence[str]
+    sample_rows: Sequence[Mapping[str, Any]]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options", "observed_columns", "sample_rows")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "plugin": self.plugin,
+            "options": deep_thaw(self.options),
+            "observed_columns": list(deep_thaw(self.observed_columns)),
+            "sample_rows": [dict(deep_thaw(r)) for r in self.sample_rows],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SourceIntent:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                plugin=d["plugin"],
+                options=d["options"],
+                observed_columns=tuple(d["observed_columns"]),
+                sample_rows=tuple(dict(r) for r in d["sample_rows"]),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"SourceIntent.from_dict: malformed record {d!r}") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class SinkIntent:
     """Sink plugin name and options captured during the Step-2 SCHEMA_FORM turn.
 
@@ -293,6 +341,12 @@ class GuidedSession:
     ``composer_meta["guided_session"]`` (see Task 3.5a implementation notes).
     The frozen dataclass equality check is the round-trip invariant test.
 
+    ``step_1_source_intent`` is a mid-Step-1 staging field.  The INSPECT_AND_CONFIRM
+    emit site writes the chosen source plugin + options + observed inspection facts
+    into it before emitting the INSPECT_AND_CONFIRM turn.  ``_advance_step_1`` reads
+    it to reconstruct the full SourceResolved and clears it in the same atomic
+    replace(); it is always None after Step 1 completes.
+
     ``step_2_sink_intent`` is a mid-Step-2 staging field.  The SCHEMA_FORM
     dispatcher writes the chosen sink plugin + options into it before emitting
     the MULTI_SELECT_WITH_CUSTOM turn.  ``_advance_step_2`` reads it to
@@ -307,6 +361,7 @@ class GuidedSession:
     step_3_proposal: ChainProposal | None
     terminal: TerminalState | None
     transition_consumed: bool = False
+    step_1_source_intent: SourceIntent | None = None
     step_2_sink_intent: SinkIntent | None = None
 
     @classmethod
@@ -334,6 +389,7 @@ class GuidedSession:
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
+            "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
         }
 
@@ -349,6 +405,7 @@ class GuidedSession:
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
             terminal_raw = d["terminal"]
+            source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
             return cls(
                 step=GuidedStep(d["step"]),
@@ -358,6 +415,7 @@ class GuidedSession:
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
                 transition_consumed=d["transition_consumed"],
+                step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
             )
         except (KeyError, ValueError, TypeError) as exc:
@@ -471,21 +529,43 @@ def _advance_step_1(
     turn types (``SINGLE_SELECT`` for plugin selection, ``SCHEMA_FORM`` for
     options) are intra-step turns that do not advance the wizard. Those
     branches emit the next intra-step turn and are out of scope here.
+
+    The inspection state (plugin, options, samples, warnings) is held in
+    ``session.step_1_source_intent`` — set by the INSPECT_AND_CONFIRM emit site
+    before the turn is returned to the client.  The wire response carries only
+    ``edited_values = {"columns": list[str]}``, since that is the only field
+    the widget can authoritatively edit.  plugin/options/samples are recovered
+    from intent; columns come from the response.
+
+    All values from the response are Tier-3 external data and are coerced
+    (str, tuple) before being stored in the audit-tier ``SourceResolved``.
     """
     if turn_type is not TurnType.INSPECT_AND_CONFIRM:
         # Intra-step turns (plugin select, options form) — do not advance.
         # Tasks 2.2+ wire these when the full intra-step flow is added.
         return (session, None, None, [])
 
+    intent = session.step_1_source_intent
+    if intent is None:
+        raise ValueError(
+            "_advance_step_1: step_1_source_intent is None when INSPECT_AND_CONFIRM "
+            "was received — the INSPECT_AND_CONFIRM emit site must set it before "
+            "emitting the turn. This is a state-machine invariant violation."
+        )
+
     edited = response["edited_values"]
     if edited is None:
         raise ValueError("inspect_and_confirm response must carry edited_values; got None")
 
+    # columns is the only field the widget edits; it is Tier-3: coerce to tuple[str, ...].
+    columns_raw = edited["columns"]  # KeyError propagates as protocol violation
+    columns = tuple(str(c) for c in columns_raw)
+
     source = SourceResolved(
-        plugin=str(edited["plugin"]),
-        options=dict(edited["options"]),
-        observed_columns=tuple(edited["observed_columns"]),
-        sample_rows=tuple(dict(r) for r in edited["sample_rows"]),
+        plugin=intent.plugin,
+        options=dict(intent.options),
+        observed_columns=columns,
+        sample_rows=tuple(dict(r) for r in intent.sample_rows),
     )
     directives: list[GuidedAuditDirective] = [
         GuidedAuditDirective(
@@ -501,6 +581,7 @@ def _advance_step_1(
         session,
         step=GuidedStep.STEP_2_SINK,
         step_1_result=source,
+        step_1_source_intent=None,  # consumed; clear to prevent misread by later steps
     )
     return (new_sess, None, None, directives)
 

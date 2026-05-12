@@ -1782,80 +1782,65 @@ async def _dispatch_guided_respond(
 
     # --- STEP_1_SOURCE → STEP_2_SINK (step_advance fired for INSPECT_AND_CONFIRM)
     if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
-        # step_advance advanced the step. Build SourceResolved from edited_values.
-        # ``edited_values`` is the wire contract for the post-advance
-        # INSPECT_AND_CONFIRM response (server-side; per the unit-test contract
-        # in test_state_machine.test_initial_session_advances_after_source_confirmed):
-        # ``{"plugin": str, "options": Mapping, "observed_columns": list,
-        # "sample_rows": list}``. A missing key, a null payload, or a wrong-typed
-        # value is a protocol violation — silent ``.get()`` defaults would
-        # fabricate fields the client never supplied (forbidden per CLAUDE.md
-        # §Three-Tier Trust Model). The HTTP boundary is a trust boundary, so
-        # we raise 400 with a contract-citing message.
+        # step_advance already ran and advanced the step.  _advance_step_1 built
+        # SourceResolved from step_1_source_intent (plugin/options/samples) +
+        # edited_values["columns"] (the only field the widget can edit) and stored
+        # the result in guided.step_1_result.  It also cleared step_1_source_intent.
         #
-        # Shadowing note: ``_advance_step_1`` in state_machine.py runs BEFORE
-        # this dispatcher branch and itself raises ``ValueError`` on null
-        # ``edited_values`` and ``KeyError`` on missing required keys — those
-        # errors propagate as HTTP 500 long before reaching here. The null and
-        # missing-key guards below are defense-in-depth: structurally
-        # unreachable as 400 in the production flow, but kept so the validator
-        # is locally complete and the dispatcher remains correct in isolation
-        # (e.g. if ``_advance_step_1``'s guards were ever relaxed). The
-        # guards that ARE HTTP-reachable as 400 are those where
-        # ``_advance_step_1``'s ``str()`` / ``tuple()`` coercion passes the
-        # raw value through unchanged: non-empty/non-string ``plugin``,
-        # non-Mapping ``options``, non-list ``observed_columns`` /
-        # ``sample_rows``.
+        # The new wire contract for INSPECT_AND_CONFIRM edited_values is narrow:
+        #   ``{"columns": list[str]}``
+        # Plugin, options, observed_columns (samples), and warnings are now
+        # server-side knowledge held in step_1_source_intent before the turn is
+        # emitted; the widget never sees them in the response body.
+        #
+        # Shadowing note: ``_advance_step_1`` raises ValueError on null
+        # ``edited_values`` and KeyError on missing ``columns`` — those propagate
+        # as HTTP 500 before reaching here. The null guard and missing-key guard
+        # below are defense-in-depth (locally complete; unreachable as 400 in
+        # normal flow). The isinstance(columns_raw, list) guard IS HTTP-reachable
+        # as 400: _advance_step_1's ``tuple(str(c) for c in columns_raw)`` coercion
+        # silently accepts a scalar string (iterating its characters), so the
+        # dispatcher catches non-list here before that coercion runs.
+        #
+        # EMIT-SITE NOTE: step_1_source_intent must be set before emitting the
+        # INSPECT_AND_CONFIRM turn.  Today no production code path emits this turn
+        # (``_build_get_guided_turn`` always passes blob_inspection=None); the only
+        # emitter is _seed_inspect_and_confirm_history in the integration test suite.
+        # When a real emitter is added, it must
+        #   ``replace(session, step_1_source_intent=SourceIntent(...))``
+        # before returning.
         edited = turn_response["edited_values"]
         if edited is None:
             raise HTTPException(
                 status_code=400,
                 detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
             )
-        missing = {"plugin", "options", "observed_columns", "sample_rows"} - edited.keys()
-        if missing:
+        if "columns" not in edited:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"inspect_and_confirm response at step 1 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    f"inspect_and_confirm response at step 1 edited_values missing required key: 'columns'; got keys: {sorted(edited.keys())}"
                 ),
             )
-        plugin_name = edited["plugin"]
-        if not isinstance(plugin_name, str) or not plugin_name:
-            raise HTTPException(
-                status_code=400,
-                detail=(f"inspect_and_confirm response at step 1 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
-            )
-        options_raw = edited["options"]
-        if not isinstance(options_raw, Mapping):
+        columns_raw = edited["columns"]
+        if not isinstance(columns_raw, list):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"inspect_and_confirm response at step 1 edited_values['options'] must be an object; got {type(options_raw).__name__}"
+                    f"inspect_and_confirm response at step 1 edited_values['columns'] must be a list; got {type(columns_raw).__name__}"
                 ),
             )
-        observed_columns_raw = edited["observed_columns"]
-        if not isinstance(observed_columns_raw, list):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"inspect_and_confirm response at step 1 edited_values['observed_columns'] must be a list; got {type(observed_columns_raw).__name__}"
-                ),
+        # SourceResolved was built by _advance_step_1 and stored in guided.step_1_result.
+        # Unreachable None: _advance_step_1 always sets step_1_result on advance (the
+        # branch is only reached when guided.step is STEP_2_SINK, which only happens
+        # after _advance_step_1 sets step_1_result).  Assert to keep mypy happy and
+        # provide a clear crash message if this invariant is ever violated.
+        if guided.step_1_result is None:
+            raise AssertionError(
+                "inspect_and_confirm post-advance: guided.step_1_result is None after "
+                "_advance_step_1 ran — this is an invariant violation in the state machine."
             )
-        sample_rows_raw = edited["sample_rows"]
-        if not isinstance(sample_rows_raw, list):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"inspect_and_confirm response at step 1 edited_values['sample_rows'] must be a list; got {type(sample_rows_raw).__name__}"
-                ),
-            )
-        resolved = SourceResolved(
-            plugin=plugin_name,
-            options=dict(options_raw),
-            observed_columns=tuple(observed_columns_raw),
-            sample_rows=tuple(dict(r) for r in sample_rows_raw),
-        )
+        resolved = guided.step_1_result
         handler_result = handle_step_1_source(
             state=state,
             session=guided,

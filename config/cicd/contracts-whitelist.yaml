@@ -567,6 +567,8 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/state_machine.py:SinkOutputResolved.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkResolved.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:ChainProposal.to_dict:return"

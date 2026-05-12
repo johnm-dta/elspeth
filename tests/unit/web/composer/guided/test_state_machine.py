@@ -14,6 +14,7 @@ from elspeth.web.composer.guided.state_machine import (
     SinkIntent,
     SinkOutputResolved,
     SinkResolved,
+    SourceIntent,
     SourceResolved,
     TerminalKind,
     TerminalReason,
@@ -136,6 +137,42 @@ class TestGuidedSession:
         assert restored == sess
         assert restored.step_2_sink_intent is None
 
+    def test_guided_session_roundtrip_with_source_intent(self) -> None:
+        """GuidedSession with step_1_source_intent survives to_dict/from_dict round-trip.
+
+        Exercises the Tier-1 serialisation boundary: the session is persisted to
+        composer_meta["guided_session"] between turns, so the new staging field must
+        survive the round-trip without loss or corruption.
+        """
+        intent = SourceIntent(
+            plugin="csv",
+            options={"path": "/data/in.csv", "schema": {"mode": "observed"}},
+            observed_columns=("col_a", "col_b"),
+            sample_rows=({"col_a": "x", "col_b": "y"},),
+        )
+        from dataclasses import replace
+
+        sess = replace(GuidedSession.initial(), step_1_source_intent=intent)
+        d = sess.to_dict()
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_1_source_intent is not None
+        assert restored.step_1_source_intent.plugin == "csv"
+        assert restored.step_1_source_intent.observed_columns == ("col_a", "col_b")
+        assert restored.step_1_source_intent.sample_rows == ({"col_a": "x", "col_b": "y"},)
+
+    def test_guided_session_roundtrip_with_source_intent_none(self) -> None:
+        """GuidedSession with step_1_source_intent=None round-trips cleanly.
+
+        Ensures the None case is serialised as None and reconstructed as None
+        (not absent or missing), which would crash from_dict's strict key read.
+        """
+        sess = GuidedSession.initial()
+        d = sess.to_dict()
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_1_source_intent is None
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a minimal TurnResponse
@@ -165,27 +202,83 @@ def _make_response(
 
 class TestStepAdvance:
     def test_initial_session_advances_after_source_confirmed(self) -> None:
-        """INSPECT_AND_CONFIRM with valid edited_values advances to STEP_2_SINK."""
-        session = GuidedSession.initial()
+        """INSPECT_AND_CONFIRM with step_1_source_intent set advances to STEP_2_SINK.
+
+        The new wire contract is narrow: edited_values = {"columns": list}.
+        Plugin, options, and sample_rows are recovered from step_1_source_intent.
+        """
+        intent = SourceIntent(
+            plugin="csv",
+            options={"path": "/data/input.csv"},
+            observed_columns=("id", "name", "score"),
+            sample_rows=({"id": 1, "name": "Alice", "score": 99},),
+        )
+        from dataclasses import replace
+
+        session = replace(GuidedSession.initial(), step_1_source_intent=intent)
         response = _make_response(
             edited_values={
-                "plugin": "csv",
-                "options": {"path": "/data/input.csv"},
-                "observed_columns": ["id", "name", "score"],
-                "sample_rows": [{"id": 1, "name": "Alice", "score": 99}],
+                "columns": ["id", "name", "score"],
             },
         )
         new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
         assert new_sess.step is GuidedStep.STEP_2_SINK
         assert new_sess.step_1_result is not None
         assert new_sess.step_1_result.plugin == "csv"
+        assert new_sess.step_1_result.observed_columns == ("id", "name", "score")
+        assert new_sess.step_1_source_intent is None  # consumed; cleared atomically
         assert terminal is None
         assert next_turn is None
         assert any(d.tool_name == "guided_step_advanced" for d in directives)
 
-    def test_inspect_and_confirm_without_edited_values_raises(self) -> None:
-        """edited_values=None on an INSPECT_AND_CONFIRM response must raise ValueError."""
+    def test_advance_step_1_raises_when_intent_missing(self) -> None:
+        """INSPECT_AND_CONFIRM without step_1_source_intent raises ValueError.
+
+        The intent must be set by the emit site before the turn is sent.
+        Arriving at INSPECT_AND_CONFIRM with intent=None is a state-machine
+        invariant violation.
+        """
         session = GuidedSession.initial()
+        # Confirm intent is None (initial state — no emit site set it).
+        assert session.step_1_source_intent is None
+        response = _make_response(edited_values={"columns": ["id", "name"]})
+        with pytest.raises(ValueError, match="step_1_source_intent is None"):
+            step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+
+    def test_advance_step_1_columns_are_coerced_to_str(self) -> None:
+        """Numeric column values in edited_values["columns"] are coerced to str.
+
+        Tier-3 coercion at the HTTP boundary: ``str(c)`` applied to each element.
+        """
+        intent = SourceIntent(
+            plugin="csv",
+            options={"path": "/data/input.csv"},
+            observed_columns=("col_a",),
+            sample_rows=(),
+        )
+        from dataclasses import replace
+
+        session = replace(GuidedSession.initial(), step_1_source_intent=intent)
+        response = _make_response(edited_values={"columns": [42, "name", True]})
+        new_sess, _, _, _ = step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+        assert new_sess.step_1_result is not None
+        assert new_sess.step_1_result.observed_columns == ("42", "name", "True")
+
+    def test_inspect_and_confirm_without_edited_values_raises(self) -> None:
+        """edited_values=None on an INSPECT_AND_CONFIRM response must raise ValueError.
+
+        step_1_source_intent must be set so the intent-guard passes; the
+        edited_values-None guard is the second check.
+        """
+        intent = SourceIntent(
+            plugin="csv",
+            options={"path": "/data/input.csv"},
+            observed_columns=("id",),
+            sample_rows=(),
+        )
+        from dataclasses import replace
+
+        session = replace(GuidedSession.initial(), step_1_source_intent=intent)
         response = _make_response(edited_values=None)
         with pytest.raises(ValueError, match="inspect_and_confirm"):
             step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)

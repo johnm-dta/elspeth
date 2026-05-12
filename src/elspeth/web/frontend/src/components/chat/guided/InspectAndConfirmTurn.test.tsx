@@ -2,10 +2,14 @@
 // InspectAndConfirmTurn — wire-response contract regression coverage.
 //
 // Pins three wire-response contracts and one UI-state contract:
-//   "Looks right" submit  → edited_values = payload.observed verbatim,
-//                           chosen=null, custom_inputs=null, all-other-fields null
-//   "Apply edits" submit  → edited_values.columns reflects user renames/removals;
-//                           samples and warnings pass through unchanged from payload.observed
+//   "Looks right" submit  → edited_values = { columns: payload.observed.columns }
+//                           chosen=null, custom_inputs=null, all-other-fields null.
+//                           Plugin, options, samples, and warnings are held server-side
+//                           in step_1_source_intent (state_machine.SourceIntent); the
+//                           widget never round-trips them.
+//   "Apply edits" submit  → edited_values = { columns: <edited> }
+//                           Only the column list is sent; server recovers the rest
+//                           from step_1_source_intent on advance.
 //   Editor sub-state      → "Edit columns..." opens the editor (rename inputs + remove
 //                           buttons per column); Cancel returns to inspect view without
 //                           submitting
@@ -14,9 +18,10 @@
 //
 // The GuidedRespondRequest shape is the unit under test; these tests will
 // catch any future refactor that silently drops a null field, changes which
-// fields are populated on each submit path, or corrupts samples/warnings
-// pass-through on the edit path.  Tasks 7.4-7.7 will replicate this
-// regression-intent structure with their own wire contracts.
+// fields are populated on each submit path, or re-introduces round-tripping
+// of samples/warnings (which would break the narrow wire contract).
+// Tasks 7.4-7.7 replicate this regression-intent structure with their own
+// wire contracts.
 // ============================================================================
 
 import { describe, it, expect, vi } from "vitest";
@@ -138,7 +143,7 @@ describe("InspectAndConfirmTurn — warnings", () => {
 // ── Inspect view: "Looks right" submit ───────────────────────────────────────
 
 describe("InspectAndConfirmTurn — Looks right submit", () => {
-  it("clicking 'Looks right' fires onSubmit with observed shape verbatim", async () => {
+  it("clicking 'Looks right' fires onSubmit with narrow {columns} shape", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={onSubmit} />);
@@ -154,13 +159,23 @@ describe("InspectAndConfirmTurn — Looks right submit", () => {
       custom_inputs: null,
       edited_values: {
         columns: ["name", "age", "city"],
-        samples: [
-          { name: "Alice", age: 30, city: "London" },
-          { name: "Bob", age: 25, city: "Paris" },
-        ],
-        warnings: ["Column 'age' contains mixed numeric and string values."],
       },
     });
+  });
+
+  it("clicking 'Looks right' does NOT include samples or warnings in edited_values", async () => {
+    // Regression: narrow wire contract — samples/warnings stay server-side in
+    // step_1_source_intent; the widget must not round-trip them.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={onSubmit} />);
+
+    await user.click(screen.getByRole("button", { name: "Looks right" }));
+
+    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const ev = body.edited_values as Record<string, unknown>;
+    expect("samples" in ev).toBe(false);
+    expect("warnings" in ev).toBe(false);
   });
 
   it("nullResponse() fields are explicitly null — not undefined or omitted", async () => {
@@ -228,7 +243,7 @@ describe("InspectAndConfirmTurn — editor sub-state", () => {
 // ── Edit submit: rename ───────────────────────────────────────────────────────
 
 describe("InspectAndConfirmTurn — edit submit with rename", () => {
-  it("renaming a column and applying edits sends edited columns; samples + warnings unchanged", async () => {
+  it("renaming a column and applying edits sends narrow {columns} shape with edited names", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={onSubmit} />);
@@ -251,21 +266,30 @@ describe("InspectAndConfirmTurn — edit submit with rename", () => {
       custom_inputs: null,
       edited_values: {
         columns: ["full_name", "age", "city"],
-        // samples and warnings pass through unchanged
-        samples: [
-          { name: "Alice", age: 30, city: "London" },
-          { name: "Bob", age: 25, city: "Paris" },
-        ],
-        warnings: ["Column 'age' contains mixed numeric and string values."],
       },
     });
+  });
+
+  it("applying edits does NOT include samples or warnings in edited_values", async () => {
+    // Regression: narrow wire contract — samples/warnings stay server-side.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={onSubmit} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit columns..." }));
+    await user.click(screen.getByRole("button", { name: "Apply edits" }));
+
+    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const ev = body.edited_values as Record<string, unknown>;
+    expect("samples" in ev).toBe(false);
+    expect("warnings" in ev).toBe(false);
   });
 });
 
 // ── Edit submit: remove ───────────────────────────────────────────────────────
 
 describe("InspectAndConfirmTurn — edit submit with remove", () => {
-  it("removing a column and applying edits sends columns without removed entry; samples unchanged", async () => {
+  it("removing a column and applying edits sends narrow {columns} shape without removed entry", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<InspectAndConfirmTurn payload={PAYLOAD_WITH_WARNINGS} onSubmit={onSubmit} />);
@@ -279,13 +303,10 @@ describe("InspectAndConfirmTurn — edit submit with remove", () => {
     await user.click(screen.getByRole("button", { name: "Apply edits" }));
 
     const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    const ev = body.edited_values as { columns: string[]; samples: unknown[]; warnings: unknown[] };
+    const ev = body.edited_values as { columns: string[] };
     expect(ev.columns).toEqual(["name", "city"]);
-    // Samples pass through unchanged from payload.observed
-    expect(ev.samples).toEqual([
-      { name: "Alice", age: 30, city: "London" },
-      { name: "Bob", age: 25, city: "Paris" },
-    ]);
+    // Narrow contract: only columns in edited_values.
+    expect(Object.keys(ev)).toEqual(["columns"]);
   });
 });
 

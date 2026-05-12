@@ -999,7 +999,7 @@ class TestStep2SchemaFormAccept:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 INSPECT_AND_CONFIRM — contract-violation negative tests (Pair 4)
+# Step 1 INSPECT_AND_CONFIRM — contract tests (Pair 5a)
 # ---------------------------------------------------------------------------
 # The INSPECT_AND_CONFIRM dispatcher branch (routes.py STEP_1 → STEP_2 path)
 # is currently HTTP-unreachable in normal flow because ``get_guided`` always
@@ -1007,24 +1007,26 @@ class TestStep2SchemaFormAccept:
 # INSPECT_AND_CONFIRM turn (see emitters.build_initial_step_1_turn).  The
 # dispatch branch is exercised here via state injection (the same pattern
 # used by test_progressive_disclosure._seed_terminal_state at line 170): a
-# TurnRecord with turn_type=INSPECT_AND_CONFIRM is seeded into
-# guided.history before POST /respond fires.
+# TurnRecord with turn_type=INSPECT_AND_CONFIRM AND step_1_source_intent is
+# seeded into guided state before POST /respond fires.
+#
+# New wire contract (Pair 5a):
+#   edited_values = {"columns": list[str]}
+#
+# Plugin, options, observed_columns, and sample_rows are now held server-side
+# in step_1_source_intent (state_machine.SourceIntent).  The old 4-key wire
+# shape is gone; tests for the removed plugin/options/observed_columns guards
+# are removed.
 #
 # Shadowing note:
-#   ``_advance_step_1`` in state_machine.py runs BEFORE the dispatcher and
-#   itself raises ValueError on null ``edited_values`` and KeyError on missing
-#   required keys.  Those errors propagate as HTTP 500, not site-2's HTTP 400.
-#   The dispatcher's null/missing-key guards remain as defense-in-depth (and
-#   are documented in the dispatcher comment) but cannot be asserted as 400
-#   via normal HTTP; the unit-level test_state_machine suite pins them at the
-#   ValueError/KeyError boundary.
-#
-#   The validators that ARE HTTP-reachable as 400 are those where step_advance's
-#   ``str()``/``tuple()`` coercion passes the raw value through:
-#     - non-string plugin (str(42) → "42" passes; isinstance(42,str)=False fires)
-#     - empty plugin     (str("")=""    passes; ``not plugin_name`` fires)
-#     - non-list observed_columns (tuple("abc")=('a','b','c') passes; isinstance fires)
-#   These three are tested below.
+#   ``_advance_step_1`` runs BEFORE the dispatcher and raises ValueError on
+#   null ``edited_values`` and KeyError on missing ``columns``.  Those errors
+#   propagate as HTTP 500, not the dispatcher's HTTP 400.  The dispatcher's
+#   null guard and missing-key guard remain as defense-in-depth.  The guard
+#   that IS HTTP-reachable as 400 is the ``isinstance(columns_raw, list)``
+#   check: ``_advance_step_1``'s ``tuple(str(c) for c in columns_raw)``
+#   silently accepts a scalar string (iterating its characters), so the
+#   dispatcher catches non-list here before that coercion runs.
 
 
 class TestStep1InspectAndConfirmAccept:
@@ -1033,13 +1035,18 @@ class TestStep1InspectAndConfirmAccept:
         client: TestClient,
         session_id: str,
     ) -> None:
-        """Seed an INSPECT_AND_CONFIRM TurnRecord into the session's guided history.
+        """Seed an INSPECT_AND_CONFIRM TurnRecord + step_1_source_intent into the session.
 
         This bypasses GET /guided because the server-side initial-turn builder
         passes blob_inspection=None unconditionally and so never emits an
         inspect_and_confirm turn.  We inject the state directly via
         save_composition_state — the same pattern used by
         test_progressive_disclosure._seed_terminal_state (line 170).
+
+        step_1_source_intent is populated so that _advance_step_1 can recover
+        plugin/options/sample_rows when the POST /respond fires — without it
+        _advance_step_1 raises ValueError before the dispatcher can validate
+        edited_values.
         """
         from dataclasses import replace
 
@@ -1048,6 +1055,7 @@ class TestStep1InspectAndConfirmAccept:
         from elspeth.web.composer.guided.state_machine import (
             GuidedSession,
             GuidedStep,
+            SourceIntent,
             TurnRecord,
         )
         from elspeth.web.sessions.converters import state_from_record
@@ -1067,7 +1075,8 @@ class TestStep1InspectAndConfirmAccept:
 
         # Build the GuidedSession with an INSPECT_AND_CONFIRM TurnRecord
         # at STEP_1_SOURCE so the dispatcher's current_turn_type read picks
-        # it up on POST /respond.
+        # it up on POST /respond.  Also seed step_1_source_intent so that
+        # _advance_step_1 can build SourceResolved from it.
         guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
         record = TurnRecord(
             step=GuidedStep.STEP_1_SOURCE,
@@ -1076,7 +1085,13 @@ class TestStep1InspectAndConfirmAccept:
             response_hash=None,
             emitter="server",
         )
-        guided = replace(guided, history=(*guided.history, record))
+        intent = SourceIntent(
+            plugin="csv",
+            options={"path": "/data/input.csv"},
+            observed_columns=("id", "name", "score"),
+            sample_rows=({"id": 1, "name": "Alice", "score": 99},),
+        )
+        guided = replace(guided, history=(*guided.history, record), step_1_source_intent=intent)
         state = replace(state, guided_session=guided)
 
         new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
@@ -1093,12 +1108,14 @@ class TestStep1InspectAndConfirmAccept:
         )
         asyncio.run(service.save_composition_state(session_uuid, state_data))
 
-    def test_inspect_and_confirm_empty_plugin_returns_400(self, composer_test_client: TestClient) -> None:
-        """Empty-string ``plugin`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
+    def test_inspect_and_confirm_non_list_columns_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-list ``columns`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
 
-        Site 2's ``isinstance(plugin_name, str) or not plugin_name`` check
-        fires the 400 on the raw empty-string value (replacing the previous
-        silent ``str(edited["plugin"])`` coercion).
+        The dispatcher's ``isinstance(columns_raw, list)`` guard fires the 400
+        on the raw scalar value.  This guard IS HTTP-reachable as 400 because
+        ``_advance_step_1``'s ``tuple(str(c) for c in columns_raw)`` coercion
+        would silently accept a scalar string (iterating its characters),
+        so the dispatcher must catch it before that coercion runs.
         """
         session_id = _create_session(composer_test_client)
         self._seed_inspect_and_confirm_history(composer_test_client, session_id)
@@ -1107,83 +1124,12 @@ class TestStep1InspectAndConfirmAccept:
             f"/api/sessions/{session_id}/guided/respond",
             json={
                 "edited_values": {
-                    "plugin": "",
-                    "options": {},
-                    "observed_columns": [],
-                    "sample_rows": [],
+                    "columns": "id,name,score",  # string, not a list
                 },
             },
         )
         assert resp.status_code == 400, resp.json()
         detail = resp.json()["detail"]
-        # Assert the boundary-message marker, not a bare substring — without
-        # the dispatcher guard, ``""`` would flow through ``handle_step_1_source``
-        # and the resulting 400 ``"Step 1 source commit failed: ToolResult(...)"``
-        # repr contains the word "plugin", so ``"inspect_and_confirm" in detail``
-        # / ``"plugin" in detail`` would BOTH pass against the unguarded path
-        # (the dispatcher's own 400 message starts ``"inspect_and_confirm
-        # response at step 1 ..."``, and the downstream commit-failure 400
-        # carries the dispatched ToolResult which echoes "plugin"). Only the
-        # contract-citing message "must be a non-empty string" mechanically
-        # pins this test to the dispatcher's guard.
-        assert "inspect_and_confirm response at step 1" in detail
-        assert "must be a non-empty string" in detail
-        assert "''" in detail  # the offending empty-string value is echoed in the detail
-
-    def test_inspect_and_confirm_non_string_plugin_returns_400(self, composer_test_client: TestClient) -> None:
-        """Non-string ``plugin`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
-
-        Site 2's ``isinstance(plugin_name, str)`` check fires the 400 on the
-        raw integer value (replacing the previous silent ``str(42)="42"``
-        coercion).
-        """
-        session_id = _create_session(composer_test_client)
-        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "edited_values": {
-                    "plugin": 42,
-                    "options": {},
-                    "observed_columns": [],
-                    "sample_rows": [],
-                },
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        detail = resp.json()["detail"]
-        # Boundary-message marker pins the dispatcher's 400 against the
-        # downstream ToolResult-repr 400 that also contains "plugin".
-        assert "inspect_and_confirm response at step 1" in detail
-        assert "must be a non-empty string" in detail
-        assert "42" in detail  # the offending integer value is echoed in the detail
-
-    def test_inspect_and_confirm_non_list_observed_columns_returns_400(self, composer_test_client: TestClient) -> None:
-        """Non-list ``observed_columns`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
-
-        Site 2's ``isinstance(observed_columns_raw, list)`` check fires the
-        400 on the raw scalar value (replacing the previous silent
-        ``tuple("abc")=('a','b','c')`` coercion that would have yielded a
-        character-wise tuple).
-        """
-        session_id = _create_session(composer_test_client)
-        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "edited_values": {
-                    "plugin": "csv",
-                    "options": {},
-                    "observed_columns": "abc",
-                    "sample_rows": [],
-                },
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        detail = resp.json()["detail"]
-        # Boundary-message marker pins the dispatcher's list-guard.
         assert "inspect_and_confirm response at step 1" in detail
         assert "must be a list" in detail
         assert "str" in detail  # offending type is named

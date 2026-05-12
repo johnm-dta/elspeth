@@ -48,9 +48,11 @@
 //   the parent live region, warnings will be silent — the contract is documented
 //   here so the dependency is discoverable.
 //
-// Wire-response shapes:
-//   "Looks right": edited_values = { columns, samples, warnings } verbatim from payload.observed
-//   "Apply edits": edited_values = { columns: <edited>, samples: payload.observed.samples, warnings: payload.observed.warnings }
+// Wire-response shapes (narrow contract — state_machine.SourceIntent holds the rest server-side):
+//   "Looks right": edited_values = { columns: payload.observed.columns }
+//   "Apply edits": edited_values = { columns: <edited> }
+//   plugin, options, samples, and warnings are held in step_1_source_intent on the server;
+//   the widget never sends them back. The server recovers them from intent on advance.
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { GuidedRespondRequest, InspectAndConfirmPayload } from "@/types/guided";
@@ -103,8 +105,6 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
       chosen: null,
       edited_values: {
         columns: payload.observed.columns,
-        samples: payload.observed.samples,
-        warnings: payload.observed.warnings,
       },
       custom_inputs: null,
       accepted_step_index: null,
@@ -151,8 +151,6 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
       chosen: null,
       edited_values: {
         columns: editorState.columns,
-        samples: payload.observed.samples,
-        warnings: payload.observed.warnings,
       },
       custom_inputs: null,
       accepted_step_index: null,

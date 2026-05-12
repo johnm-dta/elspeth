@@ -9,6 +9,13 @@ floor-check (rev-3 M1) are enforced unconditionally at every collection of
 this file. They trivially pass while MANIFEST holds only set_source; they
 begin enforcing real coverage as Tasks 13-16 populate the manifest.
 
+Assertion 3 (mass-copy uniqueness, §4.4.4, Task 11) detects copy-paste
+rationale in declarative manifest entries. Two tools may not share an
+exact-match ``why_arguments_safe`` (or ``why_responses_safe``) string after
+whitespace normalisation. ``sensitive_data_locations`` duplication is
+intentionally allowed — some tools genuinely share a location string like
+"server-side secret resolver".
+
 The adequacy guard works at MANIFEST-level only. AST inspection of handler
 source is forbidden (rev-2 M.3): any handler using ``args = arguments;
 args['x']``, destructuring, or helper delegation evades the scan. Tools
@@ -18,6 +25,7 @@ Pydantic argument models with ``extra="forbid"``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -28,6 +36,9 @@ import pytest
 
 from elspeth.web.composer.redaction import (
     MANIFEST,
+    HandlesNoSensitiveDataReason,
+    ToolRedaction,
+    ToolRedactionPolicy,
     _SensitiveMarker,
     walk_model_schema,
 )
@@ -267,3 +278,291 @@ def test_walker_emits_node_for_every_top_level_field() -> None:
             f"on {entry.argument_model.__name__}. Adequacy guard cannot detect this "
             f"because the runtime walker shares the same blind spot."
         )
+
+
+# ---------------------------------------------------------------------------
+# Assertion 3 (§4.4.4, Task 11). Mass-copy uniqueness of declarative reasons.
+# ---------------------------------------------------------------------------
+
+
+def _why_text_collisions(
+    manifest: Mapping[str, ToolRedaction],
+) -> list[tuple[str, str, str]]:
+    """Return collisions on ``why_arguments_safe`` or ``why_responses_safe``
+    across declarative manifest entries whose policy carries a
+    ``HandlesNoSensitiveDataReason`` struct.
+
+    Each element of the returned list is a 3-tuple:
+      ``(tool_a, tool_b, normalised_text)``
+    where ``tool_a < tool_b`` (lexicographic) so a given pair appears exactly
+    once regardless of iteration order.
+
+    Whitespace is normalised with ``" ".join(text.split())`` before
+    comparison: this collapses runs of internal whitespace to a single space
+    AND strips leading/trailing whitespace in one operation (the standard
+    Python idiom, spec §4.4.4).
+
+    Checks BOTH text fields: ``why_arguments_safe`` and ``why_responses_safe``.
+    A collision on either field is a finding.
+
+    ``sensitive_data_locations`` is intentionally NOT checked here. Duplicate
+    location strings across entries are allowed — some tools genuinely share a
+    location (e.g., "server-side secret resolver") and there is no policy value
+    in forbidding that coincidence.
+
+    Returns ALL collisions (not just the first pair) so an operator receives
+    the full list to fix in one pass.
+    """
+    # Accumulate, per (field_label, normalised_text), the list of tool names
+    # that use that text.  Two lists with > 1 name → collision.
+    seen: dict[tuple[str, str], list[str]] = {}
+
+    for tool_name, entry in manifest.items():
+        if entry.policy is None:
+            continue
+        struct = entry.policy.handles_no_sensitive_data_reason_struct
+        if struct is None:
+            continue
+        for field_label, raw_text in (
+            ("why_arguments_safe", struct.why_arguments_safe),
+            ("why_responses_safe", struct.why_responses_safe),
+        ):
+            key = (field_label, " ".join(raw_text.split()))
+            if key not in seen:
+                seen[key] = []
+            seen[key].append(tool_name)
+
+    collisions: list[tuple[str, str, str]] = []
+    for (_field_label, normalised_text), names in seen.items():
+        if len(names) > 1:
+            # Emit every pair for that text so the caller sees the full
+            # picture; sort to guarantee lexicographic ordering tool_a < tool_b.
+            sorted_names = sorted(names)
+            for i in range(len(sorted_names)):
+                for j in range(i + 1, len(sorted_names)):
+                    collisions.append((sorted_names[i], sorted_names[j], normalised_text))
+
+    return collisions
+
+
+def test_mass_copy_uniqueness_passes_for_live_manifest() -> None:
+    """Assertion 3 (§4.4.4): no two declarative entries in MANIFEST share an
+    exact-match ``why_arguments_safe`` or ``why_responses_safe`` text (after
+    whitespace normalisation).
+
+    This test passes trivially while MANIFEST contains only ``set_source``
+    (a type-driven entry with no ``HandlesNoSensitiveDataReason``). It becomes
+    a real gate as Tasks 13-16 populate MANIFEST with declarative entries — any
+    copy-paste across those entries will be caught here at CI.
+
+    The test is kept unconditional (not xfail) because the spec §4.4.4 contract
+    is already valid on a single-entry manifest: zero declarative entries produce
+    zero possible collisions, so the assertion passes correctly.
+    """
+    collisions = _why_text_collisions(MANIFEST)
+    assert not collisions, (
+        "Mass-copy detected in handles_no_sensitive_data reasons (spec §4.4.4). "
+        "The following tool pairs share identical why_arguments_safe or "
+        "why_responses_safe text after whitespace normalisation. "
+        "Each entry must provide a distinct, concrete justification — "
+        "copy-paste rationale defeats the audit trail and indicates a "
+        "bulk-placeholder migration. Fix by rewriting each tool's reason "
+        "in terms of that tool's specific argument/response surface. "
+        f"Collisions: {collisions!r}"
+    )
+
+
+def _make_declarative_entry(
+    why_arguments_safe: str,
+    why_responses_safe: str,
+    sensitive_data_locations: tuple[str, ...] | None = None,
+) -> ToolRedaction:
+    """Build a minimal declarative ToolRedaction entry for local-fixture tests.
+
+    ``known_response_keys`` must be non-empty when ``handles_no_sensitive_data``
+    is False (ToolRedactionPolicy invariant).  We set
+    ``handles_no_sensitive_data=True`` with a full ``HandlesNoSensitiveDataReason``
+    so the ``known_response_keys`` constraint does not apply and the
+    construction stays focused on the uniqueness surface.
+
+    ``sensitive_data_locations`` defaults to a single generic entry so
+    ``HandlesNoSensitiveDataReason.__post_init__`` passes its non-empty check.
+    """
+    locations: tuple[str, ...] = (
+        sensitive_data_locations if sensitive_data_locations is not None else ("no LLM-supplied inputs reach this tool",)
+    )
+    reason = HandlesNoSensitiveDataReason(
+        sensitive_data_locations=locations,
+        why_arguments_safe=why_arguments_safe,
+        why_responses_safe=why_responses_safe,
+    )
+    policy = ToolRedactionPolicy(
+        handles_no_sensitive_data=True,
+        handles_no_sensitive_data_reason_struct=reason,
+    )
+    return ToolRedaction(policy=policy)
+
+
+def test_mass_copy_uniqueness_flags_exact_match_why_arguments_safe() -> None:
+    """Two declarative entries with identical ``why_arguments_safe`` text are
+    flagged by ``_why_text_collisions`` (spec §4.4.4).
+
+    ``why_responses_safe`` intentionally differs between the two entries so
+    only the argument field triggers the collision — confirming the check
+    targets the right text field and does not require both fields to collide.
+    """
+    shared_args_text = (
+        "All arguments are validated against a Pydantic model with extra=forbid; "
+        "every field is structural pipeline metadata with no user-supplied content."
+    )
+    fake_manifest: Mapping[str, ToolRedaction] = {
+        "tool_alpha": _make_declarative_entry(
+            why_arguments_safe=shared_args_text,
+            why_responses_safe=("tool_alpha returns only a boolean success flag; no payload content is present in the response."),
+        ),
+        "tool_beta": _make_declarative_entry(
+            why_arguments_safe=shared_args_text,
+            why_responses_safe=("tool_beta returns only a session identifier; no user-supplied data appears in the response shape."),
+        ),
+    }
+
+    collisions = _why_text_collisions(fake_manifest)
+
+    assert len(collisions) == 1, f"Expected exactly one collision pair, got {len(collisions)}: {collisions!r}"
+    tool_a, tool_b, norm_text = collisions[0]
+    assert {tool_a, tool_b} == {"tool_alpha", "tool_beta"}, (
+        f"Expected the offending pair to be tool_alpha + tool_beta; got {tool_a!r}, {tool_b!r}"
+    )
+    assert norm_text == " ".join(shared_args_text.split()), f"Normalised collision text mismatch: {norm_text!r}"
+
+
+def test_mass_copy_uniqueness_flags_whitespace_only_difference_why_arguments_safe() -> None:
+    """Two entries whose ``why_arguments_safe`` texts differ only by trailing
+    whitespace (or internal extra spaces) are still flagged — the check
+    normalises whitespace with ``" ".join(text.split())`` before comparing
+    (spec §4.4.4).
+
+    This verifies the normalisation step is applied, not just raw string
+    equality: a copy-paste that adds a trailing newline or double-space does
+    not bypass the assertion.
+    """
+    canonical = (
+        "All arguments are structural metadata accepted by the Pydantic model; "
+        "no user-supplied text or sensitive identifiers appear in any field."
+    )
+    # Add trailing whitespace to one entry's text — post-normalisation these
+    # two strings are identical and must collide.
+    with_trailing = canonical + "   \n  "
+
+    fake_manifest: Mapping[str, ToolRedaction] = {
+        "tool_gamma": _make_declarative_entry(
+            why_arguments_safe=canonical,
+            why_responses_safe=(
+                "tool_gamma responses contain only a pipeline state summary; no verbatim user data or secret material is returned."
+            ),
+        ),
+        "tool_delta": _make_declarative_entry(
+            why_arguments_safe=with_trailing,
+            why_responses_safe=(
+                "tool_delta responses expose only structural metadata fields; "
+                "the response shape is fully known and contains no sensitive content."
+            ),
+        ),
+    }
+
+    collisions = _why_text_collisions(fake_manifest)
+
+    assert len(collisions) == 1, f"Expected exactly one collision (whitespace-normalised match); got {len(collisions)}: {collisions!r}"
+    tool_a, tool_b, norm_text = collisions[0]
+    assert {tool_a, tool_b} == {"tool_gamma", "tool_delta"}, (
+        f"Expected the offending pair to be tool_gamma + tool_delta; got {tool_a!r}, {tool_b!r}"
+    )
+    # The returned text must be the normalised form (trailing whitespace stripped).
+    assert norm_text == " ".join(canonical.split()), f"Normalised text should equal the stripped canonical form; got {norm_text!r}"
+
+
+def test_mass_copy_uniqueness_flags_collisions_on_why_responses_safe() -> None:
+    """Two declarative entries with identical ``why_responses_safe`` text are
+    flagged by ``_why_text_collisions`` (spec §4.4.4 — the check applies to
+    BOTH ``why_arguments_safe`` AND ``why_responses_safe``).
+
+    ``why_arguments_safe`` intentionally differs between the two entries so
+    only the response field triggers the collision — confirming both directions
+    are checked independently, not only the argument field.
+    """
+    shared_resp_text = (
+        "Response contains only a boolean 'ok' field and an integer 'count' field; "
+        "neither carries user-supplied content or secret material."
+    )
+    fake_manifest: Mapping[str, ToolRedaction] = {
+        "tool_epsilon": _make_declarative_entry(
+            why_arguments_safe=(
+                "tool_epsilon arguments are a session_id string and an integer limit; "
+                "both are structural references with no sensitive content."
+            ),
+            why_responses_safe=shared_resp_text,
+        ),
+        "tool_zeta": _make_declarative_entry(
+            why_arguments_safe=(
+                "tool_zeta accepts only a plugin name string validated against a closed enumeration; no user data appears in this field."
+            ),
+            why_responses_safe=shared_resp_text,
+        ),
+    }
+
+    collisions = _why_text_collisions(fake_manifest)
+
+    assert len(collisions) == 1, f"Expected exactly one collision pair on the response field; got {len(collisions)}: {collisions!r}"
+    tool_a, tool_b, norm_text = collisions[0]
+    assert {tool_a, tool_b} == {"tool_epsilon", "tool_zeta"}, (
+        f"Expected the offending pair to be tool_epsilon + tool_zeta; got {tool_a!r}, {tool_b!r}"
+    )
+    assert norm_text == " ".join(shared_resp_text.split()), f"Normalised collision text mismatch: {norm_text!r}"
+
+
+def test_mass_copy_uniqueness_allows_identical_sensitive_data_locations() -> None:
+    """Identical ``sensitive_data_locations`` values across entries are NOT
+    flagged as mass-copy collisions (spec §4.4.4, ``_why_text_collisions``
+    docstring).
+
+    Some tools genuinely share a location description — e.g., both may
+    declare ``("server-side secret resolver",)`` because that is literally
+    where sensitive material lives for both tools. Forbidding this coincidence
+    would produce false positives and mislead policy authors into writing
+    artificially distinct location strings.
+
+    The uniqueness constraint applies only to the *reasoning* fields
+    (``why_arguments_safe``, ``why_responses_safe``); the *location* field
+    describes factual topology and permits coincidence.
+    """
+    shared_location = ("server-side secret resolver",)
+    fake_manifest: Mapping[str, ToolRedaction] = {
+        "tool_eta": _make_declarative_entry(
+            why_arguments_safe=(
+                "tool_eta arguments are a read-only filter expression; "
+                "the expression is validated against a schema with no string-value "
+                "interpolation and cannot encode secret material."
+            ),
+            why_responses_safe=(
+                "tool_eta returns a list of matching session IDs; session IDs are opaque structural references, not sensitive content."
+            ),
+            sensitive_data_locations=shared_location,
+        ),
+        "tool_theta": _make_declarative_entry(
+            why_arguments_safe=(
+                "tool_theta accepts a pipeline name and an integer step index; both are structural coordinates with no sensitivity surface."
+            ),
+            why_responses_safe=(
+                "tool_theta response is a status enum and a timestamp; neither field contains user-supplied data or secret material."
+            ),
+            sensitive_data_locations=shared_location,
+        ),
+    }
+
+    collisions = _why_text_collisions(fake_manifest)
+
+    assert not collisions, (
+        "Expected zero collisions when only sensitive_data_locations is shared "
+        "(identical locations are allowed by spec §4.4.4); "
+        f"got {collisions!r}"
+    )

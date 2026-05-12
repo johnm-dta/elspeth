@@ -17,7 +17,7 @@ Two kinds of values are read from ``source.options`` and
     ``handle_step_1_source`` (steps.py) when the submitted path resolves to
     a known uploaded blob.  This is Tier-2 data (already validated by our
     own code) — direct subscript access is mandatory, no ``.get()``.  A
-    missing ``blob_ref`` crashes with an informative ``ValueError`` (the
+    missing ``blob_ref`` crashes with an informative ``InvariantError`` (the
     resolver must only be called after blob-backed source commit).
 
 Output paths (``sink.outputs[i].options.get("path", default)``)

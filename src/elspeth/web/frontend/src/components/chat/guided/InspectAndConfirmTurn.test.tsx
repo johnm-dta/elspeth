@@ -4,9 +4,11 @@
 // Pins three wire-response contracts and one UI-state contract:
 //   "Looks right" submit  → edited_values = { columns: payload.observed.columns }
 //                           chosen=null, custom_inputs=null, all-other-fields null.
-//                           Plugin, options, samples, and warnings are held server-side
-//                           in step_1_source_intent (state_machine.SourceIntent); the
-//                           widget never round-trips them.
+//                           Plugin, options, and sample_rows are held server-side
+//                           in step_1_source_intent (state_machine.SourceIntent);
+//                           warnings come from SourceInspectionFacts at emit time
+//                           (advisory, not stored in intent). The widget never
+//                           round-trips any of them.
 //   "Apply edits" submit  → edited_values = { columns: <edited> }
 //                           Only the column list is sent; server recovers the rest
 //                           from step_1_source_intent on advance.

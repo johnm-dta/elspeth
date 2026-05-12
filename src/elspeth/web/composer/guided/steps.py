@@ -168,7 +168,7 @@ def handle_step_2_sink(
     - state advanced, session.step_2_result=resolved on success of all outputs.
 
     Raises:
-        ValueError: if resolved.outputs is empty. The dispatcher upstream
+        InvariantError: if resolved.outputs is empty. The dispatcher upstream
             guarantees at least one output.
     """
     if not resolved.outputs:
@@ -304,7 +304,7 @@ def handle_step_3_chain_accept(
         session_id: Optional session ID (forwarded with session_engine).
 
     Raises:
-        ValueError: if the proposal has zero steps, or if state has no source
+        InvariantError: if the proposal has zero steps, or if state has no source
             or no outputs (handler invariant violation — dispatcher guarantees
             Step 1 and Step 2 have committed before reaching Step 3).
     """

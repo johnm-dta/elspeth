@@ -51,8 +51,9 @@
 // Wire-response shapes (narrow contract — state_machine.SourceIntent holds the rest server-side):
 //   "Looks right": edited_values = { columns: payload.observed.columns }
 //   "Apply edits": edited_values = { columns: <edited> }
-//   plugin, options, samples, and warnings are held in step_1_source_intent on the server;
+//   plugin, options, and sample_rows are held in step_1_source_intent on the server;
 //   the widget never sends them back. The server recovers them from intent on advance.
+//   warnings come from SourceInspectionFacts at emit time (advisory only, not stored in intent).
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { GuidedRespondRequest, InspectAndConfirmPayload } from "@/types/guided";

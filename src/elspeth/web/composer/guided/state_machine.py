@@ -531,11 +531,11 @@ def _advance_step_1(
     options) are intra-step turns that do not advance the wizard. Those
     branches emit the next intra-step turn and are out of scope here.
 
-    The inspection state (plugin, options, samples, warnings) is held in
+    The inspection state (plugin, options, sample_rows) is held in
     ``session.step_1_source_intent`` — set by the INSPECT_AND_CONFIRM emit site
     before the turn is returned to the client.  The wire response carries only
     ``edited_values = {"columns": list[str]}``, since that is the only field
-    the widget can authoritatively edit.  plugin/options/samples are recovered
+    the widget can authoritatively edit.  plugin/options/sample_rows are recovered
     from intent; columns come from the response.
 
     All values from the response are Tier-3 external data and are coerced

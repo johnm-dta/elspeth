@@ -1794,9 +1794,9 @@ async def _dispatch_guided_respond(
         # server-side knowledge held in step_1_source_intent before the turn is
         # emitted; the widget never sees them in the response body.
         #
-        # Shadowing note: ``_advance_step_1`` raises ValueError on null
-        # ``edited_values`` and KeyError on missing ``columns`` — those propagate
-        # as HTTP 500 before reaching here. The null guard and missing-key guard
+        # Shadowing note: ``_advance_step_1`` raises ValueError (client-fault)
+        # on null ``edited_values`` and KeyError on missing ``columns`` — those
+        # propagate as HTTP 500 before reaching here. The null guard and missing-key guard
         # below are defense-in-depth (locally complete; unreachable as 400 in
         # normal flow). The isinstance(columns_raw, list) guard IS HTTP-reachable
         # as 400: _advance_step_1's ``tuple(str(c) for c in columns_raw)`` coercion

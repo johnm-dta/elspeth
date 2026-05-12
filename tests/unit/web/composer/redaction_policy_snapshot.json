@@ -135,17 +135,17 @@
     "shape": "declarative"
   },
   "request_advisor_hint": {
-    "hash": "5c04f63a3009f31f81aeaed8f7d39088b31b992ce0689f37e7f5f2d03f3be588",
-    "sensitive_path_count": 4,
+    "hash": "4ee76e6f5c8f38065693d036ec50f484d0e3595c73ea60b8b8bc441779f49dae",
+    "sensitive_path_count": 5,
     "shape": "declarative"
   },
   "set_metadata": {
-    "hash": "acaa818b95d019aaca7b534d40377e9961e25e74848f6e56d2b34f18946ae91b",
+    "hash": "e9adb16a2a8634efefd5ca357030bf20f0effe8884e8cfcd479a15509793ccdc",
     "sensitive_path_count": 1,
     "shape": "declarative"
   },
   "set_output": {
-    "hash": "981279644abf09b13ad469a827499e9948050a7b0f7c78a64b577ac39ca699af",
+    "hash": "26cdabfa4a9f6b6616c14ce58c89b2ece85303bee99bfeb45b2ed6b09f0b4767",
     "sensitive_path_count": 1,
     "shape": "declarative"
   },
@@ -175,7 +175,7 @@
     "shape": "declarative"
   },
   "upsert_node": {
-    "hash": "c98af59d8edaf04ec469889e51e48c831607d3da8efca6d6bc41e16e5b5313fb",
+    "hash": "ccba300792fb254df7686473ed5ef10da215a28d9819f2dde886aad635dd5e25",
     "sensitive_path_count": 3,
     "shape": "declarative"
   },

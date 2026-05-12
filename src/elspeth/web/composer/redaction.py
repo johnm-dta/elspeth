@@ -590,6 +590,33 @@ class ToolRedactionPolicy:
        — the allowlist defends against response-shape drift; unknown keys at
        persistence time are fail-closed redacted with a fixed sentinel.
 
+    **Response-walker fail-closed behavior for declarative entries:**
+
+    When ``handles_no_sensitive_data=False``, ``redact_tool_call_response``
+    iterates ``response.items()`` and dispatches each key as follows:
+
+    - Keys in ``sensitive_response_keys`` → substituted with
+      ``REDACTED_SENSITIVE_NO_SUMMARIZER`` (declarative entries have no
+      per-key response summarizers; argument_summarizers covers only
+      argument keys).
+    - Keys in ``known_response_keys`` that are NOT in
+      ``sensitive_response_keys`` → passthrough; the value reaches the
+      audit-table record unchanged.
+    - Keys in NEITHER set → substituted with the fixed sentinel
+      ``REDACTED_UNKNOWN_RESPONSE_KEY``. This is the **fail-closed
+      default**: a key the policy author did not declare is sentinel'd,
+      not leaked.
+
+    Therefore ``known_response_keys`` MUST enumerate every key the
+    handler may emit in normal operation (both success and failure
+    branches).  The runtime smoke test
+    (``test_declarative_manifest_runtime_smoke.py``) verifies this by
+    exercising each declarative entry through a real
+    ``redact_tool_call_response`` call.  Adequacy-guard assertion 5
+    (Task 10) additionally checks that ``sensitive_response_keys ⊆
+    known_response_keys`` at import time so a misspelled sensitive key
+    is caught before any payload reaches the walker.
+
     NOTE on freeze: ``argument_summarizers`` values are Callables;
     ``deep_freeze`` passes Callables through unchanged (verified against
     ``src/elspeth/contracts/freeze.py:78``). Identity-equality of summarizer
@@ -1853,22 +1880,6 @@ def _summarize_set_metadata_patch(patch: dict[str, Any]) -> str:
     return f"<metadata-patch:{','.join(keys)}>" if keys else "<metadata-patch:empty>"
 
 
-_UPSERT_NODE_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=("node options / routes / trigger payload — redacted via sensitive_argument_keys",),
-    why_arguments_safe=(
-        "upsert_node graph-shape fields (id, node_type, input, on_success, on_error, "
-        "condition, fork_to, branches, policy, merge, output_mode, expected_output_count) "
-        "are operator-controlled scalars; the LLM-supplied options/routes/trigger dicts "
-        "ARE sensitive and are listed in sensitive_argument_keys for boundary summary."
-    ),
-    why_responses_safe=(
-        "Response is the structural ToolResult — affected_nodes ids and validation summary "
-        "for the post-mutation state; option payload is NOT echoed back because the audit "
-        "trail's source of truth for option values is the argument redaction at dispatch."
-    ),
-)
-
-
 _UPSERT_EDGE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — edge id, endpoints, kind, label — none are payload-bearing",),
     why_arguments_safe=(
@@ -1940,36 +1951,6 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
         "Response is the structural ToolResult — validation summary describing the "
         "now-source-less state; the cleared source's option dict is discarded and not "
         "echoed back, so the response surface has no path, no plugin options, no secrets."
-    ),
-)
-
-
-_SET_METADATA_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=("metadata patch payload — redacted via sensitive_argument_keys with summarizer",),
-    why_arguments_safe=(
-        "set_metadata wraps a patch dict containing only name and description label fields "
-        "(JSON schema at tools.py:826-838); the patch IS sensitive_argument_keys-listed so "
-        "the boundary summary collapses operator-supplied free text to a key-set descriptor."
-    ),
-    why_responses_safe=(
-        "Response is the structural ToolResult — validation summary for the post-patch "
-        "state; the patched name/description values are not echoed back in the response, "
-        "so the audit-side record carries only the structural shape of the mutation."
-    ),
-)
-
-
-_SET_OUTPUT_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=("output sink option payload — redacted via sensitive_argument_keys with summarizer",),
-    why_arguments_safe=(
-        "set_output sink_name and plugin are connection-name and plugin-key scalars; on_write_failure "
-        "is a routing-name scalar; the options dict IS listed in sensitive_argument_keys so the "
-        "summarizer collapses output paths, credential markers, and prompt templates at the boundary."
-    ),
-    why_responses_safe=(
-        "Response is the structural ToolResult — validation summary plus the affected node id list "
-        "for the post-mutation state; the sink option dict is not echoed back, so destination paths "
-        "and credentials cannot leak through the response surface, only argument redaction governs that."
     ),
 )
 
@@ -2227,13 +2208,13 @@ _WIRE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
 # boundary so the audit-side record collapses each to a fixed-form scalar.
 #
 # ``guidance`` in the response is the frontier-model advice text returned
-# by ``_call_advisor_with_audit``; the frontier model's reply is logged
-# separately via the ComposerLLMCall recorder so it is already preserved in
-# the audit trail.  The chat_messages.tool_calls.result_payload row contains
-# only the closed-set status / budget metadata required to reason about the
-# tool's effect on the compose loop — the raw advice text is not in the
-# known-response-keys allowlist for that surface, so unknown keys fall to
-# the fail-closed REDACTED_UNKNOWN_RESPONSE_KEY sentinel.
+# by ``_call_advisor_with_audit``; the full text is already preserved in the
+# audit trail by the ComposerLLMCall recorder, which fires in the same
+# request.  For the chat_messages.tool_calls.result_payload row the guidance
+# text is classified as ``sensitive_response_keys`` so it is substituted with
+# REDACTED_SENSITIVE_NO_SUMMARIZER at the persistence boundary, keeping the
+# closed-set status / budget / latency metadata in clear text while preventing
+# double-mirroring of the advice text into the tool-call surface.
 # ---------------------------------------------------------------------------
 
 
@@ -2269,26 +2250,6 @@ def _summarize_advisor_attempted_actions(value: list[str]) -> str:
 def _summarize_advisor_schema_excerpt(value: str) -> str:
     """Summarizer for ``request_advisor_hint.schema_excerpt`` (Task 16g)."""
     return f"<advisor-schema-excerpt:{len(value)}-chars>"
-
-
-_REQUEST_ADVISOR_HINT_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=(
-        "argument free-text fields — collapsed via sensitive_argument_keys summarizers",
-        "advisor LLM call record — full guidance text persisted by ComposerLLMCall recorder",
-    ),
-    why_arguments_safe=(
-        "request_advisor_hint trigger is an enum string and the four free-text/list arguments "
-        "(problem_summary, recent_errors, attempted_actions, schema_excerpt) ARE listed in "
-        "sensitive_argument_keys with length-only summarizers so operator-supplied advisor "
-        "context collapses to fixed-form scalars before reaching chat_messages.tool_calls."
-    ),
-    why_responses_safe=(
-        "Response shapes (success, error, budget-exhausted, timeout, advisor-error) carry "
-        "only closed-set status / budget / latency metadata; the raw guidance text is logged "
-        "separately by the ComposerLLMCall recorder and known_response_keys enumerates the "
-        "exact allowed shape so any unanticipated key fails closed to the fixed sentinel."
-    ),
-)
 
 
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
@@ -2393,8 +2354,21 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                     "routes": _summarize_set_source_options,
                     "trigger": _summarize_set_source_options,
                 },
-                handles_no_sensitive_data=True,
-                handles_no_sensitive_data_reason_struct=_UPSERT_NODE_REASON,
+                handles_no_sensitive_data=False,
+                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
+                # and the failure branches reachable from _execute_upsert_node:
+                # _mutation_result → always emits success/validation/affected_nodes/version;
+                # _failure_result → adds data={"error": ...};
+                # _credential_wiring_contract_failure → adds data={error, credential_fields,
+                #   components, repair}.  runtime_preflight and validation_delta are not set
+                # by any reachable code path for this handler.
+                known_response_keys=(
+                    "success",
+                    "validation",
+                    "affected_nodes",
+                    "version",
+                    "data",
+                ),
             )
         ),
         "upsert_edge": ToolRedaction(
@@ -2431,16 +2405,38 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 sensitive_argument_keys=("patch",),
                 argument_summarizers={"patch": _summarize_set_metadata_patch},
-                handles_no_sensitive_data=True,
-                handles_no_sensitive_data_reason_struct=_SET_METADATA_REASON,
+                handles_no_sensitive_data=False,
+                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428).
+                # _execute_set_metadata always calls _mutation_result with no data and no
+                # prior_validation, so the response always has exactly these four keys.
+                # runtime_preflight and validation_delta are unreachable from this handler.
+                known_response_keys=(
+                    "success",
+                    "validation",
+                    "affected_nodes",
+                    "version",
+                ),
             )
         ),
         "set_output": ToolRedaction(
             policy=ToolRedactionPolicy(
                 sensitive_argument_keys=("options",),
                 argument_summarizers={"options": _summarize_set_source_options},
-                handles_no_sensitive_data=True,
-                handles_no_sensitive_data_reason_struct=_SET_OUTPUT_REASON,
+                handles_no_sensitive_data=False,
+                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
+                # and the failure branches reachable from _execute_set_output:
+                # _mutation_result → success/validation/affected_nodes/version;
+                # _failure_result → adds data={"error": ...};
+                # _credential_wiring_contract_failure → adds data={error, credential_fields,
+                #   components, repair}.  runtime_preflight and validation_delta are not set
+                # by any reachable code path for this handler.
+                known_response_keys=(
+                    "success",
+                    "validation",
+                    "affected_nodes",
+                    "version",
+                    "data",
+                ),
             )
         ),
         # Wave 5 (Task 16c) — _BLOB_DISCOVERY_TOOLS, 4 entries (3 declarative + 1 type-driven).
@@ -2508,8 +2504,36 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                     "attempted_actions": _summarize_advisor_attempted_actions,
                     "schema_excerpt": _summarize_advisor_schema_excerpt,
                 },
-                handles_no_sensitive_data=True,
-                handles_no_sensitive_data_reason_struct=_REQUEST_ADVISOR_HINT_REASON,
+                handles_no_sensitive_data=False,
+                # sensitive_response_keys: guidance is the frontier-model advice text,
+                # already preserved by ComposerLLMCall recorder; classifying it sensitive
+                # prevents double-mirroring of the advice text into chat_messages.tool_calls
+                # while keeping the closed-set status/budget/latency metadata in clear text.
+                # Per ToolRedactionPolicy invariant 5 (adequacy guard assertion 5), guidance
+                # must also appear in known_response_keys (sensitive ⊆ known).
+                sensitive_response_keys=("guidance",),
+                # known_response_keys: enumerated from all reachable response shapes at
+                # service.py:2114-2358.  Disabled path → {error}.  Budget-exhausted path →
+                # {status, budget_used, budget_remaining, guidance}.  ARG_ERROR path →
+                # {status, error, error_class}.  Timeout/advisor-error paths →
+                # {status, error, error_class, budget_used, budget_remaining}.  Success path
+                # → {status, guidance, model, prompt_tokens, completion_tokens,
+                # cached_prompt_tokens, advisor_latency_ms, budget_used, budget_remaining,
+                # note}.  Union of all shapes, guidance included per the sensitive⊆known rule.
+                known_response_keys=(
+                    "status",
+                    "error",
+                    "error_class",
+                    "budget_used",
+                    "budget_remaining",
+                    "guidance",
+                    "model",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "cached_prompt_tokens",
+                    "advisor_latency_ms",
+                    "note",
+                ),
             )
         ),
     }

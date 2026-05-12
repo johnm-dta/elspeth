@@ -28,6 +28,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+import pytest
+
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -529,3 +531,236 @@ class TestAutoDropAuditEmission:
         assert len(guided_invocations["guided_turn_answered"]) >= 1, (
             f"expected at least one guided_turn_answered event on auto-drop path; got none. All guided events: {guided_invocations}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 3 — Rejection-path audit drain (PR-review B3 regression pin)
+# ---------------------------------------------------------------------------
+
+
+class TestRejectionPathAuditDrain:
+    """Pin the PR-review B3 invariant: handler-level recorders are drained on
+    every exit path, including ``raise HTTPException`` rejections.
+
+    Before the B3 fix, ``post_guided_respond`` created a ``BufferingRecorder``,
+    wrote ``guided_turn_answered`` to it, and then only persisted on the
+    success path.  Every 400/409/500 raised between the emit and the
+    success-path drain silently dropped buffered audit events — a CLAUDE.md
+    auditability violation ("rejected requests are facts worth recording").
+
+    These tests verify:
+
+    1. **The load-bearing pin** — a 400 raised AFTER ``emit_turn_answered``
+       still persists the buffered event.  Concretely: POST a malformed
+       ``INSPECT_AND_CONFIRM`` response (``edited_values=None``), which
+       triggers ``ValueError`` inside ``step_advance`` → HTTP 400.  The
+       ``guided_turn_answered`` event for this rejected attempt must land
+       in the audit DB so an auditor can reconstruct "this client tried
+       to advance with payload X and was rejected."
+
+    2. **The 409 path** — terminal-state rejection fires BEFORE
+       ``emit_turn_answered``, so the recorder is empty on this exit.  The
+       drain must still be a clean no-op (no crash from draining an empty
+       buffer).
+
+    3. **The GET 400 path** — freeform-session rejection in ``get_guided``
+       fires immediately after recorder construction, before any emit.
+       The drain must be a clean no-op.
+
+    4. **Audit-persist failure does NOT suppress the original HTTPException**
+       — if ``_persist_tool_invocations`` itself raises inside ``finally``,
+       Python's default behaviour would let the inner exception replace
+       the in-flight 400/409.  The inner ``try/except`` around the persist
+       call prevents that.  The audit-persist failure is logged via
+       ``slog.error`` under the audit-system-failure exemption (CLAUDE.md
+       primacy order, matching the B1 convention).
+    """
+
+    def test_post_guided_respond_400_persists_prior_emits(self, composer_test_client: TestClient) -> None:
+        """A 400 raised AFTER ``emit_turn_answered`` still persists the buffered event.
+
+        Drives the wizard to the INSPECT_AND_CONFIRM turn (after ``chosen=["csv"]``),
+        then sends ``edited_values=None`` which ``step_advance`` rejects with
+        ``ValueError`` → HTTP 400.  Asserts the recorder's
+        ``guided_turn_answered`` event landed in the audit DB despite the
+        rejection.
+        """
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        # Advance past STEP_1 SINGLE_SELECT → INSPECT_AND_CONFIRM turn.
+        _respond(composer_test_client, session_id, chosen=["csv"])
+
+        # Snapshot the answered-event count BEFORE the rejected request so
+        # we can prove the rejected request added exactly one more.
+        baseline = len(_extract_guided_invocations(composer_test_client, session_id)["guided_turn_answered"])
+
+        # Send a malformed INSPECT_AND_CONFIRM response: edited_values=None.
+        # step_advance raises ValueError("inspect_and_confirm response must
+        # carry edited_values; got None") which the handler maps to 400.
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": None},
+        )
+        assert resp.status_code == 400, resp.json()
+
+        # The load-bearing assertion: the guided_turn_answered emitted before
+        # the rejection must be in the audit DB.  The 400 fires either from
+        # ``step_advance`` (state-machine guard) or from the step-1 handler
+        # (handle_step_1_source / dispatcher ValueError), both of which run
+        # AFTER ``emit_turn_answered``.  Either way the buffered event
+        # must persist.
+        post_reject = _extract_guided_invocations(composer_test_client, session_id)["guided_turn_answered"]
+        assert len(post_reject) == baseline + 1, (
+            f"PR-review B3 regression: the guided_turn_answered event for "
+            f"the rejected INSPECT_AND_CONFIRM turn was dropped on the 400 "
+            f"path. baseline={baseline} post_reject={len(post_reject)} "
+            f"(expected baseline+1). Response body: {resp.json()}"
+        )
+
+    def test_post_guided_respond_409_terminal_drains_cleanly(self, composer_test_client: TestClient) -> None:
+        """The 409 terminal-state path drains a clean (empty-or-prior-only) recorder.
+
+        The 409 is raised BEFORE ``emit_turn_answered`` for this request — see
+        the handler: terminal-state rejection sits between
+        ``service.get_current_state`` and the emit.  So the recorder has no
+        new event from this rejected request; the test simply verifies that
+        the drain doesn't crash (i.e. empty drains are safe and the original
+        HTTPException is not masked).
+        """
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        # Exit immediately so the next respond hits the 409 terminal guard.
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+
+        # Second respond on the now-terminal session: 409.
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"]},
+        )
+        assert resp.status_code == 409, resp.json()
+
+    def test_get_guided_400_freeform_session_drains_empty_recorder(self, composer_test_client: TestClient) -> None:
+        """GET /guided on a freeform session drains an empty recorder without crashing.
+
+        Constructs a session with composition state that has no
+        ``guided_session`` attached (a freeform session), then GETs /guided.
+        The handler raises 400 immediately after recorder construction —
+        no audit emit has occurred, so the recorder is empty.  The finally
+        block must drain it without crashing, and the 400 must reach the
+        client (not be replaced by a finally-block exception).
+        """
+        import asyncio
+        from uuid import UUID
+
+        # Build a freeform session: create then overwrite the composition
+        # state with one whose composer_meta has no ``guided_session`` key.
+        session_id = _create_session(composer_test_client)
+        service = composer_test_client.app.state.session_service
+
+        # Persist a freeform composition state directly.
+        from elspeth.web.sessions.protocol import CompositionStateData
+
+        freeform_state = CompositionStateData(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata_={"name": "Untitled Pipeline", "description": ""},
+            is_valid=False,
+            validation_errors=None,
+            composer_meta={},  # No guided_session key → freeform.
+        )
+        asyncio.run(service.save_composition_state(UUID(session_id), freeform_state))
+
+        resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 400, resp.json()
+        assert "not in guided mode" in resp.json()["detail"]
+
+    def test_audit_persist_failure_does_not_suppress_http_exception(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If ``_persist_tool_invocations`` raises inside finally, the
+        original HTTPException must still surface.  The inner
+        ``try/except`` in the finally block prevents Python's default
+        behaviour (the inner raise replaces the outer) from masking the
+        intended 400/409.
+
+        Concretely: drive to INSPECT_AND_CONFIRM, then patch
+        ``_persist_tool_invocations`` to raise.  Send a malformed payload
+        that triggers the 400 path.  Assert the response is still 400 —
+        not 500 from the persist failure.
+        """
+        from elspeth.web.sessions import routes as routes_mod
+
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["csv"])
+
+        async def _raising_persist(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated audit-system failure")
+
+        monkeypatch.setattr(routes_mod, "_persist_tool_invocations", _raising_persist)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": None},
+        )
+
+        # The original 400 must surface — NOT a 500 from the persist failure.
+        assert resp.status_code == 400, (
+            f"PR-review B3 regression: audit-persist failure inside finally "
+            f"replaced the original HTTPException. Expected 400, got "
+            f"{resp.status_code}: {resp.json()}"
+        )
+
+    def test_audit_persist_failure_logs_via_slog(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The audit-persist failure is logged via slog.error under the
+        audit-system-failure exemption.  Pins the
+        ``guided.audit_persist_failed_during_exception_handling`` event
+        name and confirms the failure is observable to operators.
+
+        Uses ``structlog.testing.capture_logs`` because the project uses
+        structlog (not stdlib logging) for ``slog.error``; ``caplog``
+        does not see structlog events unless the logger is bridged.
+        """
+        from structlog.testing import capture_logs
+
+        from elspeth.web.sessions import routes as routes_mod
+
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["csv"])
+
+        async def _raising_persist(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated audit-system failure")
+
+        monkeypatch.setattr(routes_mod, "_persist_tool_invocations", _raising_persist)
+
+        with capture_logs() as cap_logs:
+            resp = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={"edited_values": None},
+            )
+            # Original HTTPException still surfaces.
+            assert resp.status_code == 400
+
+        matches = [entry for entry in cap_logs if entry.get("event") == "guided.audit_persist_failed_during_exception_handling"]
+        assert matches, f"expected the audit-persist-failure slog event; got entries: {cap_logs}"
+
+        # Match the B1 convention: exc_class + frames + site + session_id +
+        # user_id, never str(exc) or exc_info.  Pin the field set so a
+        # future refactor that swaps in str(exc) is caught immediately.
+        entry = matches[0]
+        assert entry["exc_class"] == "RuntimeError", entry
+        assert entry["site"] == "post_guided_respond", entry
+        assert "frames" in entry and isinstance(entry["frames"], tuple), entry
+        # No raw exception message field — that's the leak vector the B1
+        # convention forbids.
+        forbidden_keys = {"exc_message", "exception", "exc_info"}
+        assert not (forbidden_keys & entry.keys()), f"slog entry has forbidden message/exc_info field: {entry}"

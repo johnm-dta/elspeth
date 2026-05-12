@@ -4309,182 +4309,198 @@ def create_session_router() -> APIRouter:
 
         compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
         async with compose_lock:
-            # Load or create CompositionState.
-            state_record = await service.get_current_state(session_id)
-            if state_record is None:
-                state = _initial_composition_state_with_guided_session()
-            else:
-                state = _state_from_record(state_record)
+            # PR-review B3: drain the recorder on every exit path, including
+            # ``raise HTTPException`` rejections.  Without this, any audit
+            # event emitted before a mid-body raise would be discarded — a
+            # CLAUDE.md auditability violation ("rejected requests are facts
+            # worth recording").  ``state_record_out`` is hoisted so the
+            # finally block can pass its id (or None) regardless of where
+            # control left the try.
+            state_record_out: CompositionStateRecord | None = None
+            try:
+                # Load or create CompositionState.
+                state_record = await service.get_current_state(session_id)
+                if state_record is None:
+                    state = _initial_composition_state_with_guided_session()
+                else:
+                    state = _state_from_record(state_record)
+                state_record_out = state_record
 
-            # Reject freeform sessions.
-            if state.guided_session is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                # Reject freeform sessions.
+                if state.guided_session is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                    )
+
+                guided = state.guided_session
+                current_step = guided.step
+
+                # Idempotency check: if this step already has an emitted TurnRecord,
+                # return the existing payload without re-emitting.
+                existing_record_for_step: TurnRecord | None = next(
+                    (r for r in reversed(guided.history) if r.step == current_step),
+                    None,
                 )
 
-            guided = state.guided_session
-            current_step = guided.step
+                # Build the initial turn for the current step (deterministic from
+                # state + catalog).  Returns None for steps with no rebuildable
+                # initial turn (STEP_3 / no-recipe STEP_2_5 path) or when the
+                # session is already terminal.
+                turn = _build_get_guided_turn(state, guided, catalog=catalog) if guided.terminal is None else None
+                turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
+                payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
 
-            # Idempotency check: if this step already has an emitted TurnRecord,
-            # return the existing payload without re-emitting.
-            existing_record_for_step: TurnRecord | None = next(
-                (r for r in reversed(guided.history) if r.step == current_step),
-                None,
-            )
-
-            # Build the initial turn for the current step (deterministic from
-            # state + catalog).  Returns None for steps with no rebuildable
-            # initial turn (STEP_3 / no-recipe STEP_2_5 path) or when the
-            # session is already terminal.
-            turn = _build_get_guided_turn(state, guided, catalog=catalog) if guided.terminal is None else None
-            turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
-            payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
-
-            state_record_out: CompositionStateRecord | None = state_record
-            if existing_record_for_step is None and turn is not None:
-                # First fetch for this step AND a turn exists: record TurnRecord,
-                # persist, emit audit.  When turn is None (terminal state, STEP_3,
-                # or no-recipe STEP_2_5 path) there is no turn to record.
-                # Guaranteed by the conditional assignments above: turn is not
-                # None on this branch, so both turn_type and payload_hash were
-                # populated from turn["type"] / stable_hash(turn["payload"]).
-                # Use InvariantError (not bare assert) so python -O does not
-                # strip the gate and silently feed None to TurnRecord.
-                if turn_type is None:
-                    raise InvariantError(
-                        "GET guided: turn is not None but turn_type is None — TurnType derivation skipped despite turn being present."
+                if existing_record_for_step is None and turn is not None:
+                    # First fetch for this step AND a turn exists: record TurnRecord,
+                    # persist, emit audit.  When turn is None (terminal state, STEP_3,
+                    # or no-recipe STEP_2_5 path) there is no turn to record.
+                    # Guaranteed by the conditional assignments above: turn is not
+                    # None on this branch, so both turn_type and payload_hash were
+                    # populated from turn["type"] / stable_hash(turn["payload"]).
+                    # Use InvariantError (not bare assert) so python -O does not
+                    # strip the gate and silently feed None to TurnRecord.
+                    if turn_type is None:
+                        raise InvariantError(
+                            "GET guided: turn is not None but turn_type is None — TurnType derivation skipped despite turn being present."
+                        )
+                    if payload_hash is None:
+                        raise InvariantError(
+                            "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
+                        )
+                    new_record = TurnRecord(
+                        step=current_step,
+                        turn_type=turn_type,
+                        payload_hash=payload_hash,
+                        response_hash=None,
+                        emitter="server",
                     )
-                if payload_hash is None:
-                    raise InvariantError(
-                        "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
-                    )
-                new_record = TurnRecord(
-                    step=current_step,
-                    turn_type=turn_type,
-                    payload_hash=payload_hash,
-                    response_hash=None,
-                    emitter="server",
-                )
-                from dataclasses import replace as _replace
+                    from dataclasses import replace as _replace
 
-                # If this is the STEP_2_5_RECIPE_MATCH step, populate
-                # step_2_5_recipe_offer so the POST /respond accept branch
-                # can verify the client-supplied recipe_name against the offer.
-                # This covers the GET-before-POST flow (user reloads the page
-                # while the session is at the recipe-offer step).
+                    # If this is the STEP_2_5_RECIPE_MATCH step, populate
+                    # step_2_5_recipe_offer so the POST /respond accept branch
+                    # can verify the client-supplied recipe_name against the offer.
+                    # This covers the GET-before-POST flow (user reloads the page
+                    # while the session is at the recipe-offer step).
+                    if (
+                        current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                        and guided.step_1_result is not None
+                        and guided.step_2_result is not None
+                    ):
+                        staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+                    else:
+                        staged_offer = None
+
+                    new_guided = _replace(guided, history=(*guided.history, new_record))
+                    if staged_offer is not None:
+                        new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
+                    new_state = _replace(state, guided_session=new_guided)
+
+                    # Persist state with updated guided_session in composer_meta.
+                    # Preserve any existing composer_meta keys (e.g. repair_turns_used).
+                    existing_meta: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        existing_meta = dict(deep_thaw(state_record.composer_meta))
+                    new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+
+                    state_d = new_state.to_dict()
+                    state_data = CompositionStateData(
+                        source=state_d["source"],
+                        nodes=state_d["nodes"],
+                        edges=state_d["edges"],
+                        outputs=state_d["outputs"],
+                        metadata_=state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=new_composer_meta,
+                    )
+                    state_record_out = await service.save_composition_state(session_id, state_data)
+
+                    # Emit audit event.  Persistence of the buffered invocations
+                    # is handled by the finally block below — that way both
+                    # success and rejection paths drain identically.
+                    emit_turn_emitted(
+                        recorder,
+                        step=current_step,
+                        turn_type=turn_type,
+                        payload_hash=payload_hash,
+                        payload_payload_id="",  # No payload store for server-emitted turns yet.
+                        emitter="server",
+                        composition_version=new_state.version,
+                        actor=user.user_id,
+                    )
+
+                    guided = new_guided
+
+                # Idempotency-path repair: if the session is at STEP_2_5_RECIPE_MATCH
+                # and the staged offer is absent (persisted before the step_2_5_recipe_offer
+                # field was introduced), re-populate it and persist the repaired state so
+                # the POST /respond accept branch can verify the recipe_name.  Without this
+                # repair, sessions that reached STEP_2_5 before this field was added would
+                # always fail the accept binding check with 400.  The offer is
+                # deterministically reconstructable from (step_1_result, step_2_result).
                 if (
-                    current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                    existing_record_for_step is not None
+                    and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                    and guided.step_2_5_recipe_offer is None
                     and guided.step_1_result is not None
                     and guided.step_2_result is not None
                 ):
-                    staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
-                else:
-                    staged_offer = None
+                    recovered_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+                    if recovered_offer is not None:
+                        from dataclasses import replace as _replace_repair
 
-                new_guided = _replace(guided, history=(*guided.history, new_record))
-                if staged_offer is not None:
-                    new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
-                new_state = _replace(state, guided_session=new_guided)
-
-                # Persist state with updated guided_session in composer_meta.
-                # Preserve any existing composer_meta keys (e.g. repair_turns_used).
-                existing_meta: dict[str, Any] = {}
-                if state_record is not None and state_record.composer_meta is not None:
-                    existing_meta = dict(deep_thaw(state_record.composer_meta))
-                new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
-
-                state_d = new_state.to_dict()
-                state_data = CompositionStateData(
-                    source=state_d["source"],
-                    nodes=state_d["nodes"],
-                    edges=state_d["edges"],
-                    outputs=state_d["outputs"],
-                    metadata_=state_d["metadata"],
-                    is_valid=False,
-                    validation_errors=None,
-                    composer_meta=new_composer_meta,
-                )
-                state_record_out = await service.save_composition_state(session_id, state_data)
-
-                # Emit audit event.
-                emit_turn_emitted(
-                    recorder,
-                    step=current_step,
-                    turn_type=turn_type,
-                    payload_hash=payload_hash,
-                    payload_payload_id="",  # No payload store for server-emitted turns yet.
-                    emitter="server",
-                    composition_version=new_state.version,
-                    actor=user.user_id,
-                )
-
-                # Drain recorder into the DB as role=tool audit rows.
-                tool_invocations = recorder.invocations
-                if tool_invocations:
-                    await _persist_tool_invocations(
-                        service,
-                        session_id,
-                        tool_invocations,
-                        state_record_out.id,
-                    )
-
-                guided = new_guided
-
-            # Idempotency-path repair: if the session is at STEP_2_5_RECIPE_MATCH
-            # and the staged offer is absent (persisted before the step_2_5_recipe_offer
-            # field was introduced), re-populate it and persist the repaired state so
-            # the POST /respond accept branch can verify the recipe_name.  Without this
-            # repair, sessions that reached STEP_2_5 before this field was added would
-            # always fail the accept binding check with 400.  The offer is
-            # deterministically reconstructable from (step_1_result, step_2_result).
-            if (
-                existing_record_for_step is not None
-                and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
-                and guided.step_2_5_recipe_offer is None
-                and guided.step_1_result is not None
-                and guided.step_2_result is not None
-            ):
-                recovered_offer = match_recipe(guided.step_1_result, guided.step_2_result)
-                if recovered_offer is not None:
-                    from dataclasses import replace as _replace_repair
-
-                    repaired_guided = _replace_repair(guided, step_2_5_recipe_offer=recovered_offer)
-                    repaired_state = _replace_repair(state, guided_session=repaired_guided)
-                    existing_meta_repair: dict[str, Any] = {}
-                    if state_record is not None and state_record.composer_meta is not None:
-                        existing_meta_repair = dict(deep_thaw(state_record.composer_meta))
-                    repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
-                    repaired_state_d = repaired_state.to_dict()
-                    repair_data = CompositionStateData(
-                        source=repaired_state_d["source"],
-                        nodes=repaired_state_d["nodes"],
-                        edges=repaired_state_d["edges"],
-                        outputs=repaired_state_d["outputs"],
-                        metadata_=repaired_state_d["metadata"],
-                        is_valid=False,
-                        validation_errors=None,
-                        composer_meta=repair_meta,
-                    )
-                    state_record_out = await service.save_composition_state(session_id, repair_data)
-                    guided = repaired_guided
-
-            # Build response.  On re-fetch the same turn is returned (deterministic
-            # rebuild) and the payload_hash matches what was recorded on first visit.
-            terminal = guided.terminal
-            return GetGuidedResponse(
-                guided_session=GuidedSessionResponse(
-                    step=guided.step.value,
-                    history=[
-                        TurnRecordResponse(
-                            step=r.step.value,
-                            turn_type=r.turn_type.value,
-                            payload_hash=r.payload_hash,
-                            response_hash=r.response_hash,
-                            emitter=r.emitter,
+                        repaired_guided = _replace_repair(guided, step_2_5_recipe_offer=recovered_offer)
+                        repaired_state = _replace_repair(state, guided_session=repaired_guided)
+                        existing_meta_repair: dict[str, Any] = {}
+                        if state_record is not None and state_record.composer_meta is not None:
+                            existing_meta_repair = dict(deep_thaw(state_record.composer_meta))
+                        repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
+                        repaired_state_d = repaired_state.to_dict()
+                        repair_data = CompositionStateData(
+                            source=repaired_state_d["source"],
+                            nodes=repaired_state_d["nodes"],
+                            edges=repaired_state_d["edges"],
+                            outputs=repaired_state_d["outputs"],
+                            metadata_=repaired_state_d["metadata"],
+                            is_valid=False,
+                            validation_errors=None,
+                            composer_meta=repair_meta,
                         )
-                        for r in guided.history
-                    ],
+                        state_record_out = await service.save_composition_state(session_id, repair_data)
+                        guided = repaired_guided
+
+                # Build response.  On re-fetch the same turn is returned (deterministic
+                # rebuild) and the payload_hash matches what was recorded on first visit.
+                terminal = guided.terminal
+                return GetGuidedResponse(
+                    guided_session=GuidedSessionResponse(
+                        step=guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                emitter=r.emitter,
+                            )
+                            for r in guided.history
+                        ],
+                        terminal=TerminalStateResponse(
+                            kind=terminal.kind.value,
+                            reason=terminal.reason.value if terminal.reason is not None else None,
+                            pipeline_yaml=terminal.pipeline_yaml,
+                        )
+                        if terminal is not None
+                        else None,
+                    ),
+                    next_turn=TurnPayloadResponse(
+                        type=turn["type"],
+                        step_index=turn["step_index"],
+                        payload=dict(turn["payload"]),
+                    )
+                    if turn is not None
+                    else None,
                     terminal=TerminalStateResponse(
                         kind=terminal.kind.value,
                         reason=terminal.reason.value if terminal.reason is not None else None,
@@ -4492,23 +4508,42 @@ def create_session_router() -> APIRouter:
                     )
                     if terminal is not None
                     else None,
-                ),
-                next_turn=TurnPayloadResponse(
-                    type=turn["type"],
-                    step_index=turn["step_index"],
-                    payload=dict(turn["payload"]),
+                    composition_state=_state_response(state_record_out) if state_record_out is not None else None,
                 )
-                if turn is not None
-                else None,
-                terminal=TerminalStateResponse(
-                    kind=terminal.kind.value,
-                    reason=terminal.reason.value if terminal.reason is not None else None,
-                    pipeline_yaml=terminal.pipeline_yaml,
-                )
-                if terminal is not None
-                else None,
-                composition_state=_state_response(state_record_out) if state_record_out is not None else None,
-            )
+            finally:
+                # PR-review B3: drain the recorder unconditionally — success
+                # paths and ``raise HTTPException`` rejection paths take the
+                # same exit.  Empty drains are a no-op (BufferingRecorder
+                # starts with an empty invocations list and
+                # ``_persist_tool_invocations`` iterates an empty tuple).
+                #
+                # The inner ``try`` prevents an audit-persist failure from
+                # masking the in-flight HTTPException — Python's default
+                # behaviour is to let a ``finally``-block exception replace
+                # the original, which would surface a generic 500 instead
+                # of the intended 400/409.  Per CLAUDE.md telemetry/logging
+                # primacy, audit-system failures during exception handling
+                # are the one exemption where ``slog`` is the correct
+                # channel.  The log payload follows the B1 convention:
+                # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
+                # ``exc_info`` (frames are bounded and value-free; the
+                # exception message can carry Tier-bearing strings).
+                try:
+                    await _persist_tool_invocations(
+                        service,
+                        session_id,
+                        recorder.invocations,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="get_guided",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
 
     @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
     async def post_guided_respond(
@@ -4539,207 +4574,149 @@ def create_session_router() -> APIRouter:
 
         compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
         async with compose_lock:
-            # Load state.
-            state_record = await service.get_current_state(session_id)
-            if state_record is None:
-                state = _initial_composition_state_with_guided_session()
-            else:
-                state = _state_from_record(state_record)
-
-            if state.guided_session is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
-                )
-
-            guided = state.guided_session
-
-            # Reject if session already terminal.
-            if guided.terminal is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Guided session is already in a terminal state. No further responses accepted.",
-                )
-
-            # Derive the current turn type from the last TurnRecord for the
-            # current step.  Crash if history is empty — the caller must have
-            # fetched GET /guided first (which seeds the initial TurnRecord).
-            current_step = guided.step
-            existing_record: TurnRecord | None = next(
-                (r for r in reversed(guided.history) if r.step == current_step),
-                None,
-            )
-            if existing_record is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
-                )
-
-            current_turn_type = existing_record.turn_type
-
-            # --- Wire-boundary validation (Codex #7, #12) -------------------
-            # Both guards run before the TurnResponse dict is assembled so that
-            # invalid requests are rejected before response_hash is computed or
-            # guided_turn_answered is emitted.
-
-            # Codex #12: validate control_signal against the ControlSignal enum.
-            _validate_control_signal(body.control_signal)
-
-            # Codex #7: validate step-index fields against the current proposal.
-            _validate_step_indices(
-                current_turn_type,
-                body.accepted_step_index,
-                body.edit_step_index,
-                guided,
-            )
-
-            # Build the TurnResponse dict from the request body.
-            from dataclasses import replace as _replace
-
-            turn_response: TurnResponse = {
-                "chosen": body.chosen,
-                "edited_values": body.edited_values,
-                "custom_inputs": body.custom_inputs,
-                "accepted_step_index": body.accepted_step_index,
-                "edit_step_index": body.edit_step_index,
-                "control_signal": body.control_signal,
-            }
-
-            # Record the response_hash on the existing TurnRecord.
-            response_hash = stable_hash(turn_response)
-            updated_record = _replace(existing_record, response_hash=response_hash)
-            # Rebuild history tuple with response_hash stamped on this record.
-            updated_history = tuple(updated_record if r is existing_record else r for r in guided.history)
-            guided = _replace(guided, history=updated_history)
-
-            # Emit guided_turn_answered audit event.
-            emit_turn_answered(
-                recorder,
-                step=current_step,
-                turn_type=current_turn_type,
-                response_hash=response_hash,
-                response_payload_id="",
-                control_signal=body.control_signal,
-                composition_version=state.version,
-                actor=user.user_id,
-            )
-
-            # Run step_advance (pure — no I/O).
-            # InvariantError indicates a server-side bug (e.g. stamped an
-            # invalid turn type on a history record) — propagate as HTTP 500
-            # with a static message so the response body never carries
-            # ``str(exc)``. ``InvariantError`` raised from ``from_dict`` call
-            # sites embeds ``{d!r}`` of the corrupted Tier-1 record, which
-            # includes Tier-3 ``sample_rows`` source data. Interpolating that
-            # into the HTTP detail field would have leaked user/PII content
-            # into the JSON 500 body returned to the browser (PR #37 review
-            # finding B1).
+            # PR-review B3: drain the recorder on every exit path, including
+            # ``raise HTTPException`` rejections.  This handler emits
+            # ``guided_turn_answered`` (line below the ``_validate_*`` calls)
+            # BEFORE the dispatcher's try-block can raise 400, so without an
+            # unconditional drain the turn-answered event for a rejected
+            # advance attempt is silently dropped — a CLAUDE.md auditability
+            # violation ("rejected requests are facts worth recording").
             #
-            # Diagnostic trace is preserved via ``slog.error`` under the
-            # audit-system-failure exemption (CLAUDE.md primacy order: when
-            # ``from_dict`` itself fails, the audit-derivation path can't be
-            # trusted to record the failure consistently). The slog event
-            # carries ``exc_class`` + ``frames`` only — never the message
-            # string, since for ``{d!r}`` -bearing InvariantErrors that text
-            # is the leak vector. Sibling helpers in this file follow the
-            # same "class + frames, no message" pattern when the exception
-            # carries Tier-bearing strings (see ``_safe_frame_strings`` docs).
-            #
-            # ValueError indicates a client-supplied payload violated the
-            # guided-mode protocol contract (e.g. unexpected chosen value on a
-            # recipe_offer turn, or null edited_values on inspect_and_confirm)
-            # — propagate as HTTP 400 so the caller can correct the request.
-            # ValueError is not raised by ``from_dict`` and does not embed
-            # ``{d!r}`` of Tier-1 records, so interpolating ``str(exc)`` here
-            # is safe.
+            # ``state_record_out`` is hoisted above the try so the finally
+            # block can reference it regardless of where control left.  On
+            # rejection paths it may legitimately remain ``None`` — the
+            # ``_persist_tool_invocations`` signature accepts that.
+            state_record_out: CompositionStateRecord | None = None
             try:
-                new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
+                # Load state.
+                state_record = await service.get_current_state(session_id)
+                if state_record is None:
+                    state = _initial_composition_state_with_guided_session()
+                else:
+                    state = _state_from_record(state_record)
+
+                if state.guided_session is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                    )
+
+                guided = state.guided_session
+
+                # Reject if session already terminal.
+                if guided.terminal is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Guided session is already in a terminal state. No further responses accepted.",
+                    )
+
+                # Derive the current turn type from the last TurnRecord for the
+                # current step.  Crash if history is empty — the caller must have
+                # fetched GET /guided first (which seeds the initial TurnRecord).
+                current_step = guided.step
+                existing_record: TurnRecord | None = next(
+                    (r for r in reversed(guided.history) if r.step == current_step),
+                    None,
+                )
+                if existing_record is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
+                    )
+
+                current_turn_type = existing_record.turn_type
+
+                # --- Wire-boundary validation (Codex #7, #12) -------------------
+                # Both guards run before the TurnResponse dict is assembled so that
+                # invalid requests are rejected before response_hash is computed or
+                # guided_turn_answered is emitted.
+
+                # Codex #12: validate control_signal against the ControlSignal enum.
+                _validate_control_signal(body.control_signal)
+
+                # Codex #7: validate step-index fields against the current proposal.
+                _validate_step_indices(
+                    current_turn_type,
+                    body.accepted_step_index,
+                    body.edit_step_index,
                     guided,
-                    turn_response,
-                    current_turn_type=current_turn_type,
                 )
-            except InvariantError as exc:
-                slog.error(
-                    "guided.invariant_violated",
-                    session_id=str(session_id),
-                    user_id=user.user_id,
-                    exc_class=type(exc).__name__,
-                    site="step_advance",
-                    frames=_safe_frame_strings(exc),
+
+                # Build the TurnResponse dict from the request body.
+                from dataclasses import replace as _replace
+
+                turn_response: TurnResponse = {
+                    "chosen": body.chosen,
+                    "edited_values": body.edited_values,
+                    "custom_inputs": body.custom_inputs,
+                    "accepted_step_index": body.accepted_step_index,
+                    "edit_step_index": body.edit_step_index,
+                    "control_signal": body.control_signal,
+                }
+
+                # Record the response_hash on the existing TurnRecord.
+                response_hash = stable_hash(turn_response)
+                updated_record = _replace(existing_record, response_hash=response_hash)
+                # Rebuild history tuple with response_hash stamped on this record.
+                updated_history = tuple(updated_record if r is existing_record else r for r in guided.history)
+                guided = _replace(guided, history=updated_history)
+
+                # Emit guided_turn_answered audit event.  This writes to the
+                # recorder BEFORE the dispatcher's try-block — if the
+                # dispatcher then raises 400, this event must still reach
+                # the audit DB (see PR-review B3 finally-drain rationale).
+                emit_turn_answered(
+                    recorder,
+                    step=current_step,
+                    turn_type=current_turn_type,
+                    response_hash=response_hash,
+                    response_payload_id="",
+                    control_signal=body.control_signal,
+                    composition_version=state.version,
+                    actor=user.user_id,
                 )
-                raise HTTPException(
-                    status_code=500,
-                    detail="Server invariant violated. See application audit log for diagnostic detail.",
-                ) from exc
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Guided-mode protocol error: {exc}",
-                ) from exc
 
-            # Fan directives to emit_* helpers.
-            for directive in directives:
-                if directive.tool_name == "guided_step_advanced":
-                    args = dict(directive.arguments)
-                    emit_step_advanced(
-                        recorder,
-                        prev=GuidedStep(args["prev_step"]),
-                        next_=GuidedStep(args["next_step"]),
-                        reason=args["reason"],
-                        composition_version=state.version,
-                        actor=user.user_id,
-                    )
-                elif directive.tool_name == "guided_dropped_to_freeform":
-                    args = dict(directive.arguments)
-                    emit_dropped_to_freeform(
-                        recorder,
-                        prev=GuidedStep(args["prev_step"]),
-                        drop_reason=TerminalReason(args["drop_reason"]),
-                        validation_result=args["validation_result"],
-                        composition_version=state.version,
-                        actor=user.user_id,
-                    )
-
-            guided = new_guided
-            terminal = terminal_from_advance
-
-            # Run side-effect dispatcher if the session is not yet terminal.
-            # The dispatcher calls step handlers (handle_step_1_source,
-            # handle_step_2_sink, handle_step_2_5_recipe_apply) and emits
-            # the next turn based on the updated step + turn type.
-            next_turn: Any | None = None
-            settings = request.app.state.settings
-            data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
-            session_engine = request.app.state.session_engine
-
-            if terminal is None:
+                # Run step_advance (pure — no I/O).
+                # InvariantError indicates a server-side bug (e.g. stamped an
+                # invalid turn type on a history record) — propagate as HTTP 500
+                # with a static message so the response body never carries
+                # ``str(exc)``. ``InvariantError`` raised from ``from_dict`` call
+                # sites embeds ``{d!r}`` of the corrupted Tier-1 record, which
+                # includes Tier-3 ``sample_rows`` source data. Interpolating that
+                # into the HTTP detail field would have leaked user/PII content
+                # into the JSON 500 body returned to the browser (PR #37 review
+                # finding B1).
+                #
+                # Diagnostic trace is preserved via ``slog.error`` under the
+                # audit-system-failure exemption (CLAUDE.md primacy order: when
+                # ``from_dict`` itself fails, the audit-derivation path can't be
+                # trusted to record the failure consistently). The slog event
+                # carries ``exc_class`` + ``frames`` only — never the message
+                # string, since for ``{d!r}`` -bearing InvariantErrors that text
+                # is the leak vector. Sibling helpers in this file follow the
+                # same "class + frames, no message" pattern when the exception
+                # carries Tier-bearing strings (see ``_safe_frame_strings`` docs).
+                #
+                # ValueError indicates a client-supplied payload violated the
+                # guided-mode protocol contract (e.g. unexpected chosen value on a
+                # recipe_offer turn, or null edited_values on inspect_and_confirm)
+                # — propagate as HTTP 400 so the caller can correct the request.
+                # ValueError is not raised by ``from_dict`` and does not embed
+                # ``{d!r}`` of Tier-1 records, so interpolating ``str(exc)`` here
+                # is safe.
                 try:
-                    state, guided, next_turn = await _dispatch_guided_respond(
-                        state=state,
-                        guided=guided,
-                        current_step=current_step,
+                    new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
+                        guided,
+                        turn_response,
                         current_turn_type=current_turn_type,
-                        turn_response=turn_response,
-                        catalog=catalog,
-                        recorder=recorder,
-                        user_id=user.user_id,
-                        data_dir=data_dir,
-                        session_engine=session_engine,
-                        session_id=str(session_id),
-                        model=settings.composer_model,
                     )
                 except InvariantError as exc:
-                    # Same B1-sanitization rationale as the step_advance
-                    # catch above: ``str(exc)`` from a ``from_dict`` site
-                    # embeds ``{d!r}`` of the corrupted Tier-1 record
-                    # including Tier-3 ``sample_rows``. Static detail; slog
-                    # carries exc_class + frames only.
                     slog.error(
                         "guided.invariant_violated",
                         session_id=str(session_id),
                         user_id=user.user_id,
                         exc_class=type(exc).__name__,
-                        site="dispatch_guided_respond",
+                        site="step_advance",
                         frames=_safe_frame_strings(exc),
                     )
                     raise HTTPException(
@@ -4747,60 +4724,143 @@ def create_session_router() -> APIRouter:
                         detail="Server invariant violated. See application audit log for diagnostic detail.",
                     ) from exc
                 except ValueError as exc:
-                    # ValueError from inside the dispatcher indicates a
-                    # client-supplied payload violated the guided-mode protocol
-                    # contract (e.g. unknown plugin name from chosen, null
-                    # edited_values) — propagate as HTTP 400. See Codex #8,
-                    # #11, #15 and commit message for full context.
                     raise HTTPException(
                         status_code=400,
                         detail=f"Guided-mode protocol error: {exc}",
                     ) from exc
-                terminal = guided.terminal
 
-            # Persist updated state.
-            new_state = _replace(state, guided_session=guided)
-            existing_meta: dict[str, Any] = {}
-            if state_record is not None and state_record.composer_meta is not None:
-                existing_meta = dict(deep_thaw(state_record.composer_meta))
-            new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
-
-            state_d = new_state.to_dict()
-            state_data = CompositionStateData(
-                source=state_d["source"],
-                nodes=state_d["nodes"],
-                edges=state_d["edges"],
-                outputs=state_d["outputs"],
-                metadata_=state_d["metadata"],
-                is_valid=False,
-                validation_errors=None,
-                composer_meta=new_composer_meta,
-            )
-            state_record_out = await service.save_composition_state(session_id, state_data)
-
-            # Drain recorder.
-            tool_invocations = recorder.invocations
-            if tool_invocations:
-                await _persist_tool_invocations(
-                    service,
-                    session_id,
-                    tool_invocations,
-                    state_record_out.id,
-                )
-
-            return GuidedRespondResponse(
-                guided_session=GuidedSessionResponse(
-                    step=guided.step.value,
-                    history=[
-                        TurnRecordResponse(
-                            step=r.step.value,
-                            turn_type=r.turn_type.value,
-                            payload_hash=r.payload_hash,
-                            response_hash=r.response_hash,
-                            emitter=r.emitter,
+                # Fan directives to emit_* helpers.
+                for directive in directives:
+                    if directive.tool_name == "guided_step_advanced":
+                        args = dict(directive.arguments)
+                        emit_step_advanced(
+                            recorder,
+                            prev=GuidedStep(args["prev_step"]),
+                            next_=GuidedStep(args["next_step"]),
+                            reason=args["reason"],
+                            composition_version=state.version,
+                            actor=user.user_id,
                         )
-                        for r in guided.history
-                    ],
+                    elif directive.tool_name == "guided_dropped_to_freeform":
+                        args = dict(directive.arguments)
+                        emit_dropped_to_freeform(
+                            recorder,
+                            prev=GuidedStep(args["prev_step"]),
+                            drop_reason=TerminalReason(args["drop_reason"]),
+                            validation_result=args["validation_result"],
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+
+                guided = new_guided
+                terminal = terminal_from_advance
+
+                # Run side-effect dispatcher if the session is not yet terminal.
+                # The dispatcher calls step handlers (handle_step_1_source,
+                # handle_step_2_sink, handle_step_2_5_recipe_apply) and emits
+                # the next turn based on the updated step + turn type.
+                next_turn: Any | None = None
+                settings = request.app.state.settings
+                data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
+                session_engine = request.app.state.session_engine
+
+                if terminal is None:
+                    try:
+                        state, guided, next_turn = await _dispatch_guided_respond(
+                            state=state,
+                            guided=guided,
+                            current_step=current_step,
+                            current_turn_type=current_turn_type,
+                            turn_response=turn_response,
+                            catalog=catalog,
+                            recorder=recorder,
+                            user_id=user.user_id,
+                            data_dir=data_dir,
+                            session_engine=session_engine,
+                            session_id=str(session_id),
+                            model=settings.composer_model,
+                        )
+                    except InvariantError as exc:
+                        # Same B1-sanitization rationale as the step_advance
+                        # catch above: ``str(exc)`` from a ``from_dict`` site
+                        # embeds ``{d!r}`` of the corrupted Tier-1 record
+                        # including Tier-3 ``sample_rows``. Static detail; slog
+                        # carries exc_class + frames only.
+                        slog.error(
+                            "guided.invariant_violated",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            exc_class=type(exc).__name__,
+                            site="dispatch_guided_respond",
+                            frames=_safe_frame_strings(exc),
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Server invariant violated. See application audit log for diagnostic detail.",
+                        ) from exc
+                    except ValueError as exc:
+                        # ValueError from inside the dispatcher indicates a
+                        # client-supplied payload violated the guided-mode protocol
+                        # contract (e.g. unknown plugin name from chosen, null
+                        # edited_values) — propagate as HTTP 400. See Codex #8,
+                        # #11, #15 and commit message for full context.
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Guided-mode protocol error: {exc}",
+                        ) from exc
+                    terminal = guided.terminal
+
+                # Persist updated state.
+                new_state = _replace(state, guided_session=guided)
+                existing_meta: dict[str, Any] = {}
+                if state_record is not None and state_record.composer_meta is not None:
+                    existing_meta = dict(deep_thaw(state_record.composer_meta))
+                new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+
+                state_d = new_state.to_dict()
+                state_data = CompositionStateData(
+                    source=state_d["source"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=state_d["metadata"],
+                    is_valid=False,
+                    validation_errors=None,
+                    composer_meta=new_composer_meta,
+                )
+                state_record_out = await service.save_composition_state(session_id, state_data)
+
+                # Recorder persistence happens in the finally block below so
+                # rejection paths drain identically to the success path.
+
+                return GuidedRespondResponse(
+                    guided_session=GuidedSessionResponse(
+                        step=guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                emitter=r.emitter,
+                            )
+                            for r in guided.history
+                        ],
+                        terminal=TerminalStateResponse(
+                            kind=terminal.kind.value,
+                            reason=terminal.reason.value if terminal.reason is not None else None,
+                            pipeline_yaml=terminal.pipeline_yaml,
+                        )
+                        if terminal is not None
+                        else None,
+                    ),
+                    next_turn=TurnPayloadResponse(
+                        type=next_turn["type"],
+                        step_index=next_turn["step_index"],
+                        payload=dict(next_turn["payload"]),
+                    )
+                    if next_turn is not None
+                    else None,
                     terminal=TerminalStateResponse(
                         kind=terminal.kind.value,
                         reason=terminal.reason.value if terminal.reason is not None else None,
@@ -4808,23 +4868,42 @@ def create_session_router() -> APIRouter:
                     )
                     if terminal is not None
                     else None,
-                ),
-                next_turn=TurnPayloadResponse(
-                    type=next_turn["type"],
-                    step_index=next_turn["step_index"],
-                    payload=dict(next_turn["payload"]),
+                    composition_state=_state_response(state_record_out),
                 )
-                if next_turn is not None
-                else None,
-                terminal=TerminalStateResponse(
-                    kind=terminal.kind.value,
-                    reason=terminal.reason.value if terminal.reason is not None else None,
-                    pipeline_yaml=terminal.pipeline_yaml,
-                )
-                if terminal is not None
-                else None,
-                composition_state=_state_response(state_record_out),
-            )
+            finally:
+                # PR-review B3: drain the recorder unconditionally — success
+                # paths and ``raise HTTPException`` rejection paths take the
+                # same exit.  Empty drains are a no-op (BufferingRecorder
+                # starts with an empty invocations list and
+                # ``_persist_tool_invocations`` iterates an empty tuple).
+                #
+                # The inner ``try`` prevents an audit-persist failure from
+                # masking the in-flight HTTPException — Python's default
+                # behaviour is to let a ``finally``-block exception replace
+                # the original, which would surface a generic 500 instead
+                # of the intended 400/409.  Per CLAUDE.md telemetry/logging
+                # primacy, audit-system failures during exception handling
+                # are the one exemption where ``slog`` is the correct
+                # channel.  The log payload follows the B1 convention:
+                # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
+                # ``exc_info`` (frames are bounded and value-free; the
+                # exception message can carry Tier-bearing strings).
+                try:
+                    await _persist_tool_invocations(
+                        service,
+                        session_id,
+                        recorder.invocations,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="post_guided_respond",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
 
     return router
 

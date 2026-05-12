@@ -42,7 +42,6 @@ from elspeth.web.composer.guided.audit import (
     emit_turn_answered,
     emit_turn_emitted,
 )
-from elspeth.web.composer.guided.chain_solver import solve_chain
 from elspeth.web.composer.guided.emitters import (
     build_initial_step_1_turn,
     build_step_1_inspect_and_confirm_turn_from_intent,
@@ -94,6 +93,7 @@ from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
+from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -2172,7 +2172,24 @@ async def _dispatch_guided_respond(
             return state, guided, next_turn
 
         # No recipe match — solve the chain via the LLM and emit propose_chain.
-        proposal = await solve_chain(model=model, source=source, sink=sink, recipe_match=None)
+        # I2: wrap transient LLM failures (LiteLLM API/auth/bad-request,
+        # timeouts, malformed-response shape) so they auto-drop to freeform
+        # via mark_solver_exhausted rather than escape as 500s.  See
+        # ``solve_chain_with_auto_drop`` for the contract.
+        proposal, guided = await solve_chain_with_auto_drop(
+            site="step_2_sink_initial_solve",
+            session=guided,
+            session_id=session_id,
+            user_id=user_id,
+            composition_version=state.version,
+            recorder=recorder,
+            model=model,
+            source=source,
+            sink=sink,
+            recipe_match=None,
+        )
+        if proposal is None:
+            return state, guided, None
         guided = _replace(guided, step=GuidedStep.STEP_3_TRANSFORMS, step_3_proposal=proposal)
         next_turn = build_step_3_propose_chain_turn(proposal)
         new_record = TurnRecord(
@@ -2322,7 +2339,21 @@ async def _dispatch_guided_respond(
                 )
             source = guided.step_1_result
             sink = guided.step_2_result
-            proposal = await solve_chain(model=model, source=source, sink=sink, recipe_match=None)
+            # I2: same auto-drop wrap as the no-recipe-match branch above.
+            proposal, guided = await solve_chain_with_auto_drop(
+                site="step_2_5_build_manually_solve",
+                session=guided,
+                session_id=session_id,
+                user_id=user_id,
+                composition_version=state.version,
+                recorder=recorder,
+                model=model,
+                source=source,
+                sink=sink,
+                recipe_match=None,
+            )
+            if proposal is None:
+                return state, guided, None
             guided = _replace(guided, step_3_proposal=proposal)
             next_turn = build_step_3_propose_chain_turn(proposal)
             new_record = TurnRecord(
@@ -2396,13 +2427,27 @@ async def _dispatch_guided_respond(
                         raise InvariantError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
                     if guided.step_2_result is None:
                         raise InvariantError("repair: step_2_result is None — STEP_3 unreachable without Step 2 commit")
-                    repair_proposal = await solve_chain(
+                    # I2: a transient failure during repair auto-drops
+                    # IMMEDIATELY — repair is already attempt #2, so a
+                    # transient on repair means we are done trying. The
+                    # early ``return`` below short-circuits BEFORE the
+                    # downstream ``mark_solver_exhausted`` path so we never
+                    # double-emit ``guided_dropped_to_freeform``.
+                    repair_proposal, guided = await solve_chain_with_auto_drop(
+                        site="step_3_repair_solve",
+                        session=guided,
+                        session_id=session_id,
+                        user_id=user_id,
+                        composition_version=state.version,
+                        recorder=recorder,
                         model=model,
                         source=guided.step_1_result,
                         sink=guided.step_2_result,
                         recipe_match=None,
                         repair_context=repair_context,
                     )
+                    if repair_proposal is None:
+                        return state, guided, None
                     repair_result = handle_step_3_chain_accept(
                         # state is the original pre-attempt state — _execute_set_pipeline
                         # is validate-then-mutate: on failure the state is untouched,

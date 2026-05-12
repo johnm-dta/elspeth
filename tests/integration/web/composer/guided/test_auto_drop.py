@@ -347,3 +347,302 @@ class TestRepairSucceeds:
         # No guided_dropped_to_freeform audit event emitted.
         drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
         assert drop_invocations == [], f"unexpected drop event in repair-succeeds path: {drop_invocations}"
+
+
+# ---------------------------------------------------------------------------
+# I2: transient LLM failure at solve_chain sites → auto-drop (200), not 500.
+# ---------------------------------------------------------------------------
+#
+# Three sites in ``_dispatch_guided_respond`` await ``solve_chain``:
+#   1. step_2_sink_initial_solve      (no recipe match path)
+#   2. step_2_5_build_manually_solve  (recipe offer → build_manually)
+#   3. step_3_repair_solve            (Step 3 repair re-solve)
+#
+# Pre-I2, all three were unwrapped: a LiteLLM API/auth error, timeout, or
+# malformed-response shape (IndexError on empty ``choices``) escaped as an
+# unstructured 500 — bypassing ``mark_solver_exhausted`` and leaving the
+# session wedged mid-step with no ``guided_dropped_to_freeform`` audit
+# record.  These tests pin the new contract from
+# ``_solve_chain_or_auto_drop``.
+
+
+def _drive_to_step_2_sink_initial_solve_pre_call(client: TestClient, session_id: str) -> str:
+    """Drive to the request that triggers site 1 (step_2_sink_initial_solve).
+
+    Returns ``session_id`` after Steps 1 and 2 SINGLE_SELECT + SCHEMA_FORM
+    have been answered. The NEXT respond (MULTI_SELECT chosen=['text'])
+    triggers ``solve_chain`` at site 1.
+    """
+    _blob_id, storage_path = _seed_blob(client, session_id)
+    output_path = _outputs_path(client, "out.jsonl")
+
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    _respond(
+        client,
+        session_id,
+        edited_values={
+            "plugin": "csv",
+            "options": {"path": storage_path, "schema": {"mode": "observed"}},
+            "observed_columns": ["text", "note"],
+            "sample_rows": [{"text": "Hello world", "note": "greeting"}],
+        },
+    )
+    _respond(client, session_id, chosen=["json"])
+    _respond(
+        client,
+        session_id,
+        edited_values={
+            "plugin": "json",
+            "options": {
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+            "observed_columns": [],
+            "sample_rows": [],
+        },
+    )
+    return session_id
+
+
+def _post_step_2_sink_intent(client: TestClient, session_id: str) -> object:
+    """Post the MULTI_SELECT response that triggers site 1's solve_chain call."""
+    return client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={"chosen": ["text"], "custom_inputs": []},
+    )
+
+
+class TestI2ChainSolverTransientFailure:
+    """Pin: transient LLM failure at each solve_chain site auto-drops cleanly.
+
+    Patches ``chain_solver._litellm_acompletion`` (the seam the existing
+    auto-drop tests use) to raise transient exception classes from the
+    project canonical set. Asserts:
+      - HTTP 200 (not 500) with terminal=exited_to_freeform / solver_exhausted.
+      - ``guided_dropped_to_freeform`` audit emitted exactly once with the
+        ``validation_result`` payload mandated by spec §9.1.
+      - No exception ``str(exc)`` leaks into the response body.
+      - ``InvariantError`` from chain_solver (e.g. emit-shape contract
+        violations) still propagates as 500 — real bugs must crash.
+    """
+
+    def test_step_2_sink_initial_solve_api_error_auto_drops(self, composer_test_client: TestClient) -> None:
+        """Site 1: a LiteLLM APIError at the no-recipe initial solve auto-drops."""
+        from litellm.exceptions import APIError as LiteLLMAPIError
+
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        api_err = LiteLLMAPIError(
+            status_code=500,
+            message="upstream auth failure: SECRET_API_KEY=sk-leaks-here",
+            llm_provider="openai",
+            model="gpt-4o",
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=api_err,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        # Must be 200 (auto-drop is a clean wizard outcome) not 500.
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+
+        terminal = body.get("terminal")
+        assert terminal is not None, f"expected terminal in body, got: {body}"
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+        # No-leak invariant: the LiteLLM error message embedded a fake
+        # secret-shaped string. The response body must not echo it.
+        body_text = json.dumps(body)
+        assert "SECRET_API_KEY" not in body_text, "exc str leaked into response body"
+        assert "sk-leaks-here" not in body_text, "exc str leaked into response body"
+
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drop_invocations) == 1, f"expected exactly one drop audit event; got {drop_invocations}"
+        drop_args = drop_invocations[0]
+        assert drop_args["drop_reason"] == "solver_exhausted"
+        validation_result = drop_args["validation_result"]
+        assert isinstance(validation_result, dict)
+        assert validation_result["is_valid"] is False
+        errors = validation_result["errors"]
+        assert isinstance(errors, list) and len(errors) == 1
+        # The error message names the exception class only — no str(exc).
+        assert errors[0]["message"] == "Chain solver failed: APIError", errors
+
+    def test_step_2_5_build_manually_timeout_auto_drops(self, composer_test_client: TestClient) -> None:
+        """Site 2: a TimeoutError at build_manually solve auto-drops.
+
+        Routes recipe-match by configuring source with a classifier keyword
+        so a recipe IS offered, then sends ['build_manually'] which triggers
+        ``solve_chain`` at site 2.
+        """
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
+
+        _get_guided(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["csv"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text", "note"],
+                "sample_rows": [{"text": "Hello world", "note": "greeting"}],
+            },
+        )
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+        # Use a classifier keyword (``category``) to force a recipe match →
+        # recipe_offer. See ``_CLASSIFY_KEYWORDS`` in
+        # ``composer/guided/recipe_match.py`` for the closed list.
+        sink_resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["text", "category"], "custom_inputs": []},
+        )
+        assert sink_resp.status_code == 200, sink_resp.json()
+        # Confirm we got a recipe_offer turn (sanity check; the test fails
+        # informatively if recipe matching is reconfigured).
+        next_turn = sink_resp.json().get("next_turn")
+        if next_turn is None or next_turn.get("type") != "recipe_offer":
+            import pytest
+
+            pytest.skip(
+                f"site-2 test requires a recipe_offer to fire; recipe matching may have been reconfigured (got next_turn={next_turn})."
+            )
+
+        # Now build_manually triggers solve_chain at site 2.
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=TimeoutError("timeout calling upstream"),
+        ):
+            resp = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={"chosen": ["build_manually"]},
+            )
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        terminal = body.get("terminal")
+        assert terminal is not None
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drop_invocations) == 1
+        errors = drop_invocations[0]["validation_result"]["errors"]
+        assert errors[0]["message"] == "Chain solver failed: TimeoutError", errors
+
+    def test_step_3_repair_solve_malformed_response_auto_drops(self, composer_test_client: TestClient) -> None:
+        """Site 3: an IndexError (empty choices) on the repair re-solve auto-drops.
+
+        Repair is already attempt #2; a transient on repair means we are done
+        trying. Asserts the single-drop short-circuit — no double-emit through
+        the downstream ``mark_solver_exhausted`` at the bottom of the repair block.
+        """
+        session_id = _create_session(composer_test_client)
+
+        # Drive to PROPOSE_CHAIN with a bad-plugin initial proposal.
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_response_for_bad_plugin(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+
+        # Accept the bad chain → handler fails → repair call → empty choices
+        # array → solve_chain raises IndexError at ``response.choices[0]``.
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(choices=[]),
+        ):
+            resp = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={"chosen": ["accept"]},
+            )
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        terminal = body.get("terminal")
+        assert terminal is not None
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+        # Exactly one drop event — the wrapper's short-circuit prevents the
+        # downstream mark_solver_exhausted from firing a second one.
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drop_invocations) == 1, (
+            f"site-3 transient must emit exactly one drop event (no double-emit "
+            f"through the downstream repair-failure path); got {len(drop_invocations)}"
+        )
+        errors = drop_invocations[0]["validation_result"]["errors"]
+        assert errors[0]["message"] == "Chain solver failed: IndexError", errors
+
+    def test_chain_solver_invariant_error_still_propagates_to_500(self, composer_test_client: TestClient) -> None:
+        """Class B: InvariantError from chain_solver must propagate as 500.
+
+        ``chain_solver.py`` raises ``InvariantError`` at lines 97 / 99 / 116
+        when the LLM returns a tool name / turn_type / tool_calls shape that
+        violates the solver's emit contract. Per the I2 design, these are
+        Class B (programming bug → 500) — the wrapper must NOT absorb them.
+        """
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        # Construct a LiteLLM response with a tool_call name OTHER than
+        # ``emit_turn`` — this triggers ``raise InvariantError`` at
+        # chain_solver.py:97 from inside ``solve_chain``.
+        wrong_name_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="not_emit_turn",
+                                    arguments="{}",
+                                )
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=wrong_name_response,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        # Must NOT be absorbed into the auto-drop path. The outer
+        # ``except InvariantError`` handler returns 500 with the B1-sanitized
+        # static detail (no exc str).
+        assert resp.status_code == 500, resp.json()
+        detail = resp.json().get("detail", "")
+        assert "invariant" in detail.lower(), detail
+        # No drop event must have been emitted.
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert drop_invocations == [], f"InvariantError must not trigger guided_dropped_to_freeform; got {drop_invocations}"

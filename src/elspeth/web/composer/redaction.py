@@ -155,16 +155,39 @@ def _build_value_provider(
     """Compile a path-step list into a value_provider closure.
 
     Semantics (spec §4.2.5):
-      - Zero container steps: returns the scalar at the path.
+      - Zero container steps: returns the scalar at the path, OR ``None`` if
+        the path descends through an Optional sub-model whose value is
+        ``None`` at runtime.
       - N container steps (N >= 1): returns a flat list of
-        (key_or_keys, leaf_value) pairs. With one container step the key
-        is a single int/str; with two or more it is a tuple of keys/indices
-        in descent order.
+        (key_or_keys, leaf_value) pairs (possibly empty if any intermediate
+        Optional sub-model is ``None`` at runtime).  With one container step
+        the key is a single int/str; with two or more it is a tuple of
+        keys/indices in descent order.
 
-    The closure assumes the root dict's shape conforms to the model schema.
-    KeyError/TypeError on a non-conforming root is correct behaviour: the
-    consumer is internal code that promised to pass a serialised state for
-    the same model, and a mismatch is a bug, not external input.
+    **Optional-intermediate disposition (rev-4 sibling-API parity).**
+    ``("attr", name)`` steps descend dict-by-name; the walker emits inner
+    paths for fields whose declared type is ``OptionalModel | None`` so the
+    schema-completeness contract holds.  At runtime the value at the
+    intermediate slot may be ``None`` (Pydantic's ``model_dump`` reflects
+    ``Optional[Model] = None`` as ``None``); the inner path is unreachable
+    in that example.  This closure skips such frontier entries — mirroring
+    the sibling ``_build_substitute_provider``'s None-skip pattern (lines
+    250-271) which has been correct since Task 8.  The earlier docstring
+    rule ("KeyError/TypeError on non-conforming root is correct
+    behaviour") predates Task 8's Optional sub-model coverage and is no
+    longer load-bearing — a None intermediate is conforming-to-schema by
+    Pydantic's definition.
+
+    For the scalar (zero-container) case with an unreachable path the
+    closure returns ``None``: the property test's only-allowed skip rule
+    (``raw_value is None: continue``) treats this as semantically
+    consistent with "no sensitive data at this path for this example."
+    For the container case the closure returns an empty list of pairs:
+    the test's container branch handles this via ``dict([])`` → empty
+    key set → no per-key comparisons.
+
+    Non-Optional non-conforming roots (e.g., a missing required key) still
+    raise KeyError — that remains a bug-in-caller signal.
     """
     container_step_count = sum(1 for s in steps if s[0] in ("list", "dict"))
 
@@ -176,16 +199,36 @@ def _build_value_provider(
             kind = step[0]
             if kind == "attr":
                 name = step[1]
-                frontier = [(keys, current[name]) for keys, current in frontier]
+                # Optional-intermediate disposition: skip frontier entries
+                # whose ``current`` is None.  The walker emits inner paths
+                # through Optional sub-models; at runtime those intermediates
+                # may be None for a given example, making the inner path
+                # unreachable.  Sibling parity with _build_substitute_provider
+                # (rev-4 sibling-API alignment).
+                next_frontier: list[tuple[tuple[Any, ...], Any]] = []
+                for keys, current in frontier:
+                    if current is None:
+                        continue
+                    next_frontier.append((keys, current[name]))
+                frontier = next_frontier
             elif kind == "list":
-                frontier = [((*keys, idx), item) for keys, current in frontier for idx, item in enumerate(current)]
+                # Defensive against a None intermediate (Optional[list[...]]
+                # = None at runtime): treat as empty iteration.
+                frontier = [((*keys, idx), item) for keys, current in frontier if current is not None for idx, item in enumerate(current)]
             elif kind == "dict":
-                frontier = [((*keys, key), item) for keys, current in frontier for key, item in current.items()]
+                # Defensive against a None intermediate (Optional[dict[...]]
+                # = None at runtime): treat as empty iteration.
+                frontier = [((*keys, key), item) for keys, current in frontier if current is not None for key, item in current.items()]
             else:
                 raise AssertionError(f"unknown path step kind: {kind!r}")
 
         if container_step_count == 0:
-            # Single-element frontier with empty key path.
+            # Scalar case.  If the frontier is empty (path unreachable due
+            # to an Optional intermediate being None), return None — the
+            # property test's only-allowed skip rule treats this as "no
+            # sensitive data at this path for this example".
+            if not frontier:
+                return None
             ((_, value),) = frontier
             return value
         if container_step_count == 1:

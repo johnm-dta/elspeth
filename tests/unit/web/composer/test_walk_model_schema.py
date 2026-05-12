@@ -184,6 +184,51 @@ def test_with_values_false_yields_no_value_provider() -> None:
     assert all(n.value_provider is None for n in nodes)
 
 
+def test_value_provider_returns_none_for_path_through_optional_none() -> None:
+    """A path that descends through an ``Optional[Model] = None`` intermediate
+    returns ``None`` rather than raising (rev-4 sibling-API parity).
+
+    The walker emits inner paths for fields whose declared type is
+    ``OptionalModel | None`` (schema-completeness contract); at runtime the
+    intermediate may be ``None`` for a given example.  The ``value_provider``
+    closure mirrors the sibling ``substitute_provider``'s None-skip pattern
+    (which has been correct since Task 8) so the read API does not crash on
+    a conforming-to-schema input that happens to populate the Optional with
+    ``None``.
+
+    This is the load-bearing regression test for the rev-4 sibling-API
+    alignment closing the property test's TypeError-on-None failure mode.
+    """
+    nodes = list(walk_model_schema(_OptionalModel, with_values=True))
+    secret_node = next(n for n in nodes if n.path == "maybe.secret")
+    assert secret_node.value_provider is not None
+    # maybe = None: the inner path is unreachable; provider returns None.
+    assert secret_node.value_provider({"maybe": None}) is None
+    # maybe populated: provider returns the inner value as usual.
+    assert secret_node.value_provider({"maybe": {"ok": "v", "secret": "S"}}) == "S"
+
+
+def test_value_provider_returns_empty_list_for_container_through_optional_none() -> None:
+    """A container-descent path through an ``Optional[list[...]] = None``
+    intermediate returns an empty list rather than raising (rev-4 sibling-API
+    parity).
+    """
+
+    class _OptionalListModel(BaseModel):
+        items: list[_FlatModel] | None = None
+
+    nodes = list(walk_model_schema(_OptionalListModel, with_values=True))
+    secret_node = next(n for n in nodes if n.path == "items[*].secret")
+    assert secret_node.value_provider is not None
+    # items = None: provider returns an empty pair-list.
+    assert list(secret_node.value_provider({"items": None})) == []
+    # items populated: provider returns the per-element pairs as usual.
+    assert sorted(secret_node.value_provider({"items": [{"ok": "a", "secret": "X"}, {"ok": "b", "secret": "Y"}]})) == [
+        (0, "X"),
+        (1, "Y"),
+    ]
+
+
 def test_walk_duplicate_sensitive_markers() -> None:
     """Duplicate _SensitiveMarker in one field's Annotated tuple raises ValueError
     (spec §4.2.5 promises this; rev-2 M_adequacy quality MAJOR-1 gap A)."""

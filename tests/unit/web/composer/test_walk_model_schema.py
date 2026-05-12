@@ -423,3 +423,180 @@ def test_walk_short_circuits_under_sensitive_container() -> None:
         "reachable value in the redacted view and yielding it would cause "
         "the property test to raise TypeError on value_provider(redacted)."
     )
+
+
+def test_walk_emits_substitute_provider_only_for_attr_path() -> None:
+    """``substitute_provider`` is populated iff the node's final step is ``("attr", name)``.
+
+    Pins the ``needs_substitute = bool(steps) and steps[-1][0] == "attr"`` gate
+    at :func:`elspeth.web.composer.redaction._walk_type` (currently
+    ``redaction.py`` line 524) for the scalar/leaf branch.  Container-element
+    scalar leaves (``list[str]``, ``dict[str, str]``) end their step chain
+    with ``("list",)``/``("dict",)`` — there is no named destination to
+    substitute INTO, so ``substitute_provider`` MUST remain ``None``.
+
+    Without the gate, container-final scalar leaves would receive a
+    ``substitute_provider`` whose final-attr-step assertion at
+    :func:`_build_substitute_provider` (line 269) would raise
+    ``AssertionError`` during *node construction* — masking the design
+    intent and making the failure mode an opaque crash rather than a
+    cleanly-typed ``None``.
+
+    Test-shape coverage:
+
+      * ``tags``: ``Sensitive[list[str]]`` — Sensitive yield-and-return branch;
+        steps end with ``("attr", "tags")`` so substitute_provider MUST be set.
+      * ``plain_tags[*]``: bare ``list[str]`` — container-descent then scalar
+        leaf; steps end with ``("list",)`` so substitute_provider MUST be None.
+      * ``name``: scalar field — steps end with ``("attr", "name")`` so
+        substitute_provider MUST be set.
+
+    This combination exercises both sides of the gate in one walk.
+    """
+
+    class _MixedModel(BaseModel):
+        tags: Annotated[list[str], Sensitive(summarizer=lambda v: f"<n={len(v)}>")]
+        plain_tags: list[str]
+        name: str
+
+    nodes = list(walk_model_schema(_MixedModel, with_values=True))
+    by_path = {n.path: n for n in nodes}
+
+    # All three paths must appear.
+    assert "tags" in by_path, "Sensitive[list[str]] field did not appear at its field path."
+    assert "plain_tags[*]" in by_path, "Container-element leaf for plain list[str] did not appear."
+    assert "name" in by_path, "Scalar field did not appear."
+
+    # Attr-final nodes: substitute_provider MUST be populated.
+    assert by_path["tags"].substitute_provider is not None, (
+        "Sensitive[list[str]] node at attr-final path 'tags' has no "
+        "substitute_provider. The redactor cannot substitute the summarizer "
+        "output into the field without one."
+    )
+    assert by_path["name"].substitute_provider is not None, (
+        "Scalar attr-final node 'name' has no substitute_provider. "
+        "All attr-final leaves must carry a sibling substitute_provider "
+        "alongside value_provider."
+    )
+
+    # Container-element-final nodes: substitute_provider MUST be None.
+    assert by_path["plain_tags[*]"].substitute_provider is None, (
+        "Container-element scalar leaf 'plain_tags[*]' was given a "
+        "substitute_provider. Its step chain ends with ('list',) — there "
+        "is no named destination to substitute into. If the _walk_type "
+        "gate at line 524 is removed, this node would receive a provider "
+        "whose construction at _build_substitute_provider line 269 would "
+        "raise AssertionError on the non-attr final step."
+    )
+
+    # Broader assertion: across ALL emitted nodes, the gate must hold.
+    for node in nodes:
+        # Reconstruct whether the node's terminal step is ('attr', name) by
+        # inspecting the path: container-descent path-segments end with
+        # '[*]' or '{*}', so any node whose path ends with one of those
+        # markers is container-final and MUST have substitute_provider=None.
+        is_container_final = node.path.endswith("[*]") or node.path.endswith("}")
+        if is_container_final:
+            assert node.substitute_provider is None, (
+                f"Node at container-final path {node.path!r} unexpectedly carries a "
+                "substitute_provider; the _walk_type gate (line 524) is broken."
+            )
+        else:
+            assert node.substitute_provider is not None, f"Node at attr-final path {node.path!r} is missing its substitute_provider."
+
+
+def test_walk_handles_optional_basemodel_with_none_runtime_value() -> None:
+    """Optional[BaseModel] with inner Sensitive — sibling providers tolerate runtime None.
+
+    Pins two cooperating guards that together let a Sensitive leaf inside an
+    ``Optional[InnerModel] = None`` field be walked without crashing when the
+    runtime example happens to have ``None`` at the Optional slot:
+
+      1. :func:`_build_substitute_provider`'s None-skip at the attr prefix step
+         (``redaction.py`` lines 300-303: ``if value is None: continue``).
+         Without this skip, the closure would attempt ``current[leaf_name]``
+         on a ``None`` intermediate and raise ``TypeError``.
+
+      2. :func:`_build_value_provider`'s empty-frontier scalar return
+         (``redaction.py`` lines 230-231: ``if not frontier: return None``).
+         The walker emits the inner Sensitive path because schema-completeness
+         requires it (rev-3 M1 floor-check); at runtime the inner path is
+         unreachable when the Optional resolves to ``None``, and the closure
+         must return ``None`` rather than raise.
+
+    Both guards are documented in the docstring (redaction.py lines 167-187
+    for value_provider, 280-292 for substitute_provider) as the rev-4
+    sibling-API parity contract.
+
+    If guard (1) regresses: ``substitute_provider({'optional_nested': None}, ...)``
+    raises ``TypeError`` on the ``None[leaf_name]`` access — this test would
+    fail at the substitute_provider call line.
+
+    If guard (2) regresses: ``value_provider({'optional_nested': None})``
+    would either raise ``ValueError`` on the empty-frontier unpack
+    ``((_, value),) = frontier`` or raise ``TypeError`` earlier on the
+    ``None[name]`` step — this test would fail at the value_provider call
+    line.
+    """
+
+    class _InnerModel(BaseModel):
+        sensitive_field: Annotated[str, Sensitive(summarizer=lambda v: f"<len={len(v)}>")]
+
+    class _OuterWithOptionalInner(BaseModel):
+        optional_nested: _InnerModel | None = None
+
+    nodes = list(walk_model_schema(_OuterWithOptionalInner, with_values=True))
+    sensitive_node = next(
+        (n for n in nodes if n.path == "optional_nested.sensitive_field"),
+        None,
+    )
+    assert sensitive_node is not None, (
+        "Walker did not emit a node for the inner Sensitive field through the "
+        "Optional[InnerModel] arm. The schema-completeness contract "
+        "(rev-3 M1 floor-check) requires this path even though it is "
+        "unreachable at runtime when optional_nested is None."
+    )
+    assert sensitive_node.value_provider is not None
+    assert sensitive_node.substitute_provider is not None
+
+    # Pin guard (2): scalar case with unreachable path returns None, not raise.
+    # The docstring at redaction.py lines 181-187 ("For the scalar
+    # (zero-container) case with an unreachable path the closure returns
+    # None") is the load-bearing contract.
+    root_with_none: dict[str, Any] = {"optional_nested": None}
+    assert sensitive_node.value_provider(root_with_none) is None, (
+        "value_provider for inner-Sensitive path through Optional[Model]=None "
+        "did not return None on an unreachable scalar leaf. The empty-frontier "
+        "scalar return at _build_value_provider lines 230-231 has regressed."
+    )
+
+    # Pin guard (1): substitute_provider must be a no-op (no TypeError) when
+    # the intermediate Optional is None at runtime.  We pass a transform that
+    # would itself raise if called, proving the closure short-circuited at
+    # the None-skip rather than reaching the leaf.
+    def _must_not_be_called(_value: Any) -> Any:
+        raise AssertionError(
+            "transform was invoked despite the Optional intermediate being None; "
+            "the _build_substitute_provider None-skip guard (lines 300-303) "
+            "has regressed."
+        )
+
+    # No TypeError, no AssertionError from the transform: clean no-op.
+    sensitive_node.substitute_provider(root_with_none, _must_not_be_called)
+    # And the root remains untouched (no spurious mutation).
+    assert root_with_none == {"optional_nested": None}
+
+    # Sanity: when the Optional IS populated, both providers behave normally
+    # (this guards against the regression-direction "guard is too aggressive
+    # and skips even when the value is present").
+    root_populated: dict[str, Any] = {"optional_nested": {"sensitive_field": "abcdef"}}
+    assert sensitive_node.value_provider(root_populated) == "abcdef"
+    captured: list[Any] = []
+
+    def _capture(value: Any) -> str:
+        captured.append(value)
+        return f"<replaced:{value}>"
+
+    sensitive_node.substitute_provider(root_populated, _capture)
+    assert captured == ["abcdef"]
+    assert root_populated == {"optional_nested": {"sensitive_field": "<replaced:abcdef>"}}

@@ -2214,6 +2214,83 @@ _WIRE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
 )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16g — request_advisor_hint, 1 tool).
+#
+# ``request_advisor_hint`` is the advisor escape hatch intercepted at
+# service.py:2103 BEFORE the dispatcher; the result_payload shapes are
+# enumerated at service.py:2114-2358 (error, budget-exhausted, timeout,
+# advisor-error, success).  ``problem_summary``, ``recent_errors``,
+# ``attempted_actions``, and ``schema_excerpt`` are LLM-supplied free text
+# that may reproduce prompt-injection vectors, plugin option values, or
+# validator-quoted operator content; they ARE summarised at the argument
+# boundary so the audit-side record collapses each to a fixed-form scalar.
+#
+# ``guidance`` in the response is the frontier-model advice text returned
+# by ``_call_advisor_with_audit``; the frontier model's reply is logged
+# separately via the ComposerLLMCall recorder so it is already preserved in
+# the audit trail.  The chat_messages.tool_calls.result_payload row contains
+# only the closed-set status / budget metadata required to reason about the
+# tool's effect on the compose loop — the raw advice text is not in the
+# known-response-keys allowlist for that surface, so unknown keys fall to
+# the fail-closed REDACTED_UNKNOWN_RESPONSE_KEY sentinel.
+# ---------------------------------------------------------------------------
+
+
+def _summarize_advisor_problem_summary(value: str) -> str:
+    """Summarizer for ``request_advisor_hint.problem_summary`` (Task 16g).
+
+    Records only the character length of the LLM's problem statement; the
+    composer's own slog of advisor calls retains the full text under separate
+    retention policy.  Contract (spec §4.2.6, §9 RSK-03):
+
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+    """
+    return f"<advisor-problem-summary:{len(value)}-chars>"
+
+
+def _summarize_advisor_recent_errors(value: list[str]) -> str:
+    """Summarizer for ``request_advisor_hint.recent_errors`` (Task 16g).
+
+    Records only the number of error strings.  The full error texts are
+    preserved in the separate validator-output audit records; recording them
+    here would double-mirror them into ``chat_messages.tool_calls`` beyond
+    their intended retention surface.
+    """
+    return f"<advisor-recent-errors:{len(value)}-entries>"
+
+
+def _summarize_advisor_attempted_actions(value: list[str]) -> str:
+    """Summarizer for ``request_advisor_hint.attempted_actions`` (Task 16g)."""
+    return f"<advisor-attempted-actions:{len(value)}-entries>"
+
+
+def _summarize_advisor_schema_excerpt(value: str) -> str:
+    """Summarizer for ``request_advisor_hint.schema_excerpt`` (Task 16g)."""
+    return f"<advisor-schema-excerpt:{len(value)}-chars>"
+
+
+_REQUEST_ADVISOR_HINT_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=(
+        "argument free-text fields — collapsed via sensitive_argument_keys summarizers",
+        "advisor LLM call record — full guidance text persisted by ComposerLLMCall recorder",
+    ),
+    why_arguments_safe=(
+        "request_advisor_hint trigger is an enum string and the four free-text/list arguments "
+        "(problem_summary, recent_errors, attempted_actions, schema_excerpt) ARE listed in "
+        "sensitive_argument_keys with length-only summarizers so operator-supplied advisor "
+        "context collapses to fixed-form scalars before reaching chat_messages.tool_calls."
+    ),
+    why_responses_safe=(
+        "Response shapes (success, error, budget-exhausted, timeout, advisor-error) carry "
+        "only closed-set status / budget / latency metadata; the raw guidance text is logged "
+        "separately by the ComposerLLMCall recorder and known_response_keys enumerates the "
+        "exact allowed shape so any unanticipated key fails closed to the fixed sentinel."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2414,6 +2491,25 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
+            )
+        ),
+        # Wave 5 (Task 16g) — request_advisor_hint (intercepted at service.py:2103).
+        "request_advisor_hint": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                sensitive_argument_keys=(
+                    "problem_summary",
+                    "recent_errors",
+                    "attempted_actions",
+                    "schema_excerpt",
+                ),
+                argument_summarizers={
+                    "problem_summary": _summarize_advisor_problem_summary,
+                    "recent_errors": _summarize_advisor_recent_errors,
+                    "attempted_actions": _summarize_advisor_attempted_actions,
+                    "schema_excerpt": _summarize_advisor_schema_excerpt,
+                },
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_REQUEST_ADVISOR_HINT_REASON,
             )
         ),
     }

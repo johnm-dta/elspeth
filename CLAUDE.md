@@ -337,7 +337,7 @@ Resolution options in priority order:
 - `git push --force` - Rewrites remote history
 - `git rebase` (on pushed branches) - Rewrites shared history
 
-**No git stash.** The stash/pop cycle has caused repeated data loss in this project — pre-commit hooks that stash/unstash silently destroy unstaged work when `stash pop` encounters conflicts. If you need to preserve work, commit it to a branch.
+**Worktree isolation is the default for new work.** Before starting implementation, ask the operator whether to create a worktree under `.worktrees/`; default yes. Inside a worktree there is nothing to stash, which removes the slip pattern that previously caused data loss in this project via pre-commit-hook `stash`/`pop` cycles (the hooks silently destroy unstaged work when `stash pop` encounters conflicts). In the main checkout — an explicit operator opt-in — `git stash` is available as a normal tool: the prior absolute prohibition was lifted on 2026-05-11 once worktree-default became the upstream control. See memory: `feedback_default_to_worktree.md`, `feedback_no_git_stash.md`.
 
 ## Defensive Programming: Forbidden. Offensive Programming: Encouraged
 

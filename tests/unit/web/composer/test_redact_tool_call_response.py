@@ -479,3 +479,60 @@ def test_walker_atomicity_on_mid_walk_raise(monkeypatch: pytest.MonkeyPatch) -> 
     assert "crash" in call_log
     # Telemetry counter fired before the raise
     assert tel.summarizer_error_calls == [{"tool_name": tool}]
+
+
+# ---------------------------------------------------------------------------
+# Test 11: manifest_dispatch beacon fires for type-driven response path
+# ---------------------------------------------------------------------------
+
+
+def test_response_walker_emits_manifest_dispatch_for_type_driven_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §4.2.4: manifest_dispatch beacon fires per invocation, not per
+    direction. Task 7 fix-up: redact_tool_call_response was silently omitting
+    this emission while redact_tool_call_arguments correctly emits it.
+    Restoring symmetry so the operational-progress dashboard reflects both
+    directions."""
+
+    class _ResponseModel(BaseModel):
+        status: str
+
+        model_config = ConfigDict(extra="forbid")
+
+    class _ArgModel(BaseModel):
+        query: str
+
+        model_config = ConfigDict(extra="forbid")
+
+    tool = "t_dispatch_type_driven"
+    entry = ToolRedaction(argument_model=_ArgModel, response_model=_ResponseModel)
+    _patch_manifest(monkeypatch, tool, entry)
+
+    tel = NoopRedactionTelemetry()
+    redact_tool_call_response(tool, {"status": "ok"}, telemetry=tel)
+
+    assert tel.manifest_dispatch_calls == [{"tool_name": tool, "shape": "type_driven"}]
+
+
+# ---------------------------------------------------------------------------
+# Test 12: manifest_dispatch beacon fires for declarative response path
+# ---------------------------------------------------------------------------
+
+
+def test_response_walker_emits_manifest_dispatch_for_declarative_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §4.2.4 walker-wide emission requirement: declarative branch also
+    emits the manifest_dispatch beacon once per invocation."""
+    tool = "t_dispatch_declarative"
+    entry = _declarative_entry(
+        sensitive_response_keys=(),
+        known_response_keys=("status",),
+    )
+    _patch_manifest(monkeypatch, tool, entry)
+
+    tel = NoopRedactionTelemetry()
+    redact_tool_call_response(tool, {"status": "ok"}, telemetry=tel)
+
+    assert tel.manifest_dispatch_calls == [{"tool_name": tool, "shape": "declarative"}]

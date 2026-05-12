@@ -782,6 +782,10 @@ def redact_tool_call_response(
 
     # --- Type-driven path ---
     if entry.argument_model is not None:
+        # Spec §4.2.4: manifest_dispatch is a per-invocation, walker-wide beacon.
+        # Emit regardless of whether a response_model is declared — the dispatch
+        # happened and the shape is type_driven in both sub-cases.
+        telemetry.manifest_dispatch(tool_name=tool_name, shape="type_driven")
         if entry.response_model is None:
             # No response surface declared: nothing to redact.
             return dict(response)
@@ -795,6 +799,8 @@ def redact_tool_call_response(
     # --- Declarative path ---
     # entry.policy is not None (ToolRedaction.__post_init__ guarantees exactly
     # one of {argument_model, policy} is set).
+    # Spec §4.2.4: emit the manifest_dispatch beacon for the declarative branch too.
+    telemetry.manifest_dispatch(tool_name=tool_name, shape="declarative")
     policy = entry.policy
     assert policy is not None  # offensive: satisfies the type-checker contract
 

@@ -272,6 +272,7 @@ def test_redaction_replaces_every_sensitive_response_value(tool_name: str) -> No
         f"loudly rather than silently passing on a no-op iteration."
     )
 
+    # F6 drift guard (conftest.py) ensures future response models with Field(default_factory=dict) raise at collection time.
     @given(st.from_type(model))  # type: ignore[arg-type]
     @settings(max_examples=50, deadline=None)
     def check(payload: object) -> None:

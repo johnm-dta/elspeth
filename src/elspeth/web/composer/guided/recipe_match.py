@@ -40,8 +40,13 @@ by design.
 Recipe coverage in v1
 ~~~~~~~~~~~~~~~~~~~~~
 - ``classify-rows-llm-jsonl``:  CSV → single JSON output with classifier-keyword
-  in required_fields.
-- ``split-by-numeric-threshold``:  CSV → two JSON outputs.
+  in required_fields.  Reachable from the real guided flow.
+- ``split-by-numeric-threshold``:  CSV → two JSON outputs.  Predicate is in
+  the registry but is **currently unreachable from guided-flow Step 2**: the Step 2
+  state machine always produces a single-output sink (``_advance_step_2`` hard-codes
+  ``SinkResolved(outputs=(output,))``).  Enabling this recipe requires a multi-output
+  Step 2 UI and state-machine refactor.  Kept in the registry for forward-compat;
+  tracked at elspeth-obs-74a708e3d7.
 - ``fork-coalesce-truncate-jsonl``:  intentionally omitted in v1.  The recipe
   requires structural intent (truncate one arm, key-based coalesce) that cannot
   be inferred from (source, sink) alone.  Additionally, its topology (CSV →
@@ -271,6 +276,17 @@ def _split_threshold_predicate(source: SourceResolved, sink: SinkResolved) -> bo
     ``blob_ref``, and the slot resolver cannot run without it.  Returning
     False here means "no recipe match" — the flow continues to manual chain
     solving, which is the correct outcome for a non-blob-backed CSV source.
+
+    **Currently unreachable from guided-flow Step 2.**
+
+    ``_advance_step_2`` (state_machine.py) hard-codes
+    ``SinkResolved(outputs=(output,))`` — the state machine always produces a
+    single-output sink. ``_has_two_json_outputs`` therefore never returns True
+    from the real flow.  The predicate is kept in ``_RECIPE_PREDICATES`` for
+    forward-compatibility: when multi-output Step 2 lands (requires multi-output
+    Step 2 UI + ``step_2_sink_intents: tuple[SinkIntent, ...]`` staging field +
+    refactored ``_advance_step_2``), this recipe will auto-wire without restoring
+    deleted code.  Tracked: elspeth-obs-74a708e3d7.
     """
     if not (_is_csv(source) and _has_two_json_outputs(sink)):
         return False

@@ -2190,6 +2190,30 @@ _VALIDATE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
 )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16f — _SECRET_MUTATION_TOOLS,
+# 1 tool).
+# ---------------------------------------------------------------------------
+
+
+_WIRE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=(
+        "server-side secret resolver — secret values resolved at execution time, never echoed",
+        "pipeline plugin option dict — the secret REFERENCE marker {secret_ref: NAME} is wired, not the value",
+    ),
+    why_arguments_safe=(
+        "wire_secret_ref arguments are four scalar strings (name, target, target_id, "
+        "option_key); the handler places a {secret_ref: NAME} marker dict into the chosen "
+        "option slot, so only the NAME of the secret is recorded — never any credential."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult after the wire mutation — validation summary "
+        "for the post-mutation state plus the affected node id list; the wired marker "
+        "appears in subsequent state inspections but the secret VALUE is never returned."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2383,6 +2407,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_VALIDATE_SECRET_REF_REASON,
+            )
+        ),
+        # Wave 5 (Task 16f) — _SECRET_MUTATION_TOOLS, 1 entry.
+        "wire_secret_ref": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
             )
         ),
     }

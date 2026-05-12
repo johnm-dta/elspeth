@@ -30,7 +30,10 @@ Error paths (exit_to_freeform, 409 after terminal) live in test_error_paths.py
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -1576,3 +1579,189 @@ class TestCodex16SampleRowsElementValidation:
             },
         )
         assert resp.status_code == 200, resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Wire-validation tests — Codex #7 (step-index validation)
+# ---------------------------------------------------------------------------
+
+# Helpers for driving to Step 3 (mirrors test_step_3_e2e.py pattern).
+
+
+def _fake_llm_passthrough_for_step_index_tests() -> SimpleNamespace:
+    """Single-step passthrough proposal stub."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": "passthrough",
+                                                    "options": {"schema": {"mode": "observed"}},
+                                                    "rationale": "identity chain",
+                                                }
+                                            ],
+                                            "why": "rows already match sink schema",
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def _drive_to_step_3_propose_chain_for_step_idx(
+    client: TestClient,
+    session_id: str,
+) -> None:
+    """Drive to the Step 3 PROPOSE_CHAIN turn (no-recipe path)."""
+    _blob_id, storage_path = _seed_blob(client, session_id)
+    output_path = _outputs_path(client, "out_idx.jsonl")
+
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["csv"])
+    _respond(
+        client,
+        session_id,
+        edited_values={
+            "plugin": "csv",
+            "options": {"path": storage_path, "schema": {"mode": "observed"}},
+            "observed_columns": ["text", "note"],
+            "sample_rows": [{"text": "Hello world", "note": "greeting"}],
+        },
+    )
+    _respond(client, session_id, chosen=["json"])
+    _respond(
+        client,
+        session_id,
+        edited_values={
+            "plugin": "json",
+            "options": {
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+            "observed_columns": [],
+            "sample_rows": [],
+        },
+    )
+    # Non-classifier required field -> no recipe match -> chain solver fires.
+    _respond(client, session_id, chosen=["text"], custom_inputs=[])
+
+
+class TestCodex7StepIndexValidation:
+    """Codex #7: accepted_step_index / edit_step_index validated against the
+    current proposal at the wire boundary.
+
+    Guards fire before response_hash computation and audit emission, so an
+    invalid request returns 400 without recording a partial event.
+    """
+
+    def test_accepted_step_index_minus_one_returns_400(self, composer_test_client: TestClient) -> None:
+        """Negative accepted_step_index is out of range -> 400."""
+        session_id = _create_session(composer_test_client)
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            _drive_to_step_3_propose_chain_for_step_idx(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["accept"], "accepted_step_index": -1},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "accepted_step_index" in detail
+        assert "out of range" in detail
+
+    def test_accepted_step_index_beyond_end_returns_400(self, composer_test_client: TestClient) -> None:
+        """accepted_step_index=999 is far beyond proposal length -> 400."""
+        session_id = _create_session(composer_test_client)
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            _drive_to_step_3_propose_chain_for_step_idx(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["accept"], "accepted_step_index": 999},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "accepted_step_index" in detail
+        assert "out of range" in detail
+
+    def test_edit_step_index_out_of_range_returns_400(self, composer_test_client: TestClient) -> None:
+        """edit_step_index=999 is out of range -> 400."""
+        session_id = _create_session(composer_test_client)
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            _drive_to_step_3_propose_chain_for_step_idx(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["accept"], "edit_step_index": 999},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "edit_step_index" in detail
+        assert "out of range" in detail
+
+    def test_valid_accepted_step_index_zero_is_accepted(self, composer_test_client: TestClient) -> None:
+        """Asymmetry probe: accepted_step_index=0 is valid for a 1-step proposal (no error).
+
+        The guard must not reject valid indices. accepted_step_index is not
+        consumed by the accept handler (the dispatcher uses the full proposal),
+        so the request reaches its normal path and returns 200.
+        """
+        session_id = _create_session(composer_test_client)
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            _drive_to_step_3_propose_chain_for_step_idx(composer_test_client, session_id)
+            resp = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={"chosen": ["accept"], "accepted_step_index": 0},
+            )
+        # 200 -> the guard passed; the underlying handler ran to completion.
+        assert resp.status_code == 200, resp.json()
+
+    def test_non_null_step_index_at_step_1_returns_400(self, composer_test_client: TestClient) -> None:
+        """Step-1 SINGLE_SELECT is not PROPOSE_CHAIN -> accepted_step_index must be None.
+
+        Cross-step stale probe: a request with accepted_step_index set at Step 1
+        (where it is semantically irrelevant) is caught before it can corrupt
+        step-machine state.
+        """
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        # Currently at Step 1 SINGLE_SELECT.
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "accepted_step_index": 0},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "accepted_step_index" in detail
+        assert "null" in detail

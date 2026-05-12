@@ -1582,6 +1582,80 @@ def _validate_control_signal(raw: str | None) -> None:
         )
 
 
+def _validate_step_indices(
+    turn_type: TurnType,
+    accepted_step_index: int | None,
+    edit_step_index: int | None,
+    guided: GuidedSession,
+) -> None:
+    """Validate ``accepted_step_index`` / ``edit_step_index`` against the current step.
+
+    Raises :class:`HTTPException` (400) when an index field is non-None for a
+    turn type that carries no step-index semantics, or when the index is out of
+    range for the proposal that is actually staged.
+
+    Step-index semantics exist **only** for ``PROPOSE_CHAIN`` turns: they
+    reference positions within ``guided.step_3_proposal.steps``.  Every other
+    turn type must send both fields as ``None`` — a non-None value on any other
+    turn type indicates a stale or mis-shaped client payload.
+
+    Matrix (exhaustive):
+
+    +---------------------------------+--------------------------------------+
+    | Turn type                       | Accepted / edit index               |
+    +=================================+======================================+
+    | PROPOSE_CHAIN                   | Must be None or                     |
+    |                                 | 0 <= idx < len(proposal.steps)      |
+    +---------------------------------+--------------------------------------+
+    | All other turn types            | Must be None                         |
+    +---------------------------------+--------------------------------------+
+    """
+    if turn_type is not TurnType.PROPOSE_CHAIN:
+        if accepted_step_index is not None or edit_step_index is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"accepted_step_index and edit_step_index must be null for turn type "
+                    f"{turn_type.value!r}; got accepted_step_index={accepted_step_index!r}, "
+                    f"edit_step_index={edit_step_index!r}."
+                ),
+            )
+        return
+
+    # PROPOSE_CHAIN: validate against the staged proposal.
+    # If step_3_proposal is None but an index was supplied, the client is
+    # sending a step-index against a step that has not been reached yet —
+    # treat as a client-fault 400 (not a server 500) because the proposal
+    # absence is not necessarily an invariant violation at this point (the
+    # route handler checks later for the accept path).
+    proposal = guided.step_3_proposal
+    if proposal is None:
+        if accepted_step_index is not None or edit_step_index is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "accepted_step_index / edit_step_index sent but no chain proposal is staged for this session (step_3_proposal is None)."
+                ),
+            )
+        return
+
+    step_count = len(proposal.steps)
+    for field_name, idx in (
+        ("accepted_step_index", accepted_step_index),
+        ("edit_step_index", edit_step_index),
+    ):
+        if idx is None:
+            continue
+        if not (0 <= idx < step_count):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{field_name}={idx!r} is out of range for the current proposal "
+                    f"(proposal has {step_count} step(s); valid range is 0-{step_count - 1})."
+                ),
+            )
+
+
 async def _dispatch_guided_respond(
     *,
     state: CompositionState,
@@ -4492,13 +4566,21 @@ def create_session_router() -> APIRouter:
 
             current_turn_type = existing_record.turn_type
 
-            # --- Wire-boundary validation (Codex #12) -----------------------
-            # Validates before the TurnResponse dict is assembled so that
+            # --- Wire-boundary validation (Codex #7, #12) -------------------
+            # Both guards run before the TurnResponse dict is assembled so that
             # invalid requests are rejected before response_hash is computed or
             # guided_turn_answered is emitted.
 
             # Codex #12: validate control_signal against the ControlSignal enum.
             _validate_control_signal(body.control_signal)
+
+            # Codex #7: validate step-index fields against the current proposal.
+            _validate_step_indices(
+                current_turn_type,
+                body.accepted_step_index,
+                body.edit_step_index,
+                guided,
+            )
 
             # Build the TurnResponse dict from the request body.
             from dataclasses import replace as _replace

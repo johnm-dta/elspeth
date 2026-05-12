@@ -74,7 +74,7 @@ Landed at `d6ea2ca0` (markdown-only commit, `--no-verify` per `feedback_doc_only
 
 ### Task 10.3 — Umbrella PR open
 
-PR opened against `main` from `feat/composer-guided-mode` (see below for PR URL once landed). Phase-by-phase commit map (1–10) carried in the PR description for reviewer navigation; DB migration note (delete sessions DB), open observations, and deferred tasks (9.2 / 9.3 / ChaosLLM fixture) all surfaced.
+PR #37 (https://github.com/johnm-dta/elspeth/pull/37) opened from `feat/composer-guided-mode`. Initially targeted `main`; retargeted to `RC5.2` at operator's request immediately after PR-open. Branch is 87 commits ahead of `RC5.2` / 0 commits behind, so retarget was clean (no merge resolution required). Phase-by-phase commit map (1–10) carried in the PR description for reviewer navigation; DB migration note (delete sessions DB), open observations, and deferred tasks (9.2 / 9.3 / ChaosLLM fixture) all surfaced.
 
 No reviewers requested in the PR-open per dispatch-brief constraint — operator chooses.
 
@@ -119,7 +119,7 @@ No new conventions emerged in Phase 10. The phase was small and clean, as the Ph
 
 The umbrella PR is open. Operator owns triage from here:
 
-- **Code review** — operator nominates reviewers. Branch state: clean (no uncommitted work); 90 commits total against `main`.
+- **Code review** — operator nominates reviewers. Branch state: clean (no uncommitted work); 87 commits total against `RC5.2`.
 - **Merge timing** — operator's call. PR is non-draft.
 - **Post-merge cleanup** — sibling branch `feat/composer-progress-persistence-1a` (Phase 1B/1C/Phase-2-redaction work, per memory `project_phase1b_implementation_complete` / `project_phase1c_implementation_complete` / `project_phase2_implementation_complete`) is independent work not delivered by this PR.
 - **Phase 11 / polish phase scope** — Tasks 9.2 / 9.3 / ChaosLLM fixture + the `elspeth-obs-06854f0842` `RecipeMatch` lifecycle refactor + the carried-forward observations. No commitments on timing.

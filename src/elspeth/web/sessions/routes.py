@@ -1973,7 +1973,40 @@ async def _dispatch_guided_respond(
         if chosen == ["accept"]:
             # User accepted the recipe. Extract the slots from edited_values
             # (user may have filled in required slots).
-            edited = turn_response["edited_values"] or {}
+            # ``edited_values`` is the wire contract for recipe_offer ['accept']:
+            # the RecipeOfferTurn widget always sends ``{"recipe_name": str,
+            # "slots": {...}}``. A missing key, a null payload, or a non-string
+            # ``recipe_name`` is a protocol violation, not a Tier-3 "user typo"
+            # we paper over with empty-string defaults — silent defaults here
+            # would surface far downstream as a misleading "unknown recipe ''"
+            # error, masking the actual contract drift. The HTTP boundary is a
+            # trust boundary, so we raise 400 with a contract-citing message.
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="recipe_offer ['accept'] requires edited_values; received null.",
+                )
+            missing = {"recipe_name", "slots"} - edited.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"recipe_offer ['accept'] edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            recipe_name = edited["recipe_name"]
+            if not isinstance(recipe_name, str) or not recipe_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty string; got {recipe_name!r}"),
+                )
+            slots_raw = edited["slots"]
+            if not isinstance(slots_raw, Mapping):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"recipe_offer ['accept'] edited_values['slots'] must be an object; got {type(slots_raw).__name__}"),
+                )
             # Reconstruct slots from the last RECIPE_OFFER turn's payload
             # and overlay with user-edited values.
             recipe_turn_record = next(
@@ -1991,8 +2024,7 @@ async def _dispatch_guided_respond(
             # the rest via the recipe_offer form and sends them back in edited_values.
             from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
 
-            recipe_name = str(edited.get("recipe_name", ""))
-            slots = dict(edited.get("slots", {}))
+            slots = dict(slots_raw)
             # The "accept" reconstruction is post-acceptance: the operator has
             # supplied the slot values (merged into ``edited.slots`` by the
             # widget).  ``unsatisfied_slots`` was a property of the *offer*;

@@ -556,6 +556,102 @@ class TestStep25RecipeAccept:
         assert gs["terminal"] is not None
         assert gs["terminal"]["kind"] == "completed"
 
+    # ---- Contract-violation negative tests for chosen=["accept"] -----------
+    # Defends against silent ``.get()`` defaults that rewrite a malformed
+    # ``edited_values`` payload into bogus-but-shape-valid data (e.g.
+    # ``recipe_name=""``). The widget contract is
+    # ``{"recipe_name": str, "slots": Mapping}``; missing keys, a null
+    # payload, or a non-string ``recipe_name`` MUST surface as an HTTP 400
+    # with the contract cited in the message — not flow downstream as an
+    # "unknown recipe ''" error.
+
+    def test_recipe_offer_accept_null_edited_values_returns_400(self, composer_test_client: TestClient) -> None:
+        """``edited_values=null`` on accept is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_recipe_offer(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["accept"], "edited_values": None},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "edited_values" in detail
+        assert "null" in detail
+
+    def test_recipe_offer_accept_missing_slots_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``slots`` key on accept is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_recipe_offer(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": {"recipe_name": "classify-rows-llm-jsonl"},
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        assert "slots" in resp.json()["detail"]
+
+    def test_recipe_offer_accept_missing_recipe_name_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``recipe_name`` key on accept is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": {
+                    "slots": {
+                        "source_blob_id": blob_id,
+                        "classifier_template": "Classify: {{ row['text'] }}",
+                        "model": "anthropic/claude-3.5-sonnet",
+                        "api_key_secret": "OPENROUTER_API_KEY",
+                        "required_input_fields": ["text"],
+                        "label_field": "category",
+                        "output_path": output_path,
+                    },
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        assert "recipe_name" in resp.json()["detail"]
+
+    def test_recipe_offer_accept_empty_recipe_name_returns_400(self, composer_test_client: TestClient) -> None:
+        """Empty-string ``recipe_name`` on accept is a protocol violation (HTTP 400).
+
+        Specifically defends against the silent ``str(edited.get("recipe_name", ""))``
+        pattern that would have routed ``""`` downstream into ``_RecipeMatch`` and
+        failed far away with "unknown recipe ''".
+        """
+        session_id = _create_session(composer_test_client)
+        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": {
+                    "recipe_name": "",
+                    "slots": {
+                        "source_blob_id": blob_id,
+                        "classifier_template": "Classify: {{ row['text'] }}",
+                        "model": "anthropic/claude-3.5-sonnet",
+                        "api_key_secret": "OPENROUTER_API_KEY",
+                        "required_input_fields": ["text"],
+                        "label_field": "category",
+                        "output_path": output_path,
+                    },
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        assert "recipe_name" in resp.json()["detail"]
+
 
 # ---------------------------------------------------------------------------
 # Error paths: 400 on no GET /guided first, 404 unknown session

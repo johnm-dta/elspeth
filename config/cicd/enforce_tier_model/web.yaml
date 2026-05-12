@@ -1206,17 +1206,21 @@ allow_hits:
     be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
   safety: Missing key falls back to empty tuple; no fabricated values
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=5c6bd309ba8475d8
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=93b211a4e6a30476
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted recipe-offer payload — recipe_name and slots are optional fields the user
-    fills in when accepting a recipe; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing keys fall back to empty string/dict; failure propagates via handle_step_2_5_recipe_apply
+  reason: HTTP-boundary trust-boundary validation — recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty
+    string per the RecipeOfferTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with
+    contract-citing detail), not error suppression. Replaces the previous silent str(edited.get("recipe_name", "")) default
+    which masked protocol drift as a downstream "unknown recipe ''" error.
+  safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=7ced99282cc4454b
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=cc6841deb1d46d38
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted recipe-offer payload — recipe_name and slots are optional fields the user
-    fills in when accepting a recipe; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing keys fall back to empty string/dict; failure propagates via handle_step_2_5_recipe_apply
+  reason: HTTP-boundary trust-boundary validation — recipe_offer ['accept'] edited_values['slots'] must be a Mapping per
+    the RecipeOfferTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual
+    type in the detail), not error suppression. Replaces the previous silent dict(edited.get("slots", {})) default which
+    would have collapsed null/list/scalar payloads into an empty dict.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
 - key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
   owner: web-validation

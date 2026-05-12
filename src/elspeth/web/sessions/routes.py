@@ -4616,12 +4616,31 @@ def create_session_router() -> APIRouter:
             # Run step_advance (pure — no I/O).
             # InvariantError indicates a server-side bug (e.g. stamped an
             # invalid turn type on a history record) — propagate as HTTP 500
-            # with a "Server invariant violated" prefix so it's distinguishable
-            # from client-fault HTTP 400s in dashboards and on-call runbooks.
+            # with a static message so the response body never carries
+            # ``str(exc)``. ``InvariantError`` raised from ``from_dict`` call
+            # sites embeds ``{d!r}`` of the corrupted Tier-1 record, which
+            # includes Tier-3 ``sample_rows`` source data. Interpolating that
+            # into the HTTP detail field would have leaked user/PII content
+            # into the JSON 500 body returned to the browser (PR #37 review
+            # finding B1).
+            #
+            # Diagnostic trace is preserved via ``slog.error`` under the
+            # audit-system-failure exemption (CLAUDE.md primacy order: when
+            # ``from_dict`` itself fails, the audit-derivation path can't be
+            # trusted to record the failure consistently). The slog event
+            # carries ``exc_class`` + ``frames`` only — never the message
+            # string, since for ``{d!r}`` -bearing InvariantErrors that text
+            # is the leak vector. Sibling helpers in this file follow the
+            # same "class + frames, no message" pattern when the exception
+            # carries Tier-bearing strings (see ``_safe_frame_strings`` docs).
+            #
             # ValueError indicates a client-supplied payload violated the
             # guided-mode protocol contract (e.g. unexpected chosen value on a
             # recipe_offer turn, or null edited_values on inspect_and_confirm)
             # — propagate as HTTP 400 so the caller can correct the request.
+            # ValueError is not raised by ``from_dict`` and does not embed
+            # ``{d!r}`` of Tier-1 records, so interpolating ``str(exc)`` here
+            # is safe.
             try:
                 new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
                     guided,
@@ -4629,9 +4648,17 @@ def create_session_router() -> APIRouter:
                     current_turn_type=current_turn_type,
                 )
             except InvariantError as exc:
+                slog.error(
+                    "guided.invariant_violated",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="step_advance",
+                    frames=_safe_frame_strings(exc),
+                )
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Server invariant violated: {exc}",
+                    detail="Server invariant violated. See application audit log for diagnostic detail.",
                 ) from exc
             except ValueError as exc:
                 raise HTTPException(
@@ -4691,9 +4718,22 @@ def create_session_router() -> APIRouter:
                         model=settings.composer_model,
                     )
                 except InvariantError as exc:
+                    # Same B1-sanitization rationale as the step_advance
+                    # catch above: ``str(exc)`` from a ``from_dict`` site
+                    # embeds ``{d!r}`` of the corrupted Tier-1 record
+                    # including Tier-3 ``sample_rows``. Static detail; slog
+                    # carries exc_class + frames only.
+                    slog.error(
+                        "guided.invariant_violated",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        exc_class=type(exc).__name__,
+                        site="dispatch_guided_respond",
+                        frames=_safe_frame_strings(exc),
+                    )
                     raise HTTPException(
                         status_code=500,
-                        detail=f"Server invariant violated: {exc}",
+                        detail="Server invariant violated. See application audit log for diagnostic detail.",
                     ) from exc
                 except ValueError as exc:
                     # ValueError from inside the dispatcher indicates a

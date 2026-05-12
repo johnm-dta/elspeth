@@ -236,3 +236,125 @@ class TestRespondPreconditions:
         # Either 400 (no guided mode) or 400 (no TurnRecord) are acceptable —
         # both indicate the call was rejected before doing any state mutation.
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Security — InvariantError 500 detail must not leak corrupted-record content
+# (PR #37 review finding B1)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantError500DetailIsSanitized:
+    """Pin the B1 fix: the InvariantError → 500 catch must NOT interpolate
+    ``str(exc)`` into the HTTP response body.
+
+    Several ``from_dict`` raise sites in ``state_machine.py`` build their
+    message as ``f"...: malformed record {d!r}"`` — and ``d`` for
+    ``GuidedSession.from_dict`` / ``SourceResolved.from_dict`` contains
+    the Tier-3 ``sample_rows`` payload from the source plugin.  Echoing
+    that into the HTTP detail would surface user/PII content (e.g. CSV
+    cell values such as customer SSNs) to the browser-side JSON 500 body.
+
+    The catch sites at ``routes.py:`` (step_advance / dispatch_guided_respond)
+    now use a static detail message and route diagnostic content through
+    ``slog`` under the audit-system-failure exemption.
+    """
+
+    _SENTINEL = "AAA-BB-CCCC-SENTINEL-DO-NOT-LEAK"
+    _STATIC_DETAIL = "Server invariant violated. See application audit log for diagnostic detail."
+
+    def _seed_guided_session(self, client: TestClient, session_id: str) -> None:
+        """Seed the initial Step 1 SINGLE_SELECT TurnRecord so the respond
+        handler will load the session and reach ``step_advance``.
+        """
+        _get_guided(client, session_id)
+
+    def test_step_advance_invariant_does_not_leak_to_response(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch,
+    ) -> None:
+        """When ``step_advance`` raises ``InvariantError`` with a sentinel
+        message, the HTTP 500 body contains the static detail and **not**
+        the sentinel content nor the field name ``sample_rows``.
+        """
+        from elspeth.web.composer.guided.errors import InvariantError
+        from elspeth.web.sessions import routes as routes_module
+
+        session_id = _create_session(composer_test_client)
+        self._seed_guided_session(composer_test_client, session_id)
+
+        # Replace ``step_advance`` as the route module imported it (top-level
+        # ``from ... import step_advance``).  The patched function builds a
+        # message shaped like ``GuidedSession.from_dict``'s ``{d!r}`` repr so
+        # this test reproduces the leak vector the unpatched code would have
+        # surfaced into ``detail``.
+        leaky_record_repr = "{'sample_rows': [{'ssn': '" + self._SENTINEL + "', 'name': 'Alice'}], 'step': 'step_1_source'}"
+
+        def _raise_invariant_with_leak(*args, **kwargs):
+            raise InvariantError(f"GuidedSession.from_dict: malformed record {leaky_record_repr}")
+
+        monkeypatch.setattr(routes_module, "step_advance", _raise_invariant_with_leak)
+
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            chosen=["csv"],
+        )
+
+        assert resp.status_code == 500
+        body = resp.json()
+        detail = body["detail"]
+
+        # Static-detail pin.
+        assert detail == self._STATIC_DETAIL, f"InvariantError 500 detail must be the static B1 message; got {detail!r}"
+
+        # Negative pins: neither the sentinel nor structural leak markers
+        # may appear anywhere in the serialised body.  Using the full body
+        # text (not just ``detail``) catches accidental leaks via response
+        # headers or auxiliary fields.
+        body_text = resp.text
+        assert self._SENTINEL not in body_text, "B1 leak: sentinel content escaped into the 500 response body"
+        assert "sample_rows" not in body_text, "B1 leak: structural field name 'sample_rows' surfaced in the 500 response body"
+        assert "malformed record" not in body_text, "B1 leak: from_dict error prefix surfaced in the 500 response body"
+
+    def test_dispatcher_invariant_does_not_leak_to_response(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch,
+    ) -> None:
+        """When the dispatcher path raises ``InvariantError`` with a sentinel
+        message, the HTTP 500 body contains the static detail and **not**
+        the sentinel content.
+
+        Exercises the second catch site (after ``step_advance`` succeeds but
+        ``_dispatch_guided_respond`` raises).  Patches the dispatcher
+        directly to inject the leaky message.
+        """
+        from elspeth.web.composer.guided.errors import InvariantError
+        from elspeth.web.sessions import routes as routes_module
+
+        session_id = _create_session(composer_test_client)
+        self._seed_guided_session(composer_test_client, session_id)
+
+        leaky_record_repr = "{'sample_rows': [{'ssn': '" + self._SENTINEL + "', 'name': 'Bob'}], 'plugin': 'csv'}"
+
+        async def _raise_invariant_in_dispatcher(*args, **kwargs):
+            raise InvariantError(f"SourceResolved.from_dict: malformed record {leaky_record_repr}")
+
+        monkeypatch.setattr(routes_module, "_dispatch_guided_respond", _raise_invariant_in_dispatcher)
+
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            chosen=["csv"],
+        )
+
+        assert resp.status_code == 500
+        detail = resp.json()["detail"]
+        assert detail == self._STATIC_DETAIL, f"Dispatcher InvariantError 500 detail must be the static B1 message; got {detail!r}"
+
+        body_text = resp.text
+        assert self._SENTINEL not in body_text
+        assert "sample_rows" not in body_text
+        assert "malformed record" not in body_text

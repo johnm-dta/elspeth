@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
@@ -5650,14 +5651,35 @@ class TestSetPipeline:
         assert "sink" in result.data["error"].lower()
 
     def test_set_pipeline_missing_required_field_fails(self) -> None:
+        """Missing required field is now a Tier-3 ToolArgumentError.
+
+        Post Task 14 (set_pipeline manifest promotion):
+        :class:`SetPipelineArgumentsModel` / :class:`_SetPipelineSourceModel`
+        require ``source.on_success``; absence raises a structured
+        :class:`pydantic.ValidationError` that the handler re-raises as
+        :class:`ToolArgumentError` BEFORE any handler-side spec
+        construction.  Previously the omission fell through to the
+        ``try: SourceSpec(...)``/``except KeyError`` branch and was
+        reported via ``"Invalid pipeline spec"`` in ``result.data["error"]``;
+        that branch was removed in Task 14 because Pydantic now catches
+        the type errors upstream.
+
+        The compose-loop ARG_ERROR routing at ``service.py:2480`` builds
+        the LLM-facing error payload from the captured
+        :class:`ToolArgumentError`.  This unit-level test reaches the
+        handler directly via ``execute_tool``, so it observes the bare
+        exception class — not the wrapped LLM payload.
+        """
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
         args = _valid_pipeline_args()
         # Remove on_success from source — required field
         del args["source"]["on_success"]
-        result = execute_tool("set_pipeline", args, state, catalog)
-        assert result.success is False
-        assert "Invalid pipeline spec" in result.data["error"]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool("set_pipeline", args, state, catalog)
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_set_pipeline_replaces_entire_state(self) -> None:
         # Build a state with 3 nodes first

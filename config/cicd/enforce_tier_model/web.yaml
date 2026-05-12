@@ -1427,14 +1427,14 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=41c8cebeb04b7f7f
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=ae0ed9e7ec84c47e
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=ea554e2b6eca249b
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=96bb6e8ec888a62c
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
@@ -1486,7 +1486,7 @@ allow_hits:
     routes Annotated[scalar, Sensitive()] arms through _has_sensitive instead so
     Sensitive markers on scalar Union arms still emit a node.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=f91bbb924272a6ad
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=04ee48e61a6ea0d3
   owner: web-composer
   reason: Marker-class discrimination over Annotated metadata tuple — identical to
     _has_sensitive/_count_sensitive (spec §4.2.5). _SensitiveMarker is a sentinel
@@ -1496,7 +1496,7 @@ allow_hits:
     never from external input. Mismatched metadata entries fall through to the
     skip branch.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=03326b65d0decb7a
+- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=8ad91b0934b575b6
   owner: web-composer
   reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
     the summarizer contract (spec §4.2.6) requires str return; a non-str return
@@ -1510,7 +1510,7 @@ allow_hits:
   safety: Raises AuditIntegrityError with the path and the offending type name so
     the operator can identify the misbehaving summarizer.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_policy:fp=7571e5f07d13d2bb
+- key: web/composer/redaction.py:R5:_redact_via_policy:fp=2257f499ee8f376c
   owner: web-composer
   reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
     declarative-branch counterpart of the _redact_via_schema._apply isinstance
@@ -1521,6 +1521,47 @@ allow_hits:
     CLAUDE.md (Defensive Forbidden / Offensive Encouraged).
   safety: Raises AuditIntegrityError naming the tool, the argument key, and the
     offending return type so the operator can identify the misbehaving summarizer.
+  expires: null
+- key: web/composer/redaction.py:R5:_build_substitute_provider:provider:fp=b7e8fcdb3f276802
+  owner: web-composer
+  reason: Optional-container traversal guard introduced by Task 14 (set_pipeline
+    promotion) for nested Sensitive paths under Optional[BaseModel]. The walker
+    emits paths like ``source.inline_blob.content`` regardless of whether
+    ``inline_blob`` is None at runtime; the substitute_provider closure must
+    skip frontier entries whose intermediate-attribute lookup returns None
+    (e.g., ``source.inline_blob is None``) because there is no leaf to write
+    into.  ``isinstance(current, Mapping)`` is the standard typing primitive
+    for "is this a dict-shaped node I can descend into?" — identical pattern
+    to walk_model_schema's ``isinstance(model, type)`` BaseModel-detection
+    primitive on the structural side.  The current dict shape is constructed
+    by the redactor from ``model_dump()`` of a Pydantic-validated input, so
+    the type discriminator is part of the walker's structural contract, not
+    external-data coercion.
+  safety: Skips frontier entries whose intermediate value is None (correct
+    disposition — the absent Optional container has no leaf to write into).
+    The substitution callable is only ever invoked for Sensitive nodes whose
+    intermediate path actually exists at runtime; absent paths produce no
+    substitution effect and no error, matching the "Sensitive marker on an
+    absent Optional path" semantic that Pydantic + walker establish at the
+    type layer.
+  expires: null
+- key: web/composer/redaction.py:R1:_build_substitute_provider:provider:fp=813cd59ea05de4da
+  owner: web-composer
+  reason: Companion to the R5 entry above — the ``.get(name)`` call inside the
+    Optional-container traversal handles the absent-intermediate case (when
+    the Pydantic model field is None at runtime).  Forbidden-defensive
+    elsewhere because typed dataclass field access (``obj.field``) is the
+    project standard, but this closure operates on the ``model_dump()`` dict
+    representation (not the Pydantic dataclass), where Optional-as-None is
+    surfaced as a literal None value in the dict that the walker must
+    traverse without crashing.  The walker contract (spec §4.2.5) emits
+    TraversalNodes for the typed paths; the substitute_provider must match
+    the walker's traversal regardless of which Optional arms are populated
+    at a specific runtime invocation.
+  safety: Skips frontier entries whose ``.get(name)`` returns None (the
+    Optional-arm-absent case).  No silent default coercion — absent leaves
+    are correctly omitted from the substitution set, matching the audit
+    semantics (no leaf exists, no substitution needed).
   expires: null
 - key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=5b5a0d95b7682fd0
   owner: web-sessions

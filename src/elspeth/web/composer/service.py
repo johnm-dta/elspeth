@@ -631,7 +631,15 @@ def _build_tool_required_paths_index() -> dict[str, tuple[_CompiledRequiredPath,
 # Excluded from :func:`_build_tool_required_paths_index` so the model
 # is the single source of truth for argument validity.  Extended as
 # Tasks 13/14/15 land additional promotions.
-_PROMOTED_TOOL_NAMES: frozenset[str] = frozenset({"set_source", "create_blob", "update_blob", "set_source_from_blob"})
+_PROMOTED_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "set_source",
+        "create_blob",
+        "update_blob",
+        "set_source_from_blob",
+        "set_pipeline",
+    }
+)
 
 
 def _optional_ancestor_present(value: object, ancestor: RequiredPath) -> bool:

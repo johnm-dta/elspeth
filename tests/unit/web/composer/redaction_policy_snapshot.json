@@ -4,6 +4,11 @@
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },
+  "set_pipeline": {
+    "hash": "00da6f3969ebaf58b480cb69548328a3d96b0bedfefdbf7b92d887a6de5a0f5c",
+    "sensitive_path_count": 6,
+    "shape": "type_driven"
+  },
   "set_source": {
     "hash": "1dab572ac60198108d065fac6a27e270b320d80a07e3624fd820ac8ff3b05586",
     "sensitive_path_count": 1,

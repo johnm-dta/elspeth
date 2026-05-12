@@ -364,8 +364,20 @@ class TestComposerTextOnlyResponse:
         assert "[ELSPETH-SYSTEM]" in result.message
         assert "still empty" in result.message
         assert "set_pipeline failed before mutation" in result.message
-        assert "MissingRequiredPaths" in result.message
-        assert "source.plugin" in result.message
+        # Post Task 14 (set_pipeline manifest promotion): the error_class
+        # is now ``ToolArgumentError`` (the audit-side envelope class
+        # emitted by ``service.py:2480`` when the promoted handler
+        # re-raises :class:`pydantic.ValidationError`), not
+        # ``MissingRequiredPaths`` (the legacy code path that ran when
+        # ``_TOOL_REQUIRED_PATHS["set_pipeline"]`` was the validation
+        # source).  The LLM-facing message body intentionally does NOT
+        # echo individual missing field names like ``source.plugin``:
+        # ``service.py:2484`` reads ``exc.args[0]`` only (the structurally
+        # safe envelope text), and the structured Pydantic error path
+        # lives on ``exc.__cause__`` for audit purposes only (Task 4
+        # leak-prevention discipline, mirrored at Task 13 / Wave 2).
+        assert "ToolArgumentError" in result.message
+        assert "SetPipelineArgumentsModel" in result.message
 
     @pytest.mark.asyncio
     async def test_blob_only_success_then_empty_state_reply_returns_no_state_mutation_blocker(self, tmp_path: Path) -> None:
@@ -1084,18 +1096,30 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [bad_call, text]
             result = await service.compose("Setup", [], state)
 
+        # Post Task 14 (set_pipeline manifest promotion): top-level
+        # ``source.plugin`` omission produces a structured Pydantic
+        # ValidationError on the nested :class:`_SetPipelineSourceModel`;
+        # the handler re-raises as :class:`ToolArgumentError` (audit-side
+        # envelope class).  The LLM-facing payload at ``service.py:2484``
+        # is intentionally leak-safe — it does NOT echo individual missing
+        # field paths like ``source.plugin``; those live on
+        # ``exc.__cause__`` for audit only (Task 4 leak-prevention
+        # discipline, mirrored in Task 13 / Wave 2 and now here).
         _assert_no_mutation_empty_state_blocker(
             result,
             tool_name="set_pipeline",
-            expected_detail="source.plugin",
+            expected_detail="ToolArgumentError",
         )
         tool_msg = mock_llm.call_args_list[1][0][0][-1]
         error_content = json.loads(tool_msg["content"])
-        assert "source.plugin" in error_content["error"]
-        assert "missing required" in error_content["error"].lower()
-        # Regression guard: the conditional-on-presence walker must NOT
-        # surface false-positive errors for the optional ``source.inline_blob``
-        # branch when no inline blob was supplied. See elspeth-4e79436719 §Bug A.
+        # ARG_ERROR routing: structurally safe envelope text only —
+        # no individual field paths echoed.
+        assert "SetPipelineArgumentsModel" in error_content["error"]
+        # Regression guard: the optional ``source.inline_blob`` branch must
+        # NOT surface false-positive errors when no inline blob was
+        # supplied.  Post-promotion this invariant is structurally enforced
+        # by Pydantic (``_InlineBlobModel | None = None``; absent =>
+        # branch not walked).  See elspeth-4e79436719 §Bug A.
         assert "inline_blob" not in error_content["error"]
 
     @pytest.mark.asyncio
@@ -1242,16 +1266,29 @@ class TestComposerErrorHandling:
             mock_llm.side_effect = [partial_call, text]
             result = await service.compose("Setup", [], state)
 
+        # Post Task 14: ``set_pipeline`` is now type-driven via
+        # :class:`SetPipelineArgumentsModel` / :class:`_InlineBlobModel`
+        # (``extra="forbid"`` at every level).  When ``inline_blob`` is
+        # present but missing ``mime_type`` / ``content``, Pydantic
+        # rejects with a structured ValidationError on each missing
+        # nested field; the handler re-raises as
+        # :class:`ToolArgumentError` (audit-side envelope class).  The
+        # LLM-facing payload at ``service.py:2484`` is intentionally
+        # leak-safe — it does NOT echo individual missing field paths
+        # like ``source.inline_blob.mime_type``; those live on
+        # ``exc.__cause__`` for audit only.  Two channels for two
+        # disposition shapes (LLM-recoverable vs audit-detailed).
         _assert_no_mutation_empty_state_blocker(
             result,
             tool_name="set_pipeline",
-            expected_detail="source.inline_blob.mime_type, source.inline_blob.content",
+            expected_detail="ToolArgumentError",
         )
         tool_msg = mock_llm.call_args_list[1][0][0][-1]
         error_content = json.loads(tool_msg["content"])
-        assert "source.inline_blob.mime_type" in error_content["error"]
-        assert "source.inline_blob.content" in error_content["error"]
-        # filename WAS supplied — must not be reported.
+        # ARG_ERROR routing: structurally safe envelope text only —
+        # no individual field paths echoed.
+        assert "SetPipelineArgumentsModel" in error_content["error"]
+        # filename WAS supplied — its name must not leak via __cause__.
         assert "source.inline_blob.filename" not in error_content["error"]
 
     @pytest.mark.asyncio

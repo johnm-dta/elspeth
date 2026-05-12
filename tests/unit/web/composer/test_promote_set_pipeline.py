@@ -1,0 +1,444 @@
+"""ARG_ERROR routing + redaction for ``set_pipeline`` (Task 14 / Wave 3).
+
+Wave 3 sub-task 1/2.  Same discipline as ``test_promote_set_source.py``
+(Task 4) and the three Wave 2 promotion tests
+(``test_promote_create_blob.py``, ``test_promote_update_blob.py``,
+``test_promote_set_source_from_blob.py``).  Rev-2 BLOCKER_A applies:
+promoted handlers MUST catch :class:`pydantic.ValidationError` and
+re-raise as :class:`ToolArgumentError`.  A bare ``ValidationError``
+escaping the handler hits ``service.py:2564`` (→
+:class:`ComposerPluginCrashError` → HTTP 500) — wrong disposition for
+Tier-3 input.
+
+Tests pin:
+  * manifest shape (type-driven),
+  * exception-class + ``__cause__`` chain on invalid arguments,
+  * ``extra="forbid"`` at every nested level,
+  * conditional inline_blob inner-fields (Pydantic structural enforcement
+    replaces the deleted ``elspeth-4e79436719 §Bug A`` walker guard),
+  * valid dispatch produces a working pipeline (functional smoke),
+  * :func:`redact_tool_call_arguments` collapses every Sensitive surface
+    (``source.options``, ``source.inline_blob.content``,
+    ``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``,
+    ``outputs[*].options``) via the declared summarizers.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy.pool import StaticPool
+
+from elspeth.web.composer.protocol import ToolArgumentError
+from elspeth.web.composer.redaction import (
+    MANIFEST,
+    REDACTED_BLOB_SOURCE_PATH,
+    SetPipelineArgumentsModel,
+    redact_tool_call_arguments,
+)
+from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.tools import _execute_set_pipeline
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+def _empty_state() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _mock_catalog() -> MagicMock:
+    """Minimal catalog accepting the ``text`` source plugin used by the
+    functional smoke test below.  A bare ``MagicMock`` is sufficient — the
+    paths exercised here do not consult the catalog's schema registry."""
+    catalog = MagicMock()
+    catalog.get_schema.return_value = {"properties": {}}
+    return catalog
+
+
+def _session_engine_with_session() -> tuple[Any, str]:
+    """Minimal session DB with one row, matching the Wave 2 helpers."""
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    initialize_session_schema(engine)
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="test-user",
+                auth_provider_type="local",
+                title="Test Session",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return engine, session_id
+
+
+def _minimal_valid_args() -> dict[str, Any]:
+    """The smallest dict that passes :class:`SetPipelineArgumentsModel`.
+
+    Top-level ``required: ["source", "nodes", "edges", "outputs"]``; the
+    nested ``source`` requires ``plugin`` + ``on_success``.  Empty lists
+    are valid arrays per JSON schema and Pydantic.  ``nodes`` is empty so
+    the handler skips per-node validation paths.  ``outputs`` is empty so
+    the handler skips per-output validation paths.
+    """
+    return {
+        "source": {"plugin": "text", "on_success": "rows"},
+        "nodes": [],
+        "edges": [],
+        "outputs": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Manifest shape pin
+# ---------------------------------------------------------------------------
+
+
+def test_set_pipeline_manifest_entry_is_type_driven() -> None:
+    entry = MANIFEST["set_pipeline"]
+    assert entry.argument_model is SetPipelineArgumentsModel
+    assert entry.policy is None
+
+
+# ---------------------------------------------------------------------------
+# ARG_ERROR routing — bare ValidationError must NOT escape the handler
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteSetPipelineArgErrorRouting:
+    def test_empty_arguments_raise_tool_argument_error(self) -> None:
+        """A bare ``{}`` is missing all four top-level required fields."""
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline({}, _empty_state(), _mock_catalog())
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_missing_source_plugin_raises_tool_argument_error(self) -> None:
+        """Top-level source.plugin omission is a structured Pydantic failure."""
+        args = _minimal_valid_args()
+        del args["source"]["plugin"]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        # The structured path is preserved on __cause__ for audit, NOT
+        # echoed in args[0] (compose-loop leak-prevention discipline).
+        assert any(err["loc"] == ("source", "plugin") for err in cause.errors())
+
+    def test_extra_top_level_field_raises_tool_argument_error(self) -> None:
+        """extra='forbid' at the top level rejects misrouted argument shapes.
+
+        ``filename`` belongs on ``create_blob``/``update_blob``; supplying
+        it at the top level of a ``set_pipeline`` call signals the LLM
+        targeted the wrong tool.
+        """
+        args = _minimal_valid_args()
+        args["filename"] = "stray.csv"
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_extra_field_on_source_raises_tool_argument_error(self) -> None:
+        """extra='forbid' on nested ``_SetPipelineSourceModel``.
+
+        ``label`` does not appear on the source schema.
+        """
+        args = _minimal_valid_args()
+        args["source"]["label"] = "Source A"
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_partial_inline_blob_raises_with_nested_path(self) -> None:
+        """inline_blob present but incomplete surfaces nested required fields.
+
+        Pydantic only walks ``_InlineBlobModel`` when ``source.inline_blob``
+        is supplied; the nested required-fields are then structurally
+        enforced.  This is the elspeth-4e79436719 §Bug A invariant
+        ("conditional inline_blob inner fields"), now expressed via the
+        Pydantic optional-Model layout rather than the deleted
+        ``_TOOL_REQUIRED_PATHS`` walker's optional_ancestor mechanism.
+        """
+        args = _minimal_valid_args()
+        args["source"]["inline_blob"] = {"filename": "data.csv"}  # missing mime_type + content
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        missing_locs = {err["loc"] for err in cause.errors() if err["type"] == "missing"}
+        assert ("source", "inline_blob", "mime_type") in missing_locs
+        assert ("source", "inline_blob", "content") in missing_locs
+        # ``filename`` WAS supplied — must not appear in the missing-set.
+        assert ("source", "inline_blob", "filename") not in missing_locs
+
+    def test_inline_blob_extra_field_rejected(self) -> None:
+        """extra='forbid' on nested ``_InlineBlobModel``."""
+        args = _minimal_valid_args()
+        args["source"]["inline_blob"] = {
+            "filename": "data.csv",
+            "mime_type": "text/csv",
+            "content": "a,b,c",
+            "extra_field": "stray",
+        }
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_node_missing_required_input_raises(self) -> None:
+        """nodes[*] inner ``required: [id, node_type, input]`` is enforced."""
+        args = _minimal_valid_args()
+        args["nodes"] = [{"id": "t1", "node_type": "transform"}]  # missing input
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        assert any(err["loc"] == ("nodes", 0, "input") for err in cause.errors())
+
+    def test_edge_missing_required_to_node_raises(self) -> None:
+        """edges[*] inner ``required: [id, from_node, to_node, edge_type]``."""
+        args = _minimal_valid_args()
+        args["edges"] = [{"id": "e1", "from_node": "a", "edge_type": "on_success"}]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        assert any(err["loc"] == ("edges", 0, "to_node") for err in cause.errors())
+
+    def test_output_missing_required_plugin_raises(self) -> None:
+        """outputs[*] inner ``required: [sink_name, plugin]``."""
+        args = _minimal_valid_args()
+        args["outputs"] = [{"sink_name": "main"}]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        assert any(err["loc"] == ("outputs", 0, "plugin") for err in cause.errors())
+
+    def test_valid_arguments_dispatch_normally(self, tmp_path: Path) -> None:
+        """Functional smoke: a valid inline_blob set_pipeline materialises
+        the blob and binds it as the source.
+
+        Drives the full inline_blob materialisation path so the
+        post-promotion handler reaches the source-wiring + blob-persistence
+        seams (versus only the validation gate).  This also exercises the
+        ``_prepare_blob_create`` second-caller pathway whose dead
+        isinstance guards were removed in this same commit.
+        """
+        engine, session_id = _session_engine_with_session()
+        catalog = _mock_catalog()
+        output_path = tmp_path / "outputs" / "out.csv"
+
+        args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "rows",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "hello",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [
+                {
+                    "sink_name": "rows",
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(output_path),
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+
+        result = _execute_set_pipeline(
+            args,
+            _empty_state(),
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert result.success is True
+        assert result.updated_state.source is not None
+        assert result.updated_state.source.plugin == "text"
+        # The handler resolves blob_ref into source.options authoritatively.
+        assert "blob_ref" in result.updated_state.source.options
+        # Inline content must not leak into the affected/data summary.
+        assert "hello" not in str(result.to_dict())
+
+    def test_omitted_metadata_validates_at_model_layer(self) -> None:
+        """``metadata`` is optional at the top level; absent leaves the field None."""
+        validated = SetPipelineArgumentsModel.model_validate(_minimal_valid_args())
+        assert validated.metadata is None
+
+    def test_omitted_source_options_defaults_to_empty_dict(self) -> None:
+        """Mirrors :class:`SetSourceFromBlobArgumentsModel.options` semantics.
+
+        Pin against a future refactor changing ``options`` to
+        ``Optional[dict] = None`` (which would produce ``"null"`` in the
+        redacted view via the summarizer — divergent from the handler's
+        absent-equals-empty runtime semantics).
+        """
+        validated = SetPipelineArgumentsModel.model_validate(_minimal_valid_args())
+        assert validated.source.options == {}
+
+
+# ---------------------------------------------------------------------------
+# Redaction at the persistence boundary
+# ---------------------------------------------------------------------------
+
+
+_CANARY_PATH = "CANARY-SET-PIPELINE-SOURCE-PATH-DO-NOT-LEAK"
+_CANARY_NODE_OPT = "CANARY-NODE-OPTIONS-DO-NOT-LEAK"
+_CANARY_OUTPUT_OPT = "CANARY-OUTPUT-OPTIONS-DO-NOT-LEAK"
+_CANARY_INLINE = "CANARY-INLINE-BLOB-CONTENT-DO-NOT-LEAK"
+_CANARY_ROUTES = "CANARY-NODE-ROUTES-DO-NOT-LEAK"
+_CANARY_TRIGGER = "CANARY-NODE-TRIGGER-DO-NOT-LEAK"
+
+
+def test_redaction_substitutes_source_options_via_summarizer() -> None:
+    """``source.options`` is replaced by the canonical-JSON redacted form
+    (:func:`_summarize_set_source_options`).
+
+    Uniformity-with-set_source contract: ``set_pipeline`` shares the
+    summarizer with ``set_source`` and ``set_source_from_blob``.  When
+    ``options`` contains both ``path`` and ``blob_ref``,
+    :func:`redact_source_storage_path` substitutes the internal path with
+    :data:`REDACTED_BLOB_SOURCE_PATH` before the summarizer JSON-encodes
+    the result.
+    """
+    tel = NoopRedactionTelemetry()
+    args = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"path": _CANARY_PATH, "blob_ref": "abc123"},
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [],
+    }
+    redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
+    # Structural keys preserved at the top.
+    assert redacted["source"]["plugin"] == "csv"
+    assert redacted["source"]["on_success"] == "rows"
+    # options collapses to the summarizer's str output.
+    assert isinstance(redacted["source"]["options"], str)
+    assert REDACTED_BLOB_SOURCE_PATH in redacted["source"]["options"]
+    # The canary path MUST NOT appear anywhere in the redacted output.
+    serialized = json.dumps(redacted, sort_keys=True)
+    assert _CANARY_PATH not in serialized
+    # Telemetry recorded the manifest dispatch with the type-driven shape.
+    assert tel.manifest_dispatch_calls == [{"tool_name": "set_pipeline", "shape": "type_driven"}]
+
+
+def test_redaction_substitutes_inline_blob_content_via_summarizer() -> None:
+    """``source.inline_blob.content`` is replaced by ``<inline-blob:N-bytes>``."""
+    tel = NoopRedactionTelemetry()
+    args = {
+        "source": {
+            "plugin": "text",
+            "on_success": "rows",
+            "inline_blob": {
+                "filename": "input.txt",
+                "mime_type": "text/plain",
+                "content": _CANARY_INLINE,
+            },
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [],
+    }
+    redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
+    inline = redacted["source"]["inline_blob"]
+    # filename + mime_type pass through verbatim.
+    assert inline["filename"] == "input.txt"
+    assert inline["mime_type"] == "text/plain"
+    # content collapses to the byte-length summary scalar.
+    assert isinstance(inline["content"], str)
+    assert inline["content"].startswith("<inline-blob:")
+    assert inline["content"].endswith("-bytes>")
+    # The canary content MUST NOT appear anywhere.
+    serialized = json.dumps(redacted, sort_keys=True)
+    assert _CANARY_INLINE not in serialized
+
+
+def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
+    """``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``, and
+    ``outputs[*].options`` are all collapsed by the shared summarizer.
+
+    The adequacy guard (§4.4.2) enforces that every ``dict[str, Any]``
+    field carries a Sensitive marker; this test pins the resulting
+    persistence-boundary behaviour for each surface.
+    """
+    tel = NoopRedactionTelemetry()
+    args = {
+        "source": {"plugin": "csv", "on_success": "rows"},
+        "nodes": [
+            {
+                "id": "n1",
+                "node_type": "transform",
+                "input": "rows",
+                "options": {"template": _CANARY_NODE_OPT},
+                "routes": {"true": _CANARY_ROUTES},
+                "trigger": {"every_n_rows": _CANARY_TRIGGER},
+            }
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": _CANARY_OUTPUT_OPT},
+            }
+        ],
+    }
+    redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
+    # Each Sensitive dict collapses to a str (the summarizer's JSON output).
+    assert isinstance(redacted["nodes"][0]["options"], str)
+    assert isinstance(redacted["nodes"][0]["routes"], str)
+    assert isinstance(redacted["nodes"][0]["trigger"], str)
+    assert isinstance(redacted["outputs"][0]["options"], str)
+    # NB: the path-redacting summarizer does NOT redact arbitrary keys
+    # (only ``path`` + ``blob_ref`` pairs), so the canary values DO
+    # appear inside the summarized JSON-string by design.  The test
+    # therefore asserts the structural shape: the field type is no
+    # longer ``dict`` once redaction runs.
+    serialized = json.dumps(redacted, sort_keys=True)
+    # Every canary appears exactly ONCE in the serialised output — inside
+    # its own field's JSON string, not at any other surface.
+    assert serialized.count(_CANARY_NODE_OPT) == 1
+    assert serialized.count(_CANARY_ROUTES) == 1
+    assert serialized.count(_CANARY_TRIGGER) == 1
+    assert serialized.count(_CANARY_OUTPUT_OPT) == 1

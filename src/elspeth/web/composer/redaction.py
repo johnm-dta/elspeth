@@ -235,12 +235,30 @@ def _build_substitute_provider(
     def provider(root: dict[str, Any], transform: Callable[[Any], Any]) -> None:
         # frontier holds dict references whose ``leaf_name`` slot is the
         # final substitution target.  Container steps fan the frontier out.
+        #
+        # Optional-container handling: an ``("attr", name)`` step targets a
+        # field that may be ``None`` at runtime when the field's declared
+        # type is ``OptionalModel | None``.  The walker still emits inner-
+        # path TraversalNodes through the BaseModel arm (e.g.,
+        # ``source.inline_blob.content`` when ``inline_blob`` is None at
+        # runtime).  The redactor only invokes ``substitute_provider`` for
+        # Sensitive nodes, so the inner Sensitive leaf's provider receives
+        # an arguments dict whose intermediate Optional is None.  Skipping
+        # any frontier entry whose value at the named field is None (or
+        # absent entirely) is the correct disposition: there is no leaf to
+        # substitute INTO, and the absence is itself the audit fact.
         frontier: list[Any] = [root]
         for step in prefix_steps:
             kind = step[0]
             if kind == "attr":
                 name = step[1]
-                frontier = [current[name] for current in frontier]
+                next_frontier: list[Any] = []
+                for current in frontier:
+                    value = current.get(name) if isinstance(current, Mapping) else None
+                    if value is None:
+                        continue
+                    next_frontier.append(value)
+                frontier = next_frontier
             elif kind == "list":
                 frontier = [item for current in frontier for item in current]
             elif kind == "dict":
@@ -248,6 +266,8 @@ def _build_substitute_provider(
             else:
                 raise AssertionError(f"unknown path step kind: {kind!r}")
         for container in frontier:
+            if container is None:
+                continue
             container[leaf_name] = transform(container[leaf_name])
 
     return provider
@@ -444,12 +464,27 @@ def _walk_type(
         return
 
     # Scalar/Any/object leaf: yield a node and stop.
+    #
+    # ``substitute_provider`` is meaningful only when the leaf sits at a named
+    # field — that is, when ``steps[-1]`` is ``("attr", name)`` — because
+    # substitution writes a new value INTO a dict at the named slot.  Container-
+    # element leaves (``list[str]``, ``dict[str, str]`` with non-Sensitive scalar
+    # elements) end their step chain with ``("list",)`` or ``("dict",)`` — there
+    # is no named destination to substitute into.  The redactor at
+    # :func:`_redact_via_schema` only consumes ``substitute_provider`` for nodes
+    # carrying a ``_SensitiveMarker``; by spec §4.2.5 Sensitive markers live on
+    # named fields (the walker's "Sensitive yield-and-return" branch above
+    # always sees ``("attr", name)`` as the last step), so producing ``None``
+    # for container-element scalar leaves is correct.  The adequacy guard
+    # (§4.4.2) still gets its closed-list scalar check via
+    # ``node.field_type`` — substitute_provider being None there is harmless.
+    needs_substitute = bool(steps) and steps[-1][0] == "attr"
     yield TraversalNode(
         path=path,
         field_type=field_type,
         metadata=metadata,
         value_provider=_build_value_provider(steps) if with_values else None,
-        substitute_provider=_build_substitute_provider(steps) if with_values else None,
+        substitute_provider=_build_substitute_provider(steps) if with_values and needs_substitute else None,
     )
 
 
@@ -872,6 +907,311 @@ class CreateBlobArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# ---------------------------------------------------------------------------
+# set_pipeline / apply_pipeline_recipe argument models (Task 14 / Wave 3).
+#
+# set_pipeline is the atomic full-state mutation; apply_pipeline_recipe is the
+# recipe-scaffolded variant that delegates to set_pipeline after composing the
+# arguments from operator-supplied slot values.  Both are promoted to type-
+# driven manifest entries here; the inner ``_execute_set_pipeline`` call from
+# apply_pipeline_recipe also re-validates the recipe-built args because the
+# handler is the single validation site (rev-3 N7 / rev-4 M1).
+#
+# Field-shape decisions:
+#   * ``source.options`` IS ``Sensitive[dict]`` with the same summarizer
+#     :func:`_summarize_set_source_options` already used by ``set_source`` /
+#     ``set_source_from_blob`` (uniformity-across-source-binding-tools
+#     contract from Task 4 / Task 13).
+#   * ``source.inline_blob.content`` IS ``Sensitive[str]`` with the same
+#     summarizer :func:`_summarize_inline_blob_content` already used by
+#     ``create_blob`` / ``update_blob`` (uniformity-across-blob-payload-tools
+#     contract from Task 13).
+#   * ``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``, and
+#     ``outputs[*].options`` ARE ``Sensitive[dict]`` with
+#     :func:`_summarize_set_source_options` — the adequacy guard (§4.4.2)
+#     fails closed on inspection-resistant ``dict[str, Any]`` field types
+#     without Sensitive marking, and the LLM-supplied dicts routinely
+#     carry secret-ref markers, filesystem paths, and prompt-template
+#     payloads.  Reusing the source-side summarizer is structurally safe
+#     because :func:`redact_source_storage_path` is content-agnostic (it
+#     applies path-blob_ref redaction when present and leaves every other
+#     key verbatim); a future Task 16 may introduce a node-shape-aware
+#     summarizer that also redacts the LLM template field.
+#
+# Walker coverage at the persistence boundary:
+# ``walk_model_schema`` descends into ``list[NestedModel]`` (Task 1 / Task 8
+# walker generalisation) so the Sensitive markers on the nested option
+# dicts are discoverable from the outer :class:`SetPipelineArgumentsModel`.
+# This produces five Sensitive paths in the model walk:
+# ``source.options``, ``source.inline_blob.content``, ``nodes[*].options``,
+# ``nodes[*].routes``, ``nodes[*].trigger``, ``outputs[*].options``.
+# ---------------------------------------------------------------------------
+
+
+class _InlineBlobModel(BaseModel):
+    """Nested model for ``set_pipeline.source.inline_blob``.
+
+    Mirrors the JSON schema's ``inline_blob`` sub-object declared at
+    ``tools.py:986-1009`` (under the ``set_pipeline.source`` properties).
+    Required: ``filename``, ``mime_type``, ``content``.  ``description``
+    is optional and matches :class:`CreateBlobArgumentsModel.description`
+    (the inline-blob path at :func:`_execute_set_pipeline` invokes
+    :func:`_prepare_blob_create`, which reads ``arguments.get("description")``
+    — operator-facing labels are honoured).
+
+    ``content`` carries :class:`Sensitive` with
+    :func:`_summarize_inline_blob_content` — the SAME summarizer used by
+    :class:`CreateBlobArgumentsModel.content` and
+    :class:`UpdateBlobArgumentsModel.content`.  Uniformity discipline:
+    the LLM may funnel the same raw payload through any of the three
+    blob-creating tools (``create_blob``, ``update_blob``,
+    ``set_pipeline``+``inline_blob``); the audit-side redaction must
+    collapse all three to the same fixed-form ``<inline-blob:N-bytes>``
+    scalar.
+    """
+
+    filename: str
+    mime_type: str
+    content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
+    description: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SetPipelineSourceModel(BaseModel):
+    """Nested model for ``set_pipeline.source``.
+
+    Mirrors the JSON schema's ``source`` sub-object declared at
+    ``tools.py:949-1012``.  Required: ``plugin``, ``on_success`` (matching
+    the inner ``required: ["plugin", "on_success"]`` of the JSON schema).
+    All other fields are optional at the boundary; the runtime handler in
+    :func:`_execute_set_pipeline` resolves them (``blob_id`` →
+    :func:`_resolve_source_blob`; ``inline_blob`` →
+    :func:`_prepare_blob_create`; ``options.path`` →
+    :func:`_validate_source_path` allowlist).
+
+    ``options`` carries :class:`Sensitive` with
+    :func:`_summarize_set_source_options` — the SAME summarizer used by
+    :class:`SetSourceArgumentsModel.options` and
+    :class:`SetSourceFromBlobArgumentsModel.options` (Task 4 / Task 13
+    uniformity contract).  An LLM that includes a path-like field in
+    ``set_pipeline.source.options`` receives the same redaction discipline
+    it would receive via ``set_source`` or ``set_source_from_blob``.
+
+    ``options`` default
+    -------------------
+    Mirrors :class:`SetSourceFromBlobArgumentsModel.options`:
+    ``Field(default_factory=dict)`` — absent equals empty.  Reason
+    documented at length on
+    :class:`SetSourceFromBlobArgumentsModel.options` and applies
+    identically here.
+
+    ``on_validation_failure`` default
+    ----------------------------------
+    The handler at :func:`_execute_set_pipeline` falls back to
+    ``_DEFAULT_SOURCE_VALIDATION_FAILURE`` ("discard") when absent
+    (``tools.py:4038``).  The model preserves operator-omitted-vs-specified
+    semantics with ``str | None = None`` so the handler can apply the
+    fallback explicitly (not via fabrication; CLAUDE.md trust model).
+
+    ``blob_id`` / ``inline_blob`` exclusivity
+    ------------------------------------------
+    The JSON schema does NOT encode "exactly one of (blob_id, inline_blob)
+    or neither" (JSON Schema's ``oneOf`` is not used here); the handler at
+    :func:`_execute_set_pipeline` (``tools.py:4039``) rejects the
+    both-supplied case at runtime.  We deliberately do NOT replicate the
+    exclusivity at the Pydantic model layer — the handler's existing check
+    produces a recoverable ``_failure_result`` with a repair hint that the
+    LLM can act on, whereas a Pydantic-level rejection would surface as a
+    bare ARG_ERROR with no repair guidance.  Two channels for two failure
+    shapes (type vs semantic) — same pattern as
+    ``apply_pipeline_recipe`` empty-``recipe_name`` handling.
+    """
+
+    plugin: str
+    on_success: str
+    blob_id: str | None = None
+    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    on_validation_failure: str | None = None
+    inline_blob: _InlineBlobModel | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _PipelineNodeModel(BaseModel):
+    """Nested model for ``set_pipeline.nodes[*]``.
+
+    Mirrors the JSON schema's ``nodes`` array-item shape declared at
+    ``tools.py:1013-1060`` and its inner ``required: ["id", "node_type",
+    "input"]``.
+
+    All optional fields preserve operator-omitted-vs-specified semantics
+    (``X | None = None``) because the handler at
+    :func:`_execute_set_pipeline` distinguishes "absent" from "operator-
+    specified empty/default" for several of them (``plugin`` is None for
+    gates and coalesces; ``on_error`` defaults to ``"discard"`` for
+    transform/aggregation when None).  ``options`` defaults to ``{}`` via
+    :func:`Field(default_factory=dict)` (matches the handler's
+    ``n.get("options", {})``).
+
+    Sensitive marker on ``options`` / ``routes`` / ``trigger``
+    ----------------------------------------------------------
+    These are LLM-supplied dicts that routinely carry secret-ref markers
+    (``api_key: {"secret_ref": ...}``), filesystem paths
+    (``path: "/data/in.csv"``), prompt templates (``template: "..."``),
+    and gate route maps.  Without a Sensitive annotation the adequacy
+    guard (§4.4.2) fails closed on the inspection-resistant
+    ``dict[str, Any]`` field type; with the annotation the persistence
+    boundary collapses the field to the path-redacting canonical-JSON
+    summary that :func:`_summarize_set_source_options` already supplies
+    for source-side options.
+
+    The summarizer is reused (NOT a new node-specific one) because
+    ``redact_source_storage_path`` is content-agnostic: it walks the
+    incoming dict, replaces ``path`` values when an adjacent ``blob_ref``
+    is present, and leaves every other key verbatim.  That behaviour is
+    correct for ``nodes[*].options`` too — if a node's options happen to
+    carry a ``path`` + ``blob_ref`` pair (e.g., a future blob-aware
+    transform), the redaction applies.  Future work (Task 16) may
+    introduce a node-shape-aware summarizer that also redacts the LLM
+    prompt template field.
+    """
+
+    id: str
+    node_type: str
+    input: str
+    plugin: str | None = None
+    on_success: str | None = None
+    on_error: str | None = None
+    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    condition: str | None = None
+    routes: Annotated[dict[str, Any] | None, Sensitive(summarizer=_summarize_set_source_options)] = None
+    fork_to: list[str] | None = None
+    branches: list[str] | None = None
+    policy: str | None = None
+    merge: str | None = None
+    trigger: Annotated[dict[str, Any] | None, Sensitive(summarizer=_summarize_set_source_options)] = None
+    output_mode: str | None = None
+    expected_output_count: int | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _PipelineEdgeModel(BaseModel):
+    """Nested model for ``set_pipeline.edges[*]``.
+
+    Mirrors the JSON schema's ``edges`` array-item shape declared at
+    ``tools.py:1062-1075`` and its inner ``required: ["id", "from_node",
+    "to_node", "edge_type"]``.  ``label`` is optional; the handler reads
+    it via ``e.get("label")``.
+
+    No Sensitive markers on this model: every field is a scalar string
+    naming a node id, edge id, edge type, or human-readable label —
+    structurally not a leak surface.
+    """
+
+    id: str
+    from_node: str
+    to_node: str
+    edge_type: str
+    label: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _PipelineOutputModel(BaseModel):
+    """Nested model for ``set_pipeline.outputs[*]``.
+
+    Mirrors the JSON schema's ``outputs`` array-item shape declared at
+    ``tools.py:1077-1115`` and its inner ``required: ["sink_name",
+    "plugin"]``.
+
+    ``options`` carries :class:`Sensitive` with
+    :func:`_summarize_set_source_options` — sink options routinely carry
+    filesystem paths (``path: "outputs/results.json"``), secret-ref
+    markers, and other operator-sensitive payload values.  See the
+    docstring on :class:`_PipelineNodeModel.options` for the rationale
+    behind reusing the source-side summarizer at the node/output
+    boundary.
+
+    ``on_write_failure`` preserves operator-omitted-vs-specified semantics
+    so the handler can apply its ``"discard"`` fallback explicitly.
+    """
+
+    sink_name: str
+    plugin: str
+    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    on_write_failure: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _PipelineMetadataModel(BaseModel):
+    """Nested model for ``set_pipeline.metadata``.
+
+    Mirrors the JSON schema's ``metadata`` sub-object declared at
+    ``tools.py:1122-1129``.  Both fields are optional; the handler at
+    :func:`_execute_set_pipeline` constructs
+    :class:`elspeth.web.composer.state.PipelineMetadata` only with the
+    explicitly-supplied subset and lets the dataclass defaults fill in
+    the rest.
+    """
+
+    name: str | None = None
+    description: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SetPipelineArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``set_pipeline`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:940-1132`` for the
+    ``set_pipeline`` definition and its required-paths (``source``,
+    ``nodes``, ``edges``, ``outputs`` at the top level; nested required
+    fields per :class:`_SetPipelineSourceModel`, :class:`_PipelineNodeModel`,
+    :class:`_PipelineEdgeModel`, :class:`_PipelineOutputModel`).
+    ``metadata`` is optional at the top level.
+
+    LLM-supplied vs dispatcher-wired arguments
+    ------------------------------------------
+    The dispatcher at :func:`execute_tool` (``tools.py:5530-5540``) calls
+    :func:`_execute_set_pipeline` with additional kwargs (``session_engine``,
+    ``session_id``) that are NOT part of the LLM-supplied ``arguments``
+    dict — they are wired by the composer service from the request context.
+    This Pydantic model validates only the LLM-supplied dict; the kwargs
+    enter through the handler's function signature, not through Pydantic.
+
+    Sensitive marker surface
+    ------------------------
+    Six paths carry :class:`Sensitive` markers (see module-level note above):
+      * ``source.options`` — :func:`_summarize_set_source_options`.
+      * ``source.inline_blob.content`` — :func:`_summarize_inline_blob_content`.
+      * ``nodes[*].options`` — :func:`_summarize_set_source_options`.
+      * ``nodes[*].routes`` — :func:`_summarize_set_source_options`.
+      * ``nodes[*].trigger`` — :func:`_summarize_set_source_options`.
+      * ``outputs[*].options`` — :func:`_summarize_set_source_options`.
+
+    The adequacy guard (§4.4.2) fails closed on any ``dict[str, Any]`` or
+    ``Any``-typed field without a Sensitive marker, which mechanically
+    enforces that every LLM-supplied options/routes/trigger surface is
+    redacted at the persistence boundary.
+
+    ``extra="forbid"`` is required (rev-2 M.1) at every level — the
+    outer model AND every nested sub-model.  Misrouted argument shapes
+    (e.g., ``filename`` at the top level — that belongs on
+    ``create_blob``) are rejected before any handler-side logic runs.
+    """
+
+    source: _SetPipelineSourceModel
+    nodes: list[_PipelineNodeModel]
+    edges: list[_PipelineEdgeModel]
+    outputs: list[_PipelineOutputModel]
+    metadata: _PipelineMetadataModel | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 def _redact_via_schema(
     tool_name: str,
     validated: BaseModel,
@@ -1103,6 +1443,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         "create_blob": ToolRedaction(argument_model=CreateBlobArgumentsModel),
         "update_blob": ToolRedaction(argument_model=UpdateBlobArgumentsModel),
         "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
+        "set_pipeline": ToolRedaction(argument_model=SetPipelineArgumentsModel),
     }
 )
 

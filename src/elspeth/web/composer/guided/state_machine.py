@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 
 if TYPE_CHECKING:
     # Imported for type annotations only — avoids a circular dependency.
@@ -526,14 +526,14 @@ def step_advance(
     ``emit_*`` helper in ``composer.guided.audit``.
 
     Per spec §5.3:
-    - A ``control_signal`` of ``"exit_to_freeform"`` terminates the wizard with
+    - A ``control_signal`` of ``ControlSignal.EXIT_TO_FREEFORM`` terminates the wizard with
       ``TerminalKind.EXITED_TO_FREEFORM / TerminalReason.USER_PRESSED_EXIT``
       and produces a ``guided_dropped_to_freeform`` directive.
     - Otherwise, the current ``session.step`` selects the branch handler.
     """
     directives: list[GuidedAuditDirective] = []
 
-    if response["control_signal"] == "exit_to_freeform":
+    if response["control_signal"] is ControlSignal.EXIT_TO_FREEFORM:
         directives.append(
             GuidedAuditDirective(
                 tool_name="guided_dropped_to_freeform",

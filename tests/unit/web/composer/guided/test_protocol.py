@@ -156,9 +156,13 @@ class TestTurnResponse:
             "custom_inputs": None,
             "accepted_step_index": None,
             "edit_step_index": None,
-            "control_signal": ControlSignal.EXIT_TO_FREEFORM.value,
+            "control_signal": ControlSignal.EXIT_TO_FREEFORM,
         }
-        assert resp["control_signal"] == "exit_to_freeform"
+        assert resp["control_signal"] is ControlSignal.EXIT_TO_FREEFORM
+        # StrEnum members serialize as their .value for canonical-JSON / wire
+        # purposes — document the equivalence so the round-trip contract is
+        # captured in test code.
+        assert ControlSignal.EXIT_TO_FREEFORM.value == "exit_to_freeform"
 
 
 class TestTurn:

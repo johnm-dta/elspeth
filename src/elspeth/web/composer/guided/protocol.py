@@ -116,7 +116,7 @@ class TurnResponse(TypedDict):
     custom_inputs: Sequence[str] | None
     accepted_step_index: int | None
     edit_step_index: int | None
-    control_signal: str | None  # ControlSignal value, or None
+    control_signal: ControlSignal | None
 
 
 class Turn(TypedDict):

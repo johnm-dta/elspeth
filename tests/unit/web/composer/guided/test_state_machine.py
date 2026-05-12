@@ -8,7 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
@@ -255,7 +255,7 @@ class TestGuidedSession:
 
 def _make_response(
     *,
-    control_signal: str | None = None,
+    control_signal: ControlSignal | None = None,
     edited_values: dict[str, object] | None = None,
     chosen: list[str] | None = None,
 ) -> TurnResponse:
@@ -360,7 +360,7 @@ class TestStepAdvance:
     def test_exit_to_freeform_terminates_with_user_pressed_exit(self) -> None:
         """control_signal='exit_to_freeform' produces USER_PRESSED_EXIT terminal."""
         session = GuidedSession.initial()
-        response = _make_response(control_signal="exit_to_freeform")
+        response = _make_response(control_signal=ControlSignal.EXIT_TO_FREEFORM)
         _new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.SINGLE_SELECT)
         assert terminal is not None
         assert terminal.kind is TerminalKind.EXITED_TO_FREEFORM
@@ -752,7 +752,7 @@ class TestStateMachineInvariants:
             "custom_inputs": None,
             "accepted_step_index": None,
             "edit_step_index": None,
-            "control_signal": "exit_to_freeform",
+            "control_signal": ControlSignal.EXIT_TO_FREEFORM,
         }
         new_sess, _next, terminal, _directives = step_advance(
             sess,

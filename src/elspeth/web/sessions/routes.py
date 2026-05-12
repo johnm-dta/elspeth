@@ -1559,27 +1559,31 @@ def _initial_composition_state_with_guided_session() -> CompositionState:
     )
 
 
-def _validate_control_signal(raw: str | None) -> None:
+def _validate_control_signal(raw: str | None) -> ControlSignal | None:
     """Validate ``control_signal`` against the closed :class:`ControlSignal` enum.
 
+    Returns the parsed :class:`ControlSignal` (or ``None`` if *raw* is ``None``).
     Raises :class:`HTTPException` (400) when *raw* is non-None and not a
     recognised enum value.  Null passes through — omitting the signal is
     the normal (non-control) path.
 
-    The ``GuidedRespondRequest`` schema keeps this field as ``str | None``
-    intentionally (see schemas.py docstring) so that stale clients carrying
-    an unknown signal value receive a clear protocol error from this guard
-    rather than a Pydantic deserialization crash.  This function is the
-    matching enforcement point on the route handler side.
+    This is the Tier-3 -> Tier-2 coercion site: ``GuidedRespondRequest`` keeps
+    ``control_signal`` as ``str | None`` so stale clients carrying an unknown
+    signal value receive a clear protocol error from this guard rather than a
+    Pydantic deserialization crash. After this function returns, the parsed
+    :class:`ControlSignal` is the typed value flowing into ``TurnResponse``,
+    where the field is declared ``ControlSignal | None``.
     """
     if raw is None:
-        return
-    valid = [e.value for e in ControlSignal]
-    if raw not in valid:
+        return None
+    try:
+        return ControlSignal(raw)
+    except ValueError as exc:
+        valid = [e.value for e in ControlSignal]
         raise HTTPException(
             status_code=400,
             detail=(f"Unknown control_signal: {raw!r}. Valid values: {valid}"),
-        )
+        ) from exc
 
 
 def _validate_step_indices(
@@ -4714,7 +4718,9 @@ def create_session_router() -> APIRouter:
                 # guided_turn_answered is emitted.
 
                 # Codex #12: validate control_signal against the ControlSignal enum.
-                _validate_control_signal(body.control_signal)
+                # This is the Tier-3 -> Tier-2 coercion: the parsed enum (or
+                # None) flows into the typed ``TurnResponse`` below.
+                control_signal = _validate_control_signal(body.control_signal)
 
                 # Codex #7: validate step-index fields against the current proposal.
                 _validate_step_indices(
@@ -4733,7 +4739,7 @@ def create_session_router() -> APIRouter:
                     "custom_inputs": body.custom_inputs,
                     "accepted_step_index": body.accepted_step_index,
                     "edit_step_index": body.edit_step_index,
-                    "control_signal": body.control_signal,
+                    "control_signal": control_signal,
                 }
 
                 # Record the response_hash on the existing TurnRecord.

@@ -59,12 +59,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import SinkResolved, SourceResolved
-from elspeth.web.composer.recipes import SlotSpec, get_recipe
+from elspeth.web.composer.recipes import SlotSpec, SlotType, get_recipe
 
 # ---------------------------------------------------------------------------
 # Type aliases for the predicate registry
@@ -124,6 +124,52 @@ class RecipeMatch:
                     "only required slots belong in unsatisfied_slots "
                     "(optional slots are auto-filled by validate_slots)"
                 )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict.
+
+        ``slots`` values are arbitrary (Tier-2, already validated). ``unsatisfied_slots``
+        values are ``SlotSpec`` instances — serialised as plain dicts with scalar fields.
+        """
+        unsatisfied: dict[str, dict[str, Any]] = {
+            name: {
+                "slot_type": spec.slot_type,
+                "required": spec.required,
+                "description": spec.description,
+                "default": spec.default,
+            }
+            for name, spec in self.unsatisfied_slots.items()
+        }
+        return {
+            "recipe_name": self.recipe_name,
+            "slots": dict(deep_thaw(self.slots)),
+            "unsatisfied_slots": unsatisfied,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> RecipeMatch:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data.
+
+        Used when restoring ``step_2_5_recipe_offer`` from ``GuidedSession.from_dict``.
+        The dict must have been produced by ``to_dict()``.
+        """
+        try:
+            unsatisfied: dict[str, SlotSpec] = {
+                name: SlotSpec(
+                    slot_type=cast(SlotType, spec_d["slot_type"]),
+                    required=spec_d["required"],
+                    description=spec_d["description"],
+                    default=spec_d["default"],
+                )
+                for name, spec_d in d["unsatisfied_slots"].items()
+            }
+            return cls(
+                recipe_name=d["recipe_name"],
+                slots=d["slots"],
+                unsatisfied_slots=unsatisfied,
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise InvariantError(f"RecipeMatch.from_dict: malformed record {d!r}") from exc
 
 
 # ---------------------------------------------------------------------------

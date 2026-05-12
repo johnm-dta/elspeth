@@ -20,11 +20,19 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnResponse, TurnType
+
+if TYPE_CHECKING:
+    # Imported for type annotations only — avoids a circular dependency.
+    # recipe_match.py imports state_machine.py (SourceResolved, SinkResolved);
+    # a runtime import of RecipeMatch here would create a cycle.
+    # RecipeMatch is a frozen dataclass; no freeze_fields needed on GuidedSession
+    # for this field — frozen dataclass instances are already immutable.
+    from elspeth.web.composer.guided.recipe_match import RecipeMatch
 
 
 class TerminalKind(StrEnum):
@@ -353,6 +361,16 @@ class GuidedSession:
     the MULTI_SELECT_WITH_CUSTOM turn.  ``_advance_step_2`` reads it to
     reconstruct the full SinkOutputResolved and clears it in the same atomic
     replace(); it is always None after Step 2 completes.
+
+    ``step_2_5_recipe_offer`` is a mid-Step-2.5 staging field.  The Step 2.5
+    dispatcher writes the emitted ``RecipeMatch`` into it immediately before
+    emitting the RECIPE_OFFER turn.  The recipe-accept branch in the dispatcher
+    reads it to verify that the client-supplied ``recipe_name`` matches the
+    recipe that was actually offered — binding the acceptance to the server-emitted
+    offer and preventing a crafted client from accepting a different recipe.  The
+    field is cleared (set to None) in the same atomic replace() that consumes it
+    (the terminal=COMPLETED path).  It is always None when the session is not at
+    STEP_2_5_RECIPE_MATCH.
     """
 
     step: GuidedStep
@@ -364,6 +382,7 @@ class GuidedSession:
     transition_consumed: bool = False
     step_1_source_intent: SourceIntent | None = None
     step_2_sink_intent: SinkIntent | None = None
+    step_2_5_recipe_offer: RecipeMatch | None = None
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -392,6 +411,7 @@ class GuidedSession:
             "transition_consumed": self.transition_consumed,
             "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
+            "step_2_5_recipe_offer": self.step_2_5_recipe_offer.to_dict() if self.step_2_5_recipe_offer is not None else None,
         }
 
     @classmethod
@@ -408,6 +428,12 @@ class GuidedSession:
             terminal_raw = d["terminal"]
             source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
+            recipe_offer_raw = d["step_2_5_recipe_offer"]
+            # Deferred import to avoid a circular dependency at module level.
+            # recipe_match.py imports from state_machine.py; importing RecipeMatch
+            # at module level here would create a cycle.
+            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
+
             return cls(
                 step=GuidedStep(d["step"]),
                 history=tuple(TurnRecord.from_dict(r) for r in d["history"]),
@@ -418,6 +444,7 @@ class GuidedSession:
                 transition_consumed=d["transition_consumed"],
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
+                step_2_5_recipe_offer=_RecipeMatch.from_dict(recipe_offer_raw) if recipe_offer_raw is not None else None,
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc

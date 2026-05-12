@@ -2039,7 +2039,10 @@ async def _dispatch_guided_respond(
                 composition_version=state.version,
                 actor=user_id,
             )
-            guided = _replace(guided, history=(*guided.history, new_record))
+            # Stage the offered RecipeMatch so the accept branch can verify
+            # the client-supplied recipe_name matches what was actually offered.
+            # Cleared (set to None) atomically when the acceptance is consumed.
+            guided = _replace(guided, history=(*guided.history, new_record), step_2_5_recipe_offer=recipe_match)
             return state, guided, next_turn
 
         # No recipe match — solve the chain via the LLM and emit propose_chain.
@@ -2116,16 +2119,37 @@ async def _dispatch_guided_respond(
                     status_code=400,
                     detail=(f"recipe_offer ['accept'] edited_values['slots'] must be an object; got {type(slots_raw).__name__}"),
                 )
-            # Reconstruct slots from the last RECIPE_OFFER turn's payload
-            # and overlay with user-edited values.
-            recipe_turn_record = next(
-                (r for r in reversed(guided.history) if r.step == GuidedStep.STEP_2_5_RECIPE_MATCH),
-                None,
-            )
-            if recipe_turn_record is None:
+
+            # Binding check: the client-supplied recipe_name must match the
+            # recipe that was actually offered for this step.  ``step_2_5_recipe_offer``
+            # is written by the server immediately before emitting the RECIPE_OFFER
+            # turn (Option A staging pattern, mirrors step_2_sink_intent).  A missing
+            # offer means the session was never in the recipe-offer state — the client
+            # is sending an accept without a prior offer (protocol violation or crafted
+            # request).  A mismatched recipe_name means the client is trying to accept
+            # a different recipe than the one offered — also rejected with 400.
+            #
+            # Slots are operator-editable by design (the operator fills unsatisfied
+            # required slots and may rubber-stamp / override pre-fills); the binding
+            # check does NOT compare slot values, only recipe_name.
+            offered = guided.step_2_5_recipe_offer
+            if offered is None:
                 raise HTTPException(
-                    status_code=500,
-                    detail="Dispatcher invariant: recipe_offer TurnRecord missing at step 2.5.",
+                    status_code=400,
+                    detail=(
+                        "recipe_offer ['accept'] received but no recipe was staged for this session "
+                        "(step_2_5_recipe_offer is None — the session has not reached the recipe-offer state "
+                        "or the offer was already consumed)."
+                    ),
+                )
+            if recipe_name != offered.recipe_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"recipe_offer ['accept'] recipe_name mismatch: "
+                        f"client sent {recipe_name!r} but the server offered {offered.recipe_name!r}. "
+                        "Accept must reference the recipe that was offered."
+                    ),
                 )
 
             # The slots must be passed as edited_values from the client.
@@ -2140,6 +2164,9 @@ async def _dispatch_guided_respond(
             # at apply time ``handle_step_2_5_recipe_apply`` consumes only
             # ``recipe_name`` and ``slots``, so an empty mapping is correct.
             match = _RecipeMatch(recipe_name=recipe_name, slots=slots, unsatisfied_slots={})
+            # Clear the staged offer atomically before passing to the handler
+            # so it cannot be re-read by a later step.
+            guided = _replace(guided, step_2_5_recipe_offer=None)
 
             handler_result = handle_step_2_5_recipe_apply(
                 state=state,
@@ -4151,7 +4178,23 @@ def create_session_router() -> APIRouter:
                 )
                 from dataclasses import replace as _replace
 
+                # If this is the STEP_2_5_RECIPE_MATCH step, populate
+                # step_2_5_recipe_offer so the POST /respond accept branch
+                # can verify the client-supplied recipe_name against the offer.
+                # This covers the GET-before-POST flow (user reloads the page
+                # while the session is at the recipe-offer step).
+                if (
+                    current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                    and guided.step_1_result is not None
+                    and guided.step_2_result is not None
+                ):
+                    staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+                else:
+                    staged_offer = None
+
                 new_guided = _replace(guided, history=(*guided.history, new_record))
+                if staged_offer is not None:
+                    new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
                 new_state = _replace(state, guided_session=new_guided)
 
                 # Persist state with updated guided_session in composer_meta.
@@ -4197,6 +4240,44 @@ def create_session_router() -> APIRouter:
                     )
 
                 guided = new_guided
+
+            # Idempotency-path repair: if the session is at STEP_2_5_RECIPE_MATCH
+            # and the staged offer is absent (persisted before the step_2_5_recipe_offer
+            # field was introduced), re-populate it and persist the repaired state so
+            # the POST /respond accept branch can verify the recipe_name.  Without this
+            # repair, sessions that reached STEP_2_5 before this field was added would
+            # always fail the accept binding check with 400.  The offer is
+            # deterministically reconstructable from (step_1_result, step_2_result).
+            if (
+                existing_record_for_step is not None
+                and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                and guided.step_2_5_recipe_offer is None
+                and guided.step_1_result is not None
+                and guided.step_2_result is not None
+            ):
+                recovered_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+                if recovered_offer is not None:
+                    from dataclasses import replace as _replace_repair
+
+                    repaired_guided = _replace_repair(guided, step_2_5_recipe_offer=recovered_offer)
+                    repaired_state = _replace_repair(state, guided_session=repaired_guided)
+                    existing_meta_repair: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        existing_meta_repair = dict(deep_thaw(state_record.composer_meta))
+                    repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
+                    repaired_state_d = repaired_state.to_dict()
+                    repair_data = CompositionStateData(
+                        source=repaired_state_d["source"],
+                        nodes=repaired_state_d["nodes"],
+                        edges=repaired_state_d["edges"],
+                        outputs=repaired_state_d["outputs"],
+                        metadata_=repaired_state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=repair_meta,
+                    )
+                    state_record_out = await service.save_composition_state(session_id, repair_data)
+                    guided = repaired_guided
 
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.

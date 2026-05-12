@@ -654,6 +654,77 @@ class TestStep25RecipeAccept:
         assert resp.status_code == 400, resp.json()
         assert "recipe_name" in resp.json()["detail"]
 
+    # ---- Binding check: accept must reference the offered recipe -----------
+
+    def test_recipe_accept_wrong_recipe_name_returns_400(self, composer_test_client: TestClient) -> None:
+        """Accepting with a recipe_name that differs from the offered one is rejected.
+
+        The server offers ``classify-rows-llm-jsonl``; the client sends
+        ``split-by-numeric-threshold``. The binding check must surface this as
+        HTTP 400 naming both the offered and the client-supplied recipe_name.
+
+        Asymmetry probe: removing the binding check from the accept branch
+        causes this test to fail — the wrong recipe is accepted and produces
+        a 400 from ``_execute_apply_pipeline_recipe`` with a recipe-not-found
+        or slot-mismatch error, not the binding-violation message.
+        """
+        session_id = _create_session(composer_test_client)
+        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": {
+                    "recipe_name": "split-by-numeric-threshold",  # wrong — was offered classify
+                    "slots": {
+                        "source_blob_id": blob_id,
+                        "classifier_template": "Classify: {{ row['text'] }}",
+                        "model": "anthropic/claude-3.5-sonnet",
+                        "api_key_secret": "OPENROUTER_API_KEY",
+                        "label_field": "category",
+                        "output_path": output_path,
+                    },
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Detail must name both the offered recipe and the client-supplied recipe.
+        assert "classify-rows-llm-jsonl" in detail, f"offered recipe absent from: {detail}"
+        assert "split-by-numeric-threshold" in detail, f"client recipe absent from: {detail}"
+        assert "mismatch" in detail.lower(), f"binding message absent from: {detail}"
+
+    def test_recipe_accept_without_prior_offer_returns_400(self, composer_test_client: TestClient) -> None:
+        """Accepting a recipe when no recipe was ever offered is rejected with 400.
+
+        Drives only to Step 1 (source), then sends a crafted accept directly
+        targeting STEP_2_5.  With no step_2_5_recipe_offer staged, the server
+        must return 400 with a message explaining the session has not reached
+        the recipe-offer state.
+        """
+        session_id = _create_session(composer_test_client)
+        # Drive to Step 1 SCHEMA_FORM only — no sink, no recipe offer.
+        _get_guided(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["csv"])
+
+        # Crafted accept sent while session is still at STEP_1_SOURCE / SCHEMA_FORM.
+        # The dispatcher has no step_2_5_recipe_offer; the bind check fires.
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": {
+                    "recipe_name": "classify-rows-llm-jsonl",
+                    "slots": {"source_blob_id": "fake-blob", "classifier_template": "x"},
+                },
+            },
+        )
+        # The response may be 400 from the binding check or from a step-mismatch
+        # guard earlier in the dispatcher.  Either way it must not be 200.
+        assert resp.status_code in (400, 422), resp.json()
+
 
 # ---------------------------------------------------------------------------
 # Step 1 SCHEMA_FORM — contract-violation negative tests (Pair 4)

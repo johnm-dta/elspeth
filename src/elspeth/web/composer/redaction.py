@@ -1163,6 +1163,62 @@ class _PipelineMetadataModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ApplyPipelineRecipeArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``apply_pipeline_recipe`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:1462-1485`` and its
+    ``required: ["recipe_name", "slots"]``.  ``apply_pipeline_recipe``
+    delegates to :func:`_execute_set_pipeline` after composing the
+    full-pipeline arguments from operator-supplied slot values; that
+    inner call goes through :class:`SetPipelineArgumentsModel` so the
+    recipe-built args receive the same validation discipline as a
+    hand-authored ``set_pipeline`` call.
+
+    Sensitive marker on ``slots``
+    -----------------------------
+    Recipe slots routinely carry:
+      * filesystem paths (e.g., ``output_path: "outputs/results.jsonl"``),
+      * secret-ref names (e.g., ``api_key_secret: "OPENROUTER_API_KEY"``),
+      * blob references (UUID strings, e.g., ``source_blob_id``),
+      * LLM prompt templates (e.g., ``classifier_template``).
+
+    Marking ``slots`` :class:`Sensitive` with
+    :func:`_summarize_set_source_options` collapses the dict to the
+    canonical-JSON form with path-blob_ref redaction applied.  The
+    summarizer is reused (NOT a recipe-specific one) for the same
+    structural reasons as :class:`_PipelineNodeModel.options` —
+    :func:`redact_source_storage_path` is content-agnostic and applies
+    when the relevant keys are present, leaving everything else verbatim.
+    A future Task 16 may introduce a recipe-shape-aware summarizer that
+    also redacts the template-string slot.
+
+    Empty-string semantic check on ``recipe_name``
+    ----------------------------------------------
+    The Pydantic model accepts ``recipe_name: str`` including the empty
+    string.  The handler at :func:`_execute_apply_pipeline_recipe`
+    re-checks for emptiness AFTER Pydantic validation and produces a
+    repair-hinting ``_failure_result`` ("Call list_recipes to discover
+    available recipes") rather than a bare ``ToolArgumentError``.  We
+    deliberately do NOT use ``Field(min_length=1)`` here: the
+    repair-hint message is recoverable LLM feedback, whereas a
+    ``ValidationError`` for ``min_length`` would surface as an ARG_ERROR
+    with the generic envelope text and no recipe-discovery guidance.
+    Two channels for two failure shapes (type vs semantic) — same
+    pattern as :class:`SetSourceArgumentsModel` plugin-not-in-catalog
+    handling.
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    neighbouring tools (e.g., ``source``, ``nodes`` on ``set_pipeline``)
+    are intentionally absent so ``extra="forbid"`` rejects misrouted
+    argument shapes early.
+    """
+
+    recipe_name: str
+    slots: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SetPipelineArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``set_pipeline`` tool.
 
@@ -1444,6 +1500,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         "update_blob": ToolRedaction(argument_model=UpdateBlobArgumentsModel),
         "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
         "set_pipeline": ToolRedaction(argument_model=SetPipelineArgumentsModel),
+        "apply_pipeline_recipe": ToolRedaction(argument_model=ApplyPipelineRecipeArgumentsModel),
     }
 )
 

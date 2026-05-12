@@ -638,6 +638,7 @@ _PROMOTED_TOOL_NAMES: frozenset[str] = frozenset(
         "update_blob",
         "set_source_from_blob",
         "set_pipeline",
+        "apply_pipeline_recipe",
     }
 )
 

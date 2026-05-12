@@ -1,4 +1,9 @@
 {
+  "apply_pipeline_recipe": {
+    "hash": "3c3f8b1011102f0b057e272346bd2a7eba7bd4036f9f2727967cdbb5094e6068",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
   "create_blob": {
     "hash": "6f198f67975af9752789ce05f645fcacbe7c8e567764a1b209915f5b19dca040",
     "sensitive_path_count": 1,

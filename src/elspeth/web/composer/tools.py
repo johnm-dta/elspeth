@@ -42,6 +42,7 @@ from elspeth.web.composer.recipes import (
     list_recipes,
 )
 from elspeth.web.composer.redaction import (
+    ApplyPipelineRecipeArgumentsModel,
     CreateBlobArgumentsModel,
     SetPipelineArgumentsModel,
     SetSourceArgumentsModel,
@@ -3788,22 +3789,51 @@ def _execute_apply_pipeline_recipe(
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`ApplyPipelineRecipeArgumentsModel` (the single source of
+    truth for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["apply_pipeline_recipe"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).  On
+    :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
+    at ``service.py:2480`` receives the right exception class (Task 4
+    pattern; mirrored by Task 13 / Task 14).
+
+    Semantic vs argument-shape failures
+    ------------------------------------
+    Pydantic enforces argument shape (type, required-fields, extra=forbid).
+    The empty-``recipe_name`` semantic check and the
+    :class:`RecipeValidationError` slot-shape check remain in this handler
+    and produce recoverable ``_failure_result`` responses with repair
+    hints (``Call list_recipes to discover available recipes``).  Two
+    channels for two failure shapes (type vs semantic) — same pattern as
+    :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
+
     ``set_pipeline`` is full state replacement, so a ``replaced_pipeline_note`` is
     emitted to make the destructive replacement visible to the LLM/operator. The
     note is suppressed when the prior pipeline is empty — a no-op replacement
     needs no flag, and emitting one would be noise on a fresh-session apply.
     """
-    recipe_name = arguments.get("recipe_name")
-    raw_slots = arguments.get("slots")
-    if not isinstance(recipe_name, str) or not recipe_name:
+    try:
+        validated = ApplyPipelineRecipeArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="apply_pipeline_recipe arguments",
+            expected="object conforming to ApplyPipelineRecipeArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    recipe_name = validated.recipe_name
+    raw_slots = validated.slots
+    if not recipe_name:
+        # Empty-string recipe_name passes Pydantic's ``str`` validation
+        # but the handler treats it as a recoverable semantic failure
+        # with a repair-hint pointing the LLM at list_recipes (rather
+        # than the generic ARG_ERROR envelope a Pydantic min_length=1
+        # would produce).
         return _failure_result(
             state,
             "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
-        )
-    if not isinstance(raw_slots, Mapping):
-        return _failure_result(
-            state,
-            "apply_pipeline_recipe requires 'slots' as a JSON object whose keys match the recipe's declared slot names.",
         )
 
     try:

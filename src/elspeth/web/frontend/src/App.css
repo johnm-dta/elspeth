@@ -4676,6 +4676,124 @@ summary:focus-visible {
   font-style: italic;
 }
 
+/* ---------------------------------------------------------------------------
+   CompletionSummary (Task 7.10)
+   Classes prefixed guided-completion-*.
+
+   Terminal widget rendered when the guided wizard reaches kind="completed"
+   and pipeline_yaml is non-null.  Displays the finalized pipeline YAML in a
+   syntax-highlighted block (prism-react-renderer, vsDark / vsLight) with two
+   action buttons that both call exitToFreeform():
+     "Save and exit"                   -- committed-state UX framing.
+     "Drop to freeform to keep editing" -- further-edit UX framing.
+
+   Visual hierarchy:
+     heading     -- "Pipeline ready", h3, muted weight to avoid competing
+                    with surrounding chat layout.
+     yaml block  -- monospace pre inside a scrollable container with an
+                    inset surface to visually contain the code.
+     action row  -- primary button (Save and exit) + secondary button
+                    (Drop to freeform to keep editing).
+
+   Reduced-motion: guided-completion-save-btn and guided-completion-edit-btn
+   both carry transitions; both are silenced in the @media block below.
+   --------------------------------------------------------------------------- */
+
+/* Outer wrapper */
+.guided-completion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  background-color: var(--color-success-bg);
+  border: 1px solid var(--color-success-border);
+  border-radius: var(--radius-lg);
+}
+
+/* Section heading -- "Pipeline ready" */
+.guided-completion-heading {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-success);
+}
+
+/* Scrollable YAML preview container */
+.guided-completion-yaml-container {
+  overflow: auto;
+  max-height: 400px;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+/* <pre> block produced by prism-react-renderer.
+   Reset browser default pre margins; monospace font family to match YamlView. */
+.guided-completion-pre {
+  margin: 0;
+  padding: var(--space-md);
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* Action row: Save and exit + Drop to freeform to keep editing */
+.guided-completion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* Primary action: Save and exit */
+.guided-completion-save-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-completion-save-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-completion-save-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Secondary action: Drop to freeform to keep editing */
+.guided-completion-edit-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-completion-edit-btn:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+
+.guided-completion-edit-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -4696,7 +4814,9 @@ summary:focus-visible {
   .guided-recipe-apply-btn,
   .guided-recipe-build-btn,
   .guided-exit-button,
-  .guided-history-toggle {
+  .guided-history-toggle,
+  .guided-completion-save-btn,
+  .guided-completion-edit-btn {
     transition: none;
   }
 }

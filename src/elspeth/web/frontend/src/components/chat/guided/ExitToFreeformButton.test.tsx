@@ -129,22 +129,6 @@ describe("ExitToFreeformButton -- two simultaneous instances fire independently"
     await user.click(btns[1]);
     expect(mockExitToFreeform).toHaveBeenCalledTimes(2);
   });
-
-  it("two simultaneous instances do not share state -- each click maps to one call", () => {
-    const mockExitToFreeform = vi.fn().mockResolvedValue(undefined);
-    useSessionStore.setState({ exitToFreeform: mockExitToFreeform });
-
-    render(
-      <div>
-        <ExitToFreeformButton />
-        <ExitToFreeformButton />
-      </div>,
-    );
-
-    const btns = screen.getAllByRole("button", { name: /exit to freeform/i });
-    // Both are distinct DOM nodes.
-    expect(btns[0]).not.toBe(btns[1]);
-  });
 });
 
 // ── Contract 5: no auto-focus on mount ──────────────────────────────────────

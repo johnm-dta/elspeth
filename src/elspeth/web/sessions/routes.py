@@ -45,6 +45,7 @@ from elspeth.web.composer.guided.audit import (
 from elspeth.web.composer.guided.chain_solver import solve_chain
 from elspeth.web.composer.guided.emitters import (
     build_initial_step_1_turn,
+    build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
     build_step_2_5_recipe_offer_turn,
     build_step_2_multi_select_turn,
@@ -4074,35 +4075,76 @@ def create_session_router() -> APIRouter:
         *,
         catalog: Any,
     ) -> Any | None:
-        """Build the initial turn payload for the current guided step.
+        """Build the turn payload to return from GET /guided for the current step.
 
         Called exclusively by ``get_guided`` to determine ``next_turn`` in the
-        response.  Each step has one canonical "initial" turn that is
-        deterministically rebuildable from ``(state, guided, catalog)`` alone:
+        response.  Rebuilds the correct turn deterministically from
+        ``(state, guided, catalog)`` alone, including intra-step turns for
+        steps that maintain staging fields on the session.
 
-        - STEP_1_SOURCE: ``build_initial_step_1_turn`` (single_select or
-          inspect_and_confirm based on blob state; no blob facts on GET).
-        - STEP_2_SINK: ``build_step_2_single_select_turn`` (sink plugin list).
-        - STEP_2_5_RECIPE_MATCH: ``build_step_2_5_recipe_offer_turn`` if a
-          recipe was matched and recorded; ``None`` if no recipe matched
-          (session stays at this step but no turn exists — Phase 4 path).
-        - STEP_3_TRANSFORMS: not yet implemented; returns ``None``.
+        Per-step rebuild rules:
 
-        SCHEMA_FORM and MULTI_SELECT_WITH_CUSTOM turns are intra-step turns
-        emitted by POST /respond.  They are NOT re-emitted by GET /guided
-        because the chosen plugin name (needed to rebuild SCHEMA_FORM) is not
-        stored in the session.  GET /guided always returns the *initial* turn
-        for the current step, not the latest intra-step turn.  Clients that
-        need to restore intra-step context must re-submit the prior response.
+        - STEP_1_SOURCE: three sub-cases in priority order:
+          1. ``step_1_source_intent`` is set → the SCHEMA_FORM response was
+             submitted; the session is waiting for INSPECT_AND_CONFIRM
+             confirmation.  Emit ``inspect_and_confirm`` from the intent's
+             observed columns (warnings are not stored on SourceIntent;
+             the rebuild emits an empty warnings list).
+          2. ``step_1_source_intent`` is None → initial state or SINGLE_SELECT
+             window.  Fall through to ``build_initial_step_1_turn``.
+             Note: the window between SINGLE_SELECT and SCHEMA_FORM does not
+             persist the chosen source plugin name; a GET /guided in that
+             window will re-emit the SINGLE_SELECT.  This is an observation-
+             not-fix gap (parallel to Finding 2, addressed by
+             step_2_chosen_plugin) and is tracked as obs-STEP1-chosen-plugin.
+
+        - STEP_2_SINK: three sub-cases in priority order:
+          1. ``step_2_sink_intent`` is set → the SCHEMA_FORM response was
+             submitted; the session is waiting for MULTI_SELECT_WITH_CUSTOM
+             confirmation.  Emit ``multi_select_with_custom`` from step_1_result.
+          2. ``step_2_chosen_plugin`` is set → the SINGLE_SELECT response was
+             submitted; the session is waiting for SCHEMA_FORM submission.
+             Emit ``schema_form`` for the chosen plugin.
+          3. Neither is set → initial state.  Emit ``single_select`` listing
+             all registered sink plugins.
+
+        - STEP_2_5_RECIPE_MATCH: deterministically re-run ``match_recipe``; if a
+          match is found, emit ``recipe_offer``.  Returns ``None`` when no
+          recipe matched (session stays at this step but no turn exists).
+
+        - STEP_3_TRANSFORMS: if ``step_3_proposal`` is set, emit
+          ``propose_chain`` from the staged proposal (this is the normal
+          path — step_3_proposal is always set when the session reaches
+          STEP_3_TRANSFORMS via the LLM chain solver).  Returns ``None``
+          if the proposal is absent (LLM call has not completed; should
+          not occur in practice — guarded defensively to avoid a crash).
 
         Returns:
             A ``Turn`` TypedDict, or ``None`` when the step has no rebuildable
-            initial turn (STEP_3 / no-recipe path).
+            turn (no-recipe STEP_2_5 path, or STEP_3 without a proposal).
         """
         step = guided.step
         if step is GuidedStep.STEP_1_SOURCE:
+            # Finding 3 (Codex #14): if step_1_source_intent is set, the SCHEMA_FORM
+            # was already submitted and the session is waiting for INSPECT_AND_CONFIRM.
+            # Rebuild from the staged intent (observed_columns; warnings default to empty
+            # as they are not stored on SourceIntent).
+            if guided.step_1_source_intent is not None:
+                return build_step_1_inspect_and_confirm_turn_from_intent(guided.step_1_source_intent)
             return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
         if step is GuidedStep.STEP_2_SINK:
+            # Finding 2 (Codex #10): determine intra-step position and rebuild
+            # the correct turn, not always the initial SINGLE_SELECT.
+            if guided.step_2_sink_intent is not None:
+                # SCHEMA_FORM was submitted; session is waiting for MULTI_SELECT_WITH_CUSTOM.
+                observed_columns: tuple[str, ...] = ()
+                if guided.step_1_result is not None:
+                    observed_columns = tuple(guided.step_1_result.observed_columns)
+                return build_step_2_multi_select_turn(observed_columns)
+            if guided.step_2_chosen_plugin is not None:
+                # SINGLE_SELECT was submitted; session is waiting for SCHEMA_FORM submission.
+                return build_step_2_schema_form_turn(guided.step_2_chosen_plugin, catalog)
+            # Initial state: no plugin chosen yet.  Emit the sink plugin list.
             return build_step_2_single_select_turn(catalog)
         if step is GuidedStep.STEP_2_5_RECIPE_MATCH:
             # A recipe_offer TurnRecord exists iff a recipe was matched.
@@ -4113,7 +4155,18 @@ def create_session_router() -> APIRouter:
                     return build_step_2_5_recipe_offer_turn(recipe_match)
             # No recipe matched — no initial turn for this step.
             return None
-        # STEP_3_TRANSFORMS and beyond: not yet implemented (Phase 4).
+        if step is GuidedStep.STEP_3_TRANSFORMS:
+            # Finding 1 (Codex #5): rebuild propose_chain from the staged proposal.
+            # step_3_proposal is always set when the session reaches STEP_3_TRANSFORMS
+            # via the LLM chain solver (set atomically with the step pointer in the
+            # dispatcher at routes.py:2051 and routes.py:4063).  A None here would
+            # mean the proposal was never computed — guarded defensively to avoid
+            # crashing on a corrupt session rather than returning a misleading null.
+            if guided.step_3_proposal is not None:
+                return build_step_3_propose_chain_turn(guided.step_3_proposal)
+            # No proposal yet — LLM call has not completed; return None and let the
+            # idempotency machinery handle it (no TurnRecord emitted; client retries).
+            return None
         return None
 
     @router.get("/{session_id}/guided", response_model=GetGuidedResponse)

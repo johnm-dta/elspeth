@@ -217,6 +217,36 @@ class TestGuidedSession:
         assert restored == sess
         assert restored.step_2_5_recipe_offer is None
 
+    def test_guided_session_roundtrip_with_step_2_chosen_plugin(self) -> None:
+        """GuidedSession with step_2_chosen_plugin survives to_dict/from_dict round-trip.
+
+        Exercises the Tier-1 serialisation boundary for the new staging field.
+        The field is set in the SINGLE_SELECT→SCHEMA_FORM window at STEP_2_SINK;
+        it must survive the persist/restore cycle so GET /guided can rebuild
+        the correct SCHEMA_FORM on refresh.
+        """
+        from dataclasses import replace
+
+        sess = replace(GuidedSession.initial(), step_2_chosen_plugin="json")
+        d = sess.to_dict()
+        assert d["step_2_chosen_plugin"] == "json"  # serialised
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_2_chosen_plugin == "json"
+
+    def test_guided_session_roundtrip_with_step_2_chosen_plugin_none(self) -> None:
+        """GuidedSession with step_2_chosen_plugin=None round-trips cleanly.
+
+        Ensures the None case is serialised as None (not absent), which would
+        crash from_dict's strict key read.
+        """
+        sess = GuidedSession.initial()
+        d = sess.to_dict()
+        assert d["step_2_chosen_plugin"] is None  # serialised as null
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_2_chosen_plugin is None
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a minimal TurnResponse

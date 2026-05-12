@@ -8,6 +8,12 @@ Verifies:
 - Audit message (role=tool) is persisted after first fetch.
 - 400 on freeform sessions (no guided_session attached — not currently
   exercised since all new sessions default to guided per spec §5.2).
+- M3: GET /guided rebuilds Step 3 propose_chain from staged step_3_proposal
+  (Codex #5 fix — previously returned next_turn: null at STEP_3_TRANSFORMS).
+- M4: GET /guided rebuilds intra-step Step 2 turns from staged fields
+  (Codex #10 fix — previously always returned the initial SINGLE_SELECT).
+- M5: GET /guided passes blob inspection facts to build_initial_step_1_turn
+  when step_1_source_intent is set (Codex #14 fix — previously passed None).
 
 HTTP transport: SyncASGITestClient (in-process, synchronous — same pattern
 as test_fixture_smoke.py).  The full roundtrip exercises:
@@ -22,6 +28,7 @@ Per spec §5.2 / errata C7: all fresh sessions default to guided mode.
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -364,3 +371,254 @@ class TestGetGuidedAfterStepAdvance:
         # Idempotency: second fetch must not append an extra TurnRecord at step 2.
         step_2_records = [r for r in get_b["guided_session"]["history"] if r["step"] == "step_2_sink"]
         assert len(step_2_records) == 1, f"Expected exactly 1 step_2_sink TurnRecord on re-fetch, got {len(step_2_records)}"
+
+
+# ---------------------------------------------------------------------------
+# M3/M4/M5: GET /guided full-state rebuild (Codex #5, #10, #14)
+#
+# These tests seed GuidedSession state directly via save_composition_state
+# to place the session at a specific intra-step position, then verify that
+# GET /guided returns the correct turn for that position.
+# ---------------------------------------------------------------------------
+
+
+def _seed_guided_session(client: TestClient, session_id: str, guided_session_dict: dict) -> None:
+    """Persist a pre-built guided session dict into composer_meta.
+
+    Seeds state directly via save_composition_state — the same pattern used
+    by test_respond._seed_inspect_and_confirm_history.  This bypasses the
+    normal POST /respond flow so tests can place the session at arbitrary
+    intra-step positions without driving the full wizard sequence.
+    """
+    from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.sessions.converters import state_from_record
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
+
+    service = client.app.state.session_service
+    session_uuid = UUID(session_id)
+    state_record = asyncio.run(service.get_current_state(session_uuid))
+
+    if state_record is None:
+        state = _initial_composition_state_with_guided_session()
+        existing_meta: dict = {}
+    else:
+        state = state_from_record(state_record)
+        existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
+
+    new_composer_meta = {**existing_meta, "guided_session": guided_session_dict}
+    state_d = state.to_dict()
+    state_data = CompositionStateData(
+        source=state_d["source"],
+        nodes=state_d["nodes"],
+        edges=state_d["edges"],
+        outputs=state_d["outputs"],
+        metadata_=state_d["metadata"],
+        is_valid=False,
+        validation_errors=None,
+        composer_meta=new_composer_meta,
+    )
+    asyncio.run(service.save_composition_state(session_uuid, state_data))
+
+
+class TestGetGuidedFullStateRebuild:
+    """M3/M4/M5: GET /guided correctly rebuilds turn state for all intra-step positions.
+
+    Codex #5  (P1): STEP_3_TRANSFORMS returns next_turn: null before fix.
+    Codex #10 (P2): STEP_2_SINK always rebuilds initial SINGLE_SELECT before fix.
+    Codex #14 (P2): STEP_1_SOURCE never reaches INSPECT_AND_CONFIRM before fix.
+    """
+
+    def _make_source_resolved_dict(self) -> dict:
+        return {
+            "plugin": "csv",
+            "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+            "observed_columns": ["col_a", "col_b"],
+            "sample_rows": [{"col_a": "x", "col_b": "1"}],
+        }
+
+    def _make_sink_resolved_dict(self) -> dict:
+        return {
+            "outputs": [
+                {
+                    "plugin": "json",
+                    "options": {"path": "/data/out.jsonl", "schema": {"mode": "observed"}},
+                    "required_fields": ["col_a"],
+                    "schema_mode": "observed",
+                }
+            ]
+        }
+
+    # ------------------------------------------------------------------
+    # M3: Step 3 propose_chain rebuild (Codex #5)
+    # ------------------------------------------------------------------
+
+    def test_step_3_with_proposal_returns_propose_chain_turn(self, composer_test_client: TestClient) -> None:
+        """GET /guided at STEP_3_TRANSFORMS with step_3_proposal returns propose_chain.
+
+        Codex #5 fix: before the fix this returned next_turn=null and the
+        frontend fell back to freeform UI despite the guided session being
+        non-terminal.  The seeded proposal must appear in the response.
+        """
+        session_id = _create_session(composer_test_client)
+
+        proposal_dict = {
+            "steps": [{"plugin": "rename", "options": {"mappings": {}}, "rationale": "normalise names"}],
+            "why": "Normalise column names before JSON output.",
+        }
+        guided_dict = {
+            "step": "step_3_transforms",
+            "history": [],
+            "step_1_result": self._make_source_resolved_dict(),
+            "step_2_result": self._make_sink_resolved_dict(),
+            "step_3_proposal": proposal_dict,
+            "terminal": None,
+            "transition_consumed": False,
+            "step_1_source_intent": None,
+            "step_2_sink_intent": None,
+            "step_2_5_recipe_offer": None,
+            "step_2_chosen_plugin": None,
+        }
+        _seed_guided_session(composer_test_client, session_id, guided_dict)
+
+        body = _get_guided(composer_test_client, session_id)
+
+        assert body["guided_session"]["step"] == "step_3_transforms"
+        assert body["next_turn"] is not None, (
+            "next_turn must not be null at STEP_3_TRANSFORMS when step_3_proposal is set — "
+            "Codex #5 regression: GET /guided returned null instead of propose_chain"
+        )
+        assert body["next_turn"]["type"] == "propose_chain", f"Expected propose_chain but got {body['next_turn']['type']!r}"
+        assert body["next_turn"]["step_index"] == 3  # STEP_3_TRANSFORMS index
+        payload = body["next_turn"]["payload"]
+        assert payload["why"] == proposal_dict["why"]
+        assert len(payload["steps"]) == 1
+        assert payload["steps"][0]["plugin"] == "rename"
+
+    # ------------------------------------------------------------------
+    # M4: Step 2 intra-step rebuild (Codex #10)
+    # ------------------------------------------------------------------
+
+    def test_step_2_with_chosen_plugin_returns_schema_form(self, composer_test_client: TestClient) -> None:
+        """GET /guided at STEP_2_SINK with step_2_chosen_plugin returns schema_form.
+
+        Codex #10 fix: before the fix, GET /guided always returned the initial
+        SINGLE_SELECT regardless of intra-step position.  When the user had
+        already picked a plugin, refresh would force them back to step start.
+        """
+        session_id = _create_session(composer_test_client)
+
+        guided_dict = {
+            "step": "step_2_sink",
+            "history": [],
+            "step_1_result": self._make_source_resolved_dict(),
+            "step_2_result": None,
+            "step_3_proposal": None,
+            "terminal": None,
+            "transition_consumed": False,
+            "step_1_source_intent": None,
+            "step_2_sink_intent": None,
+            "step_2_5_recipe_offer": None,
+            # Placed in the SINGLE_SELECT→SCHEMA_FORM window.
+            "step_2_chosen_plugin": "json",
+        }
+        _seed_guided_session(composer_test_client, session_id, guided_dict)
+
+        body = _get_guided(composer_test_client, session_id)
+
+        assert body["guided_session"]["step"] == "step_2_sink"
+        assert body["next_turn"] is not None
+        assert body["next_turn"]["type"] == "schema_form", (
+            f"Expected schema_form but got {body['next_turn']['type']!r} — "
+            "Codex #10 regression: GET /guided returned single_select instead of schema_form"
+        )
+        assert body["next_turn"]["payload"]["plugin"] == "json"
+
+    def test_step_2_with_sink_intent_returns_multi_select(self, composer_test_client: TestClient) -> None:
+        """GET /guided at STEP_2_SINK with step_2_sink_intent returns multi_select_with_custom.
+
+        Codex #10 fix: after the SCHEMA_FORM was submitted (step_2_sink_intent is
+        set), GET /guided must return multi_select_with_custom so the client can
+        complete the field-selection step, not the initial single_select.
+        """
+        session_id = _create_session(composer_test_client)
+
+        guided_dict = {
+            "step": "step_2_sink",
+            "history": [],
+            "step_1_result": self._make_source_resolved_dict(),
+            "step_2_result": None,
+            "step_3_proposal": None,
+            "terminal": None,
+            "transition_consumed": False,
+            "step_1_source_intent": None,
+            # Placed in the SCHEMA_FORM→MULTI_SELECT window.
+            "step_2_sink_intent": {
+                "plugin": "json",
+                "options": {"path": "/data/out.jsonl", "schema": {"mode": "observed"}},
+            },
+            "step_2_5_recipe_offer": None,
+            "step_2_chosen_plugin": None,
+        }
+        _seed_guided_session(composer_test_client, session_id, guided_dict)
+
+        body = _get_guided(composer_test_client, session_id)
+
+        assert body["guided_session"]["step"] == "step_2_sink"
+        assert body["next_turn"] is not None
+        assert body["next_turn"]["type"] == "multi_select_with_custom", (
+            f"Expected multi_select_with_custom but got {body['next_turn']['type']!r} — "
+            "Codex #10 regression: GET /guided returned single_select instead of multi_select"
+        )
+        # default_chosen should include the columns from step_1_result.
+        payload = body["next_turn"]["payload"]
+        assert "col_a" in payload["default_chosen"]
+        assert "col_b" in payload["default_chosen"]
+
+    # ------------------------------------------------------------------
+    # M5: Step 1 INSPECT_AND_CONFIRM rebuild (Codex #14)
+    # ------------------------------------------------------------------
+
+    def test_step_1_with_source_intent_returns_inspect_and_confirm(self, composer_test_client: TestClient) -> None:
+        """GET /guided at STEP_1_SOURCE with step_1_source_intent returns inspect_and_confirm.
+
+        Codex #14 fix: before the fix, build_initial_step_1_turn was called with
+        blob_inspection=None unconditionally, making INSPECT_AND_CONFIRM unreachable
+        via GET.  When step_1_source_intent is set, the server must rebuild the
+        inspect_and_confirm turn from the staged observed columns.
+        """
+        session_id = _create_session(composer_test_client)
+
+        guided_dict = {
+            "step": "step_1_source",
+            "history": [],
+            "step_1_result": None,
+            "step_2_result": None,
+            "step_3_proposal": None,
+            "terminal": None,
+            "transition_consumed": False,
+            # The SCHEMA_FORM was submitted — source intent is staged.
+            "step_1_source_intent": {
+                "plugin": "csv",
+                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                "observed_columns": ["col_a", "col_b"],
+                "sample_rows": [{"col_a": "x", "col_b": "1"}],
+            },
+            "step_2_sink_intent": None,
+            "step_2_5_recipe_offer": None,
+            "step_2_chosen_plugin": None,
+        }
+        _seed_guided_session(composer_test_client, session_id, guided_dict)
+
+        body = _get_guided(composer_test_client, session_id)
+
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"] is not None
+        assert body["next_turn"]["type"] == "inspect_and_confirm", (
+            f"Expected inspect_and_confirm but got {body['next_turn']['type']!r} — "
+            "Codex #14 regression: GET /guided returned single_select instead of inspect_and_confirm"
+        )
+        # The observed columns from step_1_source_intent must appear in the payload.
+        observed = body["next_turn"]["payload"]["observed"]
+        assert "col_a" in observed["columns"]
+        assert "col_b" in observed["columns"]

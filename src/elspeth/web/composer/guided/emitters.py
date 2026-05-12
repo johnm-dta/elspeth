@@ -7,6 +7,7 @@ TurnRecord, and emit the corresponding audit event independently.
 
 Exported:
     build_initial_step_1_turn — build the initial Step 1 turn payload.
+    build_step_1_inspect_and_confirm_turn_from_intent — inspect_and_confirm from SourceIntent.
     build_step_1_schema_form_turn — schema_form for a chosen source plugin.
     build_step_2_single_select_turn — single_select for sink plugin selection.
     build_step_2_schema_form_turn — schema_form for a chosen sink plugin.
@@ -42,7 +43,7 @@ from elspeth.web.composer.guided.protocol import (
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
     from elspeth.web.composer.guided.recipe_match import RecipeMatch
-    from elspeth.web.composer.guided.state_machine import ChainProposal
+    from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState
 
@@ -75,6 +76,39 @@ def build_initial_step_1_turn(
     if blob_inspection is not None and blob_inspection.observed_headers is not None:
         return _build_inspect_and_confirm_turn(blob_inspection)
     return _build_step_1_single_select_turn(catalog)
+
+
+def build_step_1_inspect_and_confirm_turn_from_intent(
+    intent: SourceIntent,
+) -> Turn:
+    """Build an ``inspect_and_confirm`` Turn from a persisted SourceIntent.
+
+    Called by GET /guided to rebuild the INSPECT_AND_CONFIRM turn on refresh
+    when ``guided.step_1_source_intent`` is set.  The intent carries the
+    plugin's observed_columns (the key data the widget needs), but not
+    the original blob-inspection warnings — those are not stored on
+    SourceIntent because they are observations about the blob, not about the
+    plugin choices.  The rebuild emits ``warnings=[]`` for this reason.
+    Clients that need the original warnings must resubmit the prior response;
+    the reconstructed turn is functionally equivalent for resuming the flow.
+
+    Args:
+        intent: The staged SourceIntent from GuidedSession.step_1_source_intent.
+
+    Returns:
+        A ``Turn`` TypedDict ready for serialisation and hash.
+    """
+    observed: _Observed = {
+        "columns": list(intent.observed_columns),
+        "samples": [],
+        "warnings": [],
+    }
+    payload: InspectAndConfirmPayload = {"observed": observed}
+    return Turn(
+        type=TurnType.INSPECT_AND_CONFIRM.value,
+        step_index=_step_index(GuidedStep.STEP_1_SOURCE),
+        payload=payload,
+    )
 
 
 def build_step_1_schema_form_turn(

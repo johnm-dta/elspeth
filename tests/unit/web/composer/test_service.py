@@ -3743,6 +3743,22 @@ class TestToolArgumentErrorAcrossThreadBoundary:
 
     @pytest.mark.asyncio
     async def test_real_set_source_from_blob_options_guard_feeds_error_to_llm(self) -> None:
+        """Tier-3 non-dict ``options`` routes through ARG_ERROR (Task 13 / Wave 2).
+
+        Post-promotion (Task 13) ``set_source_from_blob`` validates via
+        :class:`SetSourceFromBlobArgumentsModel` BEFORE any blob lookup.
+        Pydantic rejects ``options: str`` and the handler re-raises
+        :class:`pydantic.ValidationError` as :class:`ToolArgumentError`
+        (pattern at ``tools.py:2320-2327``, rev-2 BLOCKER_A).  The
+        LLM-facing payload is intentionally leak-safe: argument-bundle
+        name + Pydantic model name, not per-field detail.
+
+        Memory: ``feedback_locked_in_buggy_expectations`` — the prior
+        assertion pinned the legacy in-handler isinstance message
+        ``"'options' must be an object, got str"``; the Pydantic
+        boundary now fires earlier and that message no longer reaches
+        the LLM.
+        """
         from elspeth.web.composer.tools import execute_tool
 
         catalog = _mock_catalog()
@@ -3787,13 +3803,19 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         _assert_no_mutation_empty_state_blocker(
             result,
             tool_name="set_source_from_blob",
-            expected_detail="'options' must be an object, got str",
+            expected_detail="ToolArgumentError",
         )
         second_call_messages = mock_llm.call_args_list[1].args[0]
         tool_messages = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_messages) == 1
         error_content = json.loads(tool_messages[0]["content"])
-        assert "'options' must be an object, got str" in error_content["error"]
+        # New (post-promotion) LLM-facing message names the argument-bundle
+        # and the Pydantic model — no leak of the raw offending value or
+        # its type (which the legacy handler echoed as "got str").
+        assert "set_source_from_blob arguments" in error_content["error"]
+        assert "SetSourceFromBlobArgumentsModel" in error_content["error"]
+        assert "got str" not in error_content["error"]
+        assert "column=text" not in error_content["error"]
 
 
 class TestComposerErrorConstructionInvariants:

@@ -9,6 +9,11 @@
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },
+  "set_source_from_blob": {
+    "hash": "aefd3830cd86e58c16654a8344e19acbd56206ba9bf73ab3420324a2225f0ed3",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
   "update_blob": {
     "hash": "3f642aeebd8e082f2f2a19ff34d2a3c6167be908e59e9a1f874f8c43ce6040f0",
     "sensitive_path_count": 1,

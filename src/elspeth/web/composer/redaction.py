@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
@@ -750,6 +750,74 @@ def _summarize_inline_blob_content(content: str) -> str:
     return f"<inline-blob:{len(content.encode('utf-8'))}-bytes>"
 
 
+class SetSourceFromBlobArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``set_source_from_blob`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:1329-1361`` for the
+    ``set_source_from_blob`` definition and its required-paths
+    (``blob_id``, ``on_success``).
+
+    ``options`` is :class:`Sensitive` with the same summarizer
+    (:func:`_summarize_set_source_options`) used by
+    :class:`SetSourceArgumentsModel`.  ``set_source_from_blob`` merges
+    caller-supplied ``options`` with the resolved blob's authoritative
+    ``path`` and ``blob_ref`` at ``_resolve_source_blob`` (``tools.py:
+    1961-1966``); the merged dict carries an internal storage path that
+    must not enter the audit-side ``chat_messages.tool_calls`` row
+    verbatim.  Treating the caller-supplied ``options`` slot as
+    Sensitive at the argument boundary maintains uniformity with
+    ``set_source.options`` (Task 4) so an LLM that happens to include a
+    path-like field receives the same redaction discipline regardless
+    of which source-binding tool it invoked.
+
+    ``blob_id`` is a UUID reference, not content; ``plugin`` and
+    ``on_validation_failure`` are operator-controlled discriminators;
+    ``on_success`` is a connection-name string.  None of these carry
+    LLM-supplied sensitive material, so only ``options`` is marked.
+
+    ``options`` default
+    -------------------
+    The JSON schema for ``set_source_from_blob`` does NOT list
+    ``options`` as required; the handler at
+    :func:`_execute_set_source_from_blob` reads it via
+    ``arguments.get("options", {})``.  We mirror that absent-equals-empty
+    semantics with ``Field(default_factory=dict)`` rather than declaring
+    ``options: dict | None = None``.  Reason: the summarizer needs to
+    handle a real ``dict`` value (the existing
+    :func:`_summarize_set_source_options` does
+    ``redact_source_storage_path({"source": {"options": options}})``,
+    which expects ``options`` to be a dict-or-None and treats absence as
+    "no redaction needed").  A ``None`` value reaches the summarizer and
+    produces ``"null"`` in the redacted view — a meaningless audit signal
+    that does not match the runtime semantics (the handler treats an
+    absent slot as ``{}``).  Defaulting to ``{}`` preserves "absent = no
+    options" at the argument boundary AND records it accurately on the
+    audit side as an empty-options dict.
+
+    ``plugin`` and ``on_validation_failure`` keep ``str | None = None``
+    because the handler distinguishes their absent semantics: ``plugin``
+    absent triggers MIME-type-based inference at
+    ``_resolve_source_blob``; ``on_validation_failure`` absent falls back
+    to ``_DEFAULT_SOURCE_VALIDATION_FAILURE`` ("discard").  A default of
+    ``""`` would conflate "operator did not specify" with "operator
+    specified empty string" — fabrication (CLAUDE.md trust model).
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    neighbouring tools (``filename``, ``mime_type``, ``content``,
+    ``description`` on ``create_blob``/``update_blob``; ``inline_blob``
+    on ``set_pipeline``) are intentionally absent so ``extra="forbid"``
+    rejects misrouted argument shapes early.
+    """
+
+    blob_id: str
+    on_success: str
+    plugin: str | None = None
+    on_validation_failure: str | None = None
+    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class UpdateBlobArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``update_blob`` tool.
 
@@ -1034,6 +1102,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
         "create_blob": ToolRedaction(argument_model=CreateBlobArgumentsModel),
         "update_blob": ToolRedaction(argument_model=UpdateBlobArgumentsModel),
+        "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
     }
 )
 

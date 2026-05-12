@@ -44,6 +44,7 @@ from elspeth.web.composer.recipes import (
 from elspeth.web.composer.redaction import (
     CreateBlobArgumentsModel,
     SetSourceArgumentsModel,
+    SetSourceFromBlobArgumentsModel,
     UpdateBlobArgumentsModel,
     redact_source_storage_path,
 )
@@ -2692,18 +2693,47 @@ def _execute_set_source_from_blob(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> ToolResult:
-    caller_options = arguments.get("options", {})
-    if not isinstance(caller_options, dict):
+    """Bind the pipeline source to an existing blob.
+
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`SetSourceFromBlobArgumentsModel` (the single source of
+    truth for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["set_source_from_blob"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).  On
+    :class:`pydantic.ValidationError` we re-raise as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
+    at ``service.py:2480`` receives the right exception class (Task 13
+    / Wave 2; mirrors Task 4 pattern at ``tools.py:2320-2327``).
+
+    The prior in-handler ``isinstance(caller_options, dict)`` guard at
+    this site is superseded by the Pydantic model's ``options: dict[str,
+    Any]`` validation: a non-dict (or missing-required-fields) input now
+    raises a structured ValidationError that the handler re-raises as
+    ToolArgumentError before any blob-lookup work is done.
+
+    Optional-field semantics (mirrors the JSON schema's `required`):
+      * ``options`` defaults to ``{}`` (matches the prior
+        ``arguments.get("options", {})``).
+      * ``plugin`` and ``on_validation_failure`` remain ``str | None``
+        so the handler can distinguish operator-omitted from
+        operator-specified.  ``on_validation_failure`` None falls back
+        to ``_DEFAULT_SOURCE_VALIDATION_FAILURE`` ("discard") at the
+        seam below, matching the prior ``arguments.get(...)`` default.
+    """
+    try:
+        validated = SetSourceFromBlobArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
         raise ToolArgumentError(
-            argument="options",
-            expected="an object",
-            actual_type=type(caller_options).__name__,
-        )
-    on_vf = arguments.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
+            argument="set_source_from_blob arguments",
+            expected="object conforming to SetSourceFromBlobArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    on_vf = validated.on_validation_failure if validated.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
     resolved = _resolve_source_blob(
-        blob_id=arguments["blob_id"],
-        explicit_plugin=arguments.get("plugin"),
-        caller_options=caller_options,
+        blob_id=validated.blob_id,
+        explicit_plugin=validated.plugin,
+        caller_options=validated.options,
         on_validation_failure=on_vf,
         state=state,
         catalog=catalog,
@@ -2715,7 +2745,7 @@ def _execute_set_source_from_blob(
 
     source = SourceSpec(
         plugin=resolved.plugin,
-        on_success=arguments["on_success"],
+        on_success=validated.on_success,
         options=resolved.options,
         on_validation_failure=on_vf,
     )

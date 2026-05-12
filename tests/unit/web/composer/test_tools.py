@@ -7286,7 +7286,22 @@ class TestUpdateBlobTypeGuard:
 
 
 class TestSetSourceFromBlobTypeGuard:
-    """Malformed `options` must stay a retryable tool-argument failure."""
+    """Malformed `options` must stay a retryable tool-argument failure.
+
+    Post Task 13 (Wave 2 — ``set_source_from_blob`` manifest promotion):
+    the Tier-3 type guard now lives in
+    :class:`SetSourceFromBlobArgumentsModel` via Pydantic's strict
+    ``options: dict[str, Any]`` validation.  The handler catches
+    :class:`pydantic.ValidationError` and re-raises as
+    :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327`` /
+    Task 4); the LLM-facing message names the argument-bundle and the
+    Pydantic model, not the offending value (rev-2 BLOCKER_A leak
+    discipline).  Memory:
+    ``feedback_locked_in_buggy_expectations`` — the previous
+    ``"'options' must be an object, got str"`` assertion pinned the
+    legacy in-handler isinstance guard; the new boundary fires earlier
+    with a leak-safe shell.
+    """
 
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path: Path) -> None:
@@ -7322,6 +7337,8 @@ class TestSetSourceFromBlobTypeGuard:
             )
 
     def test_non_object_options_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
@@ -7339,7 +7356,13 @@ class TestSetSourceFromBlobTypeGuard:
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
 
-        with pytest.raises(ToolArgumentError, match=r"'options' must be an object, got str"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value (the string
+        # "column=text") and its type ("got str") are not echoed.
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'set_source_from_blob arguments' must be object conforming to SetSourceFromBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "set_source_from_blob",
                 {
@@ -7353,6 +7376,8 @@ class TestSetSourceFromBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------

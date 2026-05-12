@@ -1,6 +1,8 @@
-# Composer Progress Persistence — Phase 3: Compose-Loop Persistence + Tool-Call Cap
+# Composer Progress Persistence — Phase 3: Compose-Loop Persistence + Tool-Call Cap (rev 2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+> **Revision history.** Rev 1 (commit `6bcf2f2d`, 2026-05-10) was authored when Phase 2 was planned but unimplemented. Rev 2 (this revision, 2026-05-12) re-baselines against the actual Phase 2 implementation at HEAD `f54ee7e8` — every Phase 2 symbol the plan consumes is now on-disk and gate-green. Rev-2 changes are scoped to: (1) Dependency posture section truthful re: Phase 2 shipped; (2) Ground rules drops the "import-time RED against Phase 2 symbols" framing; (3) Task 5 Step 1 RED expectation re-framed (no more `ImportError`); (4) Task 16 final step removes the unconditional `gh pr create` and replaces it with operator-surface — per Phase 2 rev-5 BLOCKER B4 closure pattern, per project memory `feedback_default_to_worktree` (worktree-default policy 2026-05-11) and per the operator's standing instruction to defer PR-open. The task structure and TDD steps are otherwise unchanged. Appendix A (new) carries Phase-2-as-shipped traceability — F2 / F3 / AST-fingerprint observation references — that Phase 3 implementers will encounter at mid-file edit sites.
 
 **Goal:** Wire the live compose loop through the Phase 1 persistence primitive so a failed compose turn lands its assistant row, tool rows, and composition state atomically; enforce the per-turn tool-call cap; surface `failed_turn` + `tool_responses_persisted` on 422/500 error bodies; and expose `include_tool_rows=true` on `GET /api/sessions/{sid}/messages` with audit-grade access logging.
 
@@ -25,15 +27,22 @@
 
 ---
 
-## Dependency posture
+## Dependency posture (rev-2 update — Phase 2 is now shipped)
 
-**This plan does not execute on a fresh `feat/composer-progress-persistence-1a` checkout in isolation.**
+**This plan executes on `feat/composer-progress-persistence-1a` at HEAD `f54ee7e8` or later (the umbrella branch per memory `project_adr010_umbrella_branch`).** All upstream Phase 1A/1B/1C and Phase 2 deliverables are landed.
 
-- Phase 1 (1A/1B/1C) is **shipped** on this branch. The compose loop calls `persist_compose_turn_async`, `RedactedToolRow`, `StatePayload`, `CompositionStateData`, `AuditOutcome`, `StaleComposeStateError`, and `AuditIntegrityError` — all already importable from `src/elspeth/web/sessions/protocol.py`, `_persist_payload.py`, and `elspeth.contracts.errors`.
-- Phase 2 (manifest dispatch + `Sensitive[T]` promotion wave) is **not yet shipped**. Every red test in this plan that references `redact_tool_call_arguments`, `redact_tool_call_response`, `MANIFEST`, or `RedactionTelemetry` **will fail at import time** until Phase 2 merges. The expected disposition during the Phase 3 reds is `ImportError`, not `AssertionError`; that is the correct red signal. Do not stub the Phase 2 surface — Phase 3 must consume the real symbols once Phase 2 lands.
+- Phase 1 (1A/1B/1C) is **shipped** on this branch. The compose loop calls `persist_compose_turn_async`, `RedactedToolRow`, `StatePayload`, `CompositionStateData`, `AuditOutcome`, `StaleComposeStateError`, and `AuditIntegrityError` — all already importable from `src/elspeth/web/sessions/protocol.py`, `_persist_payload.py`, and `elspeth.contracts.errors`. `_ToolOutcome` exists at `web/sessions/_persist_payload.py:89` (frozen, `freeze_fields(self, "call", "response")`); Phase 3 imports it, does NOT redefine. The `audit_access_log_table` is defined INERT at `web/sessions/models.py:485`; Task 11 wires the writer.
+- Phase 2 (manifest-keyed dispatch + `Sensitive[T]` promotion wave + adequacy guard + F1–F6 follow-ups) is **shipped** as of HEAD `f54ee7e8`. The Phase 3 plan's red tests against Phase 2 symbols now fail with `AssertionError` (wiring not yet present), not `ImportError`. Specifically, every Phase 2 surface this plan consumes is on disk:
+  - `MANIFEST: Mapping[str, ToolRedaction]` at `web/composer/redaction.py:2352` (38 entries — 10 type-driven + 28 declarative per `project_phase2_implementation_complete`).
+  - `redact_tool_call_arguments(tool_name, decoded_args, telemetry=...)` at `web/composer/redaction.py:1658`.
+  - `redact_tool_call_response(tool_name, response, telemetry=...)` at `web/composer/redaction.py:2635`.
+  - `class RedactionTelemetry(Protocol)` at `web/composer/redaction_telemetry.py:32`; `NoopRedactionTelemetry` at `:42`; `OtelRedactionTelemetry` at `:60`.
+  - `_arg_error_payload(exc, tool_name) -> Mapping[str, Any]` at `web/composer/service.py:3705` (F2 — module-tail helper preserving AST fingerprints; populates `validation_errors` field on ARG_ERROR `result_canonical` when `exc.__cause__` is a `pydantic.ValidationError`).
+  - `canonicalize_pydantic_cause(exc)` at `web/composer/audit.py:826` (F2 — leak-safe `loc`/`msg`/`type` canonicalisation, `input`/`url`/`ctx` stripped).
+
+  Phase 3 consumes these symbols verbatim; the walker dispatches through `MANIFEST[tool_name]` (spec §5.7.5); `_arg_error_payload` is the canonical ARG_ERROR factory invoked by both `dispatch_with_audit` and the `except ToolArgumentError` arm in `_compose_loop`.
 - Phase 1 also shipped CL-PP-11 (concurrent multi-session writes against testcontainer Postgres — commit `eca88974`). Phase 3 does not re-author that test; it cites the existing test as the CL-PP-11 deliverable in the §11 done-when checklist.
-
-Sequencing: Phase 2 PR must merge first, then this plan executes.
+- **Sequencing for Phase 3 execution:** the implementer starts at HEAD `f54ee7e8` (or later) on `feat/composer-progress-persistence-1a`. No upstream phase is pending. Reds in Phase 3 tasks fail because the loop body is unwired, not because imports are unresolved.
 
 ---
 
@@ -76,7 +85,7 @@ Existing characterization tests in `tests/integration/pipeline/test_composer_llm
 
 ## Ground rules
 
-- **TDD throughout.** Every task ends in a failing test before any implementation lands. The red includes both unit-test reds and import-time reds against Phase 2 symbols. Do not work around import-time reds by stubbing Phase 2 — wait for the Phase 2 PR to merge, rebase, and continue.
+- **TDD throughout.** Every task ends in a failing test before any implementation lands. The reds are wiring-level (`AssertionError` / `AttributeError`), not import-level — Phase 2 symbols resolve at HEAD `f54ee7e8` (see Dependency posture; the rev-1 "import-time RED against Phase 2 symbols" framing is superseded). Do not stub Phase 2 surfaces; they exist.
 - **Real databases in tests.** `create_session_engine(..., poolclass=StaticPool)` + `initialize_session_schema()` for SQLite (per spec §8.6); testcontainer PostgreSQL for CL-PP-11 (already wired) and any new PostgreSQL-only assertion. Bare `metadata.create_all()` is banned. Mocking `persist_compose_turn` or any `_insert_*` helper is banned.
 - **No defensive programming.** Tier-1 audit data crashes on anomaly. `AuditIntegrityError` is the canonical signal; it is in `TIER_1_ERRORS` and must not be caught by `except Exception`. The compose loop's `except Exception as tool_exc:` branch (the plugin-bug surface) **must** re-raise `AuditIntegrityError` unmodified — capture only via the existing `service.py:942–980` pattern.
 - **No legacy code.** The current `_compose_loop` accumulates tool results into `BufferingRecorder` and drains via `_persist_tool_invocations` after the loop ends. The §5.2.1 shape supersedes that. Delete the legacy path in the same PR; do not leave both wired behind a feature flag.
@@ -574,7 +583,7 @@ def test_step2_redacts_response_with_summarizer(
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py::test_step2_redacts_via_manifest_walker -v
 ```
 
-Expected: FAIL with `ImportError: cannot import name 'MANIFEST' from elspeth.web.composer.redaction` until Phase 2 merges. After Phase 2 is in, the import resolves and the test fails with the actual missing wiring.
+Expected (rev-2 update — Phase 2 is shipped at HEAD `f54ee7e8`): FAIL with `AssertionError` on `assert persisted == expected` (or similar wiring assertion). Phase 2 imports resolve cleanly; the red is the loop body not yet calling the walker. (Rev-1 said "ImportError until Phase 2 merges"; that expectation is superseded.)
 
 - [ ] **Step 2: Wire the redaction step in `_compose_loop`.**
 
@@ -676,13 +685,13 @@ def pre_state_id_for(
 
 `pre_state_id_for` is intentionally trivial in Phase 3 because Phase 1 already encodes the version-ordering lineage in `composition_states`; carrying an explicit predecessor id through the loop would duplicate that information. The helper exists so a future tightening (per-tool-row explicit lineage) has a single landing site. Document this decision in a load-bearing comment on the helper.
 
-- [ ] **Step 3: Re-run the Step 2 tests (after Phase 2 merges).**
+- [ ] **Step 3: Re-run the Step 2 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v -k "step2"
 ```
 
-Expected: PASS once Phase 2 is in. Until then, document the import-time RED in the PR description.
+Expected: PASS. (Phase 2 is shipped at HEAD `f54ee7e8`; rev-1's "PASS once Phase 2 is in" is superseded — see Dependency posture.)
 
 - [ ] **Step 4: Commit.**
 
@@ -1751,27 +1760,55 @@ Expected: all green.
 
 Expected: PASS. `composer.audit.tool_row_tier1_violation_total == 0` across the property-test campaign (the counter only increments when the test explicitly injects a Tier-1 fault and asserts the increment).
 
-- [ ] **Step 4: Open the PR.**
+- [ ] **Step 4: Surface to operator for PR-open decision. Do NOT run `gh pr create`.**
 
-```bash
-gh pr create \
-  --base feat/composer-progress-persistence-1a \
-  --title "feat(composer): progress persistence phase 3 — compose-loop persistence + tool-call cap" \
-  --body "$(cat <<'EOF'
+Per Phase 2 rev-5 BLOCKER B4 closure pattern (per `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md` "Phase 2 done-when removes PR-open from scope; plan rewrite ends at 'gate green; await operator PR-open instruction'"), and per project memory `feedback_default_to_worktree.md` (worktree-default policy revision 2026-05-11) and `project_phase2_plan_review_verdict.md`: Phase 3 implementation ends at "gate green; await operator PR-open instruction." The implementer captures the readiness state in the conversation and stops; the operator decides when (and whether) to open the PR. (Rev-1 of this plan ran `gh pr create` unconditionally here; that was a re-introduction of the Phase 2 rev-1 BLOCKER B4 pattern. Rev-2 removes it.)
+
+The implementer surfaces the following to the operator after the gate runs are green:
+
+> Phase 3 implementation complete on `feat/composer-progress-persistence-1a` at HEAD `<commit-sha>`. Gate state:
+>
+> - Unit: `<N>k` pass, `<m>` skipped, `<x>` xfailed. Integration: `<M>` pass (Docker-disabled lane). Property: `<P>` pass.
+> - mypy / ruff / contracts / tier-model / freeze-guards: all clean.
+> - CL-PP-11 testcontainer scenario: gates on Docker-enabled CI lane only; surfaced via `pytest -m testcontainer` for the operator to spot-check locally.
+>
+> Phase 3 ships:
+>
+> - Compose-loop rewrite to the §5.2.1 single-sync-block shape: gather tool outcomes async, redact via the Phase 2 manifest walker (`MANIFEST` / `redact_tool_call_arguments` / `redact_tool_call_response` / `RedactionTelemetry`), dispatch ONE `persist_compose_turn_async` per turn; raise `ComposerPluginCrashError` after audit commit; let `AuditIntegrityError` propagate from the sync worker.
+> - Per-turn tool-call cap (default 16, env-tunable via `MAX_TOOL_CALLS_PER_TURN`); new `tool_call_cap_exceeded` reason code on `ComposerConvergenceError`; new `composer.tool_call_cap_exceeded_total` counter.
+> - `failed_turn` field on 422/500 response bodies emitted by `_handle_convergence_error`, `_handle_plugin_crash`, `_handle_runtime_preflight_failure`; four-key shape Phase 4 consumes (`assistant_message_id`, `tool_calls_attempted`, `tool_responses_persisted`, `transcript_url`).
+> - `include_tool_rows` query parameter on `GET /api/sessions/{sid}/messages`; new response-row fields `tool_call_id`, `parent_assistant_id`, `sequence_no`.
+> - Audit-grade access logging via new `record_audit_grade_view` helper writing to the Phase-1-provisioned `audit_access_log` table; new `composer.audit.audit_grade_view_total` counter.
+> - `count_tool_responses_for_assistant` read helper on SessionsService for the route-layer SELECT (spec §6.1 read-consistency note).
+> - Legacy `BufferingRecorder.add_message` drain inside `_compose_loop` deleted (no-legacy-code policy).
+> - Integration tests CL-PP-1..10b, 12, 13 (extending the existing characterization surface; CL-PP-11 already shipped in commit `eca88974`).
+> - Property test (§8.3) with full strategy contracts (§8.3.1), §8.3.2 post-conditions, and the schema-level backward-direction predicate.
+> - Overview updated to rev-5 / manifest-keyed framing.
+>
+> Open Phase 3 follow-ups filed during implementation:
+>
+> - OQ-3 `chat_messages` integrity-hash chain — Filigree ticket: `<id>`.
+> - Pre-merge-to-release prerequisites (per overview done-when item 5): alert route, dashboard, runbook entries — Filigree tickets `<id-1>`, `<id-2>`, `<id-3>`.
+>
+> Ready for operator PR-open decision. The PR description body (below) is pre-drafted from this plan's Summary section; the operator runs `gh pr create` with the desired base and review pool when ready.
+
+**Pre-drafted PR body (for operator use; do NOT invoke `gh pr create` from this step):**
+
+```text
 ## Summary
 
 Phase 3 of composer-progress-persistence (spec §11):
 
-- **Compose-loop rewrite** to the §5.2.1 single-sync-block shape: gather tool outcomes async, redact via the Phase 2 manifest walker, dispatch ONE `persist_compose_turn_async` per turn; raise `ComposerPluginCrashError` after audit commit; let `AuditIntegrityError` propagate from the sync worker.
-- **Per-turn tool-call cap** (default 16, env-tunable via `MAX_TOOL_CALLS_PER_TURN`); new `tool_call_cap_exceeded` reason code on `ComposerConvergenceError`; new `composer.tool_call_cap_exceeded_total` counter.
-- **`failed_turn` field** on 422/500 response bodies emitted by `_handle_convergence_error`, `_handle_plugin_crash`, `_handle_runtime_preflight_failure`; carries `assistant_message_id`, `tool_calls_attempted`, `tool_responses_persisted`, `transcript_url`.
-- **`include_tool_rows`** query parameter on `GET /api/sessions/{sid}/messages`; new response-row fields `tool_call_id`, `parent_assistant_id`, `sequence_no`.
-- **Audit-grade access logging** via new `record_audit_grade_view` helper writing to the Phase-1-provisioned `audit_access_log` table; new `composer.audit.audit_grade_view_total` counter.
-- **`count_tool_responses_for_assistant`** read helper on SessionsService for the route-layer SELECT (spec §6.1 read-consistency note).
-- **Legacy `BufferingRecorder.add_message` drain inside `_compose_loop` deleted** (no-legacy-code policy).
-- **Integration tests** CL-PP-1..10b, 12, 13 (extending the existing characterization surface; CL-PP-11 already shipped in commit `eca88974`).
-- **Property test** (§8.3) with full strategy contracts (§8.3.1), §8.3.2 post-conditions, and the schema-level backward-direction predicate.
-- **Overview** updated to rev-5 / manifest-keyed framing.
+- Compose-loop rewrite to the §5.2.1 single-sync-block shape: gather tool outcomes async, redact via the Phase 2 manifest walker, dispatch ONE `persist_compose_turn_async` per turn; raise `ComposerPluginCrashError` after audit commit; let `AuditIntegrityError` propagate from the sync worker.
+- Per-turn tool-call cap (default 16, env-tunable via `MAX_TOOL_CALLS_PER_TURN`); new `tool_call_cap_exceeded` reason code on `ComposerConvergenceError`; new `composer.tool_call_cap_exceeded_total` counter.
+- `failed_turn` field on 422/500 response bodies emitted by `_handle_convergence_error`, `_handle_plugin_crash`, `_handle_runtime_preflight_failure`; carries `assistant_message_id`, `tool_calls_attempted`, `tool_responses_persisted`, `transcript_url`.
+- `include_tool_rows` query parameter on `GET /api/sessions/{sid}/messages`; new response-row fields `tool_call_id`, `parent_assistant_id`, `sequence_no`.
+- Audit-grade access logging via new `record_audit_grade_view` helper writing to the Phase-1-provisioned `audit_access_log` table; new `composer.audit.audit_grade_view_total` counter.
+- `count_tool_responses_for_assistant` read helper on SessionsService for the route-layer SELECT (spec §6.1 read-consistency note).
+- Legacy `BufferingRecorder.add_message` drain inside `_compose_loop` deleted (no-legacy-code policy).
+- Integration tests CL-PP-1..10b, 12, 13 (extending the existing characterization surface; CL-PP-11 already shipped in commit `eca88974`).
+- Property test (§8.3) with full strategy contracts (§8.3.1), §8.3.2 post-conditions, and the schema-level backward-direction predicate.
+- Overview updated to rev-5 / manifest-keyed framing.
 
 ## Spec
 
@@ -1780,7 +1817,7 @@ Phase 3 of composer-progress-persistence (spec §11):
 ## Depends on
 
 - Phase 1 PRs (1A, 1B, 1C) — merged on this branch.
-- Phase 2 PR (manifest dispatch + `Sensitive[T]` promotion wave + adequacy guard) — must merge before Phase 3.
+- Phase 2 PR (manifest dispatch + `Sensitive[T]` promotion wave + adequacy guard + F1–F6 follow-ups) — landed at HEAD `f54ee7e8` on this branch.
 
 ## Out of scope (later phases)
 
@@ -1809,10 +1846,6 @@ Phase 3 of composer-progress-persistence (spec §11):
 - [x] `test_compose_loop_invariants.py` — property test, §8.3.2 OTel counter post-conditions
 - [x] mypy / ruff / tier-model / freeze-guard / contracts CI green
 - [x] Docker-enabled CI lane runs CL-PP-11; non-Docker lanes deselect via `-m "not testcontainer"`; `ci-success` aggregation job passes
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-EOF
-)"
 ```
 
 ---
@@ -1835,3 +1868,109 @@ All 16 tasks above are complete. Specifically (closing the spec §11 done-when):
 12. ✅ Pre-merge-to-release operational prerequisites filed as Filigree tickets and cited in the PR description (or merged in this PR if existing alert/dashboard infra was present).
 
 Phase 4 begins after this PR merges. Phase 4 reads the `failed_turn` field this phase delivered and the `include_tool_rows=true` transcript endpoint this phase opened.
+
+---
+
+## Appendix A — Phase-2-as-shipped traceability (added rev-2)
+
+Phase 2 shipped at HEAD `f54ee7e8` with 38 manifest entries (10 type-driven + 28 declarative) plus the F1–F6 follow-up sweep. Three deliverables from that sweep are load-bearing for Phase 3 and not obvious from the spec body — this appendix surfaces them so an implementer at task-execution time doesn't have to reverse-engineer the precedents.
+
+### A.1 F2 — ARG_ERROR `validation_errors` field (commit `70424cc1`)
+
+F2 added two helpers that Phase 3 inherits:
+
+- `canonicalize_pydantic_cause(exc: BaseException | None) -> list[dict[str, Any]] | None` at `src/elspeth/web/composer/audit.py:826`. Leak-safe Pydantic-`ValidationError` canonicalisation: `loc` / `msg` / `type` only; `input` / `url` / `ctx` stripped (Tier-3 sensitive material). Returns `None` when the cause is not a `ValidationError` (recording an empty list has no audit value).
+- `_arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, Any]` at `src/elspeth/web/composer/service.py:3705`. Module-level (not loop-local) so it is testable in isolation. Builds the structured ARG_ERROR payload with two fields: `error` (operator-safe, LLM-facing) plus `validation_errors` (present iff `exc.__cause__` is a `ValidationError`). Populates `result_canonical` for the audit row AND serves as the LLM-facing `role=tool` message content.
+
+**Implications for Phase 3:**
+
+- Task 4's walker call on the ARG_ERROR `_ToolOutcome` payload sees a dict that may include `validation_errors`. The Phase 4 recovery panel will display these field-name details to help operators recover from Pydantic-rejected tool arguments; Phase 3's persistence must preserve the field through the redaction walker.
+- The existing `except ToolArgumentError as exc:` arm in `_compose_loop` already calls `_arg_error_payload(exc, tool_name)` (current line ~L2549); Task 4's accumulator must produce the same payload shape for the `error_class="ToolArgumentError"` `_ToolOutcome` branch, otherwise the persisted record diverges from the LLM-visible one.
+- §12.2 BLOCKER_A traceability — the cross-phase contract integrity guarantee at the persistence boundary that F2 closes for ARG_ERROR specifically; Phase 3's walker call is the downstream consumer of F2.
+
+### A.2 F3 — closed-list Sensitive markers (commit `f54ee7e8`)
+
+F3 replaced overbroad `Sensitive` markers on `routes` and `trigger` fields with closed-list types. This is a Phase 2 hardening; Phase 3 does not modify or extend it. The implication for Phase 3 is purely citation: when reviewers reference the `Sensitive[T]` annotation surface, the closed-list types are the canonical shape; the older "overbroad" form is no longer in use.
+
+### A.3 AST-fingerprint observation `elspeth-obs-02a0002fae`
+
+`scripts/cicd/enforce_tier_model.py` fingerprints findings by AST `body[N]` index. Any line-shifting edit to `src/elspeth/web/composer/service.py` rotates downstream fingerprints in `config/cicd/enforce_tier_model/`. F2 (commit `70424cc1`) established the mitigation pattern: append new module-level defs at file tail with a "do-not-move" header comment so the AST indices of existing definitions remain stable.
+
+**Implications for Phase 3:**
+
+- Task 3's `_PerTurnPersistContext` dataclass (if introduced) lands at `service.py` tail with the same "do-not-move" header. Zero allowlist refresh.
+- Task 10's `record_audit_grade_view` writer lands at `web/sessions/service.py` tail with the same header. Zero refresh.
+- Task 11's protocol extension appends at protocol-class tail. Minimal refresh.
+- **Tasks 3/4/5/6/7 modify the `_compose_loop` body at L1668–~L2700 (current line numbers) — these edits CANNOT be tail-appended; they must land where the loop body sits.** Expected allowlist refresh: ~40–70 entries across the loop-body tasks. Refresh is mechanical (regenerate from current findings; same-commit), not investigation; the implementer must distinguish "same finding at a new fingerprint" (refresh) from "new finding" (fix the code).
+- Memory: `project_tier_model_python_version` — the worktree venv MUST be Python 3.13 to avoid the ~300 spurious tier-model FPs the version-skew issue triggers.
+
+### A.4 Current `_compose_loop` line numbers (rev-2 update)
+
+The rev-1 plan body cited `service.py:867`, `:907`, `:942` in code-comment references inherited from the spec text. Those numbers were stale even at rev-1 authorship time; rev-2 captures the actual current locations at HEAD `f54ee7e8`:
+
+| Surface | Rev-1 cited | Current (HEAD `f54ee7e8`) |
+|---|---|---|
+| `async def _compose_loop(...)` definition | `:1724`–`:1900` (approximate range) | `:1668`–~`:2700` |
+| `except ToolArgumentError` (Tier-3 boundary, loop continues) | `:867` | `:2518` |
+| `except (AssertionError, MemoryError, RecursionError, SystemError)` (fail-fast) | `:907` | `:2559` |
+| `except Exception as tool_exc` (plugin-bug surface; `ComposerPluginCrashError.capture`) | `:942` | `:2602` |
+| `_arg_error_payload(exc, tool_name)` call site inside `except ToolArgumentError` arm | not present at rev-1 | `:2549` (added by F2 `70424cc1`) |
+| `_arg_error_payload` module-level helper definition | not present at rev-1 | `:3705` (added by F2; file-tail per AST-fingerprint pattern) |
+| `_PROMOTED_TOOL_NAMES` frozenset (9 promoted tools excluded from `_TOOL_REQUIRED_PATHS`) | not present at rev-1 | introduced via Phase 2 promotion-wave commits |
+
+`web/sessions/service.py` references:
+
+| Surface | Current (HEAD `f54ee7e8`) |
+|---|---|
+| `def persist_compose_turn(...)` sync primitive | `:723` |
+| `async def persist_compose_turn_async(...)` impl | `:980` |
+
+`web/sessions/_persist_payload.py` (Phase 1B shipped):
+
+| Surface | Current |
+|---|---|
+| `class StatePayload` | `:19` |
+| `class _ToolOutcome` | `:89` |
+| `class RedactedToolRow` | `:123` |
+| `class AuditOutcome` | `:132` |
+
+`web/sessions/models.py` (Phase 1A shipped):
+
+| Surface | Current |
+|---|---|
+| `audit_access_log_table` (INERT; Task 11 wires writer) | `:485` |
+| `writer_principal` CHECK constraint | `:502` |
+
+`web/sessions/routes.py` (route helpers):
+
+| Surface | Current |
+|---|---|
+| `_handle_convergence_error` | `:1139` |
+| `_handle_plugin_crash` | `:1283` |
+| `_handle_runtime_preflight_failure` | `:1433` |
+| `get_messages` (the endpoint Task 10 extends) | `:2821` |
+
+Implementers should use these current locations rather than the spec-text-inherited line numbers in the rev-1 plan body. The plan body's comments inside the inserted compose-loop code (`# service.py:867 — catches and continues...`) are kept verbatim for spec-cross-reference convenience; they reflect the spec author's intent and are not load-bearing line-precise references.
+
+### A.5 Anticipated open questions (rev-1 inheritance — all resolved by spec rev-5)
+
+The on-disk Phase 3 plan-authoring prompt at `notes/composer-phase-3-plan-prompt-2026-05-10.md` anticipated four "decisions to surface" before drafting. Rev-2 confirms all four are resolved by spec rev-5 and the current code; the implementer does NOT need to bring them back to the operator unless a contradiction surfaces during execution:
+
+1. **`failed_turn.transcript_url` cursor shape.** Resolved: user-message ID. Reference: Phase 4 plan line ~140 (`?since=u_1&include_tool_rows=true`) — Phase 4's tests pin the contract.
+2. **`provenance='tool_call'` write timing within the sync block.** Resolved: spec §5.2.2 step list — assistant row first, then per-tool (optional state row first, then tool row). All in one `engine.begin()` context. Implementation already at `web/sessions/service.py:723`.
+3. **Latency NFR vs CI infra.** Resolved: spec §1.4 splits sanity bound (CI, p95 ≤ 250 ms) from tight target (nightly bench, p95 ≤ 25 ms). Phase 3 done-when references the sanity bound only; the tight target is filed as tracking observation per §1.4.
+4. **Cancellation arrival-time enum coverage.** Resolved: spec §5.2.4 cancellation table + §8.3.1 `st_cancellation_arrival_time` nine-value enum — exhaustive coverage of the §5.5 failure-mode rows 5–11. Task 12c's strategy contract consumes this directly.
+
+### A.6 Phase 1B `_ToolOutcome` field check (Task 1 disposition)
+
+Task 1 of this plan is "verify `_ToolOutcome` matches spec §5.2.1." Rev-2 confirms via direct inspection at HEAD `f54ee7e8`:
+
+- `web/sessions/_persist_payload.py:89` defines `_ToolOutcome(call: Any, response: Any, error_class: str | None, error_message: str | None, pre_version: int, post_version: int)`.
+- Frozen, slots, `freeze_fields(self, "call", "response")` in `__post_init__`.
+- Matches spec §5.2.1 verbatim. Task 1 is a verify-only no-op at execution time; no commit, no follow-up ticket.
+
+If a future Phase 1 hygiene change adds or removes a field, Task 1's "Step 1: Confirm the field list" branch is the surface to catch it.
+
+---
+
+End of rev-2 plan, composer-progress-persistence Phase 3.

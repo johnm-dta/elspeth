@@ -559,7 +559,7 @@ def step_advance(
         return _advance_step_2_5(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_3_TRANSFORMS:
         return _advance_step_3(session, response, current_turn_type)
-    raise AssertionError(f"unhandled step: {session.step}")
+    raise InvariantError(f"unhandled step: {session.step}")
 
 
 def _advance_step_1(

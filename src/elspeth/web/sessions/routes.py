@@ -1950,7 +1950,7 @@ async def _dispatch_guided_respond(
         # after _advance_step_1 sets step_1_result).  Assert to keep mypy happy and
         # provide a clear crash message if this invariant is ever violated.
         if guided.step_1_result is None:
-            raise AssertionError(
+            raise InvariantError(
                 "inspect_and_confirm post-advance: guided.step_1_result is None after "
                 "_advance_step_1 ran — this is an invariant violation in the state machine."
             )
@@ -2471,7 +2471,7 @@ async def _dispatch_guided_respond(
         )
 
     # Unhandled branch — this is a dispatcher gap, not a user error.
-    raise AssertionError(
+    raise InvariantError(
         f"_dispatch_guided_respond: unhandled branch "
         f"current_step={current_step!r}, current_turn_type={current_turn_type!r}, "
         f"guided.step={guided.step!r}"
@@ -4346,8 +4346,19 @@ def create_session_router() -> APIRouter:
                 # First fetch for this step AND a turn exists: record TurnRecord,
                 # persist, emit audit.  When turn is None (terminal state, STEP_3,
                 # or no-recipe STEP_2_5 path) there is no turn to record.
-                assert turn_type is not None  # guaranteed: turn is not None → type set
-                assert payload_hash is not None  # guaranteed: turn is not None → hash set
+                # Guaranteed by the conditional assignments above: turn is not
+                # None on this branch, so both turn_type and payload_hash were
+                # populated from turn["type"] / stable_hash(turn["payload"]).
+                # Use InvariantError (not bare assert) so python -O does not
+                # strip the gate and silently feed None to TurnRecord.
+                if turn_type is None:
+                    raise InvariantError(
+                        "GET guided: turn is not None but turn_type is None — TurnType derivation skipped despite turn being present."
+                    )
+                if payload_hash is None:
+                    raise InvariantError(
+                        "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
+                    )
                 new_record = TurnRecord(
                     step=current_step,
                     turn_type=turn_type,

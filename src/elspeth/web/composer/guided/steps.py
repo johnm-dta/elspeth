@@ -195,7 +195,17 @@ def handle_step_2_sink(
         current_state = tool_result.updated_state
         last_result = tool_result
 
-    assert last_result is not None  # guaranteed: loop ran ≥1 time (empty check above)
+    if last_result is None:
+        # The empty-outputs check at the top of this function raises before the
+        # loop; therefore reaching this point with last_result=None means the
+        # loop body never ran despite resolved.outputs being non-empty — a bug
+        # in iteration logic that would otherwise silently feed None to the
+        # StepHandlerResult dataclass constructor.  Use InvariantError (not a
+        # bare assert) so python -O does not strip the gate.
+        raise InvariantError(
+            "step 2 sink handler loop completed with last_result=None despite "
+            "non-empty resolved.outputs — bug in the empty-outputs guard above"
+        )
 
     return StepHandlerResult(
         state=current_state,

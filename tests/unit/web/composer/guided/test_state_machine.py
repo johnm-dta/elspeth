@@ -658,6 +658,39 @@ class TestStepAdvance:
         with pytest.raises(InvariantError, match="_advance_step_3"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
+    def test_step_advance_unhandled_step_raises_invariant_error_not_assertion(self) -> None:
+        """Dispatcher fall-through is gated by InvariantError, not AssertionError.
+
+        Regression test for PR-review finding B2: AssertionError is stripped by
+        ``python -O`` and would silently fall through under optimized
+        deployment.  ``InvariantError`` subclasses ``Exception`` directly and
+        survives ``-O`` — see ``elspeth.web.composer.guided.errors``.
+
+        The closed enum ``GuidedStep`` makes this branch unreachable from valid
+        state, so we inject a sentinel via ``object.__setattr__`` on the frozen
+        dataclass to drive the dispatcher into the fall-through.
+        """
+        sess = GuidedSession.initial()
+        # Inject a step value the dispatcher cannot match.  ``object.__setattr__``
+        # bypasses ``frozen=True``; that's intentional here — the production code
+        # never mutates step in place, only via dataclasses.replace.
+        object.__setattr__(sess, "step", "not-a-real-step")
+        response = _make_response()
+        with pytest.raises(InvariantError, match="unhandled step"):
+            step_advance(sess, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+        # And explicitly: it is NOT an AssertionError subclass.  This pins the
+        # python -O contract: AssertionError raises are elided; InvariantError
+        # raises are not.
+        try:
+            object.__setattr__(sess, "step", "also-not-real")
+            step_advance(sess, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+        except InvariantError as exc:
+            assert not isinstance(exc, AssertionError), (
+                "InvariantError must NOT inherit from AssertionError; "
+                "python -O strips AssertionError raises and would silently "
+                "skip the dispatcher gate."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Task 2.5 tests: standalone terminal-failure helpers (spec §5.4)

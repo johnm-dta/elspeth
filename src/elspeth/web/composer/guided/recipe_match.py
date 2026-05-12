@@ -16,9 +16,15 @@ Two kinds of values are read from ``source.options`` and
     ``_execute_set_source_from_blob`` (tools.py) **and** by
     ``handle_step_1_source`` (steps.py) when the submitted path resolves to
     a known uploaded blob.  This is Tier-2 data (already validated by our
-    own code) — direct subscript access is mandatory, no ``.get()``.  A
-    missing ``blob_ref`` crashes with an informative ``InvariantError`` (the
-    resolver must only be called after blob-backed source commit).
+    own code) — direct subscript access is mandatory, no ``.get()``.
+
+    **Both predicates gate on ``"blob_ref" in source.options`` before returning
+    True**, so a CSV source without a blob upload will produce no recipe match
+    (returning ``None``) rather than crashing in the resolver.  CSV-without-blob
+    is a legitimate user configuration; the correct outcome is that the flow
+    continues to manual chain solving via Step 3.  Slot resolvers retain their
+    ``InvariantError`` guard as defence-in-depth for any future caller that
+    bypasses the predicate registry.
 
 Output paths (``sink.outputs[i].options.get("path", default)``)
     User/LLM-supplied via the SchemaForm, so genuinely Tier-3.  A default
@@ -145,13 +151,20 @@ _CLASSIFY_KEYWORDS: frozenset[str] = frozenset({"category", "label", "tag", "cla
 
 
 def _classify_predicate(source: SourceResolved, sink: SinkResolved) -> bool:
-    """Return True for CSV → single-JSON with a classifier-keyword required field.
+    """Return True for blob-backed CSV → single-JSON with a classifier-keyword required field.
+
+    Requires ``blob_ref`` in ``source.options``: a CSV source configured via
+    SchemaForm with a direct file path (no blob upload) has no ``blob_ref`` and
+    must NOT match — the slot resolver cannot run without it, and "no recipe match"
+    is the correct outcome (the flow continues to manual chain solving).
 
     The required_fields check is the only topology signal that separates
     classify from fork-coalesce-truncate (which also produces single JSON
     output from CSV). Without it, recipe selection would be ambiguous.
     """
     if not (_is_csv(source) and _has_single_json_output(sink)):
+        return False
+    if "blob_ref" not in source.options:
         return False
     return any(name in _CLASSIFY_KEYWORDS for name in sink.outputs[0].required_fields)
 
@@ -172,9 +185,14 @@ def _classify_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mappi
     ``source.options["blob_ref"]`` is the composer-canonical blob UUID.
     It is written by ``_execute_set_source_from_blob`` for blob-upload flows
     and by ``handle_step_1_source`` (steps.py) for SchemaForm flows where
-    the submitted path resolves to an uploaded blob.  A missing ``blob_ref``
-    is a state-machine invariant violation — this resolver must only be
-    reached for blob-backed sources.
+    the submitted path resolves to an uploaded blob.
+
+    The ``_classify_predicate`` gate now requires ``blob_ref in source.options``
+    before returning True, so this InvariantError is structurally unreachable from
+    any call path through ``match_recipe``.  It is kept as defence-in-depth: any
+    future caller that bypasses the predicate registry and invokes this resolver
+    directly will get a clear, immediately-informative crash rather than a silent
+    ``KeyError`` or opaque downstream failure.
     """
     if "blob_ref" not in source.options:
         raise InvariantError(
@@ -200,8 +218,17 @@ def _classify_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mappi
 
 
 def _split_threshold_predicate(source: SourceResolved, sink: SinkResolved) -> bool:
-    """Return True for CSV → two JSON outputs (regardless of required_fields)."""
-    return _is_csv(source) and _has_two_json_outputs(sink)
+    """Return True for blob-backed CSV → two JSON outputs (regardless of required_fields).
+
+    Requires ``blob_ref`` in ``source.options`` for the same reason as
+    ``_classify_predicate``: a CSV source without a blob upload has no
+    ``blob_ref``, and the slot resolver cannot run without it.  Returning
+    False here means "no recipe match" — the flow continues to manual chain
+    solving, which is the correct outcome for a non-blob-backed CSV source.
+    """
+    if not (_is_csv(source) and _has_two_json_outputs(sink)):
+        return False
+    return "blob_ref" in source.options
 
 
 def _split_threshold_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mapping[str, Any]:
@@ -214,6 +241,12 @@ def _split_threshold_slot_resolver(source: SourceResolved, sink: SinkResolved) -
     same contract as ``_classify_slot_resolver`` — must be present.
     ``sink.outputs[i].options.get("path", default)`` is Tier-3 with a
     rubber-stampable suggested default.
+
+    The ``_split_threshold_predicate`` gate now requires ``blob_ref in source.options``
+    before returning True, so this InvariantError is structurally unreachable from
+    any call path through ``match_recipe``.  It is kept as defence-in-depth: any
+    future caller that bypasses the predicate registry will get a clear crash
+    rather than a silent ``KeyError`` or opaque downstream failure.
     """
     if "blob_ref" not in source.options:
         raise InvariantError(

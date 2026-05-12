@@ -6,7 +6,12 @@ from __future__ import annotations
 import pytest
 
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.recipe_match import RecipeMatch, match_recipe
+from elspeth.web.composer.guided.recipe_match import (
+    RecipeMatch,
+    _classify_slot_resolver,
+    _split_threshold_slot_resolver,
+    match_recipe,
+)
 from elspeth.web.composer.guided.state_machine import (
     SinkOutputResolved,
     SinkResolved,
@@ -28,6 +33,21 @@ def _make_csv_source(blob_ref: str = "a1b2c3d4-0000-0000-0000-000000000001") -> 
     return SourceResolved(
         plugin="csv",
         options={"blob_ref": blob_ref},
+        observed_columns=("id", "text"),
+        sample_rows=({"id": "1", "text": "hello"},),
+    )
+
+
+def _make_csv_source_no_blob() -> SourceResolved:
+    """Return a minimal CSV SourceResolved WITHOUT blob_ref in options.
+
+    Models the legitimate case of a CSV source configured via SchemaForm with
+    a direct file path and no blob upload.  Neither recipe predicate should
+    match this source; ``match_recipe`` must return None.
+    """
+    return SourceResolved(
+        plugin="csv",
+        options={"path": "/data/my_file.csv"},
         observed_columns=("id", "text"),
         sample_rows=({"id": "1", "text": "hello"},),
     )
@@ -265,41 +285,80 @@ class TestNoMatch:
 
 
 # ---------------------------------------------------------------------------
-# Source blob_ref missing from options (invariant violation — offensive crash)
+# CSV source without blob_ref: predicate returns False → no recipe match
 # ---------------------------------------------------------------------------
 
 
-class TestMissingBlobRef:
-    def test_classify_raises_when_blob_ref_absent(self) -> None:
-        """source.options without blob_ref → ValueError (state-machine invariant).
+class TestCsvNoBlobRef:
+    """CSV sources without a blob_ref (direct file-path configuration) are
+    legitimate user configurations.  Both predicates gate on blob_ref presence
+    before returning True, so ``match_recipe`` returns None rather than crashing.
+    "No recipe match" is the correct outcome — the guided flow continues to
+    manual chain solving via Step 3.
 
-        The slot resolver must only be reached for blob-backed sources.
-        When blob_ref is absent it means handle_step_1_source (steps.py)
-        did not enrich the options, which is a dispatcher bug — crash loudly
-        rather than silently producing an empty source_blob_id that fails
-        recipe validation with an opaque error later.
-        """
-        source = SourceResolved(
-            plugin="csv",
-            options={},  # no blob_ref
-            observed_columns=("text",),
-            sample_rows=(),
-        )
+    Asymmetry probes: reverting either predicate's blob_ref check causes these
+    tests to fail (the predicate returns True and the slot resolver crashes with
+    InvariantError, which leaks up through match_recipe as an unhandled exception).
+    """
+
+    def test_classify_returns_none_when_blob_ref_absent(self) -> None:
+        """CSV + classifier-keyword sink, but no blob_ref → None (no recipe match)."""
+        source = _make_csv_source_no_blob()
+        sink = _make_single_json_sink(required_fields=("category",))
+        # Predicate gates out on missing blob_ref; resolver never reached.
+        assert match_recipe(source, sink) is None
+
+    def test_split_threshold_returns_none_when_blob_ref_absent(self) -> None:
+        """CSV + two-JSON sink, but no blob_ref → None (no recipe match)."""
+        source = _make_csv_source_no_blob()
+        sink = _make_two_json_sink()
+        # Predicate gates out on missing blob_ref; resolver never reached.
+        assert match_recipe(source, sink) is None
+
+    def test_classify_no_blob_does_not_raise(self) -> None:
+        """Confirms the predicate change: no InvariantError leaks from match_recipe
+        when blob_ref is absent.  If the predicate's blob_ref check were reverted,
+        the resolver would raise InvariantError and this test would fail."""
+        source = _make_csv_source_no_blob()
+        sink = _make_single_json_sink(required_fields=("label",))
+        # Must NOT raise — returns None silently.
+        result = match_recipe(source, sink)
+        assert result is None
+
+    def test_split_threshold_no_blob_does_not_raise(self) -> None:
+        """Same probe for the split-threshold predicate."""
+        source = _make_csv_source_no_blob()
+        sink = _make_two_json_sink()
+        result = match_recipe(source, sink)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Resolver-level defence-in-depth (InvariantError still raised directly)
+# ---------------------------------------------------------------------------
+
+
+class TestResolverDefenceInDepth:
+    """The slot resolvers retain their InvariantError guard even though the
+    predicates now prevent blob_ref-less sources from ever reaching them through
+    ``match_recipe``.  These tests call the resolvers directly to prove the
+    defence-in-depth guard is intact — any future caller that bypasses the
+    predicate registry will get a clear crash rather than a silent KeyError.
+    """
+
+    def test_classify_resolver_crashes_directly_without_blob_ref(self) -> None:
+        """_classify_slot_resolver called directly with no blob_ref → InvariantError."""
+        source = _make_csv_source_no_blob()
         sink = _make_single_json_sink(required_fields=("category",))
         with pytest.raises(InvariantError, match="blob_ref"):
-            match_recipe(source, sink)
+            _classify_slot_resolver(source, sink)
 
-    def test_threshold_raises_when_blob_ref_absent(self) -> None:
-        """split-by-numeric-threshold resolver also crashes on missing blob_ref."""
-        source = SourceResolved(
-            plugin="csv",
-            options={},  # no blob_ref
-            observed_columns=("amount",),
-            sample_rows=(),
-        )
+    def test_split_threshold_resolver_crashes_directly_without_blob_ref(self) -> None:
+        """_split_threshold_slot_resolver called directly with no blob_ref → InvariantError."""
+        source = _make_csv_source_no_blob()
         sink = _make_two_json_sink()
         with pytest.raises(InvariantError, match="blob_ref"):
-            match_recipe(source, sink)
+            _split_threshold_slot_resolver(source, sink)
 
 
 # ---------------------------------------------------------------------------

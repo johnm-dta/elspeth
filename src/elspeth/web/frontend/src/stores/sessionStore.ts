@@ -534,10 +534,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         stateVersions: [],
         isComposing: false,
         selectedNodeId: null, // Clear selection for forked session
+        // Clear guided state synchronously — the fork is a new session context;
+        // the parent's guidedSession must not bleed into the fork's UI before
+        // startGuided resolves.  Mirrors selectSession lines 225-228.
+        guidedSession: null,
+        guidedNextTurn: null,
+        guidedTerminal: null,
       }));
 
       // Fire-and-forget: refresh blob list for the NEW forked session
       useBlobStore.getState().loadBlobs(result.session.id);
+
+      // Auto-start guided mode for the forked session — same pattern as
+      // selectSession and createSession.  The backend initialises a fresh
+      // GuidedSession on the first GET /guided call (spec §5.2, errata C7).
+      // The stale-fetch guard inside startGuided ensures the response is
+      // dropped if the user switches away again before it resolves.
+      void get().startGuided(result.session.id);
     } catch {
       set({
         isComposing: false,
@@ -549,8 +562,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   // Guided-mode actions
   async startGuided(sessionId: string) {
+    // Capture which session this fetch belongs to before the await.
+    // Mirrors the active-session guard in loadComposerProgress (lines 367-372):
+    // if the user switches sessions while the request is in flight, the
+    // stale response is silently dropped rather than overwriting the newly
+    // active session's guided state.
+    const requestedSessionId = sessionId;
     try {
       const response = await api.getGuided(sessionId);
+      // Stale-fetch guard (Codex #3): drop the response if the active session
+      // changed while the request was in flight.
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       // Atomically replace all 4 wire fields — server is authoritative (spec §7.3)
       set({
         guidedSession: response.guided_session,
@@ -575,8 +599,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (activeSessionId === null) {
       throw new Error("respondGuided called without active session");
     }
+    // Capture the session identity before the await (Codex #4 stale-fetch guard).
+    // Mirrors the active-session guard in loadComposerProgress (lines 367-372).
+    const requestedSessionId = activeSessionId;
     try {
       const response = await api.respondGuided(activeSessionId, body);
+      // Stale-fetch guard (Codex #4): drop the response if the active session
+      // changed while the request was in flight.
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
       set({
         guidedSession: response.guided_session,

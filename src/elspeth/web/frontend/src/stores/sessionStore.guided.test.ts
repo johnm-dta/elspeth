@@ -111,6 +111,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
       sampleGetGuidedResponse,
     );
 
+    // Pre-seed activeSessionId to match the requested session.  The stale-fetch
+    // guard (Codex #3) requires activeSessionId === requestedSessionId after the
+    // await; without this pre-seed the guard would drop the response and the
+    // assertions below would fail.  Real callers (createSession, selectSession,
+    // forkFromMessage) always set activeSessionId synchronously before firing
+    // startGuided, so this invariant holds in production.
+    useSessionStore.setState({ activeSessionId: "sess-1" });
+
     await useSessionStore.getState().startGuided("sess-1");
 
     const state = useSessionStore.getState();
@@ -247,5 +255,154 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedSession).toBeNull();
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
+  });
+
+  // ── Test 9: startGuided stale-fetch guard (Codex #3) ─────────────────────
+  //
+  // If the user switches to a different session while getGuided is in flight
+  // for sess-A, the resolved response must be dropped and the new session's
+  // guided state must remain null.
+
+  it("startGuided: drops response when active session changes before resolution", async () => {
+    const { getGuided } = await import("@/api/client");
+
+    // Controllable promise — we resolve it manually after simulating a session switch.
+    let resolveGuided!: (v: GetGuidedResponse) => void;
+    (getGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise<GetGuidedResponse>((resolve) => {
+        resolveGuided = resolve;
+      }),
+    );
+
+    // The caller always sets activeSessionId before firing startGuided.
+    useSessionStore.setState({ activeSessionId: "sess-A" });
+    const startPromise = useSessionStore.getState().startGuided("sess-A");
+
+    // Simulate a session switch happening while the request is in flight.
+    useSessionStore.setState({ activeSessionId: "sess-B" });
+
+    // Now let the request resolve with sess-A's data.
+    resolveGuided(sampleGetGuidedResponse);
+    await startPromise;
+
+    // The stale response must have been dropped — sess-B's guided state
+    // must remain null.
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+    expect(state.compositionState).toBeNull();
+  });
+
+  // ── Test 10: respondGuided stale-fetch guard (Codex #4) ──────────────────
+  //
+  // If the user switches sessions while respondGuided's API call is in flight,
+  // the resolved response must be dropped and the new session's state unchanged.
+
+  it("respondGuided: drops response when active session changes before resolution", async () => {
+    const { respondGuided } = await import("@/api/client");
+
+    // Controllable promise — we resolve it manually after simulating a session switch.
+    let resolveRespond!: (v: GuidedRespondResponse) => void;
+    (respondGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise<GuidedRespondResponse>((resolve) => {
+        resolveRespond = resolve;
+      }),
+    );
+
+    // Pre-seed: sess-A has existing guided state before the respond call.
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedTerminal: null,
+    });
+
+    const respondPromise = useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+
+    // Simulate a session switch before the response arrives.
+    useSessionStore.setState({
+      activeSessionId: "sess-B",
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
+    });
+
+    // Let sess-A's response arrive.
+    resolveRespond(sampleRespondResponse);
+    await respondPromise;
+
+    // The stale response must have been dropped — sess-B's guided state
+    // must remain null (not overwritten by sess-A's respond result).
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+  });
+
+  // ── Test 11: forkFromMessage clears guided state and reloads (Codex #6) ──
+  //
+  // After a successful fork:
+  // 1. The fork's guided state must start null (synchronous clear).
+  // 2. startGuided must be called for the new fork session.
+
+  it("forkFromMessage: clears guided state and fires startGuided for fork", async () => {
+    const { forkFromMessage, getGuided } = await import("@/api/client");
+
+    const forkResult = {
+      session: { id: "sess-fork", title: "Fork", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+      messages: [],
+      composition_state: null,
+    };
+
+    (forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce(forkResult);
+
+    // Controllable promise for startGuided so we can verify it was called
+    // without letting it resolve (keeps test deterministic).
+    let resolveGuided!: (v: GetGuidedResponse) => void;
+    (getGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise<GetGuidedResponse>((resolve) => {
+        resolveGuided = resolve;
+      }),
+    );
+
+    // Pre-seed: parent session has guided state that must NOT bleed into fork.
+    useSessionStore.setState({
+      activeSessionId: "sess-parent",
+      sessions: [{ id: "sess-parent", title: "Parent", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }],
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedTerminal: null,
+    });
+
+    // Start the fork — this triggers the async forkFromMessage path.
+    const forkPromise = useSessionStore.getState().forkFromMessage("msg-1", "new content");
+    await forkPromise;
+
+    // Guided state must be null immediately after the set() (synchronous clear).
+    const state = useSessionStore.getState();
+    expect(state.activeSessionId).toBe("sess-fork");
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+
+    // startGuided must have been invoked for the fork session.
+    expect(getGuided).toHaveBeenCalledWith("sess-fork");
+
+    // Let startGuided resolve — must write into the fork's guided state
+    // since activeSessionId is still "sess-fork".
+    resolveGuided(sampleGetGuidedResponse);
+    // Give microtask queue a tick to drain.
+    await Promise.resolve();
+
+    const stateAfterReload = useSessionStore.getState();
+    expect(stateAfterReload.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
   });
 });

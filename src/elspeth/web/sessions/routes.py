@@ -1744,6 +1744,20 @@ async def _dispatch_guided_respond(
                         f"schema_form response at step 1 edited_values['sample_rows'] must be a list; got {type(sample_rows_raw).__name__}"
                     ),
                 )
+            # Codex #16: validate each element is a Mapping before calling
+            # dict(r).  A non-Mapping element (e.g. int, str, list) triggers
+            # TypeError from dict() — uncontrolled 500 instead of a clear 400.
+            # The HTTP boundary is a trust boundary: external data may contain
+            # arbitrary JSON values at any list position.
+            for _sr_idx, _sr_elem in enumerate(sample_rows_raw):
+                if not isinstance(_sr_elem, Mapping):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"schema_form response at step 1 edited_values['sample_rows'][{_sr_idx}] "
+                            f"must be an object; got {type(_sr_elem).__name__}"
+                        ),
+                    )
             resolved = SourceResolved(
                 plugin=plugin_name,
                 options=dict(options_raw),

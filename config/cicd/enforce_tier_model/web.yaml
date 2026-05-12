@@ -1265,6 +1265,15 @@ allow_hits:
     type in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=684ae8a3c5af57d9
+  owner: web-sessions
+  reason: >-
+    HTTP-boundary trust-boundary validation (Codex 16) - each element of Step-1 SCHEMA_FORM edited_values sample_rows
+    must be a Mapping before dict(r) is called; isinstance here is offensive validation (raises HTTPException 400 naming
+    the offending index), not error suppression. Without this guard a non-Mapping element (int, str, list) triggers
+    TypeError inside the tuple comprehension, yielding an uncontrolled 500 instead of a deterministic 400.
+  safety: Contract violation raises HTTPException 400 with the offending index and type name in the detail; no fall-through, no fabrication.
+  expires: null
 - key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
   owner: web-validation
   reason: Union type dispatch — function receives PluginNotFoundError | PluginConfigError, isinstance needed to read component_type

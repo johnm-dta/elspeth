@@ -1472,3 +1472,107 @@ class TestCodex12ControlSignalValidation:
         assert resp.status_code == 400, resp.json()
         detail = resp.json()["detail"]
         assert "Unknown control_signal" in detail
+
+
+# ---------------------------------------------------------------------------
+# Wire-validation tests — Codex #16 (per-element sample_rows validation)
+# ---------------------------------------------------------------------------
+
+
+class TestCodex16SampleRowsElementValidation:
+    """Codex #16: per-element Mapping check for sample_rows at Step 1 SCHEMA_FORM.
+
+    The outer-container check (list vs non-list) existed before this change.
+    The new guard catches non-Mapping elements inside the list, which
+    previously triggered an uncontrolled TypeError from dict(r) -> 500.
+    """
+
+    def _drive_to_step_1_schema_form(self, client: TestClient, session_id: str) -> None:
+        """Drive to the Step 1 SCHEMA_FORM state."""
+        _get_guided(client, session_id)
+        _respond(client, session_id, chosen=["csv"])
+
+    def test_non_mapping_elements_in_sample_rows_return_400(self, composer_test_client: TestClient) -> None:
+        """sample_rows containing non-Mapping elements (int, str, list) -> 400 naming the index."""
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        self._drive_to_step_1_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                    "observed_columns": ["text"],
+                    "sample_rows": [42, "string", []],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # The error message must name the offending list position.
+        # Detail text form: edited_values['sample_rows'][N] must be an object
+        assert "'sample_rows'][" in detail
+        assert "must be an object" in detail
+
+    def test_single_non_mapping_at_index_1_names_index(self, composer_test_client: TestClient) -> None:
+        """One valid row followed by a non-Mapping element: error names index 1."""
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        self._drive_to_step_1_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                    "observed_columns": ["text"],
+                    "sample_rows": [{"text": "ok"}, 99],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "'sample_rows'][1]" in detail
+
+    def test_valid_sample_rows_pass_through(self, composer_test_client: TestClient) -> None:
+        """Asymmetry probe: a well-formed sample_rows list of Mapping elements does not
+        trigger the guard and allows the request to reach the step handler."""
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        self._drive_to_step_1_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                    "observed_columns": ["text"],
+                    "sample_rows": [{"text": "Hello"}, {"text": "World"}],
+                },
+            },
+        )
+        # Guard passes; step handler runs and advances to Step 2 -> 200.
+        assert resp.status_code == 200, resp.json()
+
+    def test_empty_sample_rows_list_is_valid(self, composer_test_client: TestClient) -> None:
+        """An empty sample_rows list has no elements to fail the per-element check."""
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        self._drive_to_step_1_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                    "observed_columns": [],
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 200, resp.json()

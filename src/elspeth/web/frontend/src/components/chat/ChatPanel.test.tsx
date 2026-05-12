@@ -153,7 +153,7 @@ describe("ChatPanel mode discriminator", () => {
       guidedNextTurn: singleSelectTurn(),
     });
 
-    render(<ChatPanel />);
+    const { container } = render(<ChatPanel />);
 
     // GuidedTurn → SingleSelectTurn renders a <fieldset> (implicit role="group")
     // with the question as the accessible name (via <legend>).
@@ -165,6 +165,18 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.getByRole("button", { name: "Exit to freeform" }),
     ).toBeInTheDocument();
+
+    // Discriminator-anchored class assertion: pins the guided-active branch to
+    // its own output (the `chat-panel--guided` class on `#chat-main`), parallel
+    // to how the completed-branch test asserts `chat-panel--completed`. Without
+    // this, a future change to `SingleSelectTurn`'s DOM (e.g., swap to
+    // `<div role="radiogroup">`) would break the `getByRole("group", …)` check
+    // and the failure would point at the discriminator test rather than at the
+    // widget. The class assertion fails only when the discriminator itself
+    // misroutes.
+    const chatMain = container.querySelector("#chat-main");
+    expect(chatMain).not.toBeNull();
+    expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
 
     // Freeform surface suppressed.
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
@@ -215,11 +227,16 @@ describe("ChatPanel mode discriminator", () => {
   });
 
   it("does not render ExitToFreeformButton on the completed surface (regression pin for elspeth-obs-0a1002de6d)", () => {
-    // Same fixture as the completed-surface test, plus an asserted absence.
-    // The button label "Exit to freeform" is identical to ExitToFreeformButton.tsx.
-    // If the discriminator forgot to suppress ExitToFreeformButton in the completed
-    // branch, three identical-action buttons would coexist on the completed surface
-    // (Save and exit, Drop to freeform to keep editing, Exit to freeform).
+    // Regression pin for observation `elspeth-obs-0a1002de6d`. The completed
+    // branch renders `CompletionSummary` alone — it must NOT also render
+    // `<ExitToFreeformButton />`. If a future change forgets the if/else split
+    // and rehoists the button above the discriminator, a button with label
+    // "Exit to freeform" will appear on the completed surface alongside
+    // `CompletionSummary`'s "Save and exit" and "Drop to freeform to keep
+    // editing" buttons (which have wire-identical semantics but different UX
+    // framing). This `queryByRole` predicate catches that regression — it
+    // returns `null` when the button is absent (correct state) and a non-null
+    // element when present (regression).
     const terminal: TerminalState = {
       kind: "completed",
       reason: null,

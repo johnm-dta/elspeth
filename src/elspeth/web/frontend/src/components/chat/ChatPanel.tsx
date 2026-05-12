@@ -149,6 +149,12 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   // alongside a completed terminal still surfaces the summary (correct UX)
   // rather than dispatching a widget.
   //
+  // When `terminal.kind === "exited_to_freeform"`, branch 1 does not match
+  // (kind !== "completed") and branch 2 does not match (`!guidedSession.terminal`
+  // is false because `terminal` is set). Execution falls through to the existing
+  // freeform body — which is the correct outcome (the user has exited; show
+  // them the chat surface).
+  //
   // Both branches preserve `id="chat-main"` so the skip-link target is honoured;
   // the modifier class (`--guided` / `--completed`) provides a per-branch hook
   // for future CSS without coupling layout to the freeform surface.

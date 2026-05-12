@@ -390,6 +390,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     session_service = SessionServiceImpl(session_engine, data_dir=settings.data_dir)
     app.state.session_service = session_service
+    app.state.session_engine = session_engine  # available to guided step handlers
 
     # --- Blob service ---
     app.state.blob_service = BlobServiceImpl(

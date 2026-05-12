@@ -9,6 +9,12 @@ import type {
   ApiError,
   ValidationResult,
 } from "@/types/api";
+import type {
+  GuidedSession,
+  TurnPayload,
+  TerminalState,
+  GuidedRespondRequest,
+} from "@/types/guided";
 import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
@@ -99,6 +105,15 @@ interface SessionState {
   loadStateVersions: () => Promise<void>;
   isLoadingVersions: boolean;
   revertToVersion: (stateId: string) => Promise<void>;
+
+  // Guided-mode protocol state — all three are null when not in a guided session
+  guidedSession: GuidedSession | null;
+  guidedNextTurn: TurnPayload | null;
+  guidedTerminal: TerminalState | null;
+  // Guided-mode actions
+  startGuided: (sessionId: string) => Promise<void>;
+  respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  exitToFreeform: () => Promise<void>;
   clearError: () => void;
   injectSystemMessage: (content: string, stableId?: string) => void;
   reset: () => void;
@@ -115,6 +130,9 @@ const initialState = {
   isLoadingVersions: false,
   error: null as string | null,
   selectedNodeId: null as string | null,
+  guidedSession: null as GuidedSession | null,
+  guidedNextTurn: null as TurnPayload | null,
+  guidedTerminal: null as TerminalState | null,
 };
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -142,7 +160,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         stateVersions: [],
         error: null,
         selectedNodeId: null, // Clear selection for new session
+        guidedSession: null,
+        guidedNextTurn: null,
+        guidedTerminal: null,
       }));
+      // Auto-start guided mode.  New sessions are created with
+      // GuidedSession.initial() already attached by the backend (spec §5.2,
+      // errata C7).  startGuided's own catch block handles failures without
+      // clobbering the session we just set above.
+      void get().startGuided(session.id);
     } catch {
       set({ error: "Failed to create session. Please try again." });
     }
@@ -169,6 +195,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 stateVersions: [],
                 isComposing: false,
                 selectedNodeId: null,
+                guidedSession: null,
+                guidedNextTurn: null,
+                guidedTerminal: null,
               }
             : {}),
         };
@@ -193,6 +222,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       isComposing: false,
       error: null,
       selectedNodeId: null, // Clear selection when switching sessions
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
     });
 
     try {
@@ -201,6 +233,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         api.fetchCompositionState(id),
       ]);
       set({ messages, compositionState });
+
+      // Auto-start guided mode for the selected session.
+      //
+      // Per spec §5.2 and errata C7: new sessions are created with
+      // GuidedSession.initial() already attached by the backend.  The
+      // GET /guided endpoint auto-initialises on first call and returns the
+      // current step (or terminal state for sessions that have already
+      // exited to freeform).
+      //
+      // startGuided is fire-and-forget here: its own catch block sets the
+      // error field without clobbering the session/messages/compositionState
+      // we just loaded.  ChatPanel's guided-mode discriminator falls through
+      // to the freeform surface when guidedSession is null (startup race) or
+      // when terminal.kind === "exited_to_freeform" — both safe.
+      void get().startGuided(id);
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);
@@ -487,10 +534,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         stateVersions: [],
         isComposing: false,
         selectedNodeId: null, // Clear selection for forked session
+        // Clear guided state synchronously — the fork is a new session context;
+        // the parent's guidedSession must not bleed into the fork's UI before
+        // startGuided resolves.  Mirrors selectSession lines 225-228.
+        guidedSession: null,
+        guidedNextTurn: null,
+        guidedTerminal: null,
       }));
 
       // Fire-and-forget: refresh blob list for the NEW forked session
       useBlobStore.getState().loadBlobs(result.session.id);
+
+      // Auto-start guided mode for the forked session — same pattern as
+      // selectSession and createSession.  The backend initialises a fresh
+      // GuidedSession on the first GET /guided call (spec §5.2, errata C7).
+      // The stale-fetch guard inside startGuided ensures the response is
+      // dropped if the user switches away again before it resolves.
+      void get().startGuided(result.session.id);
     } catch {
       set({
         isComposing: false,
@@ -498,6 +558,80 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: "Failed to fork conversation. Please try again.",
       });
     }
+  },
+
+  // Guided-mode actions
+  async startGuided(sessionId: string) {
+    // Capture which session this fetch belongs to before the await.
+    // Mirrors the active-session guard in loadComposerProgress (lines 367-372):
+    // if the user switches sessions while the request is in flight, the
+    // stale response is silently dropped rather than overwriting the newly
+    // active session's guided state.
+    const requestedSessionId = sessionId;
+    try {
+      const response = await api.getGuided(sessionId);
+      // Stale-fetch guard (Codex #3): drop the response if the active session
+      // changed while the request was in flight.
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      // Atomically replace all 4 wire fields — server is authoritative (spec §7.3)
+      set({
+        guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
+      });
+    } catch {
+      // Error path: set error string, leave existing guided state alone.
+      // Mirrors selectSession lines 207-209: set error, don't clobber fields
+      // that were already loaded. The caller can inspect error to decide whether
+      // to surface a retry prompt.
+      set({ error: "Failed to load guided session. Please try again." });
+    }
+  },
+
+  async respondGuided(body: GuidedRespondRequest) {
+    const { activeSessionId } = get();
+    // Offensive guard — caller must not invoke this without an active session.
+    // Per CLAUDE.md: "Proactively detect invalid states and throw meaningful
+    // exceptions." Using ?. to silently skip would mask a programmer error.
+    if (activeSessionId === null) {
+      throw new Error("respondGuided called without active session");
+    }
+    // Capture the session identity before the await (Codex #4 stale-fetch guard).
+    // Mirrors the active-session guard in loadComposerProgress (lines 367-372).
+    const requestedSessionId = activeSessionId;
+    try {
+      const response = await api.respondGuided(activeSessionId, body);
+      // Stale-fetch guard (Codex #4): drop the response if the active session
+      // changed while the request was in flight.
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
+      set({
+        guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
+      });
+    } catch {
+      set({ error: "Failed to submit guided response. Please try again." });
+    }
+  },
+
+  async exitToFreeform() {
+    // Sugar over respondGuided — sets control_signal and nulls all choice fields.
+    // All state mutation is handled by respondGuided.
+    await get().respondGuided({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "exit_to_freeform",
+    });
   },
 
   async loadStateVersions() {

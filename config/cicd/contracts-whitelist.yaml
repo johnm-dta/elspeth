@@ -549,6 +549,38 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/state.py:CompositionState.from_dict:d"
   - "src/elspeth/web/composer/state.py:CompositionState.with_metadata:patch"
   - "src/elspeth/web/composer/state.py:CompositionState.to_dict:return"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # WEB COMPOSER — GuidedSession state-machine serialization (Tier 1 audit)
+  # from_dict() accepts plain dicts from JSON deserialization (Tier 1 read).
+  # to_dict() returns plain dicts for SQLite JSON-column serialization.
+  # All from_dict() implementations are strict: direct key access, enum
+  # construction, KeyError/ValueError chained via `from exc`.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/web/composer/guided/state_machine.py:TerminalState.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:TerminalState.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:TurnRecord.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:TurnRecord.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:SourceResolved.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:SourceResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:SinkOutputResolved.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:SinkOutputResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:SinkResolved.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:SinkResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:ChainProposal.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:ChainProposal.from_dict:d"
+  - "src/elspeth/web/composer/guided/state_machine.py:GuidedSession.to_dict:return"
+  - "src/elspeth/web/composer/guided/state_machine.py:GuidedSession.from_dict:d"
+  # RecipeMatch serialization — staged offer persisted in GuidedSession.step_2_5_recipe_offer.
+  # to_dict() / from_dict() follow the same Tier-1-strict pattern as the rest of the
+  # guided state-machine types (direct key access, KeyError/ValueError chained via `from exc`).
+  - "src/elspeth/web/composer/guided/recipe_match.py:RecipeMatch.to_dict:return"
+  - "src/elspeth/web/composer/guided/recipe_match.py:RecipeMatch.from_dict:d"
+
   # YAML generator — strips web-specific metadata from plugin options dicts
   # Options are dynamic (vary by plugin) so dict[str, Any] is the correct type
   - "src/elspeth/web/composer/yaml_generator.py:_strip_web_metadata:options"

@@ -2,11 +2,16 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useComposer } from "@/hooks/useComposer";
+import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
 import { MessageBubble } from "./MessageBubble";
 import { ComposingIndicator } from "./ComposingIndicator";
 import { ChatInput } from "./ChatInput";
 import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
+import { CompletionSummary } from "./guided/CompletionSummary";
+import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { GuidedHistory } from "./guided/GuidedHistory";
+import { GuidedTurn } from "./guided/GuidedTurn";
 import type { BlobMetadata, ChatMessage } from "@/types/api";
 
 interface ChatPanelProps {
@@ -27,6 +32,12 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const composerProgress = useSessionStore((s) => s.composerProgress);
   const clearError = useSessionStore((s) => s.clearError);
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage);
+  // Guided-mode discriminator state.  Selectors are hoisted here (not inside a
+  // branch) to comply with React's Rules of Hooks; the discriminator early
+  // returns below decide which surface to render based on these values.
+  const guidedSession = useSessionStore((s) => s.guidedSession);
+  const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
+  const respondGuided = useSessionStore((s) => s.respondGuided);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const { sendMessage, retryMessage, isComposing, error } = useComposer();
@@ -34,6 +45,7 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const guidedLogRef = useRef<HTMLDivElement>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showBlobManager, setShowBlobManager] = useState(false);
   const [inputText, setInputText] = useState("");
@@ -73,6 +85,25 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   useEffect(() => {
     setShowScrollButton(false);
   }, [activeSessionId]);
+
+  // Spec §7.4 — maintain focus on the first interactive element of the new turn
+  // after step advance.  Without this, a step-advancing button click unmounts
+  // the button before the browser can return focus elsewhere, so focus falls to
+  // <body>.  Keyboard users then have to Tab from the very top to reach the new
+  // turn widget — unacceptable for general a11y.
+  //
+  // Keyed on step_index: fires only when the guided wizard advances to a new
+  // step, not on every store mutation that produces a new TurnPayload object
+  // with the same step_index.  The ref-null short-circuit handles all non-guided
+  // branches implicitly — guidedLogRef.current is null whenever the
+  // chat-panel-guided-log div is not mounted (completed surface, freeform
+  // surface, no session).  Observation elspeth-obs-5ea21f94af documents the
+  // original defect and the chosen Option (c) implementation.
+  useEffect(() => {
+    if (!guidedLogRef.current) return;
+    const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    first?.focus();
+  }, [guidedNextTurn?.step_index]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -122,6 +153,89 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
       >
         Select a session from the sidebar, or create a new one to get
         started.
+      </div>
+    );
+  }
+
+  // ── Guided-mode discriminator ────────────────────────────────────────────────
+  //
+  // Precedence (intentional):
+  //   1. terminal.kind === "completed"  → CompletionSummary surface.
+  //   2. active guided session + non-null next turn  → GuidedTurn surface.
+  //   3. anything else (no guidedSession, exited_to_freeform terminal, or a
+  //      transient state where guidedSession is set but guidedNextTurn is null)
+  //      → fall through to the freeform body below.
+  //
+  // The completed branch is checked FIRST so that a stale `guidedNextTurn`
+  // alongside a completed terminal still surfaces the summary (correct UX)
+  // rather than dispatching a widget.
+  //
+  // When `terminal.kind === "exited_to_freeform"`, branch 1 does not match
+  // (kind !== "completed") and branch 2 does not match (`!guidedSession.terminal`
+  // is false because `terminal` is set). Execution falls through to the existing
+  // freeform body — which is the correct outcome (the user has exited; show
+  // them the chat surface).
+  //
+  // Both branches preserve `id="chat-main"` so the skip-link target is honoured;
+  // the modifier class (`--guided` / `--completed`) provides a per-branch hook
+  // for future CSS without coupling layout to the freeform surface.
+  if (guidedSession?.terminal?.kind === "completed") {
+    return (
+      <div
+        id="chat-main"
+        className="chat-panel chat-panel--completed"
+        aria-label="Pipeline summary"
+      >
+        <CompletionSummary terminal={guidedSession.terminal} />
+      </div>
+    );
+  }
+
+  if (guidedSession && !guidedSession.terminal && guidedNextTurn) {
+    return (
+      <div
+        id="chat-main"
+        className="chat-panel chat-panel--guided"
+        aria-label="Guided composer"
+      >
+        {/*
+          aria-live region scope (mirrors the freeform body's
+          `<div className="chat-panel-messages">` region below).
+
+          Only the live turn surface (<GuidedTurn>) lives inside the role="log"
+          region.  Rationale:
+
+          * GuidedHistory is historical context — already-resolved turns that
+            were announced when they first arrived.  Replaying them through the
+            live region on every step transition would create redundant SR
+            chatter; keep it outside.
+          * ExitToFreeformButton is a persistent affordance (always present
+            in guided mode).  It is not "new content" on turn change, so it
+            also lives outside the log region.
+          * GuidedTurn replaces in place when a new step's payload arrives.
+            That replacement IS the "new content" event that SRs need to hear
+            about — hence the wrapping log region.
+
+          Load-bearing for `InspectAndConfirmTurn.tsx` — search for the
+          "Warnings accessibility" comment block (the widget's warnings <aside>
+          deliberately omits its own aria-live region under the convention that
+          the parent ChatPanel wraps turn content in one).
+        */}
+        <GuidedHistory history={guidedSession.history} />
+        <div
+          ref={guidedLogRef}
+          className="chat-panel-guided-log"
+          role="log"
+          aria-label="Guided wizard step"
+          aria-live="polite"
+          aria-relevant="additions"
+        >
+          <GuidedTurn
+            turn={guidedNextTurn}
+            onSubmit={(body) => void respondGuided(body)}
+          />
+        </div>
+        <ExitToFreeformButton />
       </div>
     );
   }

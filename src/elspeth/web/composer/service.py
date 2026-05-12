@@ -23,7 +23,10 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Final, Literal, NoReturn, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.guided.state_machine import TerminalState
 
 import structlog
 from opentelemetry import metrics
@@ -1607,6 +1610,7 @@ class ComposerServiceImpl:
         session_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
+        guided_terminal: TerminalState | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop with dual-counter budget.
 
@@ -1615,6 +1619,10 @@ class ComposerServiceImpl:
             messages: Chat history as plain dicts (pre-converted from
                 ChatMessageRecord by route handler; seam contract B).
             state: The current CompositionState.
+            guided_terminal: When set, the resolved TerminalState from the
+                completed guided session; triggers the layered mode-transition
+                prompt for this first freeform turn (spec §8.2). The caller
+                is responsible for gate logic and ``transition_consumed`` flip.
 
         Returns:
             ComposerResult with assistant message and updated state.
@@ -1630,7 +1638,7 @@ class ComposerServiceImpl:
         from litellm.exceptions import APIError as LiteLLMAPIError
 
         try:
-            return await self._compose_loop(message, messages, state, session_id, user_id, deadline, progress)
+            return await self._compose_loop(message, messages, state, session_id, user_id, deadline, progress, guided_terminal)
         except ComposerConvergenceError as exc:
             await _emit_progress(
                 progress,
@@ -1730,6 +1738,7 @@ class ComposerServiceImpl:
         user_id: str | None = None,
         deadline: float = 0.0,
         progress: ComposerProgressSink | None = None,
+        guided_terminal: TerminalState | None = None,
     ) -> ComposerResult:
         """Inner composition loop with dual-counter budget tracking.
 
@@ -1743,9 +1752,13 @@ class ComposerServiceImpl:
         LLM calls are wrapped in per-call asyncio.wait_for(remaining)
         because they are pure network I/O with no side effects and
         can be safely cancelled.
+
+        Args:
+            guided_terminal: When set, this is the first freeform turn after
+                guided-mode exit; the layered transition prompt is used.
         """
         initial_version = state.version
-        llm_messages = self._build_messages(messages, state, message)
+        llm_messages = self._build_messages(messages, state, message, guided_terminal)
         tools = self._get_litellm_tools()
         # Per-call audit recorder. Surfaced on ComposerResult and on
         # the three partial-state-carrier exceptions so the route handler
@@ -2900,6 +2913,7 @@ class ComposerServiceImpl:
         chat_history: list[dict[str, Any]],
         state: CompositionState,
         user_message: str,
+        guided_terminal: TerminalState | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list. Returns a NEW list on every call.
 
@@ -2922,6 +2936,10 @@ class ComposerServiceImpl:
         commits 1a30d985 (SQLAlchemy 422 path) and 127417cb (sibling
         HTTP-path slog sites) — both narrow the HTTP surface to
         class-name-only while preserving structured server-side detail.
+
+        Args:
+            guided_terminal: When set, forward to ``build_messages`` so the
+                layered mode-transition prompt is used for this turn.
         """
         try:
             return build_messages(
@@ -2931,6 +2949,7 @@ class ComposerServiceImpl:
                 catalog=self._catalog,
                 data_dir=self._data_dir,
                 advisor_enabled=self._settings.composer_advisor_enabled,
+                guided_terminal=guided_terminal,
             )
         except OSError as exc:
             raise ComposerServiceError(f"Failed to load deployment skill ({type(exc).__name__})") from exc

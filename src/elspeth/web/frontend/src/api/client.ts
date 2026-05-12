@@ -31,6 +31,11 @@ import type {
   ValidationResult,
   SystemStatus,
 } from "@/types/index";
+import type {
+  GetGuidedResponse,
+  GuidedRespondRequest,
+  GuidedRespondResponse,
+} from "@/types/guided";
 
 // ── Token Management ────────────────────────────────────────────────────────
 
@@ -309,6 +314,48 @@ export async function recompose(
   return parseResponse<{ message: ChatMessage; state: CompositionState | null }>(
     response,
   );
+}
+
+/**
+ * Fetch the current guided-session state for a session.
+ *
+ * Returns the active GuidedSession (step + history + terminal), the
+ * server-emitted next turn payload (if any), and the current composition
+ * state.  When no guided session has started for the session, the server
+ * initialises one and returns the Step 1 turn.
+ */
+export async function getGuided(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided`, {
+    method: "GET",
+    headers: authHeaders(),
+    signal,
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
+ * Post a user response to the active guided turn.
+ *
+ * Server consumes the response, advances the state machine, and returns
+ * the replacement GuidedSession + next turn (or terminal state).  The
+ * client is expected to atomically replace its cached guided state with
+ * the response shape — no optimistic updates (spec §7.3).
+ */
+export async function respondGuided(
+  sessionId: string,
+  body: GuidedRespondRequest,
+  signal?: AbortSignal,
+): Promise<GuidedRespondResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/respond`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse<GuidedRespondResponse>(response);
 }
 
 /** Fork a session from a specific user message. */

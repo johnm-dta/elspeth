@@ -138,6 +138,37 @@ jobs:
             --allowlist config/cicd/enforce_tier_1_decoration
 
   # ===========================================================================
+  # Stage 2a: SlotType / guided.ts cross-language mirror check
+  # ===========================================================================
+  check-slot-type-cross-language:
+    name: SlotType cross-language mirror check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsqlcipher-dev
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Check SlotType / guided.ts mirror consistency
+        run: uv run python scripts/cicd/check_slot_type_cross_language.py
+
+  # ===========================================================================
   # Stage 2b: Contract Enforcement (Settings→Runtime alignment)
   # ===========================================================================
   contract-enforcement:
@@ -174,7 +205,7 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement]
+    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, check-slot-type-cross-language]
     strategy:
       fail-fast: false
       matrix:

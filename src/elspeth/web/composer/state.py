@@ -34,6 +34,7 @@ from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 from elspeth.engine.orchestrator.validation import (
     _ALLOWED_FAILSINK_PLUGINS,
 )
+from elspeth.web.composer.guided.state_machine import GuidedSession
 
 NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
 EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"]
@@ -1628,6 +1629,9 @@ class CompositionState:
         outputs: Sink configurations.
         metadata: Pipeline name and description.
         version: Monotonically increasing per session, starting at 1.
+        guided_session: Optional guided-mode session pointer. None for freeform
+            sessions; set to GuidedSession.initial() at session-create time for
+            guided sessions (spec §5.2).
     """
 
     source: SourceSpec | None
@@ -1636,6 +1640,7 @@ class CompositionState:
     outputs: tuple[OutputSpec, ...]
     metadata: PipelineMetadata
     version: int
+    guided_session: GuidedSession | None = None
 
     def __post_init__(self) -> None:
         if self.version < 1:

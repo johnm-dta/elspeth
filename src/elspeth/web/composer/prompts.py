@@ -13,12 +13,18 @@ import json
 import re
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
+from elspeth.web.composer.guided.state_machine import TerminalKind
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.skills import load_deployment_skill, load_skill
 from elspeth.web.composer.state import CompositionState
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.guided.state_machine import TerminalState
 
 # Load the pipeline composer skill once at module level (static content).
 _PIPELINE_SKILL = load_skill("pipeline_composer")
@@ -179,6 +185,7 @@ def build_messages(
     data_dir: str | None = None,
     *,
     advisor_enabled: bool = True,
+    guided_terminal: TerminalState | None = None,
 ) -> list[dict[str, Any]]:
     """Build the full message list for the LLM.
 
@@ -198,6 +205,12 @@ def build_messages(
     system message, so keeping the mutating state JSON in the second
     message lets follow-up turns reuse the expensive stable skill prefix.
 
+    When ``guided_terminal`` is set, this is the first freeform turn after
+    a guided-mode exit.  The system prompt is replaced with a layered
+    prompt (guided skill → transition header → freeform skill) per spec §8.2.
+    The caller is responsible for the gate logic and the ``transition_consumed``
+    flip; this function is pure (no state mutation).
+
     Args:
         chat_history: Chat history as plain dicts (role/content keys).
         state: Current CompositionState.
@@ -207,6 +220,9 @@ def build_messages(
             overlay.  When provided, the deployment skill at
             ``{data_dir}/skills/pipeline_composer.md`` is appended to
             the core skill in the system prompt.
+        guided_terminal: When set, the resolved TerminalState from the
+            completed guided session; triggers the layered transition
+            prompt instead of the freeform-only prompt.
         advisor_enabled: When False, strip advisor-specific sections from
             the core skill before forming the system prompt — the LLM
             should not learn about the ``request_advisor_hint`` tool when
@@ -219,11 +235,45 @@ def build_messages(
     messages: list[dict[str, Any]] = []
 
     # 1. Stable system prompt only.
+    # When guided_terminal is set, this is the first freeform turn after
+    # a guided-mode exit — use the layered transition prompt (spec §8.2).
+    # Otherwise fall through to the standard freeform-only prompt.
     # F1: route through build_system_prompt unconditionally so the
     # advisor-strip transformation applies consistently — the previous
     # ``data_dir is None → SYSTEM_PROMPT`` fast path bypassed it. The
     # @lru_cache on build_system_prompt makes repeat calls free.
-    prompt = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
+    if guided_terminal is not None:
+        if guided_terminal.kind is TerminalKind.COMPLETED:
+            reason_str = "completed_pipeline"
+        else:
+            # EXITED_TO_FREEFORM — reason must be non-None for this kind.
+            # Use InvariantError (server-bug sentinel) rather than RuntimeError
+            # so the send_message / recompose route handlers route this through
+            # the B1-sanitized static-500 path (slog event + _safe_frame_strings
+            # capture) rather than landing at FastAPI's default 500.
+            #
+            # The diagnostic value here is the invariant name; we deliberately
+            # drop the ``{guided_terminal!r}`` interpolation that would otherwise
+            # embed ``pipeline_yaml`` (Tier-1 — may contain source paths, plugin
+            # options, secret references) into the exception message. Same leak
+            # vector that B1 (commit eb30f669) and I1 (commit ba424ad9)
+            # sanitized at routes.py:4634/4696; this site was missed by the
+            # original PR sweep (obs-ae69e10e00).
+            if guided_terminal.reason is None:
+                raise InvariantError("EXITED_TO_FREEFORM terminal must have a reason")
+            reason_str = guided_terminal.reason.value
+        # Thread data_dir and advisor_enabled through the transition prompt so the
+        # first freeform turn after guided exit carries the same deployment overlay
+        # and advisor-strip policy as all subsequent freeform turns (Codex #17).
+        # build_system_prompt is @lru_cache'd — this call hits the same cache entry
+        # as the non-transition branch below.
+        freeform_skill = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
+        prompt = build_mode_transition_system_prompt(
+            terminal_reason=reason_str,
+            freeform_skill=freeform_skill,
+        )
+    else:
+        prompt = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
     messages.append({"role": "system", "content": prompt})
 
     # 2. Dynamic state/plugin context. Keep this outside the first

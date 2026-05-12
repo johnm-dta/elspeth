@@ -25,6 +25,7 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCall
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
+from elspeth.core.canonical import stable_hash
 from elspeth.core.dag.models import GraphValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
@@ -32,8 +33,43 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
+from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
 from elspeth.web.composer import yaml_generator
-from elspeth.web.composer.audit import audit_envelope, llm_call_audit_envelope
+from elspeth.web.composer.audit import BufferingRecorder, audit_envelope, llm_call_audit_envelope
+from elspeth.web.composer.guided.audit import (
+    emit_dropped_to_freeform,
+    emit_step_advanced,
+    emit_turn_answered,
+    emit_turn_emitted,
+)
+from elspeth.web.composer.guided.emitters import (
+    build_initial_step_1_turn,
+    build_step_1_inspect_and_confirm_turn_from_intent,
+    build_step_1_schema_form_turn,
+    build_step_2_5_recipe_offer_turn,
+    build_step_2_multi_select_turn,
+    build_step_2_schema_form_turn,
+    build_step_2_single_select_turn,
+    build_step_3_propose_chain_turn,
+)
+from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.recipe_match import match_recipe
+from elspeth.web.composer.guided.state_machine import (
+    GuidedSession,
+    SinkIntent,
+    SourceResolved,
+    TerminalReason,
+    TurnRecord,
+    mark_solver_exhausted,
+    step_advance,
+)
+from elspeth.web.composer.guided.steps import (
+    handle_step_1_source,
+    handle_step_2_5_recipe_apply,
+    handle_step_2_sink,
+    handle_step_3_chain_accept,
+)
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
@@ -51,11 +87,13 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
+from elspeth.web.composer.tools import _DATA_ERROR_KEY
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
+from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -73,11 +111,18 @@ from elspeth.web.sessions.schemas import (
     CreateSessionRequest,
     ForkSessionRequest,
     ForkSessionResponse,
+    GetGuidedResponse,
+    GuidedRespondRequest,
+    GuidedRespondResponse,
+    GuidedSessionResponse,
     MessageWithStateResponse,
     RevertStateRequest,
     RunResponse,
     SendMessageRequest,
     SessionResponse,
+    TerminalStateResponse,
+    TurnPayloadResponse,
+    TurnRecordResponse,
     ValidationEntryResponse,
 )
 
@@ -1494,6 +1539,994 @@ async def _handle_runtime_preflight_failure(
     return response_body
 
 
+def _initial_composition_state_with_guided_session() -> CompositionState:
+    """Construct a fresh CompositionState with a guided-mode session attached.
+
+    Per spec §5.2 / errata C7: new sessions default to guided. Every lazy-
+    create branch in this module must use this helper rather than building
+    CompositionState directly, so the default-guided invariant holds
+    uniformly across endpoints (send_message, recompose, the future
+    guided/respond endpoint added in Task 3.5).
+    """
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+        guided_session=GuidedSession.initial(),
+    )
+
+
+def _validate_control_signal(raw: str | None) -> ControlSignal | None:
+    """Validate ``control_signal`` against the closed :class:`ControlSignal` enum.
+
+    Returns the parsed :class:`ControlSignal` (or ``None`` if *raw* is ``None``).
+    Raises :class:`HTTPException` (400) when *raw* is non-None and not a
+    recognised enum value.  Null passes through — omitting the signal is
+    the normal (non-control) path.
+
+    This is the Tier-3 -> Tier-2 coercion site: ``GuidedRespondRequest`` keeps
+    ``control_signal`` as ``str | None`` so stale clients carrying an unknown
+    signal value receive a clear protocol error from this guard rather than a
+    Pydantic deserialization crash. After this function returns, the parsed
+    :class:`ControlSignal` is the typed value flowing into ``TurnResponse``,
+    where the field is declared ``ControlSignal | None``.
+    """
+    if raw is None:
+        return None
+    try:
+        return ControlSignal(raw)
+    except ValueError as exc:
+        valid = [e.value for e in ControlSignal]
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unknown control_signal: {raw!r}. Valid values: {valid}"),
+        ) from exc
+
+
+def _validate_step_indices(
+    turn_type: TurnType,
+    accepted_step_index: int | None,
+    edit_step_index: int | None,
+    guided: GuidedSession,
+) -> None:
+    """Validate ``accepted_step_index`` / ``edit_step_index`` against the current step.
+
+    Raises :class:`HTTPException` (400) when an index field is non-None for a
+    turn type that carries no step-index semantics, or when the index is out of
+    range for the proposal that is actually staged.
+
+    Step-index semantics exist **only** for ``PROPOSE_CHAIN`` turns: they
+    reference positions within ``guided.step_3_proposal.steps``.  Every other
+    turn type must send both fields as ``None`` — a non-None value on any other
+    turn type indicates a stale or mis-shaped client payload.
+
+    Matrix (exhaustive):
+
+    +---------------------------------+--------------------------------------+
+    | Turn type                       | Accepted / edit index               |
+    +=================================+======================================+
+    | PROPOSE_CHAIN                   | Must be None or                     |
+    |                                 | 0 <= idx < len(proposal.steps)      |
+    +---------------------------------+--------------------------------------+
+    | All other turn types            | Must be None                         |
+    +---------------------------------+--------------------------------------+
+    """
+    if turn_type is not TurnType.PROPOSE_CHAIN:
+        if accepted_step_index is not None or edit_step_index is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"accepted_step_index and edit_step_index must be null for turn type "
+                    f"{turn_type.value!r}; got accepted_step_index={accepted_step_index!r}, "
+                    f"edit_step_index={edit_step_index!r}."
+                ),
+            )
+        return
+
+    # PROPOSE_CHAIN: validate against the staged proposal.
+    # If step_3_proposal is None but an index was supplied, the client is
+    # sending a step-index against a step that has not been reached yet —
+    # treat as a client-fault 400 (not a server 500) because the proposal
+    # absence is not necessarily an invariant violation at this point (the
+    # route handler checks later for the accept path).
+    proposal = guided.step_3_proposal
+    if proposal is None:
+        if accepted_step_index is not None or edit_step_index is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "accepted_step_index / edit_step_index sent but no chain proposal is staged for this session (step_3_proposal is None)."
+                ),
+            )
+        return
+
+    step_count = len(proposal.steps)
+    for field_name, idx in (
+        ("accepted_step_index", accepted_step_index),
+        ("edit_step_index", edit_step_index),
+    ):
+        if idx is None:
+            continue
+        if not (0 <= idx < step_count):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{field_name}={idx!r} is out of range for the current proposal "
+                    f"(proposal has {step_count} step(s); valid range is 0-{step_count - 1})."
+                ),
+            )
+
+
+async def _dispatch_guided_respond(
+    *,
+    state: CompositionState,
+    guided: GuidedSession,
+    current_step: GuidedStep,
+    current_turn_type: TurnType,
+    turn_response: Mapping[str, Any],
+    catalog: CatalogServiceProtocol,
+    recorder: BufferingRecorder,
+    user_id: str,
+    data_dir: str | None,
+    session_engine: Any,
+    session_id: str,
+    model: str,
+) -> tuple[CompositionState, GuidedSession, Any | None]:
+    """Dispatch a guided respond to the correct step handler and next-turn emitter.
+
+    Pure routing logic: identifies which branch to take based on
+    ``current_step`` and ``current_turn_type``, calls the appropriate
+    side-effect step handler, advances the session pointer, and emits
+    the next turn.
+
+    Returns ``(updated_state, updated_session, next_turn_or_None)``.
+
+    The dispatcher is called only when ``guided.terminal is None``.  The
+    caller checks terminality before and after; the dispatcher never
+    terminates a session (that is ``step_advance``'s responsibility for
+    exit_to_freeform and the step-2.5 recipe-accept path).
+
+    Decision table:
+
+    +-------------------+---------------------------+---------------------------+
+    | current_step      | guided.step (after adv.)  | action                    |
+    +-------------------+---------------------------+---------------------------+
+    | STEP_1_SOURCE     | STEP_1_SOURCE             | intra-step; turn_type     |
+    |   (intra)         | (no advance fired)        | decides next turn:        |
+    |                   |                           | SINGLE_SELECT →           |
+    |                   |                           |   emit SCHEMA_FORM        |
+    |                   |                           | SCHEMA_FORM →             |
+    |                   |                           |   handle_step_1_source;   |
+    |                   |                           |   advance to STEP_2;      |
+    |                   |                           |   emit SINGLE_SELECT      |
+    | STEP_1_SOURCE     | STEP_2_SINK               | INSPECT_AND_CONFIRM path; |
+    |   (advancing)     | (step_advance fired)      | handle_step_1_source;     |
+    |                   |                           | emit SINGLE_SELECT (sink) |
+    | STEP_2_SINK       | STEP_2_SINK               | intra-step; turn_type     |
+    |   (intra)         | (no advance fired)        | decides next turn:        |
+    |                   |                           | SINGLE_SELECT →           |
+    |                   |                           |   emit SCHEMA_FORM        |
+    |                   |                           | SCHEMA_FORM →             |
+    |                   |                           |   emit MULTI_SELECT       |
+    |                   |                           | MULTI_SELECT →            |
+    |                   |                           |   unreachable here        |
+    |                   |                           |   (_advance_step_2 always |
+    |                   |                           |   fires for this type)    |
+    | STEP_2_SINK       | STEP_2_5_RECIPE_MATCH     | MULTI_SELECT path;        |
+    |   (advancing)     | (step_advance fired)      | handle_step_2_sink;       |
+    |                   |                           | match_recipe;             |
+    |                   |                           | emit RECIPE_OFFER or None |
+    | STEP_2_5_RECIPE   | STEP_2_5_RECIPE_MATCH     | RECIPE_OFFER chosen=      |
+    |   (intra/term.)   | (accept: no advance)      | accept → recipe apply;    |
+    |                   |                           | terminal=COMPLETED        |
+    | STEP_2_5_RECIPE   | STEP_3_TRANSFORMS         | RECIPE_OFFER chosen=      |
+    |   (advancing)     | (step_advance fired)      | build_manually → step 3   |
+    +-------------------+---------------------------+---------------------------+
+
+    ``step_advance`` has already run; ``guided.step`` may already point to the
+    next step (when step_advance fired a step transition).  The dispatcher uses
+    ``current_step`` (before advance) and ``guided.step`` (after advance) to
+    detect transitions.
+    """
+    from dataclasses import replace as _replace
+
+    next_turn: Any | None = None
+
+    # --- STEP_1_SOURCE intra-step turns ----------------------------------
+    if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_1_SOURCE:
+        # step_advance did NOT advance the step — intra-step turn.
+        if current_turn_type is TurnType.SINGLE_SELECT:
+            # User picked a source plugin. Emit schema_form for the plugin options.
+            chosen = turn_response["chosen"] or []
+            if not chosen:
+                raise HTTPException(
+                    status_code=400,
+                    detail="single_select response at step 1 must include chosen plugin name.",
+                )
+            plugin_name = str(chosen[0])
+            next_turn = build_step_1_schema_form_turn(plugin_name, catalog)
+            new_record = TurnRecord(
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        if current_turn_type is TurnType.SCHEMA_FORM:
+            # User submitted source options. Call handle_step_1_source to commit.
+            # ``edited_values`` is the wire contract for the Step-1 SCHEMA_FORM
+            # response: the SchemaFormTurn widget always sends
+            # ``{"plugin": str, "options": Mapping, "observed_columns": list,
+            # "sample_rows": list}``. A missing key, a null payload, a non-string
+            # ``plugin``, or non-list-shaped ``observed_columns`` / ``sample_rows``
+            # is a protocol violation, not a Tier-3 "user typo" we paper over
+            # with ``.get()`` defaults — silent defaults here would surface
+            # far downstream as inference from adjacent fields (forbidden per
+            # CLAUDE.md §Three-Tier Trust Model). The HTTP boundary is a trust
+            # boundary, so we raise 400 with a contract-citing message.
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="schema_form response at step 1 requires edited_values; received null.",
+                )
+            missing = {"plugin", "options", "observed_columns", "sample_rows"} - edited.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 1 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            plugin_name = edited["plugin"]
+            if not isinstance(plugin_name, str) or not plugin_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 1 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
+                )
+            options_raw = edited["options"]
+            if not isinstance(options_raw, Mapping):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 1 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
+                )
+            observed_columns_raw = edited["observed_columns"]
+            if not isinstance(observed_columns_raw, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 1 edited_values['observed_columns'] must be a list; got {type(observed_columns_raw).__name__}"
+                    ),
+                )
+            sample_rows_raw = edited["sample_rows"]
+            if not isinstance(sample_rows_raw, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 1 edited_values['sample_rows'] must be a list; got {type(sample_rows_raw).__name__}"
+                    ),
+                )
+            # Codex #16: validate each element is a Mapping before calling
+            # dict(r).  A non-Mapping element (e.g. int, str, list) triggers
+            # TypeError from dict() — uncontrolled 500 instead of a clear 400.
+            # The HTTP boundary is a trust boundary: external data may contain
+            # arbitrary JSON values at any list position.
+            for _sr_idx, _sr_elem in enumerate(sample_rows_raw):
+                if not isinstance(_sr_elem, Mapping):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"schema_form response at step 1 edited_values['sample_rows'][{_sr_idx}] "
+                            f"must be an object; got {type(_sr_elem).__name__}"
+                        ),
+                    )
+            resolved = SourceResolved(
+                plugin=plugin_name,
+                options=dict(options_raw),
+                observed_columns=tuple(observed_columns_raw),
+                sample_rows=tuple(dict(r) for r in sample_rows_raw),
+            )
+            handler_result = handle_step_1_source(
+                state=state,
+                session=guided,
+                resolved=resolved,
+                catalog=catalog,
+                data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
+            )
+            if not handler_result.tool_result.success:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                )
+            state = handler_result.state
+            # Advance step pointer to STEP_2.
+            guided = _replace(
+                handler_result.session,
+                step=GuidedStep.STEP_2_SINK,
+            )
+            # Emit Step 2 initial turn.
+            next_turn = build_step_2_single_select_turn(catalog)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_step_advanced(
+                recorder,
+                prev=GuidedStep.STEP_1_SOURCE,
+                next_=GuidedStep.STEP_2_SINK,
+                reason="user_advanced",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        # INSPECT_AND_CONFIRM at STEP_1: step_advance already advanced to STEP_2.
+        # But in this branch guided.step is still STEP_1 — step_advance
+        # must have already advanced it.  This case is unreachable (step_advance
+        # advances for INSPECT_AND_CONFIRM → guided.step becomes STEP_2).
+        # Fall through to the post-advance branch below.
+
+    # --- STEP_1_SOURCE → STEP_2_SINK (step_advance fired for INSPECT_AND_CONFIRM)
+    if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
+        # step_advance already ran and advanced the step.  _advance_step_1 built
+        # SourceResolved from step_1_source_intent (plugin/options/samples) +
+        # edited_values["columns"] (the only field the widget can edit) and stored
+        # the result in guided.step_1_result.  It also cleared step_1_source_intent.
+        #
+        # The new wire contract for INSPECT_AND_CONFIRM edited_values is narrow:
+        #   ``{"columns": list[str]}``
+        # Plugin, options, observed_columns (samples), and warnings are now
+        # server-side knowledge held in step_1_source_intent before the turn is
+        # emitted; the widget never sees them in the response body.
+        #
+        # Shadowing note: ``_advance_step_1`` raises ValueError (client-fault)
+        # on null ``edited_values`` and KeyError on missing ``columns`` — those
+        # propagate as HTTP 500 before reaching here. The null guard and missing-key guard
+        # below are defense-in-depth (locally complete; unreachable as 400 in
+        # normal flow). The isinstance(columns_raw, list) guard IS HTTP-reachable
+        # as 400: _advance_step_1's ``tuple(str(c) for c in columns_raw)`` coercion
+        # silently accepts a scalar string (iterating its characters), so the
+        # dispatcher catches non-list here before that coercion runs.
+        #
+        # EMIT-SITE NOTE: step_1_source_intent must be set before emitting the
+        # INSPECT_AND_CONFIRM turn.  Today no production code path emits this turn
+        # (``_build_get_guided_turn`` always passes blob_inspection=None); the only
+        # emitter is _seed_inspect_and_confirm_history in the integration test suite.
+        # When a real emitter is added, it must
+        #   ``replace(session, step_1_source_intent=SourceIntent(...))``
+        # before returning.
+        edited = turn_response["edited_values"]
+        if edited is None:
+            raise HTTPException(
+                status_code=400,
+                detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
+            )
+        if "columns" not in edited:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"inspect_and_confirm response at step 1 edited_values missing required key: 'columns'; got keys: {sorted(edited.keys())}"
+                ),
+            )
+        columns_raw = edited["columns"]
+        if not isinstance(columns_raw, list):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"inspect_and_confirm response at step 1 edited_values['columns'] must be a list; got {type(columns_raw).__name__}"
+                ),
+            )
+        # SourceResolved was built by _advance_step_1 and stored in guided.step_1_result.
+        # Unreachable None: _advance_step_1 always sets step_1_result on advance (the
+        # branch is only reached when guided.step is STEP_2_SINK, which only happens
+        # after _advance_step_1 sets step_1_result).  Assert to keep mypy happy and
+        # provide a clear crash message if this invariant is ever violated.
+        if guided.step_1_result is None:
+            raise InvariantError(
+                "inspect_and_confirm post-advance: guided.step_1_result is None after "
+                "_advance_step_1 ran — this is an invariant violation in the state machine."
+            )
+        resolved = guided.step_1_result
+        handler_result = handle_step_1_source(
+            state=state,
+            session=guided,
+            resolved=resolved,
+            catalog=catalog,
+            data_dir=data_dir,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        if not handler_result.tool_result.success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+            )
+        state = handler_result.state
+        guided = handler_result.session
+        next_turn = build_step_2_single_select_turn(catalog)
+        new_record = TurnRecord(
+            step=GuidedStep.STEP_2_SINK,
+            turn_type=TurnType(next_turn["type"]),
+            payload_hash=stable_hash(next_turn["payload"]),
+            response_hash=None,
+            emitter="server",
+        )
+        emit_turn_emitted(
+            recorder,
+            step=GuidedStep.STEP_2_SINK,
+            turn_type=TurnType(next_turn["type"]),
+            payload_hash=stable_hash(next_turn["payload"]),
+            payload_payload_id="",
+            emitter="server",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        guided = _replace(guided, history=(*guided.history, new_record))
+        return state, guided, next_turn
+
+    # --- STEP_2_SINK intra-step turns ------------------------------------
+    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_SINK:
+        if current_turn_type is TurnType.SINGLE_SELECT:
+            # User picked a sink plugin. Emit schema_form for the plugin options.
+            chosen = turn_response["chosen"] or []
+            if not chosen:
+                raise HTTPException(
+                    status_code=400,
+                    detail="single_select response at step 2 must include chosen plugin name.",
+                )
+            plugin_name = str(chosen[0])
+            next_turn = build_step_2_schema_form_turn(plugin_name, catalog)
+            new_record = TurnRecord(
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            # Persist the chosen plugin name so GET /guided can rebuild the SCHEMA_FORM
+            # on refresh (rebuild requires the plugin name to fetch the schema from the
+            # catalog).  Cleared atomically when step_2_sink_intent is set below.
+            guided = _replace(
+                guided,
+                history=(*guided.history, new_record),
+                step_2_chosen_plugin=plugin_name,
+            )
+            return state, guided, next_turn
+
+        if current_turn_type is TurnType.SCHEMA_FORM:
+            # User filled in sink options. Persist the chosen plugin + options into
+            # step_2_sink_intent so _advance_step_2 can reconstruct the full
+            # SinkOutputResolved when the subsequent MULTI_SELECT_WITH_CUSTOM
+            # response arrives (which only carries required_fields, not the plugin).
+            # ``edited_values`` is the wire contract for the Step-2 SCHEMA_FORM
+            # response: the SchemaFormTurn widget always sends
+            # ``{"plugin": str, "options": Mapping, "observed_columns": list,
+            # "sample_rows": list}``. Step 2 only consumes ``plugin`` + ``options``
+            # for the sink_intent, but the wire shape is fully validated to keep
+            # the contract identical with Step 1 (no silent-tolerance drift).
+            # A missing key, a null payload, or a wrong-typed value is a
+            # protocol violation — silent ``.get()`` defaults would fabricate
+            # fields the client never supplied (forbidden per CLAUDE.md
+            # §Three-Tier Trust Model). The HTTP boundary is a trust boundary,
+            # so we raise 400 with a contract-citing message.
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="schema_form response at step 2 requires edited_values; received null.",
+                )
+            missing = {"plugin", "options"} - edited.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 2 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            plugin_name = edited["plugin"]
+            if not isinstance(plugin_name, str) or not plugin_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 2 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
+                )
+            options_raw = edited["options"]
+            if not isinstance(options_raw, Mapping):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 2 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
+                )
+            sink_intent = SinkIntent(
+                plugin=plugin_name,
+                options=dict(options_raw),
+            )
+            # Set step_2_sink_intent and clear step_2_chosen_plugin atomically.
+            # Once step_2_sink_intent is set, the full plugin+options tuple is
+            # held there; step_2_chosen_plugin is only needed in the window
+            # between SINGLE_SELECT and SCHEMA_FORM (to rebuild SCHEMA_FORM on
+            # GET /guided refresh).  Having both set simultaneously would be
+            # redundant and could mislead rebuild logic about the intra-step phase.
+            guided = _replace(guided, step_2_sink_intent=sink_intent, step_2_chosen_plugin=None)
+
+            # Emit multi_select_with_custom for required fields.
+            # Observed columns come from step_1_result if available.
+            observed_columns: tuple[str, ...] = ()
+            if guided.step_1_result is not None:
+                observed_columns = tuple(guided.step_1_result.observed_columns)
+            next_turn = build_step_2_multi_select_turn(observed_columns)
+            new_record = TurnRecord(
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=current_step,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+    # --- STEP_2_SINK → STEP_2_5 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
+    # step_advance sets guided.step=STEP_2_5_RECIPE_MATCH and populates
+    # guided.step_2_result for every MULTI_SELECT_WITH_CUSTOM response, so the
+    # intra-step branch (current_step==guided.step==STEP_2_SINK) for this turn
+    # type is structurally unreachable — _advance_step_2 always fires.
+    # This is the ONLY reachable MULTI_SELECT_WITH_CUSTOM dispatch point.
+    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+        # step_advance already set guided.step_2_result and advanced to STEP_2_5.
+        if guided.step_1_result is None or guided.step_2_result is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Dispatcher invariant: step_1_result and step_2_result must be set.",
+            )
+        source = guided.step_1_result
+        sink = guided.step_2_result
+
+        # Commit the sink to CompositionState.outputs via handle_step_2_sink.
+        # step_advance (pure) encoded the sink in guided.step_2_result but did
+        # NOT call _execute_set_output — that side-effect is our responsibility.
+        sink_handler_result = handle_step_2_sink(
+            state=state,
+            session=guided,
+            resolved=sink,
+            catalog=catalog,
+            data_dir=data_dir,
+        )
+        if not sink_handler_result.tool_result.success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Step 2 sink commit failed: {sink_handler_result.tool_result}",
+            )
+        state = sink_handler_result.state
+        guided = sink_handler_result.session
+
+        recipe_match = match_recipe(source, sink)
+        if recipe_match is not None:
+            next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            # Stage the offered RecipeMatch so the accept branch can verify
+            # the client-supplied recipe_name matches what was actually offered.
+            # Cleared (set to None) atomically when the acceptance is consumed.
+            guided = _replace(guided, history=(*guided.history, new_record), step_2_5_recipe_offer=recipe_match)
+            return state, guided, next_turn
+
+        # No recipe match — solve the chain via the LLM and emit propose_chain.
+        # I2: wrap transient LLM failures (LiteLLM API/auth/bad-request,
+        # timeouts, malformed-response shape) so they auto-drop to freeform
+        # via mark_solver_exhausted rather than escape as 500s.  See
+        # ``solve_chain_with_auto_drop`` for the contract.
+        proposal, guided = await solve_chain_with_auto_drop(
+            site="step_2_sink_initial_solve",
+            session=guided,
+            session_id=session_id,
+            user_id=user_id,
+            composition_version=state.version,
+            recorder=recorder,
+            model=model,
+            source=source,
+            sink=sink,
+            recipe_match=None,
+        )
+        if proposal is None:
+            return state, guided, None
+        guided = _replace(guided, step=GuidedStep.STEP_3_TRANSFORMS, step_3_proposal=proposal)
+        next_turn = build_step_3_propose_chain_turn(proposal)
+        new_record = TurnRecord(
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            turn_type=TurnType.PROPOSE_CHAIN,
+            payload_hash=stable_hash(next_turn["payload"]),
+            response_hash=None,
+            emitter="server",
+        )
+        emit_step_advanced(
+            recorder,
+            prev=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            next_=GuidedStep.STEP_3_TRANSFORMS,
+            # System-driven advance: no recipe matched the (source, sink) topology,
+            # so the dispatcher hops STEP_2_5 → STEP_3 without operator input.
+            reason="auto_advanced",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        emit_turn_emitted(
+            recorder,
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            turn_type=TurnType.PROPOSE_CHAIN,
+            payload_hash=stable_hash(next_turn["payload"]),
+            payload_payload_id="",
+            emitter="server",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        guided = _replace(guided, history=(*guided.history, new_record))
+        return state, guided, next_turn
+
+    # --- STEP_2_5_RECIPE_MATCH turns ------------------------------------
+    if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+        chosen = list(turn_response["chosen"] or [])
+        if chosen == ["accept"]:
+            # User accepted the recipe. Extract the slots from edited_values
+            # (user may have filled in required slots).
+            # ``edited_values`` is the wire contract for recipe_offer ['accept']:
+            # the RecipeOfferTurn widget always sends ``{"recipe_name": str,
+            # "slots": {...}}``. A missing key, a null payload, or a non-string
+            # ``recipe_name`` is a protocol violation, not a Tier-3 "user typo"
+            # we paper over with empty-string defaults — silent defaults here
+            # would surface far downstream as a misleading "unknown recipe ''"
+            # error, masking the actual contract drift. The HTTP boundary is a
+            # trust boundary, so we raise 400 with a contract-citing message.
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="recipe_offer ['accept'] requires edited_values; received null.",
+                )
+            missing = {"recipe_name", "slots"} - edited.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"recipe_offer ['accept'] edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            recipe_name = edited["recipe_name"]
+            if not isinstance(recipe_name, str) or not recipe_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty string; got {recipe_name!r}"),
+                )
+            slots_raw = edited["slots"]
+            if not isinstance(slots_raw, Mapping):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"recipe_offer ['accept'] edited_values['slots'] must be an object; got {type(slots_raw).__name__}"),
+                )
+
+            # Binding check: the client-supplied recipe_name must match the
+            # recipe that was actually offered for this step.  ``step_2_5_recipe_offer``
+            # is written by the server immediately before emitting the RECIPE_OFFER
+            # turn (Option A staging pattern, mirrors step_2_sink_intent).  A missing
+            # offer means the session was never in the recipe-offer state — the client
+            # is sending an accept without a prior offer (protocol violation or crafted
+            # request).  A mismatched recipe_name means the client is trying to accept
+            # a different recipe than the one offered — also rejected with 400.
+            #
+            # Slots are operator-editable by design (the operator fills unsatisfied
+            # required slots and may rubber-stamp / override pre-fills); the binding
+            # check does NOT compare slot values, only recipe_name.
+            offered = guided.step_2_5_recipe_offer
+            if offered is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "recipe_offer ['accept'] received but no recipe was staged for this session "
+                        "(step_2_5_recipe_offer is None — the session has not reached the recipe-offer state "
+                        "or the offer was already consumed)."
+                    ),
+                )
+            if recipe_name != offered.recipe_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"recipe_offer ['accept'] recipe_name mismatch: "
+                        f"client sent {recipe_name!r} but the server offered {offered.recipe_name!r}. "
+                        "Accept must reference the recipe that was offered."
+                    ),
+                )
+
+            # The slots must be passed as edited_values from the client.
+            # The recipe_offer turn pre-populates partial slots; the user fills
+            # the rest via the recipe_offer form and sends them back in edited_values.
+            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
+
+            slots = dict(slots_raw)
+            # The "accept" reconstruction is post-acceptance: the operator has
+            # supplied the slot values (merged into ``edited.slots`` by the
+            # widget).  ``unsatisfied_slots`` was a property of the *offer*;
+            # at apply time ``handle_step_2_5_recipe_apply`` consumes only
+            # ``recipe_name`` and ``slots``, so an empty mapping is correct.
+            match = _RecipeMatch(recipe_name=recipe_name, slots=slots, unsatisfied_slots={})
+            # Clear the staged offer atomically before passing to the handler
+            # so it cannot be re-read by a later step.
+            guided = _replace(guided, step_2_5_recipe_offer=None)
+
+            handler_result = handle_step_2_5_recipe_apply(
+                state=state,
+                session=guided,
+                match=match,
+                catalog=catalog,
+                data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
+            )
+            if not handler_result.tool_result.success:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Recipe application failed: {handler_result.tool_result}",
+                )
+            state = handler_result.state
+            guided = handler_result.session
+            # terminal is now set on guided.terminal (TerminalKind.COMPLETED).
+            return state, guided, None
+
+        if chosen == ["build_manually"]:
+            # step_advance already advanced to STEP_3.  Solve the chain via the LLM.
+            if guided.step_1_result is None or guided.step_2_result is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Dispatcher invariant: step_1_result and step_2_result must be set at build_manually.",
+                )
+            source = guided.step_1_result
+            sink = guided.step_2_result
+            # I2: same auto-drop wrap as the no-recipe-match branch above.
+            proposal, guided = await solve_chain_with_auto_drop(
+                site="step_2_5_build_manually_solve",
+                session=guided,
+                session_id=session_id,
+                user_id=user_id,
+                composition_version=state.version,
+                recorder=recorder,
+                model=model,
+                source=source,
+                sink=sink,
+                recipe_match=None,
+            )
+            if proposal is None:
+                return state, guided, None
+            guided = _replace(guided, step_3_proposal=proposal)
+            next_turn = build_step_3_propose_chain_turn(proposal)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_CHAIN,
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_CHAIN,
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"recipe_offer response must have chosen=['accept'] or chosen=['build_manually'], got {chosen!r}.",
+        )
+
+    # --- STEP_3_TRANSFORMS turns ----------------------------------------
+    # The only response shape we handle in Phase 4 is ACCEPT on a
+    # propose_chain turn.  Reject and clarifying SINGLE_SELECT responses are
+    # deferred to Phase 5 (which adds re-solve, repair, and advisor flows).
+    if current_step is GuidedStep.STEP_3_TRANSFORMS:
+        if current_turn_type is TurnType.PROPOSE_CHAIN:
+            chosen = list(turn_response["chosen"] or [])
+            if chosen == ["accept"]:
+                if guided.step_3_proposal is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Dispatcher invariant: step_3_proposal must be set when accepting a propose_chain turn.",
+                    )
+                handler_result = handle_step_3_chain_accept(
+                    state=state,
+                    session=guided,
+                    proposal=guided.step_3_proposal,
+                    catalog=catalog,
+                    data_dir=data_dir,
+                    session_engine=session_engine,
+                    session_id=session_id,
+                )
+                if not handler_result.tool_result.success:
+                    # Initial commit failed. Attempt one LLM repair: feed the
+                    # validation errors back as a system-prompt addendum and
+                    # ask the LLM to produce a corrected chain.
+                    #
+                    # Validation error text is Tier 1 audit data — taken verbatim
+                    # from the ToolResult; no paraphrasing or fabrication.
+                    failed_result = handler_result.tool_result
+                    repair_context_lines = [e.message for e in failed_result.validation.errors]
+                    if not repair_context_lines and failed_result.data is not None:
+                        # No validation errors but a data-layer error message;
+                        # use it verbatim so the LLM sees the actual fault.
+                        raw_data = dict(failed_result.data)
+                        if _DATA_ERROR_KEY in raw_data:
+                            repair_context_lines = [str(raw_data[_DATA_ERROR_KEY])]
+                    repair_context = "\n".join(repair_context_lines) or str(failed_result.validation)
+
+                    # Obtain source/sink from the guided session for the repair call.
+                    # Both must be non-None because Step 3 can only be reached after
+                    # Steps 1 and 2 commit successfully (dispatcher invariant).
+                    if guided.step_1_result is None:
+                        raise InvariantError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
+                    if guided.step_2_result is None:
+                        raise InvariantError("repair: step_2_result is None — STEP_3 unreachable without Step 2 commit")
+                    # I2: a transient failure during repair auto-drops
+                    # IMMEDIATELY — repair is already attempt #2, so a
+                    # transient on repair means we are done trying. The
+                    # early ``return`` below short-circuits BEFORE the
+                    # downstream ``mark_solver_exhausted`` path so we never
+                    # double-emit ``guided_dropped_to_freeform``.
+                    repair_proposal, guided = await solve_chain_with_auto_drop(
+                        site="step_3_repair_solve",
+                        session=guided,
+                        session_id=session_id,
+                        user_id=user_id,
+                        composition_version=state.version,
+                        recorder=recorder,
+                        model=model,
+                        source=guided.step_1_result,
+                        sink=guided.step_2_result,
+                        recipe_match=None,
+                        repair_context=repair_context,
+                    )
+                    if repair_proposal is None:
+                        return state, guided, None
+                    repair_result = handle_step_3_chain_accept(
+                        # state is the original pre-attempt state — _execute_set_pipeline
+                        # is validate-then-mutate: on failure the state is untouched,
+                        # so handler_result.state is the same object as `state`.
+                        state=state,
+                        session=guided,
+                        proposal=repair_proposal,
+                        catalog=catalog,
+                        data_dir=data_dir,
+                        session_engine=session_engine,
+                        session_id=session_id,
+                    )
+                    if repair_result.tool_result.success:
+                        # Repair succeeded: wizard completes normally.
+                        return repair_result.state, repair_result.session, None
+
+                    # Repair also failed. Mark solver exhausted and auto-drop to freeform.
+                    # Build the validation_result dict from the repair failure (Tier 1
+                    # data — only real fields from ToolResult, no fabrication).
+                    # The repair always runs on the auto-drop path; validation_result is
+                    # always present per spec §9.1 (set when drop_reason="solver_exhausted").
+                    # An empty errors list is real audit data (the validator rejected without
+                    # producing structured errors), not fabrication.
+                    repair_validation = repair_result.tool_result.validation
+                    validation_result_payload: dict[str, Any] = {
+                        "is_valid": repair_validation.is_valid,
+                        "errors": [e.to_dict() for e in repair_validation.errors],
+                    }
+
+                    new_guided, _terminal, directives = mark_solver_exhausted(
+                        session=guided,
+                        validation_result=validation_result_payload,
+                    )
+                    for directive in directives:
+                        if directive.tool_name == "guided_dropped_to_freeform":
+                            args = dict(directive.arguments)
+                            emit_dropped_to_freeform(
+                                recorder,
+                                prev=GuidedStep(args["prev_step"]),
+                                drop_reason=TerminalReason(args["drop_reason"]),
+                                validation_result=args["validation_result"],
+                                composition_version=state.version,
+                                actor=user_id,
+                            )
+                    # Return 200 with terminal — auto-drop is a clean wizard outcome.
+                    return state, new_guided, None
+
+                # handler_result.session.terminal is COMPLETED on success.
+                return handler_result.state, handler_result.session, None
+            if chosen == ["reject"]:
+                raise HTTPException(
+                    status_code=501,
+                    detail=(
+                        "Step 3 chain rejection is not yet implemented — Phase 5 will add "
+                        "re-solve and repair flows. Use exit-to-freeform to drop to freeform mode."
+                    ),
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"propose_chain response must have chosen=['accept'] or chosen=['reject'], got {chosen!r}.",
+            )
+        # SINGLE_SELECT clarifying-question response at STEP_3 — Phase 5.
+        raise HTTPException(
+            status_code=501,
+            detail="Step 3 clarifying question handling is not yet implemented — Phase 5.",
+        )
+
+    # Unhandled branch — this is a dispatcher gap, not a user error.
+    raise InvariantError(
+        f"_dispatch_guided_respond: unhandled branch "
+        f"current_step={current_step!r}, current_turn_type={current_turn_type!r}, "
+        f"guided.step={guided.step!r}"
+    )
+
+
 def create_session_router() -> APIRouter:
     """Create the session router with /api/sessions prefix."""
     router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -1660,14 +2693,7 @@ def create_session_router() -> APIRouter:
             #    for pre-send provenance (AD-7: user msg records what user saw).
             state_record = await service.get_current_state(session.id)
             if state_record is None:
-                state = CompositionState(
-                    source=None,
-                    nodes=(),
-                    edges=(),
-                    outputs=(),
-                    metadata=PipelineMetadata(),
-                    version=1,
-                )
+                state = _initial_composition_state_with_guided_session()
                 pre_send_state_id: UUID | None = None
             else:
                 state = _state_from_record(state_record)
@@ -1706,6 +2732,15 @@ def create_session_router() -> APIRouter:
                     pre_send_state_id = client_state_id
                 else:
                     pre_send_state_id = state_record.id
+
+            # 1b. Detect guided→freeform mode transition (spec §8.2).
+            # The first freeform chat turn after guided_session.terminal is set
+            # uses a layered system prompt. ``transition_consumed`` guards against
+            # re-firing on subsequent turns.
+            _guided = state.guided_session
+            _guided_terminal_for_compose = (
+                _guided.terminal if (_guided is not None and _guided.terminal is not None and not _guided.transition_consumed) else None
+            )
 
             # 2. Persist user message with pre-send provenance.
             # Keep the inserted row so the subsequent snapshot can prove
@@ -1769,6 +2804,7 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=str(user.user_id),
                         progress=progress_sink,
+                        guided_terminal=_guided_terminal_for_compose,
                     )
                 except ComposerConvergenceError as exc:
                     terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
@@ -2015,6 +3051,41 @@ def create_session_router() -> APIRouter:
                 # shared helper. Without this wrapper, a path-2 raise escapes
                 # as Starlette's bare 500 — partial_state is dropped from
                 # the audit trail and the frontend receives an opaque error.
+                #
+                # 5a. Compute the post-compose guided_session.
+                # If the transition prompt fired this turn, flip transition_consumed
+                # on the guided_session so subsequent turns use the freeform-only
+                # prompt.  The updated guided_session is included in composer_meta
+                # for both the version-changed save path and the version-unchanged
+                # standalone save below.
+                _post_compose_guided: GuidedSession | None = result.state.guided_session
+                if _guided_terminal_for_compose is not None:
+                    # transition_consumed flip — _guided is non-None because
+                    # _guided_terminal_for_compose was derived from _guided.terminal.
+                    # The explicit RuntimeError defends against an impossible state
+                    # (the gate above ensures _guided is not None when this fires)
+                    # and satisfies the type checker without defensive get() calls.
+                    if _guided is None:
+                        raise InvariantError(
+                            "guided_terminal_for_compose is set but guided_session is None — "
+                            "impossible state: transition gate should have blocked this path"
+                        )
+                    from dataclasses import replace as _replace_dc
+
+                    _post_compose_guided = _replace_dc(
+                        _guided,
+                        transition_consumed=True,
+                    )
+
+                # 5b. Compute the composer_meta that carries both repair_turns_used
+                # and guided_session.  Guided_session rides in composer_meta (not a
+                # first-class column) so any save must propagate it forward — failing
+                # to include it would silently drop the guided session from the DB on
+                # every freeform compose turn that mutates state.
+                _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+                if _post_compose_guided is not None:
+                    _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+
                 state_response: CompositionStateResponse | None = None
                 post_compose_state_id: UUID | None = pre_send_state_id
                 if result.state.version != state.version:
@@ -2040,7 +3111,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="compose",
-                            composer_meta={"repair_turns_used": result.repair_turns_used},
+                            composer_meta=_post_compose_meta,
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -2095,6 +3166,31 @@ def create_session_router() -> APIRouter:
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
+                elif _guided_terminal_for_compose is not None and _post_compose_guided is not None:
+                    # Version unchanged but transition_consumed must be flipped.
+                    # Persist the updated guided_session in a new state row so
+                    # subsequent turns pick up transition_consumed=True.
+                    _existing_meta: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        _existing_meta = dict(deep_thaw(state_record.composer_meta))
+                    _transition_meta = {**_existing_meta, **_post_compose_meta}
+                    _transition_state = result.state
+                    _transition_state_d = _transition_state.to_dict()
+                    _transition_state_data = CompositionStateData(
+                        source=_transition_state_d["source"],
+                        nodes=_transition_state_d["nodes"],
+                        edges=_transition_state_d["edges"],
+                        outputs=_transition_state_d["outputs"],
+                        metadata_=_transition_state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=_transition_meta,
+                    )
+                    _transition_record = await service.save_composition_state(
+                        session.id,
+                        _transition_state_data,
+                    )
+                    post_compose_state_id = _transition_record.id
 
                 # 6. Persist assistant message with post-compose provenance
                 assistant_msg = await service.add_message(
@@ -2153,6 +3249,27 @@ def create_session_router() -> APIRouter:
                 )
                 terminal_status = "completed"
                 return response
+            except InvariantError as exc:
+                # Same B1-sanitization rationale as the /guided/respond
+                # step_advance and dispatch handlers: server-invariant
+                # violations route through a static 500 detail and a
+                # structured slog event so on-call dashboards can filter on
+                # ``guided.invariant_violated``.  Without this handler an
+                # InvariantError raised from the post-compose transition_consumed
+                # impossible-state guard would land at FastAPI's default 500
+                # ({"detail": "Internal Server Error"}) with no structured log.
+                slog.error(
+                    "guided.invariant_violated",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="send_message",
+                    frames=_safe_frame_strings(exc),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Server invariant violated. See application audit log for diagnostic detail.",
+                ) from exc
             except asyncio.CancelledError as exc:
                 # Client-disconnect or operator cancel during the
                 # composer-engaged window. Publish a discriminated
@@ -2214,14 +3331,7 @@ def create_session_router() -> APIRouter:
             # Load current state
             state_record = await service.get_current_state(session.id)
             if state_record is None:
-                state = CompositionState(
-                    source=None,
-                    nodes=(),
-                    edges=(),
-                    outputs=(),
-                    metadata=PipelineMetadata(),
-                    version=1,
-                )
+                state = _initial_composition_state_with_guided_session()
                 pre_send_state_id: UUID | None = None
             else:
                 state = _state_from_record(state_record)
@@ -2265,6 +3375,15 @@ def create_session_router() -> APIRouter:
                     likely_next="ELSPETH will prepare the composer prompt with the current pipeline.",
                 ),
             )
+            # Detect guided→freeform mode transition (spec §8.2).
+            # Recompose is a retried freeform chat call — progressive disclosure
+            # fires here on the same semantics as send_message (first freeform
+            # turn after guided_session.terminal is set uses the layered prompt).
+            _guided = state.guided_session
+            _guided_terminal_for_compose = (
+                _guided.terminal if (_guided is not None and _guided.terminal is not None and not _guided.transition_consumed) else None
+            )
+
             _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "recompose"})
             terminal_status: _ComposerRequestTerminalStatus = "failed"
             try:
@@ -2285,6 +3404,7 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=str(user.user_id),
                         progress=progress_sink,
+                        guided_terminal=_guided_terminal_for_compose,
                     )
                 except ComposerConvergenceError as exc:
                     terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
@@ -2463,6 +3583,31 @@ def create_session_router() -> APIRouter:
                         detail={"error_type": "composer_error", "detail": str(exc)},
                     ) from exc
 
+                # Compute the post-compose guided_session and composer_meta.
+                # Mirror of send_message §5a-§5b: if the transition prompt fired
+                # this turn, flip transition_consumed so subsequent turns use the
+                # freeform-only prompt.  guided_session rides in composer_meta (not
+                # a first-class column) — any save must propagate it forward.
+                _post_compose_guided: GuidedSession | None = result.state.guided_session
+                if _guided_terminal_for_compose is not None:
+                    # transition_consumed flip — _guided is non-None because
+                    # _guided_terminal_for_compose was derived from _guided.terminal.
+                    if _guided is None:
+                        raise InvariantError(
+                            "guided_terminal_for_compose is set but guided_session is None — "
+                            "impossible state: transition gate should have blocked this path"
+                        )
+                    from dataclasses import replace as _replace_dc
+
+                    _post_compose_guided = _replace_dc(
+                        _guided,
+                        transition_consumed=True,
+                    )
+
+                _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+                if _post_compose_guided is not None:
+                    _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+
                 # Save state if version changed.
                 # Path 2 (post-compose runtime preflight): mirror of the
                 # send_message post-compose try/except — see the send_message
@@ -2492,7 +3637,7 @@ def create_session_router() -> APIRouter:
                             preflight_exception_policy="raise",
                             initial_version=state.version,
                             telemetry_source="recompose",
-                            composer_meta={"repair_turns_used": result.repair_turns_used},
+                            composer_meta=_post_compose_meta,
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
                         rpf_exc = ComposerRuntimePreflightError(
@@ -2543,6 +3688,31 @@ def create_session_router() -> APIRouter:
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
+                elif _guided_terminal_for_compose is not None and _post_compose_guided is not None:
+                    # Version unchanged but transition_consumed must be flipped.
+                    # Persist the updated guided_session in a new state row so
+                    # subsequent turns pick up transition_consumed=True.
+                    _existing_meta: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        _existing_meta = dict(deep_thaw(state_record.composer_meta))
+                    _transition_meta = {**_existing_meta, **_post_compose_meta}
+                    _transition_state = result.state
+                    _transition_state_d = _transition_state.to_dict()
+                    _transition_state_data = CompositionStateData(
+                        source=_transition_state_d["source"],
+                        nodes=_transition_state_d["nodes"],
+                        edges=_transition_state_d["edges"],
+                        outputs=_transition_state_d["outputs"],
+                        metadata_=_transition_state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=_transition_meta,
+                    )
+                    _transition_record = await service.save_composition_state(
+                        session.id,
+                        _transition_state_data,
+                    )
+                    post_compose_state_id = _transition_record.id
 
                 # Persist assistant message
                 assistant_msg = await service.add_message(
@@ -2591,6 +3761,22 @@ def create_session_router() -> APIRouter:
                 )
                 terminal_status = "completed"
                 return response
+            except InvariantError as exc:
+                # Mirror of send_message InvariantError handler — same
+                # B1-sanitization rationale. Static 500 detail; slog carries
+                # exc_class + frames only.
+                slog.error(
+                    "guided.invariant_violated",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="recompose",
+                    frames=_safe_frame_strings(exc),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Server invariant violated. See application audit log for diagnostic detail.",
+                ) from exc
             except asyncio.CancelledError as exc:
                 # Mirror of send_message cancellation path. See block
                 # comment there for the shielded-publish rationale.
@@ -3080,4 +4266,749 @@ def create_session_router() -> APIRouter:
             composition_state=_state_response(copied_state) if copied_state else None,
         )
 
+    def _build_get_guided_turn(
+        state: Any,
+        guided: Any,
+        *,
+        catalog: Any,
+    ) -> Any | None:
+        """Build the turn payload to return from GET /guided for the current step.
+
+        Called exclusively by ``get_guided`` to determine ``next_turn`` in the
+        response.  Rebuilds the correct turn deterministically from
+        ``(state, guided, catalog)`` alone, including intra-step turns for
+        steps that maintain staging fields on the session.
+
+        Per-step rebuild rules:
+
+        - STEP_1_SOURCE: three sub-cases in priority order:
+          1. ``step_1_source_intent`` is set → the SCHEMA_FORM response was
+             submitted; the session is waiting for INSPECT_AND_CONFIRM
+             confirmation.  Emit ``inspect_and_confirm`` from the intent's
+             observed columns (warnings are not stored on SourceIntent;
+             the rebuild emits an empty warnings list).
+          2. ``step_1_source_intent`` is None → initial state or SINGLE_SELECT
+             window.  Fall through to ``build_initial_step_1_turn``.
+             Note: the window between SINGLE_SELECT and SCHEMA_FORM does not
+             persist the chosen source plugin name; a GET /guided in that
+             window will re-emit the SINGLE_SELECT.  This is an observation-
+             not-fix gap (parallel to Finding 2, addressed by
+             step_2_chosen_plugin) and is tracked as obs-STEP1-chosen-plugin.
+
+        - STEP_2_SINK: three sub-cases in priority order:
+          1. ``step_2_sink_intent`` is set → the SCHEMA_FORM response was
+             submitted; the session is waiting for MULTI_SELECT_WITH_CUSTOM
+             confirmation.  Emit ``multi_select_with_custom`` from step_1_result.
+          2. ``step_2_chosen_plugin`` is set → the SINGLE_SELECT response was
+             submitted; the session is waiting for SCHEMA_FORM submission.
+             Emit ``schema_form`` for the chosen plugin.
+          3. Neither is set → initial state.  Emit ``single_select`` listing
+             all registered sink plugins.
+
+        - STEP_2_5_RECIPE_MATCH: deterministically re-run ``match_recipe``; if a
+          match is found, emit ``recipe_offer``.  Returns ``None`` when no
+          recipe matched (session stays at this step but no turn exists).
+
+        - STEP_3_TRANSFORMS: if ``step_3_proposal`` is set, emit
+          ``propose_chain`` from the staged proposal (this is the normal
+          path — step_3_proposal is always set when the session reaches
+          STEP_3_TRANSFORMS via the LLM chain solver).  Returns ``None``
+          if the proposal is absent (LLM call has not completed; should
+          not occur in practice — guarded defensively to avoid a crash).
+
+        Returns:
+            A ``Turn`` TypedDict, or ``None`` when the step has no rebuildable
+            turn (no-recipe STEP_2_5 path, or STEP_3 without a proposal).
+        """
+        step = guided.step
+        if step is GuidedStep.STEP_1_SOURCE:
+            # Finding 3 (Codex #14): if step_1_source_intent is set, the SCHEMA_FORM
+            # was already submitted and the session is waiting for INSPECT_AND_CONFIRM.
+            # Rebuild from the staged intent (observed_columns; warnings default to empty
+            # as they are not stored on SourceIntent).
+            if guided.step_1_source_intent is not None:
+                return build_step_1_inspect_and_confirm_turn_from_intent(guided.step_1_source_intent)
+            return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
+        if step is GuidedStep.STEP_2_SINK:
+            # Finding 2 (Codex #10): determine intra-step position and rebuild
+            # the correct turn, not always the initial SINGLE_SELECT.
+            if guided.step_2_sink_intent is not None:
+                # SCHEMA_FORM was submitted; session is waiting for MULTI_SELECT_WITH_CUSTOM.
+                observed_columns: tuple[str, ...] = ()
+                if guided.step_1_result is not None:
+                    observed_columns = tuple(guided.step_1_result.observed_columns)
+                return build_step_2_multi_select_turn(observed_columns)
+            if guided.step_2_chosen_plugin is not None:
+                # SINGLE_SELECT was submitted; session is waiting for SCHEMA_FORM submission.
+                return build_step_2_schema_form_turn(guided.step_2_chosen_plugin, catalog)
+            # Initial state: no plugin chosen yet.  Emit the sink plugin list.
+            return build_step_2_single_select_turn(catalog)
+        if step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+            # A recipe_offer TurnRecord exists iff a recipe was matched.
+            # Reconstruct by re-running match_recipe (deterministic).
+            if guided.step_1_result is not None and guided.step_2_result is not None:
+                recipe_match = match_recipe(guided.step_1_result, guided.step_2_result)
+                if recipe_match is not None:
+                    return build_step_2_5_recipe_offer_turn(recipe_match)
+            # No recipe matched — no initial turn for this step.
+            return None
+        if step is GuidedStep.STEP_3_TRANSFORMS:
+            # Finding 1 (Codex #5): rebuild propose_chain from the staged proposal.
+            # step_3_proposal is always set when the session reaches STEP_3_TRANSFORMS
+            # via the LLM chain solver (set atomically with the step pointer in the
+            # dispatcher at routes.py:2051 and routes.py:4063).  A None here would
+            # mean the proposal was never computed — guarded defensively to avoid
+            # crashing on a corrupt session rather than returning a misleading null.
+            if guided.step_3_proposal is not None:
+                return build_step_3_propose_chain_turn(guided.step_3_proposal)
+            # No proposal yet — LLM call has not completed; return None and let the
+            # idempotency machinery handle it (no TurnRecord emitted; client retries).
+            return None
+        return None
+
+    @router.get("/{session_id}/guided", response_model=GetGuidedResponse)
+    async def get_guided(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GetGuidedResponse:
+        """Return the current guided-mode state for a session.
+
+        **Mutating on first visit:** if the current step has no emitted
+        TurnRecord in the guided session history, a turn is built and
+        persisted.  Subsequent fetches are idempotent — the existing
+        TurnRecord's payload_hash is returned verbatim.
+
+        If the session has no existing CompositionState, one is created
+        with ``GuidedSession.initial()`` attached (spec §5.2 default-guided
+        invariant).
+
+        Returns 404 if the session does not exist or does not belong to
+        the requesting user.
+        Returns 400 if the session's composition state has no guided_session
+        attached (freeform session — use /api/sessions/{id}/messages instead).
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        catalog: CatalogServiceProtocol = request.app.state.catalog_service
+        recorder = BufferingRecorder()
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            # PR-review B3: drain the recorder on every exit path, including
+            # ``raise HTTPException`` rejections.  Without this, any audit
+            # event emitted before a mid-body raise would be discarded — a
+            # CLAUDE.md auditability violation ("rejected requests are facts
+            # worth recording").  ``state_record_out`` is hoisted so the
+            # finally block can pass its id (or None) regardless of where
+            # control left the try.
+            state_record_out: CompositionStateRecord | None = None
+            try:
+                # Load or create CompositionState.
+                state_record = await service.get_current_state(session_id)
+                if state_record is None:
+                    state = _initial_composition_state_with_guided_session()
+                else:
+                    state = _state_from_record(state_record)
+                state_record_out = state_record
+
+                # Reject freeform sessions.
+                if state.guided_session is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                    )
+
+                guided = state.guided_session
+                current_step = guided.step
+
+                # Idempotency check: if this step already has an emitted TurnRecord,
+                # return the existing payload without re-emitting.
+                existing_record_for_step: TurnRecord | None = next(
+                    (r for r in reversed(guided.history) if r.step == current_step),
+                    None,
+                )
+
+                # Build the initial turn for the current step (deterministic from
+                # state + catalog).  Returns None for steps with no rebuildable
+                # initial turn (STEP_3 / no-recipe STEP_2_5 path) or when the
+                # session is already terminal.
+                turn = _build_get_guided_turn(state, guided, catalog=catalog) if guided.terminal is None else None
+                turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
+                payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
+
+                if existing_record_for_step is None and turn is not None:
+                    # First fetch for this step AND a turn exists: record TurnRecord,
+                    # persist, emit audit.  When turn is None (terminal state, STEP_3,
+                    # or no-recipe STEP_2_5 path) there is no turn to record.
+                    # Guaranteed by the conditional assignments above: turn is not
+                    # None on this branch, so both turn_type and payload_hash were
+                    # populated from turn["type"] / stable_hash(turn["payload"]).
+                    # Use InvariantError (not bare assert) so python -O does not
+                    # strip the gate and silently feed None to TurnRecord.
+                    if turn_type is None:
+                        raise InvariantError(
+                            "GET guided: turn is not None but turn_type is None — TurnType derivation skipped despite turn being present."
+                        )
+                    if payload_hash is None:
+                        raise InvariantError(
+                            "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
+                        )
+                    new_record = TurnRecord(
+                        step=current_step,
+                        turn_type=turn_type,
+                        payload_hash=payload_hash,
+                        response_hash=None,
+                        emitter="server",
+                    )
+                    from dataclasses import replace as _replace
+
+                    # If this is the STEP_2_5_RECIPE_MATCH step, populate
+                    # step_2_5_recipe_offer so the POST /respond accept branch
+                    # can verify the client-supplied recipe_name against the offer.
+                    # This covers the GET-before-POST flow (user reloads the page
+                    # while the session is at the recipe-offer step).
+                    if (
+                        current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                        and guided.step_1_result is not None
+                        and guided.step_2_result is not None
+                    ):
+                        staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+                    else:
+                        staged_offer = None
+
+                    new_guided = _replace(guided, history=(*guided.history, new_record))
+                    if staged_offer is not None:
+                        new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
+                    new_state = _replace(state, guided_session=new_guided)
+
+                    # Persist state with updated guided_session in composer_meta.
+                    # Preserve any existing composer_meta keys (e.g. repair_turns_used).
+                    existing_meta: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        existing_meta = dict(deep_thaw(state_record.composer_meta))
+                    new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+
+                    state_d = new_state.to_dict()
+                    state_data = CompositionStateData(
+                        source=state_d["source"],
+                        nodes=state_d["nodes"],
+                        edges=state_d["edges"],
+                        outputs=state_d["outputs"],
+                        metadata_=state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=new_composer_meta,
+                    )
+                    state_record_out = await service.save_composition_state(session_id, state_data)
+
+                    # Emit audit event.  Persistence of the buffered invocations
+                    # is handled by the finally block below — that way both
+                    # success and rejection paths drain identically.
+                    emit_turn_emitted(
+                        recorder,
+                        step=current_step,
+                        turn_type=turn_type,
+                        payload_hash=payload_hash,
+                        payload_payload_id="",  # No payload store for server-emitted turns yet.
+                        emitter="server",
+                        composition_version=new_state.version,
+                        actor=user.user_id,
+                    )
+
+                    guided = new_guided
+
+                # Idempotency-path repair: if the session is at STEP_2_5_RECIPE_MATCH
+                # and the staged offer is absent (persisted before the step_2_5_recipe_offer
+                # field was introduced), re-populate it and persist the repaired state so
+                # the POST /respond accept branch can verify the recipe_name.  Without this
+                # repair, sessions that reached STEP_2_5 before this field was added would
+                # always fail the accept binding check with 400.  The offer is
+                # deterministically reconstructable from (step_1_result, step_2_result).
+                if (
+                    existing_record_for_step is not None
+                    and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+                    and guided.step_2_5_recipe_offer is None
+                    and guided.step_1_result is not None
+                    and guided.step_2_result is not None
+                ):
+                    recovered_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+                    if recovered_offer is not None:
+                        from dataclasses import replace as _replace_repair
+
+                        repaired_guided = _replace_repair(guided, step_2_5_recipe_offer=recovered_offer)
+                        repaired_state = _replace_repair(state, guided_session=repaired_guided)
+                        existing_meta_repair: dict[str, Any] = {}
+                        if state_record is not None and state_record.composer_meta is not None:
+                            existing_meta_repair = dict(deep_thaw(state_record.composer_meta))
+                        repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
+                        repaired_state_d = repaired_state.to_dict()
+                        repair_data = CompositionStateData(
+                            source=repaired_state_d["source"],
+                            nodes=repaired_state_d["nodes"],
+                            edges=repaired_state_d["edges"],
+                            outputs=repaired_state_d["outputs"],
+                            metadata_=repaired_state_d["metadata"],
+                            is_valid=False,
+                            validation_errors=None,
+                            composer_meta=repair_meta,
+                        )
+                        state_record_out = await service.save_composition_state(session_id, repair_data)
+                        guided = repaired_guided
+
+                # Build response.  On re-fetch the same turn is returned (deterministic
+                # rebuild) and the payload_hash matches what was recorded on first visit.
+                terminal = guided.terminal
+                return GetGuidedResponse(
+                    guided_session=GuidedSessionResponse(
+                        step=guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                emitter=r.emitter,
+                            )
+                            for r in guided.history
+                        ],
+                        terminal=TerminalStateResponse(
+                            kind=terminal.kind.value,
+                            reason=terminal.reason.value if terminal.reason is not None else None,
+                            pipeline_yaml=terminal.pipeline_yaml,
+                        )
+                        if terminal is not None
+                        else None,
+                    ),
+                    next_turn=TurnPayloadResponse(
+                        type=turn["type"],
+                        step_index=turn["step_index"],
+                        payload=dict(turn["payload"]),
+                    )
+                    if turn is not None
+                    else None,
+                    terminal=TerminalStateResponse(
+                        kind=terminal.kind.value,
+                        reason=terminal.reason.value if terminal.reason is not None else None,
+                        pipeline_yaml=terminal.pipeline_yaml,
+                    )
+                    if terminal is not None
+                    else None,
+                    composition_state=_state_response(state_record_out) if state_record_out is not None else None,
+                )
+            finally:
+                # PR-review B3: drain the recorder unconditionally — success
+                # paths and ``raise HTTPException`` rejection paths take the
+                # same exit.  Empty drains are a no-op (BufferingRecorder
+                # starts with an empty invocations list and
+                # ``_persist_tool_invocations`` iterates an empty tuple).
+                #
+                # The inner ``try`` prevents an audit-persist failure from
+                # masking the in-flight HTTPException — Python's default
+                # behaviour is to let a ``finally``-block exception replace
+                # the original, which would surface a generic 500 instead
+                # of the intended 400/409.  Per CLAUDE.md telemetry/logging
+                # primacy, audit-system failures during exception handling
+                # are the one exemption where ``slog`` is the correct
+                # channel.  The log payload follows the B1 convention:
+                # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
+                # ``exc_info`` (frames are bounded and value-free; the
+                # exception message can carry Tier-bearing strings).
+                try:
+                    await _persist_tool_invocations(
+                        service,
+                        session_id,
+                        recorder.invocations,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="get_guided",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
+
+    @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
+    async def post_guided_respond(
+        session_id: UUID,
+        body: GuidedRespondRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GuidedRespondResponse:
+        """Submit a user response to the current guided-mode turn.
+
+        **Dispatcher:** Identifies the current turn type from the last
+        ``TurnRecord`` in the session history, applies the response via
+        ``step_advance`` (pure), runs any required side-effect step handler,
+        persists the updated state, and emits audit events.
+
+        Returns the updated ``guided_session``, the next ``next_turn`` (or
+        ``None`` if the session has reached a terminal state), and the
+        ``terminal`` payload (or ``None`` while still active).
+
+        Raises 400 if the session has no ``guided_session`` attached.
+        Raises 409 if the guided session is already in a terminal state.
+        Raises 404 if the session does not exist or belong to the requesting user.
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        catalog: CatalogServiceProtocol = request.app.state.catalog_service
+        recorder = BufferingRecorder()
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            # PR-review B3: drain the recorder on every exit path, including
+            # ``raise HTTPException`` rejections.  This handler emits
+            # ``guided_turn_answered`` (line below the ``_validate_*`` calls)
+            # BEFORE the dispatcher's try-block can raise 400, so without an
+            # unconditional drain the turn-answered event for a rejected
+            # advance attempt is silently dropped — a CLAUDE.md auditability
+            # violation ("rejected requests are facts worth recording").
+            #
+            # ``state_record_out`` is hoisted above the try so the finally
+            # block can reference it regardless of where control left.  On
+            # rejection paths it may legitimately remain ``None`` — the
+            # ``_persist_tool_invocations`` signature accepts that.
+            state_record_out: CompositionStateRecord | None = None
+            try:
+                # Load state.
+                state_record = await service.get_current_state(session_id)
+                if state_record is None:
+                    state = _initial_composition_state_with_guided_session()
+                else:
+                    state = _state_from_record(state_record)
+
+                if state.guided_session is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                    )
+
+                guided = state.guided_session
+
+                # Reject if session already terminal.
+                if guided.terminal is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Guided session is already in a terminal state. No further responses accepted.",
+                    )
+
+                # Derive the current turn type from the last TurnRecord for the
+                # current step.  Crash if history is empty — the caller must have
+                # fetched GET /guided first (which seeds the initial TurnRecord).
+                current_step = guided.step
+                existing_record: TurnRecord | None = next(
+                    (r for r in reversed(guided.history) if r.step == current_step),
+                    None,
+                )
+                if existing_record is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
+                    )
+
+                current_turn_type = existing_record.turn_type
+
+                # --- Wire-boundary validation (Codex #7, #12) -------------------
+                # Both guards run before the TurnResponse dict is assembled so that
+                # invalid requests are rejected before response_hash is computed or
+                # guided_turn_answered is emitted.
+
+                # Codex #12: validate control_signal against the ControlSignal enum.
+                # This is the Tier-3 -> Tier-2 coercion: the parsed enum (or
+                # None) flows into the typed ``TurnResponse`` below.
+                control_signal = _validate_control_signal(body.control_signal)
+
+                # Codex #7: validate step-index fields against the current proposal.
+                _validate_step_indices(
+                    current_turn_type,
+                    body.accepted_step_index,
+                    body.edit_step_index,
+                    guided,
+                )
+
+                # Build the TurnResponse dict from the request body.
+                from dataclasses import replace as _replace
+
+                turn_response: TurnResponse = {
+                    "chosen": body.chosen,
+                    "edited_values": body.edited_values,
+                    "custom_inputs": body.custom_inputs,
+                    "accepted_step_index": body.accepted_step_index,
+                    "edit_step_index": body.edit_step_index,
+                    "control_signal": control_signal,
+                }
+
+                # Record the response_hash on the existing TurnRecord.
+                response_hash = stable_hash(turn_response)
+                updated_record = _replace(existing_record, response_hash=response_hash)
+                # Rebuild history tuple with response_hash stamped on this record.
+                updated_history = tuple(updated_record if r is existing_record else r for r in guided.history)
+                guided = _replace(guided, history=updated_history)
+
+                # Emit guided_turn_answered audit event.  This writes to the
+                # recorder BEFORE the dispatcher's try-block — if the
+                # dispatcher then raises 400, this event must still reach
+                # the audit DB (see PR-review B3 finally-drain rationale).
+                emit_turn_answered(
+                    recorder,
+                    step=current_step,
+                    turn_type=current_turn_type,
+                    response_hash=response_hash,
+                    response_payload_id="",
+                    control_signal=body.control_signal,
+                    composition_version=state.version,
+                    actor=user.user_id,
+                )
+
+                # Run step_advance (pure — no I/O).
+                # InvariantError indicates a server-side bug (e.g. stamped an
+                # invalid turn type on a history record) — propagate as HTTP 500
+                # with a static message so the response body never carries
+                # ``str(exc)``. ``InvariantError`` raised from ``from_dict`` call
+                # sites embeds ``{d!r}`` of the corrupted Tier-1 record, which
+                # includes Tier-3 ``sample_rows`` source data. Interpolating that
+                # into the HTTP detail field would have leaked user/PII content
+                # into the JSON 500 body returned to the browser (PR #37 review
+                # finding B1).
+                #
+                # Diagnostic trace is preserved via ``slog.error`` under the
+                # audit-system-failure exemption (CLAUDE.md primacy order: when
+                # ``from_dict`` itself fails, the audit-derivation path can't be
+                # trusted to record the failure consistently). The slog event
+                # carries ``exc_class`` + ``frames`` only — never the message
+                # string, since for ``{d!r}`` -bearing InvariantErrors that text
+                # is the leak vector. Sibling helpers in this file follow the
+                # same "class + frames, no message" pattern when the exception
+                # carries Tier-bearing strings (see ``_safe_frame_strings`` docs).
+                #
+                # ValueError indicates a client-supplied payload violated the
+                # guided-mode protocol contract (e.g. unexpected chosen value on a
+                # recipe_offer turn, or null edited_values on inspect_and_confirm)
+                # — propagate as HTTP 400 so the caller can correct the request.
+                # ValueError is not raised by ``from_dict`` and does not embed
+                # ``{d!r}`` of Tier-1 records, so interpolating ``str(exc)`` here
+                # is safe.
+                try:
+                    new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
+                        guided,
+                        turn_response,
+                        current_turn_type=current_turn_type,
+                    )
+                except InvariantError as exc:
+                    slog.error(
+                        "guided.invariant_violated",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        exc_class=type(exc).__name__,
+                        site="step_advance",
+                        frames=_safe_frame_strings(exc),
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Server invariant violated. See application audit log for diagnostic detail.",
+                    ) from exc
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Guided-mode protocol error: {exc}",
+                    ) from exc
+
+                # Fan directives to emit_* helpers.
+                for directive in directives:
+                    if directive.tool_name == "guided_step_advanced":
+                        args = dict(directive.arguments)
+                        emit_step_advanced(
+                            recorder,
+                            prev=GuidedStep(args["prev_step"]),
+                            next_=GuidedStep(args["next_step"]),
+                            reason=args["reason"],
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+                    elif directive.tool_name == "guided_dropped_to_freeform":
+                        args = dict(directive.arguments)
+                        emit_dropped_to_freeform(
+                            recorder,
+                            prev=GuidedStep(args["prev_step"]),
+                            drop_reason=TerminalReason(args["drop_reason"]),
+                            validation_result=args["validation_result"],
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+
+                guided = new_guided
+                terminal = terminal_from_advance
+
+                # Run side-effect dispatcher if the session is not yet terminal.
+                # The dispatcher calls step handlers (handle_step_1_source,
+                # handle_step_2_sink, handle_step_2_5_recipe_apply) and emits
+                # the next turn based on the updated step + turn type.
+                next_turn: Any | None = None
+                settings = request.app.state.settings
+                data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
+                session_engine = request.app.state.session_engine
+
+                if terminal is None:
+                    try:
+                        state, guided, next_turn = await _dispatch_guided_respond(
+                            state=state,
+                            guided=guided,
+                            current_step=current_step,
+                            current_turn_type=current_turn_type,
+                            turn_response=turn_response,
+                            catalog=catalog,
+                            recorder=recorder,
+                            user_id=user.user_id,
+                            data_dir=data_dir,
+                            session_engine=session_engine,
+                            session_id=str(session_id),
+                            model=settings.composer_model,
+                        )
+                    except InvariantError as exc:
+                        # Same B1-sanitization rationale as the step_advance
+                        # catch above: ``str(exc)`` from a ``from_dict`` site
+                        # embeds ``{d!r}`` of the corrupted Tier-1 record
+                        # including Tier-3 ``sample_rows``. Static detail; slog
+                        # carries exc_class + frames only.
+                        slog.error(
+                            "guided.invariant_violated",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            exc_class=type(exc).__name__,
+                            site="dispatch_guided_respond",
+                            frames=_safe_frame_strings(exc),
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Server invariant violated. See application audit log for diagnostic detail.",
+                        ) from exc
+                    except ValueError as exc:
+                        # ValueError from inside the dispatcher indicates a
+                        # client-supplied payload violated the guided-mode protocol
+                        # contract (e.g. unknown plugin name from chosen, null
+                        # edited_values) — propagate as HTTP 400. See Codex #8,
+                        # #11, #15 and commit message for full context.
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Guided-mode protocol error: {exc}",
+                        ) from exc
+                    terminal = guided.terminal
+
+                # Persist updated state.
+                new_state = _replace(state, guided_session=guided)
+                existing_meta: dict[str, Any] = {}
+                if state_record is not None and state_record.composer_meta is not None:
+                    existing_meta = dict(deep_thaw(state_record.composer_meta))
+                new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+
+                state_d = new_state.to_dict()
+                state_data = CompositionStateData(
+                    source=state_d["source"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=state_d["metadata"],
+                    is_valid=False,
+                    validation_errors=None,
+                    composer_meta=new_composer_meta,
+                )
+                state_record_out = await service.save_composition_state(session_id, state_data)
+
+                # Recorder persistence happens in the finally block below so
+                # rejection paths drain identically to the success path.
+
+                return GuidedRespondResponse(
+                    guided_session=GuidedSessionResponse(
+                        step=guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                emitter=r.emitter,
+                            )
+                            for r in guided.history
+                        ],
+                        terminal=TerminalStateResponse(
+                            kind=terminal.kind.value,
+                            reason=terminal.reason.value if terminal.reason is not None else None,
+                            pipeline_yaml=terminal.pipeline_yaml,
+                        )
+                        if terminal is not None
+                        else None,
+                    ),
+                    next_turn=TurnPayloadResponse(
+                        type=next_turn["type"],
+                        step_index=next_turn["step_index"],
+                        payload=dict(next_turn["payload"]),
+                    )
+                    if next_turn is not None
+                    else None,
+                    terminal=TerminalStateResponse(
+                        kind=terminal.kind.value,
+                        reason=terminal.reason.value if terminal.reason is not None else None,
+                        pipeline_yaml=terminal.pipeline_yaml,
+                    )
+                    if terminal is not None
+                    else None,
+                    composition_state=_state_response(state_record_out),
+                )
+            finally:
+                # PR-review B3: drain the recorder unconditionally — success
+                # paths and ``raise HTTPException`` rejection paths take the
+                # same exit.  Empty drains are a no-op (BufferingRecorder
+                # starts with an empty invocations list and
+                # ``_persist_tool_invocations`` iterates an empty tuple).
+                #
+                # The inner ``try`` prevents an audit-persist failure from
+                # masking the in-flight HTTPException — Python's default
+                # behaviour is to let a ``finally``-block exception replace
+                # the original, which would surface a generic 500 instead
+                # of the intended 400/409.  Per CLAUDE.md telemetry/logging
+                # primacy, audit-system failures during exception handling
+                # are the one exemption where ``slog`` is the correct
+                # channel.  The log payload follows the B1 convention:
+                # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
+                # ``exc_info`` (frames are bounded and value-free; the
+                # exception message can carry Tier-bearing strings).
+                try:
+                    await _persist_tool_invocations(
+                        service,
+                        session_id,
+                        recorder.invocations,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="post_guided_respond",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
+
     return router
+
+
+def _guided_step_index(step: Any) -> int:
+    """Map a GuidedStep to its 0-based integer index.
+
+    Mirrors ``emitters._step_index``; defined here so the route handler
+    can reconstruct a re-fetch Turn without importing the emitters module
+    just for this utility.
+    """
+    from elspeth.web.composer.guided.protocol import GuidedStep
+
+    _ORDER: tuple[GuidedStep, ...] = (
+        GuidedStep.STEP_1_SOURCE,
+        GuidedStep.STEP_2_SINK,
+        GuidedStep.STEP_2_5_RECIPE_MATCH,
+        GuidedStep.STEP_3_TRANSFORMS,
+    )
+    return _ORDER.index(step)

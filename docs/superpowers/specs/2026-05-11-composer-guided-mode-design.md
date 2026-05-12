@@ -348,15 +348,20 @@ Both are pure functions of `(state, response) → (next_state, next_turn)`. The 
 def step_advance(
     session: GuidedSession,
     response: TurnResponse,
-    state: CompositionState,
-) -> tuple[GuidedSession, Turn | None, TerminalState | None, list[GuidedAuditEvent]]:
+    *,
+    current_turn_type: TurnType,
+) -> tuple[GuidedSession, Turn | None, TerminalState | None, list[GuidedAuditDirective]]:
     """
     Apply the user's response to the current guided session. Returns:
-      (new_session, next_turn_or_None, terminal_state_or_None, audit_events_to_emit)
+      (new_session, next_turn_or_None, terminal_state_or_None, directives_to_emit)
     """
 ```
 
-The function encodes the legal-turn matrix, the step transitions, and the terminal-condition checks. It is unit-testable in isolation (no I/O, no LLM, no DB).
+The function encodes the legal-turn matrix, the step transitions, and the terminal-condition checks. It is unit-testable in isolation (no I/O, no LLM, no DB, no clock, no uuid).
+
+`GuidedAuditDirective` (defined in `state_machine.py`) is the pure-function-return shape for audit instructions: a frozen `(tool_name, arguments)` pair where `tool_name` is one of the four discriminator strings (`guided_turn_emitted`, `guided_turn_answered`, `guided_step_advanced`, `guided_dropped_to_freeform`) and `arguments` is the payload mapping. The route handler (§6.2) fans each directive out to the matching `emit_*` helper in `composer/guided/audit.py`, supplying the runtime-only fields (`tool_call_id`, `started_at`/`finished_at`, `version_before`/`version_after`, `actor`) that bind it to a live `ComposerToolInvocation` record per Errata C4. The on-the-wire audit record is still `ComposerToolInvocation`; no new L0 contract type was introduced.
+
+The `state: CompositionState` parameter from earlier drafts of this section was dropped during Phase 2 implementation — `step_advance` is structurally pure over `(session, response, current_turn_type)` alone, with composition-state mutations deferred to the route handler (which already holds the version snapshot needed for the audit record).
 
 ### 6.4 Recipe pre-match
 

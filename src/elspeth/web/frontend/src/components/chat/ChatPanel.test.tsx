@@ -314,6 +314,74 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeNull();
   });
 
+  it("wraps the guided turn surface in a role=log aria-live=polite region (Task 8.2 a11y)", () => {
+    // Task 8.2 a11y fix: the guided branch must wrap the live turn surface in
+    // role="log" aria-live="polite" so screen readers are notified when a new
+    // turn arrives.  InspectAndConfirmTurn.tsx:39-46 documents the dependency
+    // (its warnings <aside> omits its own live region in favour of the parent).
+    // This test pins the contract on the parent side.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // The log region is the inner wrapper around <GuidedTurn>.
+    const logRegion = container.querySelector<HTMLElement>(
+      '[role="log"][aria-live="polite"]',
+    );
+    expect(logRegion).not.toBeNull();
+    // Co-attributes that complete the contract (parallel to chat-panel-messages
+    // in the freeform body).
+    expect(logRegion?.getAttribute("aria-relevant")).toBe("additions");
+    expect(logRegion?.getAttribute("aria-label")).toBe("Guided wizard step");
+
+    // The log region contains the turn surface (GuidedTurn → SingleSelectTurn's
+    // <fieldset> with the question as accessible name).
+    const fieldset = logRegion?.querySelector("fieldset");
+    expect(fieldset).not.toBeNull();
+    expect(fieldset?.textContent).toContain("Which source plugin should we use?");
+
+    // ExitToFreeformButton lives OUTSIDE the log region (persistent affordance,
+    // not "new content" on turn change).  Document the layout decision via test.
+    const exitButton = screen.getByRole("button", { name: "Exit to freeform" });
+    expect(logRegion?.contains(exitButton)).toBe(false);
+  });
+
+  it("does not add a log region on the completed surface (regression pin for Task 8.2 a11y scope)", () => {
+    // The completed branch shows a static summary — no new turns ever arrive,
+    // so there must be no aria-live log region.  This test prevents an
+    // over-zealous future refactor from rehoisting the log wrapper above the
+    // discriminator and announcing the completion summary as if it were a
+    // turn arrival event.
+    const terminal: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "source:\n  plugin: csv\n",
+    };
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal,
+      },
+      guidedTerminal: terminal,
+    });
+
+    render(<ChatPanel />);
+
+    // No live region on the completed surface.
+    expect(screen.queryByRole("log")).toBeNull();
+  });
+
   it("falls through to the freeform body when guidedSession is active but guidedNextTurn is null", () => {
     // Defensive: this transient invariant should not crash the surface by passing
     // null into GuidedTurn — it should fall through to freeform.

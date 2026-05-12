@@ -177,11 +177,41 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
         className="chat-panel chat-panel--guided"
         aria-label="Guided composer"
       >
+        {/*
+          aria-live region scope (mirrors the freeform body's chat-panel-messages
+          region; see ChatPanel.tsx around line 218-225 of post-Task-8.1 state).
+
+          Only the live turn surface (<GuidedTurn>) lives inside the role="log"
+          region.  Rationale:
+
+          * GuidedHistory is historical context — already-resolved turns that
+            were announced when they first arrived.  Replaying them through the
+            live region on every step transition would create redundant SR
+            chatter; keep it outside.
+          * ExitToFreeformButton is a persistent affordance (always present
+            in guided mode).  It is not "new content" on turn change, so it
+            also lives outside the log region.
+          * GuidedTurn replaces in place when a new step's payload arrives.
+            That replacement IS the "new content" event that SRs need to hear
+            about — hence the wrapping log region.
+
+          Load-bearing for InspectAndConfirmTurn.tsx:39-46 (the widget's
+          warnings <aside> deliberately omits its own aria-live region under
+          the convention that the parent ChatPanel wraps turn content in one).
+        */}
         <GuidedHistory history={guidedSession.history} />
-        <GuidedTurn
-          turn={guidedNextTurn}
-          onSubmit={(body) => void respondGuided(body)}
-        />
+        <div
+          className="chat-panel-guided-log"
+          role="log"
+          aria-label="Guided wizard step"
+          aria-live="polite"
+          aria-relevant="additions"
+        >
+          <GuidedTurn
+            turn={guidedNextTurn}
+            onSubmit={(body) => void respondGuided(body)}
+          />
+        </div>
         <ExitToFreeformButton />
       </div>
     );

@@ -1811,6 +1811,169 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16b — _MUTATION_TOOLS remaining,
+# 8 tools).
+#
+# Excluding set_source / set_pipeline / patch_*_options (Tasks 4/14/15) the
+# remaining ``_MUTATION_TOOLS`` are graph-shape editors that take node-ids,
+# edge-ids, sink names, edge kinds, route slots, and (for upsert_node and
+# set_output) an option dict.  The option-dict-bearing tools declare
+# ``sensitive_argument_keys`` so the option payload is redacted at the
+# argument boundary; the §4.4.2 ``dict[str, Any]`` fail-closed rule applies
+# only to type-driven entries (Pydantic-walked argument models) and the
+# declarative path expresses the same contract through the sensitive-keys
+# tuple.
+#
+# Reuse of :func:`_summarize_set_source_options` is structurally sound: the
+# helper is content-agnostic — it applies path-blob_ref redaction when the
+# relevant keys are present and leaves everything else verbatim — so it
+# applies to upsert_node options, set_output options, and the trigger/routes
+# slots without modification.  The same reuse rationale is documented in
+# detail on :class:`_PipelineNodeModel.options` and :class:`_PipelineOutputModel.options`.
+# ---------------------------------------------------------------------------
+
+
+def _summarize_set_metadata_patch(patch: dict[str, Any]) -> str:
+    """Summarizer for ``set_metadata.patch`` (Task 16b).
+
+    The patch carries only ``name`` and ``description`` fields per the JSON
+    schema at tools.py:826-838 — both operator-facing labels with no plugin
+    options, no path references, and no credential markers.  The summarizer
+    returns a canonical-JSON encoding of the keys present so the audit trail
+    records which metadata fields the LLM mutated without preserving the raw
+    free-text values verbatim (a follow-up plugin may decide they ARE policy-
+    sensitive even though the current schema treats them as labels).
+
+    Contract (spec §4.2.6, §9 RSK-03):
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+    """
+    keys = sorted(patch.keys())
+    return f"<metadata-patch:{','.join(keys)}>" if keys else "<metadata-patch:empty>"
+
+
+_UPSERT_NODE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("node options / routes / trigger payload — redacted via sensitive_argument_keys",),
+    why_arguments_safe=(
+        "upsert_node graph-shape fields (id, node_type, input, on_success, on_error, "
+        "condition, fork_to, branches, policy, merge, output_mode, expected_output_count) "
+        "are operator-controlled scalars; the LLM-supplied options/routes/trigger dicts "
+        "ARE sensitive and are listed in sensitive_argument_keys for boundary summary."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — affected_nodes ids and validation summary "
+        "for the post-mutation state; option payload is NOT echoed back because the audit "
+        "trail's source of truth for option values is the argument redaction at dispatch."
+    ),
+)
+
+
+_UPSERT_EDGE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("graph topology — edge id, endpoints, kind, label — none are payload-bearing",),
+    why_arguments_safe=(
+        "upsert_edge accepts only graph-topology scalars (id, from_node, to_node, edge_type, "
+        "optional label); none are LLM-supplied option payload and the JSON schema enforces "
+        "edge_type via an enum so the dispatch surface cannot carry sensitive material."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary plus the edge id list "
+        "after upsert; edges are pure connection-name strings and the response carries no "
+        "plugin option values, no credentials, and no row payload from any execution path."
+    ),
+)
+
+
+_REMOVE_NODE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("graph topology — single node id selector identifying the deletion target",),
+    why_arguments_safe=(
+        "remove_node accepts only a single scalar id string naming the node to delete; "
+        "the JSON schema at tools.py:803-808 has no other properties, so the LLM cannot "
+        "place any payload on this surface; the handler indexes by id only."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary for the post-removal "
+        "state and the list of affected node ids; the deleted node's options are not "
+        "echoed back, and the validation entries name fields by path without payload."
+    ),
+)
+
+
+_REMOVE_EDGE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("graph topology — single edge id selector identifying the deletion target",),
+    why_arguments_safe=(
+        "remove_edge accepts only a single scalar id string naming the edge to delete; "
+        "the JSON schema at tools.py:814-819 has no other properties, so the LLM cannot "
+        "place any payload on this surface; the handler indexes by edge id only."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary for the post-removal "
+        "state and the list of affected node ids; edges carry only connection names so "
+        "the response surface has no payload, no credentials, and no row content."
+    ),
+)
+
+
+_REMOVE_OUTPUT_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("graph topology — single sink_name selector identifying the output to remove",),
+    why_arguments_safe=(
+        "remove_output accepts only a single scalar sink_name string naming the output "
+        "to delete; the JSON schema at tools.py:877-882 has no other properties, so the "
+        "LLM cannot place any payload on this surface; the handler indexes by name only."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary for the post-removal "
+        "state and the affected node id list; the removed sink's option dict is not "
+        "echoed back, so destination paths and credentials do not appear in the response."
+    ),
+)
+
+
+_CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("composer state — single in-memory source slot being cleared",),
+    why_arguments_safe=(
+        "clear_source accepts no arguments — the JSON schema at tools.py:1145 declares "
+        "an empty properties object with empty required, so the LLM cannot place any "
+        "value on this surface; the handler clears the source slot unconditionally."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary describing the "
+        "now-source-less state; the cleared source's option dict is discarded and not "
+        "echoed back, so the response surface has no path, no plugin options, no secrets."
+    ),
+)
+
+
+_SET_METADATA_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("metadata patch payload — redacted via sensitive_argument_keys with summarizer",),
+    why_arguments_safe=(
+        "set_metadata wraps a patch dict containing only name and description label fields "
+        "(JSON schema at tools.py:826-838); the patch IS sensitive_argument_keys-listed so "
+        "the boundary summary collapses operator-supplied free text to a key-set descriptor."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary for the post-patch "
+        "state; the patched name/description values are not echoed back in the response, "
+        "so the audit-side record carries only the structural shape of the mutation."
+    ),
+)
+
+
+_SET_OUTPUT_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("output sink option payload — redacted via sensitive_argument_keys with summarizer",),
+    why_arguments_safe=(
+        "set_output sink_name and plugin are connection-name and plugin-key scalars; on_write_failure "
+        "is a routing-name scalar; the options dict IS listed in sensitive_argument_keys so the "
+        "summarizer collapses output paths, credential markers, and prompt templates at the boundary."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult — validation summary plus the affected node id list "
+        "for the post-mutation state; the sink option dict is not echoed back, so destination paths "
+        "and credentials cannot leak through the response surface, only argument redaction governs that."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -1902,6 +2065,65 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DIFF_PIPELINE_REASON,
+            )
+        ),
+        # Wave 5 (Task 16b) — _MUTATION_TOOLS remaining, 8 declarative entries.
+        "upsert_node": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                sensitive_argument_keys=("options", "routes", "trigger"),
+                argument_summarizers={
+                    "options": _summarize_set_source_options,
+                    "routes": _summarize_set_source_options,
+                    "trigger": _summarize_set_source_options,
+                },
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_UPSERT_NODE_REASON,
+            )
+        ),
+        "upsert_edge": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_UPSERT_EDGE_REASON,
+            )
+        ),
+        "remove_node": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_REMOVE_NODE_REASON,
+            )
+        ),
+        "remove_edge": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_REMOVE_EDGE_REASON,
+            )
+        ),
+        "remove_output": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_REMOVE_OUTPUT_REASON,
+            )
+        ),
+        "clear_source": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_CLEAR_SOURCE_REASON,
+            )
+        ),
+        "set_metadata": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                sensitive_argument_keys=("patch",),
+                argument_summarizers={"patch": _summarize_set_metadata_patch},
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_SET_METADATA_REASON,
+            )
+        ),
+        "set_output": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                sensitive_argument_keys=("options",),
+                argument_summarizers={"options": _summarize_set_source_options},
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_SET_OUTPUT_REASON,
             )
         ),
     }

@@ -570,6 +570,7 @@ allowed_dict_patterns:
   # (dict[str, Any]) is intrinsic to the tool-call schema crossing the
   # boundary; the structured shape exists on the model side via model_validate.
   - "src/elspeth/web/composer/redaction.py:_summarize_set_source_options:options"
+  - "src/elspeth/web/composer/redaction.py:_summarize_set_metadata_patch:patch"
   - "src/elspeth/web/composer/redaction.py:_redact_via_schema:return"
   - "src/elspeth/web/composer/redaction.py:_redact_via_policy:arguments"
   - "src/elspeth/web/composer/redaction.py:_redact_via_policy:return"

@@ -111,3 +111,11 @@ repos:
         types: [python]
         pass_filenames: false
         files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/)
+
+      - id: check-slot-type-cross-language
+        name: SlotType / guided.ts mirror consistency check
+        entry: .venv/bin/python scripts/cicd/check_slot_type_cross_language.py
+        language: system
+        pass_filenames: false
+        # Run when either the Python Literal definition or its TypeScript mirror changes.
+        files: ^(src/elspeth/web/composer/recipes\.py|src/elspeth/web/frontend/src/types/guided\.ts)$

@@ -27,18 +27,27 @@ def load_guided_skill() -> str:
     return _SKILL_PATH.read_text(encoding="utf-8")
 
 
-@lru_cache(maxsize=1)
-def _load_freeform_skill() -> str:
-    """Load the freeform pipeline-composer skill. Cached per process; restart on edit."""
-    from elspeth.web.composer.skills import load_skill
+def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill: str) -> str:
+    """Construct the layered guided→freeform transition prompt: guided skill + transition message + freeform skill.
 
-    return load_skill("pipeline_composer")
+    The ``freeform_skill`` parameter must be supplied by the caller — typically via
+    ``build_system_prompt(data_dir, advisor_enabled=advisor_enabled)`` in
+    ``composer/prompts.py``.  This keeps the deployment overlay (``data_dir``) and
+    advisor-strip (``advisor_enabled=False``) correctly threaded into the transition
+    prompt, and avoids a circular import: if this module called ``build_system_prompt``
+    directly it would create a guided/prompts ↔ composer/prompts import cycle.
 
+    Args:
+        terminal_reason: String reason token from the completed guided session
+            (e.g. ``"completed_pipeline"``, ``"user_pressed_exit"``).
+        freeform_skill: Fully processed freeform composer skill string — core skill
+            with deployment overlay appended and advisor content stripped if needed.
+            Produced by ``build_system_prompt(data_dir, advisor_enabled=...)``.
 
-def build_mode_transition_system_prompt(*, terminal_reason: str) -> str:
-    """Construct the layered guided→freeform transition prompt: guided skill + transition message + freeform skill."""
+    Returns:
+        Layered prompt string: guided skill \\n\\n transition header \\n\\n freeform skill.
+    """
     guided = load_guided_skill()
-    freeform = _load_freeform_skill()
     transition = (
         f"## Mode Transition — Guided → Freeform\n\n"
         f"You have just exited guided mode (reason: {terminal_reason}).\n\n"
@@ -48,7 +57,7 @@ def build_mode_transition_system_prompt(*, terminal_reason: str) -> str:
         "outcome is recorded in `composition_state.guided_session` — "
         "do not re-run any work it already accomplished."
     )
-    return f"{guided}\n\n{transition}\n\n{freeform}"
+    return f"{guided}\n\n{transition}\n\n{freeform_skill}"
 
 
 def build_repair_addendum(*, validation_error: str) -> str:

@@ -18,6 +18,7 @@ from typing import Any
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.prompts import (
     SYSTEM_PROMPT,
     build_context_string,
@@ -369,6 +370,133 @@ def _blob_source_state(
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+def _completed_terminal() -> TerminalState:
+    """A COMPLETED TerminalState (no reason required)."""
+    return TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=None)
+
+
+def _exited_terminal(reason: TerminalReason = TerminalReason.USER_PRESSED_EXIT) -> TerminalState:
+    """An EXITED_TO_FREEFORM TerminalState with a reason."""
+    return TerminalState(kind=TerminalKind.EXITED_TO_FREEFORM, reason=reason, pipeline_yaml=None)
+
+
+class TestBuildMessagesGuidedTerminal:
+    """Integration tests: build_messages with guided_terminal set.
+
+    Verifies Codex #17: the first freeform turn after a guided exit carries the
+    same deployment overlay and advisor-strip as subsequent freeform turns.
+    """
+
+    def test_guided_terminal_with_data_dir_includes_deployment_overlay(self, tmp_path: Path) -> None:
+        """deployment overlay content must appear in the transition prompt system message."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        deployment_content = "# Codex17 Deployment Overlay\n"
+        (skills_dir / "pipeline_composer.md").write_text(deployment_content)
+
+        state = _empty_state()
+        catalog = _stub_catalog()
+
+        messages = build_messages(
+            [],
+            state,
+            "continue",
+            catalog,
+            data_dir=str(tmp_path),
+            guided_terminal=_completed_terminal(),
+        )
+
+        system_content = messages[0]["content"]
+        assert deployment_content.strip() in system_content, "Deployment overlay missing from guided-terminal transition prompt (Codex #17)"
+
+    def test_guided_terminal_advisor_disabled_strips_advisor_content(self) -> None:
+        """When advisor_enabled=False, advisor-specific content must be absent from the transition prompt."""
+        state = _empty_state()
+        catalog = _stub_catalog()
+
+        messages = build_messages(
+            [],
+            state,
+            "continue",
+            catalog,
+            advisor_enabled=False,
+            guided_terminal=_completed_terminal(),
+        )
+
+        system_content = messages[0]["content"]
+        # The advisor subsection heading that _strip_advisor_content removes.
+        assert "#### When You Are Still Stuck" not in system_content, (
+            "Advisor subsection must be stripped when advisor_enabled=False (Codex #17)"
+        )
+        # The advisor tool name token that _strip_advisor_content removes.
+        assert ", `request_advisor_hint`" not in system_content, (
+            "Advisor tool token must be stripped when advisor_enabled=False (Codex #17)"
+        )
+
+    def test_guided_terminal_advisor_enabled_retains_advisor_content(self) -> None:
+        """When advisor_enabled=True (default), advisor sections must remain in the transition prompt."""
+        state = _empty_state()
+        catalog = _stub_catalog()
+
+        messages = build_messages(
+            [],
+            state,
+            "continue",
+            catalog,
+            advisor_enabled=True,
+            guided_terminal=_completed_terminal(),
+        )
+
+        system_content = messages[0]["content"]
+        # At least one of the two advisor-specific markers must survive.
+        has_advisor_section = "#### When You Are Still Stuck" in system_content
+        has_advisor_token = "request_advisor_hint" in system_content
+        assert has_advisor_section or has_advisor_token, "Advisor content must be present when advisor_enabled=True"
+
+    def test_guided_terminal_no_data_dir_matches_non_transition_core_skill(self) -> None:
+        """Without data_dir the transition prompt freeform layer equals the standard system prompt."""
+        state = _empty_state()
+        catalog = _stub_catalog()
+
+        transition_messages = build_messages(
+            [],
+            state,
+            "continue",
+            catalog,
+            data_dir=None,
+            guided_terminal=_completed_terminal(),
+        )
+        normal_messages = build_messages(
+            [],
+            state,
+            "continue",
+            catalog,
+            data_dir=None,
+        )
+
+        # The normal freeform system content (SYSTEM_PROMPT) must be a substring
+        # of the transition prompt — the transition prompt wraps it.
+        normal_system = normal_messages[0]["content"]
+        transition_system = transition_messages[0]["content"]
+        assert normal_system in transition_system, "Transition prompt must embed the standard freeform system prompt as its final layer"
+
+    def test_guided_terminal_exited_uses_reason_value(self) -> None:
+        """EXITED_TO_FREEFORM terminal embeds the reason token in the transition prompt."""
+        state = _empty_state()
+        catalog = _stub_catalog()
+
+        messages = build_messages(
+            [],
+            state,
+            "continue",
+            catalog,
+            guided_terminal=_exited_terminal(TerminalReason.SOLVER_EXHAUSTED),
+        )
+
+        system_content = messages[0]["content"]
+        assert "solver_exhausted" in system_content
 
 
 class TestBuildContextStringRedaction:

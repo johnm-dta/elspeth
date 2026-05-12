@@ -249,7 +249,16 @@ def build_messages(
             if guided_terminal.reason is None:
                 raise RuntimeError(f"EXITED_TO_FREEFORM terminal must have a reason: {guided_terminal!r}")
             reason_str = guided_terminal.reason.value
-        prompt = build_mode_transition_system_prompt(terminal_reason=reason_str)
+        # Thread data_dir and advisor_enabled through the transition prompt so the
+        # first freeform turn after guided exit carries the same deployment overlay
+        # and advisor-strip policy as all subsequent freeform turns (Codex #17).
+        # build_system_prompt is @lru_cache'd — this call hits the same cache entry
+        # as the non-transition branch below.
+        freeform_skill = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
+        prompt = build_mode_transition_system_prompt(
+            terminal_reason=reason_str,
+            freeform_skill=freeform_skill,
+        )
     else:
         prompt = build_system_prompt(data_dir, advisor_enabled=advisor_enabled)
     messages.append({"role": "system", "content": prompt})

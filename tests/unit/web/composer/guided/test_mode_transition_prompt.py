@@ -1,6 +1,7 @@
-"""Unit tests for build_mode_transition_system_prompt and _load_freeform_skill.
+"""Unit tests for build_mode_transition_system_prompt.
 
 Phase 5 Task 5.2 — progressive disclosure transition prompt.
+Codex #17 — freeform_skill parameter threading (dependency-inversion fix).
 """
 
 from __future__ import annotations
@@ -8,9 +9,13 @@ from __future__ import annotations
 import pytest
 
 from elspeth.web.composer.guided.prompts import (
-    _load_freeform_skill,
     build_mode_transition_system_prompt,
+    load_guided_skill,
 )
+
+# Sentinel freeform skill used across tests — unique enough to identify as
+# the supplied value without depending on production skill content.
+_SENTINEL_FREEFORM = "SENTINEL_FREEFORM_SKILL_CONTENT_XYZ"
 
 
 class TestBuildModeTransitionSystemPrompt:
@@ -27,7 +32,10 @@ class TestBuildModeTransitionSystemPrompt:
     )
     def test_layered_content_all_reasons(self, reason: str) -> None:
         """Returned prompt contains guided-skill content, LIFTED signal, reason, and freeform content."""
-        result = build_mode_transition_system_prompt(terminal_reason=reason)
+        result = build_mode_transition_system_prompt(
+            terminal_reason=reason,
+            freeform_skill=_SENTINEL_FREEFORM,
+        )
 
         # (a) guided-skill content present (guided_pipeline.md mentions "guided mode")
         assert "guided mode" in result.lower(), "Missing guided-skill content marker"
@@ -38,16 +46,19 @@ class TestBuildModeTransitionSystemPrompt:
         # (c) the terminal reason string present
         assert reason in result, f"Missing reason string: {reason}"
 
-        # (d) freeform-skill content present (pipeline_composer.md contains "Audit Primacy")
-        assert "Audit Primacy" in result, "Missing freeform-skill content marker"
+        # (d) supplied freeform_skill present verbatim
+        assert _SENTINEL_FREEFORM in result, "Missing freeform_skill content in result"
 
     def test_layer_ordering(self) -> None:
         """Guided-skill content appears before transition header, before freeform-skill content."""
-        result = build_mode_transition_system_prompt(terminal_reason="user_pressed_exit")
+        result = build_mode_transition_system_prompt(
+            terminal_reason="user_pressed_exit",
+            freeform_skill=_SENTINEL_FREEFORM,
+        )
 
         guided_pos = result.lower().find("guided mode")
         transition_pos = result.find("## Mode Transition")
-        freeform_pos = result.find("Audit Primacy")
+        freeform_pos = result.find(_SENTINEL_FREEFORM)
 
         assert guided_pos != -1, "guided-skill marker not found"
         assert transition_pos != -1, "transition header not found"
@@ -58,30 +69,43 @@ class TestBuildModeTransitionSystemPrompt:
 
     def test_transition_header_literal(self) -> None:
         """Transition header matches spec §8.2 exactly."""
-        result = build_mode_transition_system_prompt(terminal_reason="solver_exhausted")
+        result = build_mode_transition_system_prompt(
+            terminal_reason="solver_exhausted",
+            freeform_skill=_SENTINEL_FREEFORM,
+        )
 
         assert "## Mode Transition — Guided → Freeform" in result
 
     def test_reason_in_transition_block(self) -> None:
         """The reason appears inside the transition header block (not elsewhere)."""
-        result = build_mode_transition_system_prompt(terminal_reason="completed_pipeline")
+        result = build_mode_transition_system_prompt(
+            terminal_reason="completed_pipeline",
+            freeform_skill=_SENTINEL_FREEFORM,
+        )
 
         assert "reason: completed_pipeline" in result
 
+    def test_freeform_skill_supplied_verbatim(self) -> None:
+        """The freeform_skill argument appears in the output exactly as supplied.
 
-class TestLoadFreeformSkill:
-    def test_is_cached(self) -> None:
-        """Two calls return the same object (lru_cache contract)."""
-        first = _load_freeform_skill()
-        second = _load_freeform_skill()
+        This is the core contract for Codex #17: the caller-supplied (fully
+        processed) freeform skill reaches the returned prompt unchanged —
+        deployment overlay and advisor-strip are the caller's responsibility.
+        """
+        custom_skill = "CUSTOM_DEPLOYMENT_OVERLAY_CONTENT\nadvisor_stripped: true"
+        result = build_mode_transition_system_prompt(
+            terminal_reason="completed_pipeline",
+            freeform_skill=custom_skill,
+        )
 
-        assert first is second
+        assert custom_skill in result
 
-    def test_returns_non_empty_string(self) -> None:
-        content = _load_freeform_skill()
-        assert isinstance(content, str)
-        assert len(content) > 0
+    def test_guided_skill_from_load_guided_skill(self) -> None:
+        """The guided section equals load_guided_skill() exactly."""
+        guided = load_guided_skill()
+        result = build_mode_transition_system_prompt(
+            terminal_reason="completed_pipeline",
+            freeform_skill=_SENTINEL_FREEFORM,
+        )
 
-    def test_contains_audit_primacy_marker(self) -> None:
-        content = _load_freeform_skill()
-        assert "Audit Primacy" in content
+        assert result.startswith(guided), "Guided skill must be the first layer of the returned prompt"

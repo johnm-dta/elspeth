@@ -1210,6 +1210,21 @@ allow_hits:
     No silent fallback; the sentinel still records the exception class name regardless
     of payload shape.
   expires: null
+- key: web/composer/audit.py:R5:canonicalize_pydantic_cause:fp=2f70e87f5a5c63fe
+  owner: composer-audit
+  reason: Tier-3 boundary check (F2 — spec §4.2.6). canonicalize_pydantic_cause accepts
+    BaseException | None (a chained ``__cause__`` from ToolArgumentError, sourced from
+    LLM tool-call validation). The isinstance(exc, ValidationError) check selects the
+    Pydantic-aware projection branch (loc/msg/type tuples, leak-stripped) vs the opt-out
+    None return for non-Pydantic causes. This is type dispatch at a documented external-system
+    boundary, not contract-violation hiding — the function is invoked from a closure
+    factory whose input is ``ToolArgumentError.__cause__`` (untyped by language design;
+    any BaseException class can be chained).
+  safety: Non-Pydantic causes return None (no validation_errors key added to the audit
+    payload — absence is the signal, never an empty list). Pydantic causes feed ``errors()``
+    unwrapped (offensive — if Pydantic's own errors() raises, that's a Pydantic-internal
+    bug and propagates). Pinned by tests/unit/web/composer/test_audit_arg_error_validation_errors.py.
+  expires: null
 - key: web/composer/audit.py:R6:finish_success:fp=2fabcd796b747c1b
   owner: composer-audit
   reason: Sentinel-canonical fallback for canonical_json failures on the SUCCESS path.

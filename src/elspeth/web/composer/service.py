@@ -49,6 +49,7 @@ from elspeth.web.composer.audit import (
     BufferingRecorder,
     begin_dispatch,
     begin_dispatch_or_arg_error,
+    canonicalize_pydantic_cause,
     dispatch_with_audit,
     finish_arg_error,
     finish_plugin_crash,
@@ -2489,18 +2490,22 @@ class ComposerServiceImpl:
                         runtime_preflight=_runtime_preflight_callback,
                     )
 
-                def _arg_error_payload(
-                    _exc: ToolArgumentError,
-                    _tool_name: str = tool_name,
-                ) -> Mapping[str, Any]:
-                    safe_message = _exc.args[0] if _exc.args else "tool argument error"
-                    return {"error": f"Tool '{_tool_name}' failed: {safe_message}"}
-
                 def _version_after(_result: Any) -> int:
                     # The handler's ToolResult carries the new state on
                     # ``updated_state``. Read here so the helper records
                     # the post-mutation version inside the recorder call.
                     return cast(int, _result.updated_state.version)
+
+                # ``_arg_error_payload`` is a module-level helper (F2 — testable
+                # in isolation); the closure binds ``tool_name`` for this
+                # iteration and satisfies the helper's single-argument
+                # ``arg_error_payload_factory`` signature. Default-arg binding
+                # defeats B023 late-binding (same pattern as ``_do_dispatch``).
+                def _arg_error_payload_factory(
+                    _exc: ToolArgumentError,
+                    _tool_name: str = tool_name,
+                ) -> Mapping[str, Any]:
+                    return _arg_error_payload(_exc, _tool_name)
 
                 try:
                     outcome = await dispatch_with_audit(
@@ -2508,7 +2513,7 @@ class ComposerServiceImpl:
                         audit=audit,
                         do_dispatch=_do_dispatch,
                         version_after_provider=_version_after,
-                        arg_error_payload_factory=_arg_error_payload,
+                        arg_error_payload_factory=_arg_error_payload_factory,
                     )
                 except ToolArgumentError as exc:
                     # The audit record was already written by the helper.
@@ -2541,7 +2546,7 @@ class ComposerServiceImpl:
                             likely_next="ELSPETH will ask the model to adjust the visible tool request.",
                         ),
                     )
-                    arg_error_payload = _arg_error_payload(exc)
+                    arg_error_payload = _arg_error_payload(exc, tool_name)
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -3682,3 +3687,54 @@ def _build_advisor_user_message(arguments: Mapping[str, Any]) -> str:
     if "schema_excerpt" in arguments and arguments["schema_excerpt"]:
         user_msg_parts.append(f"\nRelevant schema excerpt:\n{cast(str, arguments['schema_excerpt'])}")
     return "\n".join(user_msg_parts)
+
+
+# ---------------------------------------------------------------------------
+# F2 (spec §4.2.6): ARG_ERROR payload factory.
+#
+# Module-level so the helper is directly unit-testable rather than living as
+# a per-iteration closure inside the compose-loop. Placed at module tail to
+# keep AST body-index ordering of existing definitions stable — the
+# tier-model enforcer fingerprints findings by AST path (``body[N]``), so
+# inserting a new module-level def in the middle of the file would rotate
+# every downstream fingerprint and force a churn of allowlist re-keying that
+# has nothing to do with this change.
+# ---------------------------------------------------------------------------
+
+
+def _arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, Any]:
+    """Build the structured payload for an ARG_ERROR audit record + LLM tool message.
+
+    The payload serves two consumers (spec §4.2.6, F2 disposition):
+
+    1. ``dispatch_with_audit`` canonicalizes this into ``result_canonical``
+       on the ARG_ERROR audit record. Persisted in Tier-1 Landscape.
+    2. The compose loop's ARG_ERROR handler ``json.dumps`` this and sends
+       it back to the LLM as the ``role=tool`` content. Tier-3 echo.
+
+    Fields
+    ------
+    ``error``
+        Operator-safe, LLM-facing message. Composed from the
+        ``ToolArgumentError`` ``args[0]`` (structurally safe by
+        construction — see ``ToolArgumentError`` docstring) plus the
+        operator-chosen tool name. NEVER contains a raw LLM-supplied
+        value.
+
+    ``validation_errors`` (present iff ``exc.__cause__`` is a
+        ``pydantic.ValidationError``)
+        Leak-safe canonicalization of the Pydantic chained cause —
+        ``loc``/``msg``/``type`` only, ``input``/``url``/``ctx``
+        stripped. Provides field-name detail for recovery flows in
+        Phase 3+ that need to know which specific Pydantic field
+        failed validation. Absent (key omitted) when there is no
+        chained Pydantic cause or the chained cause is not a
+        ``ValidationError``; recording an empty list has no audit
+        value.
+    """
+    safe_message = exc.args[0] if exc.args else "tool argument error"
+    payload: dict[str, Any] = {"error": f"Tool '{tool_name}' failed: {safe_message}"}
+    validation_errors = canonicalize_pydantic_cause(exc.__cause__)
+    if validation_errors is not None:
+        payload["validation_errors"] = validation_errors
+    return payload

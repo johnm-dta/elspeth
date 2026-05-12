@@ -27,7 +27,7 @@
 //   To enable rich summaries, the backend would need a cross-layer protocol
 //   change (adding a denormalized summary string to TurnRecordResponse), which
 //   requires operator adjudication before implementation.
-//   Tracker: elspeth-obs-cc8fa78524.
+//   Tracker: filigree elspeth-611fc01d94 (rich step summaries — wire extension or payload-fetch endpoint)
 
 import { useId, useState } from "react";
 import type { GuidedStep, TurnRecord, TurnType } from "@/types/guided";

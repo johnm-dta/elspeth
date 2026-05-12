@@ -22,7 +22,8 @@
 //      the list would require non-standard tabindex=-1 ref dance).
 //   9. Initial-mount no-auto-focus: rendering the widget does not steal focus.
 //  10. Scope reduction documented: wire carries only step/turn_type/emitter,
-//      not rich summary data.  See Tracker: elspeth-obs-cc8fa78524.
+//      not rich summary data.  See Tracker: filigree elspeth-611fc01d94
+//      (rich step summaries — wire extension or payload-fetch endpoint).
 //
 // Source of truth:
 //   - types/guided.ts:44-51 (TurnRecord wire shape — hashes only, no summary)

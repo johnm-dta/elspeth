@@ -2115,6 +2115,31 @@ _INSPECT_SOURCE_REASON = HandlesNoSensitiveDataReason(
 )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 declarative manifest entries (Task 16d — _BLOB_MUTATION_TOOLS
+# remaining, 1 tool).
+#
+# Excluding create_blob / update_blob / set_source_from_blob / apply_pipeline_recipe
+# (Tasks 13/14), only ``delete_blob`` remains in ``_BLOB_MUTATION_TOOLS``.  It
+# takes a single blob_id scalar and returns the structural ToolResult.
+# ---------------------------------------------------------------------------
+
+
+_DELETE_BLOB_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("session blob inventory — single blob_id selector identifying the deletion target",),
+    why_arguments_safe=(
+        "delete_blob accepts a single blob_id scalar string naming the inventory row to "
+        "delete; the JSON schema at tools.py:1432-1441 has no other properties, so the "
+        "LLM cannot place any blob content or operator payload on this surface."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult after deletion — validation summary plus "
+        "the affected node id list reflecting any pipeline references to the now-removed "
+        "blob; the deleted blob's content and metadata are not echoed back in the response."
+    ),
+)
+
+
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
 # binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2288,6 +2313,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_INSPECT_SOURCE_REASON,
+            )
+        ),
+        # Wave 5 (Task 16d) — _BLOB_MUTATION_TOOLS remaining, 1 entry.
+        "delete_blob": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
             )
         ),
     }

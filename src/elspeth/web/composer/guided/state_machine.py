@@ -371,6 +371,18 @@ class GuidedSession:
     field is cleared (set to None) in the same atomic replace() that consumes it
     (the terminal=COMPLETED path).  It is always None when the session is not at
     STEP_2_5_RECIPE_MATCH.
+
+    ``step_2_chosen_plugin`` is a mid-Step-2 staging field.  The Step-2
+    SINGLE_SELECT dispatcher writes the chosen sink plugin name into it
+    immediately before emitting the SCHEMA_FORM turn.  The SCHEMA_FORM
+    dispatcher reads it when rebuilding the SCHEMA_FORM on GET /guided —
+    the chosen plugin is needed to retrieve the correct schema from the
+    catalog.  It is cleared (set to None) in the same atomic replace()
+    that sets ``step_2_sink_intent`` (i.e. when the SCHEMA_FORM response
+    arrives and the MULTI_SELECT_WITH_CUSTOM turn is about to be emitted);
+    it cannot be non-None at the same time as ``step_2_sink_intent``.
+    It is always None outside the SINGLE_SELECT→SCHEMA_FORM intra-step
+    window at STEP_2_SINK.
     """
 
     step: GuidedStep
@@ -383,6 +395,7 @@ class GuidedSession:
     step_1_source_intent: SourceIntent | None = None
     step_2_sink_intent: SinkIntent | None = None
     step_2_5_recipe_offer: RecipeMatch | None = None
+    step_2_chosen_plugin: str | None = None
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -412,6 +425,7 @@ class GuidedSession:
             "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
             "step_2_5_recipe_offer": self.step_2_5_recipe_offer.to_dict() if self.step_2_5_recipe_offer is not None else None,
+            "step_2_chosen_plugin": self.step_2_chosen_plugin,
         }
 
     @classmethod
@@ -429,6 +443,7 @@ class GuidedSession:
             source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
             recipe_offer_raw = d["step_2_5_recipe_offer"]
+            step_2_chosen_plugin_raw = d["step_2_chosen_plugin"]
             # Deferred import to avoid a circular dependency at module level.
             # recipe_match.py imports from state_machine.py; importing RecipeMatch
             # at module level here would create a cycle.
@@ -445,6 +460,7 @@ class GuidedSession:
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
                 step_2_5_recipe_offer=_RecipeMatch.from_dict(recipe_offer_raw) if recipe_offer_raw is not None else None,
+                step_2_chosen_plugin=str(step_2_chosen_plugin_raw) if step_2_chosen_plugin_raw is not None else None,
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc

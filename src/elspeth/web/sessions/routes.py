@@ -1909,7 +1909,14 @@ async def _dispatch_guided_respond(
                 composition_version=state.version,
                 actor=user_id,
             )
-            guided = _replace(guided, history=(*guided.history, new_record))
+            # Persist the chosen plugin name so GET /guided can rebuild the SCHEMA_FORM
+            # on refresh (rebuild requires the plugin name to fetch the schema from the
+            # catalog).  Cleared atomically when step_2_sink_intent is set below.
+            guided = _replace(
+                guided,
+                history=(*guided.history, new_record),
+                step_2_chosen_plugin=plugin_name,
+            )
             return state, guided, next_turn
 
         if current_turn_type is TurnType.SCHEMA_FORM:
@@ -1958,7 +1965,13 @@ async def _dispatch_guided_respond(
                 plugin=plugin_name,
                 options=dict(options_raw),
             )
-            guided = _replace(guided, step_2_sink_intent=sink_intent)
+            # Set step_2_sink_intent and clear step_2_chosen_plugin atomically.
+            # Once step_2_sink_intent is set, the full plugin+options tuple is
+            # held there; step_2_chosen_plugin is only needed in the window
+            # between SINGLE_SELECT and SCHEMA_FORM (to rebuild SCHEMA_FORM on
+            # GET /guided refresh).  Having both set simultaneously would be
+            # redundant and could mislead rebuild logic about the intra-step phase.
+            guided = _replace(guided, step_2_sink_intent=sink_intent, step_2_chosen_plugin=None)
 
             # Emit multi_select_with_custom for required fields.
             # Observed columns come from step_1_result if available.

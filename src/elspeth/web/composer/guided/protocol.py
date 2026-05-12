@@ -182,9 +182,43 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
     TurnType.RECIPE_OFFER: frozenset({"recipe_name", "slots", "alternatives", "unsatisfied_slots"}),
 }
 
+# Nested shape spec for recursive payload validation.
+#
+# Each entry maps a TurnType to a list of (field_path_component, field_kind,
+# required_keys) triples that describe nested structures.
+#
+# ``field_kind`` is one of:
+#   "mapping"  — the field value must be a Mapping; validate its required_keys.
+#   "sequence_of_mappings" — the field value must be a Sequence; each element
+#                            must be a Mapping with required_keys.
+#
+# Path-rooted error messages use dot notation: ``"payload.observed.columns"``.
+#
+# Only fields whose nested shapes are meaningful to validate are listed. Scalar
+# and pass-through fields (e.g., ``allow_custom: bool``, ``why: str``) are
+# covered by the top-level required-key check and need no further descend.
+_NestedSpec = tuple[str, str, frozenset[str]]
+_NESTED_SHAPES: Mapping[TurnType, tuple[_NestedSpec, ...]] = {
+    TurnType.INSPECT_AND_CONFIRM: (
+        # "observed" must be a Mapping with these keys
+        ("observed", "mapping", frozenset({"columns", "samples", "warnings"})),
+    ),
+    TurnType.RECIPE_OFFER: (
+        # "unsatisfied_slots" must be a Sequence; each element is a Mapping
+        # with these keys.  "required" is intentionally absent — the
+        # RecipeMatch invariant guarantees every entry is required.
+        ("unsatisfied_slots", "sequence_of_mappings", frozenset({"name", "slot_type", "description"})),
+    ),
+}
+
 
 def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | None:
     """Validate that *payload* satisfies the schema for *turn_type*.
+
+    Validates top-level required keys and recursively walks nested TypedDicts
+    listed in ``_NESTED_SHAPES``.  Error messages are path-rooted using dot
+    notation so the caller can locate the offending field:
+    ``"payload.observed.columns missing"`` rather than ``"columns missing"``.
 
     Returns None on success, or a human-readable error string on failure.
     Raises ValueError if turn_type is not a known TurnType.
@@ -195,4 +229,25 @@ def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | N
     missing = required - payload.keys()
     if missing:
         return f"payload for {turn_type.value} missing required keys: {sorted(missing)}"
+
+    # Recursive nested-shape validation.
+    for field_name, field_kind, nested_required in _NESTED_SHAPES.get(turn_type, ()):
+        field_value = payload[field_name]
+        prefix = f"payload.{field_name}"
+        if field_kind == "mapping":
+            if not isinstance(field_value, Mapping):
+                return f"{prefix} must be a mapping (got {type(field_value).__name__})"
+            nested_missing = nested_required - field_value.keys()
+            if nested_missing:
+                return f"{prefix} missing required keys: {sorted(nested_missing)}"
+        elif field_kind == "sequence_of_mappings":
+            if not isinstance(field_value, Sequence) or isinstance(field_value, str):
+                return f"{prefix} must be a sequence (got {type(field_value).__name__})"
+            for idx, item in enumerate(field_value):
+                if not isinstance(item, Mapping):
+                    return f"{prefix}[{idx}] must be a mapping (got {type(item).__name__})"
+                item_missing = nested_required - item.keys()
+                if item_missing:
+                    return f"{prefix}[{idx}] missing required keys: {sorted(item_missing)}"
+
     return None

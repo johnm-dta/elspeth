@@ -231,6 +231,142 @@ class TestPayloadValidation:
         with pytest.raises(ValueError):
             validate_payload("not_a_turn_type", {})  # type: ignore[arg-type]
 
+    # ---------------------------------------------------------------------------
+    # Recursive nested-shape validation (S4 uplift)
+    # ---------------------------------------------------------------------------
+
+    def test_inspect_and_confirm_golden_validates(self) -> None:
+        """Full valid INSPECT_AND_CONFIRM payload passes recursively."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.INSPECT_AND_CONFIRM,
+            {"observed": {"columns": ["a", "b"], "samples": [{"a": 1}], "warnings": []}},
+        )
+        assert err is None
+
+    def test_inspect_and_confirm_missing_nested_key(self) -> None:
+        """``observed`` present but missing ``columns`` — error path-rooted."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.INSPECT_AND_CONFIRM,
+            {"observed": {"samples": [], "warnings": []}},  # missing "columns"
+        )
+        assert err is not None
+        # Path-rooted: must mention "payload.observed"
+        assert "payload.observed" in err
+        assert "columns" in err
+
+    def test_inspect_and_confirm_observed_not_mapping(self) -> None:
+        """``observed`` is a scalar, not a Mapping — type error is path-rooted."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.INSPECT_AND_CONFIRM,
+            {"observed": "not-a-mapping"},
+        )
+        assert err is not None
+        assert "payload.observed" in err
+        assert "mapping" in err
+
+    def test_recipe_offer_golden_validates(self) -> None:
+        """Full valid RECIPE_OFFER payload with unsatisfied slots passes."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {
+                "recipe_name": "r",
+                "slots": {},
+                "alternatives": [],
+                "unsatisfied_slots": [
+                    {"name": "x", "slot_type": "str", "description": "hint"},
+                ],
+            },
+        )
+        assert err is None
+
+    def test_recipe_offer_empty_unsatisfied_slots_valid(self) -> None:
+        """Empty unsatisfied_slots list is valid (resolver covered all required slots)."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {
+                "recipe_name": "r",
+                "slots": {"x": 1},
+                "alternatives": [],
+                "unsatisfied_slots": [],
+            },
+        )
+        assert err is None
+
+    def test_recipe_offer_unsatisfied_slot_missing_key(self) -> None:
+        """An unsatisfied slot entry missing ``slot_type`` — path-rooted error."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {
+                "recipe_name": "r",
+                "slots": {},
+                "alternatives": [],
+                "unsatisfied_slots": [
+                    {"name": "x", "description": "d"},  # missing "slot_type"
+                ],
+            },
+        )
+        assert err is not None
+        # Path-rooted: "payload.unsatisfied_slots[0] missing required keys: ..."
+        assert "payload.unsatisfied_slots[0]" in err
+        assert "slot_type" in err
+
+    def test_recipe_offer_unsatisfied_slots_not_sequence(self) -> None:
+        """``unsatisfied_slots`` is a Mapping, not a Sequence — type error is path-rooted."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {
+                "recipe_name": "r",
+                "slots": {},
+                "alternatives": [],
+                "unsatisfied_slots": {"name": "x"},  # Mapping instead of Sequence
+            },
+        )
+        assert err is not None
+        assert "payload.unsatisfied_slots" in err
+        assert "sequence" in err
+
+    def test_recipe_offer_unsatisfied_slot_not_mapping(self) -> None:
+        """An unsatisfied slot entry is a string, not a Mapping — type error is path-rooted."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {
+                "recipe_name": "r",
+                "slots": {},
+                "alternatives": [],
+                "unsatisfied_slots": ["not-a-mapping"],
+            },
+        )
+        assert err is not None
+        assert "payload.unsatisfied_slots[0]" in err
+        assert "mapping" in err
+
+    def test_top_level_missing_key_error_takes_priority(self) -> None:
+        """Missing top-level key is reported before nested checks run."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        # "observed" is missing entirely — nested check cannot run.
+        err = validate_payload(TurnType.INSPECT_AND_CONFIRM, {})
+        assert err is not None
+        assert "observed" in err
+        # Path-rooted nested error should NOT appear when top-level is missing.
+        assert "payload.observed" not in err
+
 
 class TestBuildStep3ProposeChainTurn:
     """Tests for the propose_chain emitter (Task 4.5)."""

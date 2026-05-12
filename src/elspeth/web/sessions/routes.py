@@ -56,6 +56,7 @@ from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnT
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
+    SinkIntent,
     SourceResolved,
     TerminalReason,
     TurnRecord,
@@ -1821,7 +1822,31 @@ async def _dispatch_guided_respond(
             return state, guided, next_turn
 
         if current_turn_type is TurnType.SCHEMA_FORM:
-            # User filled in sink options. Emit multi_select_with_custom for required fields.
+            # User filled in sink options. Persist the chosen plugin + options into
+            # step_2_sink_intent so _advance_step_2 can reconstruct the full
+            # SinkOutputResolved when the subsequent MULTI_SELECT_WITH_CUSTOM
+            # response arrives (which only carries required_fields, not the plugin).
+            edited = turn_response["edited_values"] or {}
+            # "plugin" is required — absence is Tier-3 evidence that the client
+            # sent a malformed payload. Reject with 422 (same boundary rule as
+            # the Step-1 SCHEMA_FORM dispatcher).
+            if "plugin" not in edited:
+                raise HTTPException(
+                    status_code=422,
+                    detail="schema_form response at step 2 must include 'plugin' in edited_values.",
+                )
+            if "options" not in edited:
+                raise HTTPException(
+                    status_code=422,
+                    detail="schema_form response at step 2 must include 'options' in edited_values.",
+                )
+            sink_intent = SinkIntent(
+                plugin=str(edited["plugin"]),
+                options=dict(edited["options"]),
+            )
+            guided = _replace(guided, step_2_sink_intent=sink_intent)
+
+            # Emit multi_select_with_custom for required fields.
             # Observed columns come from step_1_result if available.
             observed_columns: tuple[str, ...] = ()
             if guided.step_1_result is not None:

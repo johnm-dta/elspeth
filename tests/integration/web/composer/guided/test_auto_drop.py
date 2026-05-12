@@ -166,28 +166,21 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
         client,
         session_id,
         edited_values={
-            "path": output_path,
-            "schema": {"mode": "observed"},
-            "collision_policy": "auto_increment",
+            "plugin": "json",
+            "options": {
+                "path": output_path,
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+            "observed_columns": [],
+            "sample_rows": [],
         },
     )
     body = _respond(
         client,
         session_id,
-        edited_values={
-            "outputs": [
-                {
-                    "plugin": "json",
-                    "options": {
-                        "path": output_path,
-                        "schema": {"mode": "observed"},
-                        "collision_policy": "auto_increment",
-                    },
-                    "required_fields": ["text"],
-                    "schema_mode": "observed",
-                }
-            ]
-        },
+        chosen=["text"],
+        custom_inputs=[],
     )
     return body, blob_id, output_path
 

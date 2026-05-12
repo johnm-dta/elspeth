@@ -271,13 +271,20 @@ class TestStep2IntraStep:
         _respond(composer_test_client, session_id, chosen=["json"])
         output_path = _outputs_path(composer_test_client, "out.jsonl")
 
+        # Step-2 SCHEMA_FORM: must include "plugin" in edited_values so the dispatcher
+        # can persist the sink intent into GuidedSession.step_2_sink_intent.
         body = _respond(
             composer_test_client,
             session_id,
             edited_values={
-                "path": output_path,
-                "schema": {"mode": "observed"},
-                "collision_policy": "auto_increment",
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
             },
         )
 
@@ -296,34 +303,30 @@ class TestStep2IntraStep:
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
         output_path = _outputs_path(composer_test_client, "out.jsonl")
+        # Step-2 SCHEMA_FORM: structured shape with plugin + options.
         _respond(
             composer_test_client,
             session_id,
             edited_values={
-                "path": output_path,
-                "schema": {"mode": "observed"},
-                "collision_policy": "auto_increment",
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
             },
         )
 
-        # Confirm required fields — "label" matches the classify-rows recipe's keyword set
+        # Confirm required fields via chosen — "label" matches the classify-rows recipe's
+        # keyword set.  The backend reconstructs SinkOutputResolved from step_2_sink_intent
+        # (plugin + options) plus these required_fields.
         body = _respond(
             composer_test_client,
             session_id,
-            edited_values={
-                "outputs": [
-                    {
-                        "plugin": "json",
-                        "options": {
-                            "path": output_path,
-                            "schema": {"mode": "observed"},
-                            "collision_policy": "auto_increment",
-                        },
-                        "required_fields": ["text", "label"],
-                        "schema_mode": "observed",
-                    }
-                ]
-            },
+            chosen=["text", "label"],
+            custom_inputs=[],
         )
 
         assert body["guided_session"]["step"] == "step_2_5_recipe_match"
@@ -345,34 +348,30 @@ class TestStep2IntraStep:
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
         output_path = _outputs_path(composer_test_client, "out_sink_commit.jsonl")
+        # Step-2 SCHEMA_FORM: structured shape with plugin + options.
         _respond(
             composer_test_client,
             session_id,
             edited_values={
-                "path": output_path,
-                "schema": {"mode": "observed"},
-                "collision_policy": "auto_increment",
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
             },
         )
 
         # The MULTI_SELECT response that triggers step 2 → 2.5 advance.
+        # chosen carries the required field names; the backend reads plugin + options
+        # from GuidedSession.step_2_sink_intent (persisted by the SCHEMA_FORM dispatcher).
         body = _respond(
             composer_test_client,
             session_id,
-            edited_values={
-                "outputs": [
-                    {
-                        "plugin": "json",
-                        "options": {
-                            "path": output_path,
-                            "schema": {"mode": "observed"},
-                            "collision_policy": "auto_increment",
-                        },
-                        "required_fields": ["text", "label"],
-                        "schema_mode": "observed",
-                    }
-                ]
-            },
+            chosen=["text", "label"],
+            custom_inputs=[],
         )
 
         # Step advanced to 2.5.
@@ -418,37 +417,33 @@ class TestStep25RecipeAccept:
         )
         # Step 2: pick json sink
         _respond(client, session_id, chosen=["json"])
-        # Step 2: fill json options — path must be under {data_dir}/outputs/
+        # Step 2: fill json options — path must be under {data_dir}/outputs/.
         # collision_policy is required by the json sink validator.
+        # Must include "plugin" so the dispatcher persists step_2_sink_intent.
         _respond(
             client,
             session_id,
             edited_values={
-                "path": output_path,
-                "schema": {"mode": "observed"},
-                "collision_policy": "auto_increment",
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
             },
         )
-        # Step 2: declare required fields ("category" matches classify keyword).
+        # Step 2: declare required fields via chosen ("category" matches classify keyword).
+        # The backend reads plugin + options from GuidedSession.step_2_sink_intent and
+        # combines with chosen to construct SinkOutputResolved.
         # output_path must be under {data_dir}/outputs/ and collision_policy must
         # be set (handle_step_2_sink calls _execute_set_output which validates).
         body = _respond(
             client,
             session_id,
-            edited_values={
-                "outputs": [
-                    {
-                        "plugin": "json",
-                        "options": {
-                            "path": output_path,
-                            "schema": {"mode": "observed"},
-                            "collision_policy": "auto_increment",
-                        },
-                        "required_fields": ["text", "category"],
-                        "schema_mode": "observed",
-                    }
-                ]
-            },
+            chosen=["text", "category"],
+            custom_inputs=[],
         )
         return body, blob_id
 

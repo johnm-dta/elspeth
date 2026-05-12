@@ -65,20 +65,24 @@
 //   firstRunRef skips the initial mount so we don't steal focus from
 //   wherever the user actually was when the widget first appeared.
 //
+// SUBMIT WIRE SHAPE:
+//   handleContinue emits:
+//     { chosen: [required field names in option order],
+//       custom_inputs: [...custom field names],
+//       edited_values: null,
+//       accepted_step_index: null, edit_step_index: null, control_signal: null }
+//   The backend's _advance_step_2 reads chosen + custom_inputs and combines them
+//   with the sink plugin + options stored in GuidedSession.step_2_sink_intent
+//   (persisted by the preceding SCHEMA_FORM dispatcher) to construct
+//   SinkOutputResolved. edited_values is null — the widget does not own the
+//   plugin context. Resolved by elspeth-5e905f3c9d.
+//
 // NOTE: payload.escape_label is intentionally NOT rendered in this version.
-// The wire shape for the escape submission requires a cross-layer protocol
-// decision (frontend wire shape + backend handler branch in
-// state_machine.py:_advance_step_2 — which currently reads
-// edited_values["outputs"] unconditionally). The plan describes
-// `{edited_values: {schema_mode: "observed", required_fields: []}}` but
-// that contradicts the only backend read site, and this widget owns
-// neither the plugin name nor the options needed to construct the full
-// outputs[] array. Do NOT add the escape button to this widget without
-// resolving the contract first. The deferral is pinned by tests
+// The escape submission requires a separate protocol decision (what required_fields
+// should be when the user skips field selection). Do NOT add the escape button
+// without resolving that contract first. The deferral is pinned by tests
 // (escape-button-not-rendered for both null and non-null escape_label)
 // so a future contributor can't quietly re-add it.
-//
-// Tracker: filigree elspeth-5e905f3c9d
 
 import { useEffect, useId, useRef, useState } from "react";
 import type {

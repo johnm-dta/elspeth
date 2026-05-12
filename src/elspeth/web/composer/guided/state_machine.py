@@ -208,6 +208,48 @@ class SinkResolved:
 
 
 @dataclass(frozen=True, slots=True)
+class SinkIntent:
+    """Sink plugin name and options captured during the Step-2 SCHEMA_FORM turn.
+
+    Persisted in GuidedSession.step_2_sink_intent as a mid-Step-2 staging
+    field.  The SCHEMA_FORM dispatcher writes it; _advance_step_2 reads it
+    when processing the subsequent MULTI_SELECT_WITH_CUSTOM response to
+    construct the full SinkOutputResolved entry.
+
+    It is cleared (set to None) as part of the same atomic replace() that
+    consumes it, so it cannot be misread by a later step.
+
+    Frozen, audit-tier: same freeze contract as SourceResolved and
+    SinkOutputResolved.  options is a Mapping because the sink schema can
+    contain arbitrary types; freeze_fields enforces deep immutability.
+    """
+
+    plugin: str
+    options: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain JSON-serialisable dict."""
+        return {
+            "plugin": self.plugin,
+            "options": deep_thaw(self.options),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SinkIntent:
+        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+        try:
+            return cls(
+                plugin=d["plugin"],
+                options=d["options"],
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(f"SinkIntent.from_dict: malformed record {d!r}") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class ChainProposal:
     """A transform chain proposed by Step 3 LLM.
 
@@ -250,6 +292,12 @@ class GuidedSession:
     Serialisation: use ``to_dict()`` / ``from_dict()`` for persistence via
     ``composer_meta["guided_session"]`` (see Task 3.5a implementation notes).
     The frozen dataclass equality check is the round-trip invariant test.
+
+    ``step_2_sink_intent`` is a mid-Step-2 staging field.  The SCHEMA_FORM
+    dispatcher writes the chosen sink plugin + options into it before emitting
+    the MULTI_SELECT_WITH_CUSTOM turn.  ``_advance_step_2`` reads it to
+    reconstruct the full SinkOutputResolved and clears it in the same atomic
+    replace(); it is always None after Step 2 completes.
     """
 
     step: GuidedStep
@@ -259,6 +307,7 @@ class GuidedSession:
     step_3_proposal: ChainProposal | None
     terminal: TerminalState | None
     transition_consumed: bool = False
+    step_2_sink_intent: SinkIntent | None = None
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -285,6 +334,7 @@ class GuidedSession:
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
+            "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
         }
 
     @classmethod
@@ -299,6 +349,7 @@ class GuidedSession:
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
             terminal_raw = d["terminal"]
+            sink_intent_raw = d["step_2_sink_intent"]
             return cls(
                 step=GuidedStep(d["step"]),
                 history=tuple(TurnRecord.from_dict(r) for r in d["history"]),
@@ -307,6 +358,7 @@ class GuidedSession:
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
                 transition_consumed=d["transition_consumed"],
+                step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise ValueError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
@@ -463,27 +515,44 @@ def _advance_step_2(
     Only ``MULTI_SELECT_WITH_CUSTOM`` causes a step transition; all other Step 2
     turn types are intra-step turns that do not advance the wizard.
 
-    The ``edited_values["outputs"]`` list is Tier-3 external data: each field
-    is coerced at this boundary (``str``, ``dict``, ``tuple``, ``str``) before
-    being stored in the audit-tier ``SinkOutputResolved`` dataclass.
+    The MULTI_SELECT_WITH_CUSTOM response carries:
+    - ``chosen``: the list of required field names the user selected
+    - ``custom_inputs``: any additional field names the user typed in
+
+    The sink plugin name and options were persisted in
+    ``session.step_2_sink_intent`` by the preceding SCHEMA_FORM dispatcher.
+    ``_advance_step_2`` reads them here, combines with ``chosen`` +
+    ``custom_inputs`` to construct a single ``SinkOutputResolved``, and
+    clears ``step_2_sink_intent`` in the same atomic replace() so it cannot
+    be misread by a later step.
+
+    All values from the response are Tier-3 external data and are coerced
+    (str, tuple) before being stored in the audit-tier ``SinkOutputResolved``.
     """
     if turn_type is not TurnType.MULTI_SELECT_WITH_CUSTOM:
         return (session, None, None, [])
 
-    edited = response["edited_values"]
-    if edited is None:
-        raise ValueError("multi_select_with_custom response must carry edited_values")
-    raw_outputs = edited["outputs"]
-    outputs = tuple(
-        SinkOutputResolved(
-            plugin=str(o["plugin"]),
-            options=dict(o["options"]),
-            required_fields=tuple(o["required_fields"]),
-            schema_mode=str(o["schema_mode"]),
+    intent = session.step_2_sink_intent
+    if intent is None:
+        raise ValueError(
+            "_advance_step_2: step_2_sink_intent is None when MULTI_SELECT_WITH_CUSTOM "
+            "was received — the SCHEMA_FORM dispatcher must set it before emitting "
+            "the MULTI_SELECT_WITH_CUSTOM turn. This is a state-machine invariant "
+            "violation."
         )
-        for o in raw_outputs
+
+    # chosen and custom_inputs are Tier-3: coerce to tuple[str, ...].
+    chosen_raw = response["chosen"] or []
+    custom_inputs_raw = response["custom_inputs"] or []
+    required_fields = tuple(str(f) for f in chosen_raw) + tuple(str(f) for f in custom_inputs_raw)
+
+    output = SinkOutputResolved(
+        plugin=intent.plugin,
+        options=dict(deep_thaw(intent.options)),
+        required_fields=required_fields,
+        schema_mode="observed",
     )
-    sink = SinkResolved(outputs=outputs)
+    sink = SinkResolved(outputs=(output,))
     directives = [
         GuidedAuditDirective(
             tool_name="guided_step_advanced",
@@ -498,6 +567,7 @@ def _advance_step_2(
         session,
         step=GuidedStep.STEP_2_5_RECIPE_MATCH,
         step_2_result=sink,
+        step_2_sink_intent=None,  # consumed; clear to prevent misread by later steps
     )
     return (new_sess, None, None, directives)
 

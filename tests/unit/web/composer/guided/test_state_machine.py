@@ -11,6 +11,7 @@ from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnT
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
+    SinkIntent,
     SinkOutputResolved,
     SinkResolved,
     SourceResolved,
@@ -90,6 +91,50 @@ class TestGuidedSession:
         )
         assert s.terminal is not None
         assert s.terminal.kind is TerminalKind.COMPLETED
+
+    def test_guided_session_roundtrip_with_sink_intent(self) -> None:
+        """GuidedSession with step_2_sink_intent survives to_dict/from_dict round-trip.
+
+        Exercises the Tier-1 serialisation boundary: the session is persisted to
+        composer_meta["guided_session"] between turns, so the new staging field must
+        survive the round-trip without loss or corruption.
+        """
+        intent = SinkIntent(
+            plugin="json",
+            options={"path": "/data/out.jsonl", "schema": {"mode": "observed"}},
+        )
+        sess = GuidedSession(
+            step=GuidedStep.STEP_2_SINK,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={"path": "/data/in.csv"},
+                observed_columns=("col_a", "col_b"),
+                sample_rows=({"col_a": "x", "col_b": "y"},),
+            ),
+            step_2_result=None,
+            step_3_proposal=None,
+            terminal=None,
+            step_2_sink_intent=intent,
+        )
+        d = sess.to_dict()
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_2_sink_intent is not None
+        assert restored.step_2_sink_intent.plugin == "json"
+        assert restored.step_2_sink_intent.options["path"] == "/data/out.jsonl"
+
+    def test_guided_session_roundtrip_with_sink_intent_none(self) -> None:
+        """GuidedSession with step_2_sink_intent=None round-trips cleanly.
+
+        Ensures the None case is serialised as None and reconstructed as None
+        (not absent or missing), which would crash from_dict's strict key read.
+        """
+        sess = GuidedSession.initial()
+        d = sess.to_dict()
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_2_sink_intent is None
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +220,9 @@ class TestStepAdvance:
     # ---------------------------------------------------------------------------
 
     def test_step_2_advances_after_required_fields_declared(self) -> None:
+        """_advance_step_2 reads chosen + custom_inputs from response and plugin + options
+        from GuidedSession.step_2_sink_intent to construct SinkOutputResolved."""
+        intent = SinkIntent(plugin="json", options={"path": "out.jsonl"})
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
             history=(),
@@ -187,20 +235,12 @@ class TestStepAdvance:
             step_2_result=None,
             step_3_proposal=None,
             terminal=None,
+            step_2_sink_intent=intent,
         )
         response: TurnResponse = {
-            "chosen": None,
-            "edited_values": {
-                "outputs": [
-                    {
-                        "plugin": "json",
-                        "options": {"path": "out.jsonl"},
-                        "required_fields": ["a"],
-                        "schema_mode": "fixed",
-                    },
-                ],
-            },
-            "custom_inputs": None,
+            "chosen": ["a"],
+            "edited_values": None,
+            "custom_inputs": [],
             "accepted_step_index": None,
             "edit_step_index": None,
             "control_signal": None,
@@ -211,9 +251,17 @@ class TestStepAdvance:
         assert new_sess.step is GuidedStep.STEP_2_5_RECIPE_MATCH
         assert new_sess.step_2_result is not None
         assert len(new_sess.step_2_result.outputs) == 1
+        output = new_sess.step_2_result.outputs[0]
+        assert output.plugin == "json"
+        assert output.required_fields == ("a",)
+        assert output.schema_mode == "observed"
+        # step_2_sink_intent must be cleared after consumption
+        assert new_sess.step_2_sink_intent is None
         assert terminal is None
 
     def test_step_2_let_source_decide_sets_observed_mode(self) -> None:
+        """schema_mode is always 'observed' — the backend sets it, not the frontend."""
+        intent = SinkIntent(plugin="json", options={"path": "out.jsonl"})
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
             history=(),
@@ -226,20 +274,12 @@ class TestStepAdvance:
             step_2_result=None,
             step_3_proposal=None,
             terminal=None,
+            step_2_sink_intent=intent,
         )
         response: TurnResponse = {
-            "chosen": None,
-            "edited_values": {
-                "outputs": [
-                    {
-                        "plugin": "json",
-                        "options": {"path": "out.jsonl"},
-                        "required_fields": [],
-                        "schema_mode": "observed",
-                    },
-                ],
-            },
-            "custom_inputs": None,
+            "chosen": [],
+            "edited_values": None,
+            "custom_inputs": [],
             "accepted_step_index": None,
             "edit_step_index": None,
             "control_signal": None,
@@ -248,8 +288,9 @@ class TestStepAdvance:
         assert new_sess.step_2_result is not None
         assert new_sess.step_2_result.outputs[0].schema_mode == "observed"
 
-    def test_step_2_without_edited_values_raises(self) -> None:
-        """edited_values=None on a MULTI_SELECT_WITH_CUSTOM response must raise ValueError."""
+    def test_step_2_without_sink_intent_raises(self) -> None:
+        """MULTI_SELECT_WITH_CUSTOM with step_2_sink_intent=None is a state-machine
+        invariant violation — raises ValueError immediately."""
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
             history=(),
@@ -262,9 +303,17 @@ class TestStepAdvance:
             step_2_result=None,
             step_3_proposal=None,
             terminal=None,
+            step_2_sink_intent=None,  # missing — SCHEMA_FORM dispatcher didn't run
         )
-        response = _make_response(edited_values=None)
-        with pytest.raises(ValueError, match="multi_select_with_custom"):
+        response: TurnResponse = {
+            "chosen": ["a"],
+            "edited_values": None,
+            "custom_inputs": [],
+            "accepted_step_index": None,
+            "edit_step_index": None,
+            "control_signal": None,
+        }
+        with pytest.raises(ValueError, match="step_2_sink_intent is None"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
     # ---------------------------------------------------------------------------

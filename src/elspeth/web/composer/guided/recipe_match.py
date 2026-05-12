@@ -94,6 +94,29 @@ class RecipeMatch:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "slots", "unsatisfied_slots")
+        # Offensive invariants: the documented contract on ``unsatisfied_slots``
+        # is enforced by ``match_recipe`` at the construction site, but any
+        # *other* caller (apply-time reconstruction in routes.py, test fixtures,
+        # future code paths) could violate it silently.  Pin the contract here
+        # so violations crash at construction with an informative message
+        # rather than producing audit-trail garbage at apply time.
+        #
+        # Invariant 1: key-disjointness — a slot cannot be both "resolved" and
+        # "unsatisfied".  The two mappings are complementary by definition.
+        overlap = set(self.unsatisfied_slots) & set(self.slots)
+        if overlap:
+            raise ValueError(f"RecipeMatch.unsatisfied_slots must be disjoint from slots; overlap on: {sorted(overlap)}")
+        # Invariant 2: only required slots belong in ``unsatisfied_slots``.
+        # Optional slots with declared defaults are auto-filled by
+        # ``validate_slots`` at apply time and must not be surfaced to the
+        # operator as fields they need to fill.
+        for name, spec in self.unsatisfied_slots.items():
+            if not spec.required:
+                raise ValueError(
+                    f"RecipeMatch.unsatisfied_slots[{name!r}] is optional; "
+                    "only required slots belong in unsatisfied_slots "
+                    "(optional slots are auto-filled by validate_slots)"
+                )
 
 
 # ---------------------------------------------------------------------------

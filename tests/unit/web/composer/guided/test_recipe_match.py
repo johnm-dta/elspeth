@@ -376,3 +376,75 @@ class TestUnsatisfiedSlots:
         match = match_recipe(source, sink)
         assert match is not None
         assert match.unsatisfied_slots["threshold"].slot_type == "float"
+
+    # ------------------------------------------------------------------
+    # I4: constructor-level invariants on ``unsatisfied_slots``
+    # ------------------------------------------------------------------
+    #
+    # The match_recipe() construction site enforces the slots / unsatisfied_slots
+    # contract by discipline (set-comprehension excludes resolved slots; filters
+    # to ``spec.required``).  These tests pin the invariants at the constructor
+    # itself so any *other* caller — apply-time reconstruction in routes.py,
+    # test fixtures, future code paths — also crashes on contract violation.
+
+    def test_rejects_slot_overlapping_with_unsatisfied(self) -> None:
+        """A name present in both ``slots`` and ``unsatisfied_slots`` is a
+        direct contradiction of the invariant: a slot cannot simultaneously
+        be resolved and unsatisfied.  Constructor must raise ValueError."""
+        from elspeth.web.composer.recipes import SlotSpec
+
+        with pytest.raises(ValueError, match="overlap") as exc_info:
+            RecipeMatch(
+                recipe_name="test-recipe",
+                slots={"foo": "resolved-value"},
+                unsatisfied_slots={
+                    "foo": SlotSpec(slot_type="str", description="conflicting", required=True),
+                },
+            )
+        # Message must name the offending key so the audit trail / log
+        # surfaces *which* slot violated the invariant, not just that one did.
+        assert "foo" in str(exc_info.value)
+
+    def test_rejects_optional_slot_in_unsatisfied(self) -> None:
+        """``unsatisfied_slots`` is the schema for *required* slots the resolver
+        could not pre-fill.  Optional slots have declared defaults and are
+        auto-filled by ``validate_slots`` at apply time — surfacing them to
+        the operator is a contract violation.  Constructor must raise."""
+        from elspeth.web.composer.recipes import SlotSpec
+
+        with pytest.raises(ValueError, match="optional") as exc_info:
+            RecipeMatch(
+                recipe_name="test-recipe",
+                slots={},
+                unsatisfied_slots={
+                    "foo": SlotSpec(
+                        slot_type="str",
+                        description="should not be here",
+                        required=False,
+                    ),
+                },
+            )
+        # Message must name the offending slot for debuggability.
+        assert "foo" in str(exc_info.value)
+
+    def test_apply_time_reconstruction_shape_is_trivially_valid(self) -> None:
+        """routes.py:~2033 reconstructs a RecipeMatch at apply time with
+        ``unsatisfied_slots={}``.  With the constructor invariants in place,
+        an empty unsatisfied_slots mapping makes both checks trivially pass
+        regardless of the contents of ``slots`` — verify here so a future
+        refactor that changes the apply-site shape gets a regression signal."""
+        match = RecipeMatch(
+            recipe_name="classify-rows-llm-jsonl",
+            slots={
+                "source_blob_id": "blob-abc",
+                "model": "gpt-4o-mini",
+                "classifier_template": "Classify: {text}",
+                "api_key_secret": "openai/key",
+                "output_path": "out.jsonl",
+                "label_field": "category",
+            },
+            unsatisfied_slots={},
+        )
+        # Constructor did not raise; both invariants vacuously satisfied.
+        assert match.unsatisfied_slots == {}
+        assert "source_blob_id" in match.slots

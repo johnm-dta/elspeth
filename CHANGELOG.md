@@ -4,6 +4,19 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Composer guided mode** — new structured-protocol wizard for first-time
+  pipeline authors. Source → sink → transforms in three steps; closed
+  six-turn taxonomy; deterministic recipe pre-match; LLM-read-only with
+  respect to pipeline state. Ships alongside the unmodified freeform
+  composer; mode transition uses progressive disclosure.
+  See `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`.
+
+---
+
 ## [0.5.1] - 2026-05-11 (RC-5.1 — Composer Correctness, Validator Hardening, and Audit-Integrity Coverage)
 
 RC-5.1 is a correctness and assurance follow-up to RC-5. The Web Composer's

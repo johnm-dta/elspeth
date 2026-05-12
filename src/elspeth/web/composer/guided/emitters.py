@@ -226,7 +226,6 @@ def build_step_2_5_recipe_offer_turn(
             name=name,
             slot_type=spec.slot_type,
             description=spec.description,
-            required=spec.required,
         )
         for name, spec in match.unsatisfied_slots.items()
     ]

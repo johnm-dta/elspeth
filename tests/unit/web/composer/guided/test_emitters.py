@@ -60,11 +60,16 @@ class TestBuildStep25RecipeOfferTurn:
         turn = build_step_2_5_recipe_offer_turn(match)
         assert validate_payload(TurnType.RECIPE_OFFER, turn["payload"]) is None
 
-    def test_unsatisfied_slot_entries_carry_name_type_description_required(
+    def test_unsatisfied_slot_entries_carry_name_type_description(
         self,
     ) -> None:
-        """Each entry is a _RecipeSlotInput TypedDict literal — the four keys
-        the frontend needs to render the editable form."""
+        """Each entry is a _RecipeSlotInput TypedDict literal — the three keys
+        the frontend needs to render the editable form.
+
+        ``required`` is intentionally absent from the wire shape: the
+        RecipeMatch invariant guarantees every entry is required, so the field
+        would carry only dead information (always True).
+        """
         match = RecipeMatch(
             recipe_name="r",
             slots={},
@@ -83,7 +88,7 @@ class TestBuildStep25RecipeOfferTurn:
         assert entry["name"] == "model"
         assert entry["slot_type"] == "str"
         assert entry["description"] == "LLM model identifier"
-        assert entry["required"] is True
+        assert "required" not in entry
 
     def test_unsatisfied_slots_empty_when_resolver_covers_all_required(self) -> None:
         match = RecipeMatch(

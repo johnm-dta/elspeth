@@ -75,19 +75,16 @@ const UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
       name: "classifier_template",
       slot_type: "str",
       description: "Jinja2 template",
-      required: true,
     },
     {
       name: "model",
       slot_type: "str",
       description: "LLM model identifier",
-      required: true,
     },
     {
       name: "api_key_secret",
       slot_type: "str",
       description: "Name of an inventory secret_ref",
-      required: true,
     },
   ],
 };
@@ -101,13 +98,11 @@ const NUMERIC_UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
       name: "field",
       slot_type: "str",
       description: "Field to threshold",
-      required: true,
     },
     {
       name: "threshold",
       slot_type: "float",
       description: "Numeric threshold",
-      required: true,
     },
   ],
 };
@@ -125,7 +120,6 @@ const INT_UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
       name: "batch_size",
       slot_type: "int",
       description: "Maximum rows per batch",
-      required: true,
     },
   ],
 };

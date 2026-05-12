@@ -213,12 +213,16 @@ export interface ProposeChainPayload {
  *
  * The frontend renders an editable input keyed by ``name`` and merges the
  * typed value into ``edited_values.slots`` before submitting.
+ *
+ * ``required`` is intentionally absent: the RecipeMatch invariant
+ * (protocol.py:_RecipeSlotInput docstring, commit 83b17ca6) guarantees every
+ * entry in unsatisfied_slots is required. All inputs rendered from this type
+ * should be treated as required without reading a flag.
  */
 export interface RecipeSlotInput {
   name: string;
   slot_type: "blob_id" | "str" | "float" | "int" | "str_list";
   description: string;
-  required: boolean;
 }
 
 /**

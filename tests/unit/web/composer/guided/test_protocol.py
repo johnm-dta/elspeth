@@ -87,7 +87,11 @@ class TestPayloadShapes:
         assert payload["recipe_name"] == "classify-rows-llm-jsonl"
 
     def test_recipe_offer_payload_with_unsatisfied_slots(self) -> None:
-        """unsatisfied_slots carries the editable schema for unfilled required slots."""
+        """unsatisfied_slots carries the editable schema for unfilled required slots.
+
+        ``required`` is intentionally absent from the wire shape: the
+        RecipeMatch invariant guarantees every entry is required.
+        """
         from elspeth.web.composer.guided.protocol import validate_payload
 
         payload: RecipeOfferPayload = {
@@ -99,13 +103,11 @@ class TestPayloadShapes:
                     "name": "classifier_template",
                     "slot_type": "str",
                     "description": "Jinja2 template",
-                    "required": True,
                 },
                 {
                     "name": "model",
                     "slot_type": "str",
                     "description": "LLM model identifier",
-                    "required": True,
                 },
             ],
         }

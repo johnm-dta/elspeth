@@ -346,9 +346,11 @@ class TestStep2IntraStep:
             "model",
             "api_key_secret",
         }
+        # ``required`` is absent from the wire shape: the RecipeMatch invariant
+        # guarantees every entry is required, so the field would be dead information.
         for entry in payload["unsatisfied_slots"]:
-            assert set(entry.keys()) == {"name", "slot_type", "description", "required"}
-            assert entry["required"] is True
+            assert set(entry.keys()) == {"name", "slot_type", "description"}
+            assert "required" not in entry
 
     def test_multi_select_response_commits_sink_to_state(self, composer_test_client: TestClient) -> None:
         """M1: MULTI_SELECT_WITH_CUSTOM → step 2.5 transition commits sink to composition_state.outputs.

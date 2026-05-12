@@ -137,11 +137,12 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
     setSlotInputs((prev) => ({ ...prev, [name]: value }));
   }
 
-  // Apply is disabled until every required unsatisfied slot has a non-empty
-  // trimmed value.  This mirrors the backend's validate_slots check — fail
-  // fast at the UI rather than burn a round-trip on an HTTP 400.
+  // Apply is disabled until every unsatisfied slot has a non-empty trimmed
+  // value.  RecipeSlotInput.required is absent from the wire shape because the
+  // RecipeMatch invariant guarantees every entry is required — treat all as
+  // required here.  Mirrors the backend's validate_slots check: fail fast at
+  // the UI rather than burn a round-trip on an HTTP 400.
   const applyDisabled = payload.unsatisfied_slots.some((slot) => {
-    if (!slot.required) return false;
     const value = slotInputs[slot.name] ?? "";
     return value.trim() === "";
   });
@@ -215,11 +216,11 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
                 <div key={slot.name} className="guided-recipe-input-row">
                   <label htmlFor={inputId} className="guided-recipe-input-label">
                     {slot.name}
-                    {slot.required && (
-                      <span className="guided-recipe-input-required" aria-hidden="true">
-                        {" *"}
-                      </span>
-                    )}
+                    {/* Every unsatisfied slot is required by the RecipeMatch invariant;
+                        the asterisk is always shown rather than gated on slot.required. */}
+                    <span className="guided-recipe-input-required" aria-hidden="true">
+                      {" *"}
+                    </span>
                   </label>
                   <input
                     id={inputId}
@@ -227,9 +228,9 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
                     className="guided-recipe-input-field"
                     value={slotInputs[slot.name] ?? ""}
                     onChange={(event) => setSlotInput(slot.name, event.target.value)}
-                    required={slot.required}
+                    required
                     aria-describedby={slot.description ? descriptionId : undefined}
-                    aria-required={slot.required}
+                    aria-required="true"
                   />
                   {slot.description && (
                     <p id={descriptionId} className="guided-recipe-input-hint">

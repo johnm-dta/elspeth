@@ -79,12 +79,18 @@ class _RecipeSlotInput(TypedDict):
     emitter, and (mirrored manually) in ``guided.ts``. The frontend renders an
     editable input keyed by ``name`` and submits the typed value back as part
     of ``edited_values.slots``.
+
+    ``required`` is intentionally absent from this wire shape: every entry in
+    ``RecipeOfferPayload.unsatisfied_slots`` is guaranteed required by the
+    :class:`~elspeth.web.composer.guided.recipe_match.RecipeMatch` invariant
+    (commit 83b17ca6, ``__post_init__`` Invariant 2). Sending a field that is
+    always ``True`` is dead information on the wire — the frontend can treat
+    all entries as required without reading a flag.
     """
 
     name: str
     slot_type: SlotType
     description: str
-    required: bool
 
 
 class RecipeOfferPayload(TypedDict):

@@ -654,6 +654,542 @@ class TestStep25RecipeAccept:
 
 
 # ---------------------------------------------------------------------------
+# Step 1 SCHEMA_FORM — contract-violation negative tests (Pair 4)
+# ---------------------------------------------------------------------------
+# Defends against silent ``.get()``-with-default and bare ``str()`` coercion
+# rewriting a malformed Step-1 SCHEMA_FORM ``edited_values`` payload into
+# bogus-but-shape-valid data. The SchemaFormTurn widget contract is
+# ``{"plugin": str, "options": Mapping, "observed_columns": list,
+# "sample_rows": list}``; any deviation MUST surface as an HTTP 400 with
+# the contract cited in the message — not flow downstream into
+# ``SourceResolved`` and fail far away in handle_step_1_source as a
+# misleading plugin-not-found or schema-mismatch error.
+
+
+class TestStep1SchemaFormAccept:
+    def _drive_to_schema_form(self, client: TestClient, session_id: str) -> dict:
+        """Drive to the Step 1 SCHEMA_FORM state. Returns the last /respond body."""
+        _get_guided(client, session_id)
+        return _respond(client, session_id, chosen=["csv"])
+
+    def test_step_1_schema_form_null_edited_values_returns_400(self, composer_test_client: TestClient) -> None:
+        """``edited_values=null`` at Step 1 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": None},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form" in detail
+        assert "step 1" in detail
+        assert "null" in detail
+
+    def test_step_1_schema_form_missing_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``plugin`` key is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"options": {}, "observed_columns": [], "sample_rows": []}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher's missing-keys guard
+        # against any downstream 400 that might also mention "plugin".
+        assert "schema_form response at step 1" in detail
+        assert "missing required keys" in detail
+        assert "'plugin'" in detail
+
+    def test_step_1_schema_form_missing_options_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``options`` key is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": "csv", "observed_columns": [], "sample_rows": []}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 1" in detail
+        assert "missing required keys" in detail
+        assert "'options'" in detail
+
+    def test_step_1_schema_form_missing_observed_columns_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``observed_columns`` key is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": "csv", "options": {}, "sample_rows": []}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 1" in detail
+        assert "missing required keys" in detail
+        assert "'observed_columns'" in detail
+
+    def test_step_1_schema_form_missing_sample_rows_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``sample_rows`` key is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": "csv", "options": {}, "observed_columns": []}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 1" in detail
+        assert "missing required keys" in detail
+        assert "'sample_rows'" in detail
+
+    def test_step_1_schema_form_empty_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Empty-string ``plugin`` is a protocol violation (HTTP 400).
+
+        Defends specifically against the silent ``str(edited["plugin"])`` pattern
+        that would have stringified ``""`` and routed it into ``SourceResolved``,
+        failing far downstream as a misleading "plugin not registered: ''" error.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "",
+                    "options": {},
+                    "observed_columns": [],
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Assert the boundary-message marker, not a bare substring — the bare
+        # substring "plugin" matches the downstream ToolResult repr (which
+        # echoes the offending value into a "plugin not registered" error),
+        # so a pre-validator code path would also satisfy ``"plugin" in detail``.
+        # Only the dispatcher's contract-citing 400 emits "must be a non-empty
+        # string", which mechanically distinguishes pre/post-validation paths.
+        assert "schema_form response at step 1" in detail
+        assert "must be a non-empty string" in detail
+        assert "''" in detail  # the offending empty-string value is echoed in the detail
+
+    def test_step_1_schema_form_non_string_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-string ``plugin`` is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": 42,
+                    "options": {},
+                    "observed_columns": [],
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher 400 against the
+        # downstream ToolResult repr that also contains "plugin".
+        assert "schema_form response at step 1" in detail
+        assert "must be a non-empty string" in detail
+        assert "42" in detail  # the offending integer value is echoed in the detail
+
+    def test_step_1_schema_form_non_mapping_options_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-Mapping ``options`` is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": ["not", "a", "mapping"],
+                    "observed_columns": [],
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher's Mapping-guard against
+        # any downstream 400 that may also mention "options" in its repr.
+        assert "schema_form response at step 1" in detail
+        assert "must be an object" in detail
+        assert "list" in detail  # the offending type is named in the detail
+
+    def test_step_1_schema_form_non_list_observed_columns_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-list ``observed_columns`` is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {},
+                    "observed_columns": "abc",
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher's list-guard.
+        assert "schema_form response at step 1" in detail
+        assert "must be a list" in detail
+        assert "str" in detail  # offending type is named
+
+    def test_step_1_schema_form_non_list_sample_rows_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-list ``sample_rows`` is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {},
+                    "observed_columns": [],
+                    "sample_rows": {"not": "a list"},
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 1" in detail
+        assert "must be a list" in detail
+        assert "dict" in detail  # offending type is named
+
+
+# ---------------------------------------------------------------------------
+# Step 2 SCHEMA_FORM — contract-violation negative tests (Pair 4)
+# ---------------------------------------------------------------------------
+# Defends the Step-2 (sink) SCHEMA_FORM dispatcher branch. The SchemaFormTurn
+# widget contract is identical to Step 1 — ``{"plugin": str, "options": Mapping,
+# "observed_columns": list, "sample_rows": list}`` — but Step 2 only consumes
+# ``plugin`` + ``options`` for ``step_2_sink_intent``. The dispatcher still
+# rejects missing/wrong-typed ``plugin`` and ``options`` with HTTP 400.
+# ``observed_columns`` and ``sample_rows`` are not validated at Step 2 (they
+# are payload-shape echo, not consumed for sink state).
+
+
+class TestStep2SchemaFormAccept:
+    def _drive_to_step_2_schema_form(self, client: TestClient, session_id: str) -> None:
+        """Drive to the Step 2 SCHEMA_FORM state (post-sink-pick)."""
+        _get_guided(client, session_id)
+        _respond(client, session_id, chosen=["csv"])
+        _blob_id, storage_path = _seed_blob(client, session_id)
+        _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text", "label"],
+                "sample_rows": [],
+            },
+        )
+        _respond(client, session_id, chosen=["json"])
+
+    def test_step_2_schema_form_null_edited_values_returns_400(self, composer_test_client: TestClient) -> None:
+        """``edited_values=null`` at Step 2 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": None},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form" in detail
+        assert "step 2" in detail
+        assert "null" in detail
+
+    def test_step_2_schema_form_missing_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``plugin`` key at Step 2 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"options": {}}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher's missing-keys guard.
+        assert "schema_form response at step 2" in detail
+        assert "missing required keys" in detail
+        assert "'plugin'" in detail
+
+    def test_step_2_schema_form_missing_options_returns_400(self, composer_test_client: TestClient) -> None:
+        """Missing ``options`` key at Step 2 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": "json"}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 2" in detail
+        assert "missing required keys" in detail
+        assert "'options'" in detail
+
+    def test_step_2_schema_form_empty_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Empty-string ``plugin`` at Step 2 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": "", "options": {}}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 2" in detail
+        assert "must be a non-empty string" in detail
+        assert "''" in detail
+
+    def test_step_2_schema_form_non_string_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-string ``plugin`` at Step 2 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": 42, "options": {}}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 2" in detail
+        assert "must be a non-empty string" in detail
+        assert "42" in detail
+
+    def test_step_2_schema_form_non_mapping_options_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-Mapping ``options`` at Step 2 SCHEMA_FORM is a protocol violation (HTTP 400)."""
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_schema_form(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"plugin": "json", "options": "not a mapping"}},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "schema_form response at step 2" in detail
+        assert "must be an object" in detail
+        assert "str" in detail  # offending type is named
+
+
+# ---------------------------------------------------------------------------
+# Step 1 INSPECT_AND_CONFIRM — contract-violation negative tests (Pair 4)
+# ---------------------------------------------------------------------------
+# The INSPECT_AND_CONFIRM dispatcher branch (routes.py STEP_1 → STEP_2 path)
+# is currently HTTP-unreachable in normal flow because ``get_guided`` always
+# passes ``blob_inspection=None`` — the server never emits an
+# INSPECT_AND_CONFIRM turn (see emitters.build_initial_step_1_turn).  The
+# dispatch branch is exercised here via state injection (the same pattern
+# used by test_progressive_disclosure._seed_terminal_state at line 170): a
+# TurnRecord with turn_type=INSPECT_AND_CONFIRM is seeded into
+# guided.history before POST /respond fires.
+#
+# Shadowing note:
+#   ``_advance_step_1`` in state_machine.py runs BEFORE the dispatcher and
+#   itself raises ValueError on null ``edited_values`` and KeyError on missing
+#   required keys.  Those errors propagate as HTTP 500, not site-2's HTTP 400.
+#   The dispatcher's null/missing-key guards remain as defense-in-depth (and
+#   are documented in the dispatcher comment) but cannot be asserted as 400
+#   via normal HTTP; the unit-level test_state_machine suite pins them at the
+#   ValueError/KeyError boundary.
+#
+#   The validators that ARE HTTP-reachable as 400 are those where step_advance's
+#   ``str()``/``tuple()`` coercion passes the raw value through:
+#     - non-string plugin (str(42) → "42" passes; isinstance(42,str)=False fires)
+#     - empty plugin     (str("")=""    passes; ``not plugin_name`` fires)
+#     - non-list observed_columns (tuple("abc")=('a','b','c') passes; isinstance fires)
+#   These three are tested below.
+
+
+class TestStep1InspectAndConfirmAccept:
+    def _seed_inspect_and_confirm_history(
+        self,
+        client: TestClient,
+        session_id: str,
+    ) -> None:
+        """Seed an INSPECT_AND_CONFIRM TurnRecord into the session's guided history.
+
+        This bypasses GET /guided because the server-side initial-turn builder
+        passes blob_inspection=None unconditionally and so never emits an
+        inspect_and_confirm turn.  We inject the state directly via
+        save_composition_state — the same pattern used by
+        test_progressive_disclosure._seed_terminal_state (line 170).
+        """
+        from dataclasses import replace
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.protocol import TurnType
+        from elspeth.web.composer.guided.state_machine import (
+            GuidedSession,
+            GuidedStep,
+            TurnRecord,
+        )
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+        from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
+
+        service = client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+
+        if state_record is None:
+            state = _initial_composition_state_with_guided_session()
+            existing_meta: dict = {}
+        else:
+            state = state_from_record(state_record)
+            existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
+
+        # Build the GuidedSession with an INSPECT_AND_CONFIRM TurnRecord
+        # at STEP_1_SOURCE so the dispatcher's current_turn_type read picks
+        # it up on POST /respond.
+        guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
+        record = TurnRecord(
+            step=GuidedStep.STEP_1_SOURCE,
+            turn_type=TurnType.INSPECT_AND_CONFIRM,
+            payload_hash="seed-payload-hash",
+            response_hash=None,
+            emitter="server",
+        )
+        guided = replace(guided, history=(*guided.history, record))
+        state = replace(state, guided_session=guided)
+
+        new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+        state_d = state.to_dict()
+        state_data = CompositionStateData(
+            source=state_d["source"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta=new_composer_meta,
+        )
+        asyncio.run(service.save_composition_state(session_uuid, state_data))
+
+    def test_inspect_and_confirm_empty_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Empty-string ``plugin`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
+
+        Site 2's ``isinstance(plugin_name, str) or not plugin_name`` check
+        fires the 400 on the raw empty-string value (replacing the previous
+        silent ``str(edited["plugin"])`` coercion).
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "",
+                    "options": {},
+                    "observed_columns": [],
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Assert the boundary-message marker, not a bare substring — without
+        # the dispatcher guard, ``""`` would flow through ``handle_step_1_source``
+        # and the resulting 400 ``"Step 1 source commit failed: ToolResult(...)"``
+        # repr contains the word "plugin", so ``"inspect_and_confirm" in detail``
+        # / ``"plugin" in detail`` would BOTH pass against the unguarded path
+        # (the dispatcher's own 400 message starts ``"inspect_and_confirm
+        # response at step 1 ..."``, and the downstream commit-failure 400
+        # carries the dispatched ToolResult which echoes "plugin"). Only the
+        # contract-citing message "must be a non-empty string" mechanically
+        # pins this test to the dispatcher's guard.
+        assert "inspect_and_confirm response at step 1" in detail
+        assert "must be a non-empty string" in detail
+        assert "''" in detail  # the offending empty-string value is echoed in the detail
+
+    def test_inspect_and_confirm_non_string_plugin_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-string ``plugin`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
+
+        Site 2's ``isinstance(plugin_name, str)`` check fires the 400 on the
+        raw integer value (replacing the previous silent ``str(42)="42"``
+        coercion).
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": 42,
+                    "options": {},
+                    "observed_columns": [],
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher's 400 against the
+        # downstream ToolResult-repr 400 that also contains "plugin".
+        assert "inspect_and_confirm response at step 1" in detail
+        assert "must be a non-empty string" in detail
+        assert "42" in detail  # the offending integer value is echoed in the detail
+
+    def test_inspect_and_confirm_non_list_observed_columns_returns_400(self, composer_test_client: TestClient) -> None:
+        """Non-list ``observed_columns`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
+
+        Site 2's ``isinstance(observed_columns_raw, list)`` check fires the
+        400 on the raw scalar value (replacing the previous silent
+        ``tuple("abc")=('a','b','c')`` coercion that would have yielded a
+        character-wise tuple).
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "edited_values": {
+                    "plugin": "csv",
+                    "options": {},
+                    "observed_columns": "abc",
+                    "sample_rows": [],
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Boundary-message marker pins the dispatcher's list-guard.
+        assert "inspect_and_confirm response at step 1" in detail
+        assert "must be a list" in detail
+        assert "str" in detail  # offending type is named
+
+
+# ---------------------------------------------------------------------------
 # Error paths: 400 on no GET /guided first, 404 unknown session
 # ---------------------------------------------------------------------------
 

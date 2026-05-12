@@ -1171,40 +1171,84 @@ allow_hits:
     which is raw JSON from the DB. Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=b2ee7a80ee10460c
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=6f7c49b368c3408d
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — options is an optional user input that may be omitted;
-    plugin is now validated with an explicit 422 check before this point; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing keys fall back to defaults (empty dict); no fabricated values
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['plugin'] must be a non-empty string per
+    the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the offending
+    value in the detail), not error suppression. Replaces the previous silent str(edited['plugin']) coercion that masked
+    contract drift.
+  safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=e721908298db3cf6
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=e31cfd029b5c713a
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — observed_columns is an optional user input that may be
-    omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing key falls back to empty tuple; no fabricated values
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['options'] must be a Mapping per the
+    SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type
+    in the detail), not error suppression. Replaces the previous silent dict(edited.get("options", {})) default which would
+    have collapsed null/list/scalar payloads into an empty dict and fabricated upstream contract conformance.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=b1da5afefea0764b
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=17ffe3de710a18d8
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted SCHEMA_FORM payload — sample_rows is an optional user input that may be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing key falls back to empty tuple; no fabricated values
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['observed_columns'] must be a list per
+    the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual
+    type in the detail), not error suppression. Replaces the previous silent tuple(edited.get("observed_columns", [])) default
+    which would have silently accepted scalars and yielded character-wise tuples (e.g. tuple("abc") → ('a','b','c')).
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=d09cedd0417b4678
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=b3d19afa8e6e6c86
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — options is an optional user input that may be
-    omitted; plugin is now validated with an explicit 422 check before this point; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing key falls back to empty dict; no fabricated values
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['sample_rows'] must be a list per the
+    SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type
+    in the detail), not error suppression. Replaces the previous silent tuple(dict(r) for r in edited.get("sample_rows", []))
+    pattern which would have crashed deep in the comprehension on a non-iterable.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=4ec1fb5db6288315
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=eafccf78781770d8
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — observed_columns is an optional user input that
-    may be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing key falls back to empty tuple; no fabricated values
+  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['plugin'] must be a non-empty
+    string per the server-side state_machine contract (see test_state_machine.test_initial_session_advances_after_source_confirmed);
+    isinstance here is offensive validation (raises HTTPException 400 with the offending value in the detail), not error
+    suppression. Replaces the previous silent str(edited['plugin']) coercion.
+  safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R1:_dispatch_guided_respond:fp=44eaa62f930e5a6c
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=d4d75e0f7d0db601
   owner: web-sessions
-  reason: edited.get() on Tier 3 user-submitted INSPECT_AND_CONFIRM payload — sample_rows is an optional user input that may
-    be omitted; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Missing key falls back to empty tuple; no fabricated values
+  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['options'] must be a Mapping
+    per the server-side state_machine contract; isinstance here is offensive validation (raises HTTPException 400 with the
+    actual type in the detail), not error suppression. Replaces the previous silent dict(edited.get("options", {})) default.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
+  expires: null
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=4be385491212b4dd
+  owner: web-sessions
+  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['observed_columns'] must
+    be a list per the server-side state_machine contract; isinstance here is offensive validation (raises HTTPException 400
+    with the actual type in the detail), not error suppression. Replaces the previous silent tuple(edited.get("observed_columns", []))
+    default.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
+  expires: null
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=2230df199fe835a4
+  owner: web-sessions
+  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['sample_rows'] must be a
+    list per the server-side state_machine contract; isinstance here is offensive validation (raises HTTPException 400 with
+    the actual type in the detail), not error suppression. Replaces the previous silent tuple(dict(r) for r in edited.get("sample_rows", []))
+    pattern.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
+  expires: null
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=690a1fa6374c17d1
+  owner: web-sessions
+  reason: HTTP-boundary trust-boundary validation — Step-2 SCHEMA_FORM edited_values['plugin'] must be a non-empty string per
+    the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the offending
+    value in the detail), not error suppression. Replaces the previous str(edited['plugin']) coercion that would have stringified
+    any payload (including None).
+  safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
+  expires: null
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=64df0f81fe364aa7
+  owner: web-sessions
+  reason: HTTP-boundary trust-boundary validation — Step-2 SCHEMA_FORM edited_values['options'] must be a Mapping per the
+    SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type
+    in the detail), not error suppression. Replaces the previous dict(edited['options']) call which would have crashed deep
+    on non-mappings.
+  safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
 - key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=93b211a4e6a30476
   owner: web-sessions

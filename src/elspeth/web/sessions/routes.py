@@ -1666,21 +1666,63 @@ async def _dispatch_guided_respond(
 
         if current_turn_type is TurnType.SCHEMA_FORM:
             # User submitted source options. Call handle_step_1_source to commit.
-            edited = turn_response["edited_values"] or {}
-            # "plugin" is required — absence is Tier-3 evidence that the client
-            # sent a malformed payload; reject with 422 rather than fabricating
-            # a value from state.source (inference from adjacent fields is
-            # fabrication per CLAUDE.md §Three-Tier Trust Model).
-            if "plugin" not in edited:
+            # ``edited_values`` is the wire contract for the Step-1 SCHEMA_FORM
+            # response: the SchemaFormTurn widget always sends
+            # ``{"plugin": str, "options": Mapping, "observed_columns": list,
+            # "sample_rows": list}``. A missing key, a null payload, a non-string
+            # ``plugin``, or non-list-shaped ``observed_columns`` / ``sample_rows``
+            # is a protocol violation, not a Tier-3 "user typo" we paper over
+            # with ``.get()`` defaults — silent defaults here would surface
+            # far downstream as inference from adjacent fields (forbidden per
+            # CLAUDE.md §Three-Tier Trust Model). The HTTP boundary is a trust
+            # boundary, so we raise 400 with a contract-citing message.
+            edited = turn_response["edited_values"]
+            if edited is None:
                 raise HTTPException(
-                    status_code=422,
-                    detail="schema_form response must include 'plugin' in edited_values.",
+                    status_code=400,
+                    detail="schema_form response at step 1 requires edited_values; received null.",
+                )
+            missing = {"plugin", "options", "observed_columns", "sample_rows"} - edited.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 1 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            plugin_name = edited["plugin"]
+            if not isinstance(plugin_name, str) or not plugin_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 1 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
+                )
+            options_raw = edited["options"]
+            if not isinstance(options_raw, Mapping):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 1 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
+                )
+            observed_columns_raw = edited["observed_columns"]
+            if not isinstance(observed_columns_raw, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 1 edited_values['observed_columns'] must be a list; got {type(observed_columns_raw).__name__}"
+                    ),
+                )
+            sample_rows_raw = edited["sample_rows"]
+            if not isinstance(sample_rows_raw, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 1 edited_values['sample_rows'] must be a list; got {type(sample_rows_raw).__name__}"
+                    ),
                 )
             resolved = SourceResolved(
-                plugin=str(edited["plugin"]),
-                options=dict(edited.get("options", {})),
-                observed_columns=tuple(edited.get("observed_columns", [])),
-                sample_rows=tuple(dict(r) for r in edited.get("sample_rows", [])),
+                plugin=plugin_name,
+                options=dict(options_raw),
+                observed_columns=tuple(observed_columns_raw),
+                sample_rows=tuple(dict(r) for r in sample_rows_raw),
             )
             handler_result = handle_step_1_source(
                 state=state,
@@ -1741,20 +1783,78 @@ async def _dispatch_guided_respond(
     # --- STEP_1_SOURCE → STEP_2_SINK (step_advance fired for INSPECT_AND_CONFIRM)
     if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
         # step_advance advanced the step. Build SourceResolved from edited_values.
-        edited = turn_response["edited_values"] or {}
-        # "plugin" is required — absence is a malformed client payload; reject
-        # with 422 rather than fabricating an empty string (same boundary rule
-        # as the SCHEMA_FORM branch above).
-        if "plugin" not in edited:
+        # ``edited_values`` is the wire contract for the post-advance
+        # INSPECT_AND_CONFIRM response (server-side; per the unit-test contract
+        # in test_state_machine.test_initial_session_advances_after_source_confirmed):
+        # ``{"plugin": str, "options": Mapping, "observed_columns": list,
+        # "sample_rows": list}``. A missing key, a null payload, or a wrong-typed
+        # value is a protocol violation — silent ``.get()`` defaults would
+        # fabricate fields the client never supplied (forbidden per CLAUDE.md
+        # §Three-Tier Trust Model). The HTTP boundary is a trust boundary, so
+        # we raise 400 with a contract-citing message.
+        #
+        # Shadowing note: ``_advance_step_1`` in state_machine.py runs BEFORE
+        # this dispatcher branch and itself raises ``ValueError`` on null
+        # ``edited_values`` and ``KeyError`` on missing required keys — those
+        # errors propagate as HTTP 500 long before reaching here. The null and
+        # missing-key guards below are defense-in-depth: structurally
+        # unreachable as 400 in the production flow, but kept so the validator
+        # is locally complete and the dispatcher remains correct in isolation
+        # (e.g. if ``_advance_step_1``'s guards were ever relaxed). The
+        # guards that ARE HTTP-reachable as 400 are those where
+        # ``_advance_step_1``'s ``str()`` / ``tuple()`` coercion passes the
+        # raw value through unchanged: non-empty/non-string ``plugin``,
+        # non-Mapping ``options``, non-list ``observed_columns`` /
+        # ``sample_rows``.
+        edited = turn_response["edited_values"]
+        if edited is None:
             raise HTTPException(
-                status_code=422,
-                detail="inspect_and_confirm response must include 'plugin' in edited_values.",
+                status_code=400,
+                detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
+            )
+        missing = {"plugin", "options", "observed_columns", "sample_rows"} - edited.keys()
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"inspect_and_confirm response at step 1 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                ),
+            )
+        plugin_name = edited["plugin"]
+        if not isinstance(plugin_name, str) or not plugin_name:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"inspect_and_confirm response at step 1 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
+            )
+        options_raw = edited["options"]
+        if not isinstance(options_raw, Mapping):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"inspect_and_confirm response at step 1 edited_values['options'] must be an object; got {type(options_raw).__name__}"
+                ),
+            )
+        observed_columns_raw = edited["observed_columns"]
+        if not isinstance(observed_columns_raw, list):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"inspect_and_confirm response at step 1 edited_values['observed_columns'] must be a list; got {type(observed_columns_raw).__name__}"
+                ),
+            )
+        sample_rows_raw = edited["sample_rows"]
+        if not isinstance(sample_rows_raw, list):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"inspect_and_confirm response at step 1 edited_values['sample_rows'] must be a list; got {type(sample_rows_raw).__name__}"
+                ),
             )
         resolved = SourceResolved(
-            plugin=str(edited["plugin"]),
-            options=dict(edited.get("options", {})),
-            observed_columns=tuple(edited.get("observed_columns", [])),
-            sample_rows=tuple(dict(r) for r in edited.get("sample_rows", [])),
+            plugin=plugin_name,
+            options=dict(options_raw),
+            observed_columns=tuple(observed_columns_raw),
+            sample_rows=tuple(dict(r) for r in sample_rows_raw),
         )
         handler_result = handle_step_1_source(
             state=state,
@@ -1830,23 +1930,46 @@ async def _dispatch_guided_respond(
             # step_2_sink_intent so _advance_step_2 can reconstruct the full
             # SinkOutputResolved when the subsequent MULTI_SELECT_WITH_CUSTOM
             # response arrives (which only carries required_fields, not the plugin).
-            edited = turn_response["edited_values"] or {}
-            # "plugin" is required — absence is Tier-3 evidence that the client
-            # sent a malformed payload. Reject with 422 (same boundary rule as
-            # the Step-1 SCHEMA_FORM dispatcher).
-            if "plugin" not in edited:
+            # ``edited_values`` is the wire contract for the Step-2 SCHEMA_FORM
+            # response: the SchemaFormTurn widget always sends
+            # ``{"plugin": str, "options": Mapping, "observed_columns": list,
+            # "sample_rows": list}``. Step 2 only consumes ``plugin`` + ``options``
+            # for the sink_intent, but the wire shape is fully validated to keep
+            # the contract identical with Step 1 (no silent-tolerance drift).
+            # A missing key, a null payload, or a wrong-typed value is a
+            # protocol violation — silent ``.get()`` defaults would fabricate
+            # fields the client never supplied (forbidden per CLAUDE.md
+            # §Three-Tier Trust Model). The HTTP boundary is a trust boundary,
+            # so we raise 400 with a contract-citing message.
+            edited = turn_response["edited_values"]
+            if edited is None:
                 raise HTTPException(
-                    status_code=422,
-                    detail="schema_form response at step 2 must include 'plugin' in edited_values.",
+                    status_code=400,
+                    detail="schema_form response at step 2 requires edited_values; received null.",
                 )
-            if "options" not in edited:
+            missing = {"plugin", "options"} - edited.keys()
+            if missing:
                 raise HTTPException(
-                    status_code=422,
-                    detail="schema_form response at step 2 must include 'options' in edited_values.",
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 2 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            plugin_name = edited["plugin"]
+            if not isinstance(plugin_name, str) or not plugin_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 2 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
+                )
+            options_raw = edited["options"]
+            if not isinstance(options_raw, Mapping):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 2 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
                 )
             sink_intent = SinkIntent(
-                plugin=str(edited["plugin"]),
-                options=dict(edited["options"]),
+                plugin=plugin_name,
+                options=dict(options_raw),
             )
             guided = _replace(guided, step_2_sink_intent=sink_intent)
 

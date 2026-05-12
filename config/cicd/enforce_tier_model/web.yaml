@@ -1467,28 +1467,28 @@ allow_hits:
     and cancellation now also drains the shielded future's eventual exception via add_done_callback so asyncio's GC handler
     cannot fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=b9a0bb90301e091a
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=4c7563702ecc116c
   owner: web-sessions
   reason: Same as the prior send_message R7 entry; contextlib.suppress(asyncio.CancelledError) wraps shielded
-    cancelled-LLM-call audit persistence. FP rotated by Codex 7 _validate_step_indices helper insertion.
+    cancelled-LLM-call audit persistence. FP rotated by I1 InvariantError handler insertion.
   safety: Same as the prior entry; shielded persistence is best-effort; explicit raise preserves cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=81759b68464086d0
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=50fd21ed36b9a97b
   owner: web-sessions
   reason: Same as the prior send_message R7 entry; contextlib.suppress(asyncio.CancelledError) wraps the shielded
-    progress publish. FP rotated by Codex 7 _validate_step_indices helper insertion.
+    progress publish. FP rotated by I1 InvariantError handler insertion.
   safety: Same as the prior entry; shielded publish completes; explicit raise restores cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=418edb1896282fff
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=bcbd2b6f13602433
   owner: web-sessions
   reason: Same as the prior recompose R7 entry; mirror of cancelled-LLM-call audit persistence suppress.
-    FP rotated by Codex 7 _validate_step_indices helper insertion.
+    FP rotated by I1 InvariantError handler insertion.
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=da65992455fd4fdb
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=a3647707c431903e
   owner: web-sessions
   reason: Same as the prior recompose R7 entry; mirror of shielded-publish suppress.
-    FP rotated by Codex 7 _validate_step_indices helper insertion.
+    FP rotated by I1 InvariantError handler insertion.
   safety: Same as the prior entry.
   expires: null
 - key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=d12ff64e3b96a327

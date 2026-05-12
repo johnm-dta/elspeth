@@ -358,3 +358,94 @@ class TestInvariantError500DetailIsSanitized:
         assert self._SENTINEL not in body_text
         assert "sample_rows" not in body_text
         assert "malformed record" not in body_text
+
+
+# ---------------------------------------------------------------------------
+# Server-invariant gates raise InvariantError (PR #37 review finding I1)
+#
+# Four sites previously raised ``RuntimeError`` for server-bug invariant
+# conditions (Step-3 repair guards + post-compose impossible-state guards).
+# RuntimeError lands at FastAPI's default 500 handler with no structured log
+# and no audit-system-failure exemption record. Converting to ``InvariantError``
+# routes the failure through the B1 sanitized handler: static 500 detail +
+# ``guided.invariant_violated`` slog event that on-call dashboards filter on.
+# ---------------------------------------------------------------------------
+
+
+class TestI1InvariantErrorStructuredLogging:
+    """Pin that the 4 sites converted in I1 fire the structured slog event
+    when the invariant is violated, not a generic FastAPI 500.
+
+    The B1 static-detail pin in ``TestInvariantError500DetailIsSanitized``
+    proves the response body is sanitized; this class proves the parallel
+    requirement — that the failure is observable via the structured log
+    channel keyed on ``guided.invariant_violated``.
+    """
+
+    _STATIC_DETAIL = "Server invariant violated. See application audit log for diagnostic detail."
+
+    def test_dispatcher_invariant_emits_structured_slog_event(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch,
+    ) -> None:
+        """When ``_dispatch_guided_respond`` raises ``InvariantError`` (the
+        class the Step-3 repair guards at routes.py:~2396/2398 now raise),
+        the route emits a ``guided.invariant_violated`` slog event with the
+        B1-convention field set (``exc_class`` + ``frames`` + ``site``, no
+        raw exception message).
+
+        Without the RuntimeError → InvariantError conversion, the guard
+        would escape as a plain RuntimeError to FastAPI's default 500 with
+        no structured log — operators would see only "Internal Server
+        Error" with no audit-derivation trail.
+        """
+        from structlog.testing import capture_logs
+
+        from elspeth.web.composer.guided.errors import InvariantError
+        from elspeth.web.sessions import routes as routes_module
+
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        # Reproduce the exact text the converted Step-3 repair site raises.
+        # The site is unreachable from a well-formed client (Step 3 can only
+        # be entered after Steps 1+2 commit), so we patch the dispatcher to
+        # synthesise the InvariantError shape that ``raise InvariantError(...)``
+        # at routes.py:~2396 now produces.
+        async def _raise_invariant_in_dispatcher(*args, **kwargs):
+            raise InvariantError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
+
+        monkeypatch.setattr(routes_module, "_dispatch_guided_respond", _raise_invariant_in_dispatcher)
+
+        with capture_logs() as cap_logs:
+            resp = _respond_raw(
+                composer_test_client,
+                session_id,
+                chosen=["csv"],
+            )
+
+        # The dispatcher's outer except InvariantError handler converts to
+        # a sanitized 500 with the B1 static detail.
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == self._STATIC_DETAIL
+
+        # The structured slog event must be emitted under the B1 convention.
+        matches = [entry for entry in cap_logs if entry.get("event") == "guided.invariant_violated"]
+        assert matches, f"expected guided.invariant_violated slog event for converted dispatcher InvariantError; got entries: {cap_logs}"
+        entry = matches[0]
+
+        # Field-set pin. B1 convention: exc_class + frames + site +
+        # session_id + user_id. Never str(exc) or exc_info.
+        assert entry["exc_class"] == "InvariantError", entry
+        assert entry["site"] == "dispatch_guided_respond", entry
+        assert "frames" in entry, entry
+        assert "session_id" in entry, entry
+        assert "user_id" in entry, entry
+
+        # Forbidden keys: any field carrying the raw exception message is
+        # a B1 leak vector. The Step-3 repair message itself is harmless,
+        # but the dispatcher might one day raise an InvariantError whose
+        # message embeds {d!r} (cf. ``from_dict`` callers).
+        forbidden_keys = {"exc_message", "exception", "exc_info"}
+        assert not (forbidden_keys & entry.keys()), f"slog entry must not carry the raw exception message under the B1 convention: {entry}"

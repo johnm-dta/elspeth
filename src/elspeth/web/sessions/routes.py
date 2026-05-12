@@ -2393,9 +2393,9 @@ async def _dispatch_guided_respond(
                     # Both must be non-None because Step 3 can only be reached after
                     # Steps 1 and 2 commit successfully (dispatcher invariant).
                     if guided.step_1_result is None:
-                        raise RuntimeError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
+                        raise InvariantError("repair: step_1_result is None — STEP_3 unreachable without Step 1 commit")
                     if guided.step_2_result is None:
-                        raise RuntimeError("repair: step_2_result is None — STEP_3 unreachable without Step 2 commit")
+                        raise InvariantError("repair: step_2_result is None — STEP_3 unreachable without Step 2 commit")
                     repair_proposal = await solve_chain(
                         model=model,
                         source=guided.step_1_result,
@@ -3017,7 +3017,7 @@ def create_session_router() -> APIRouter:
                     # (the gate above ensures _guided is not None when this fires)
                     # and satisfies the type checker without defensive get() calls.
                     if _guided is None:
-                        raise RuntimeError(
+                        raise InvariantError(
                             "guided_terminal_for_compose is set but guided_session is None — "
                             "impossible state: transition gate should have blocked this path"
                         )
@@ -3200,6 +3200,27 @@ def create_session_router() -> APIRouter:
                 )
                 terminal_status = "completed"
                 return response
+            except InvariantError as exc:
+                # Same B1-sanitization rationale as the /guided/respond
+                # step_advance and dispatch handlers: server-invariant
+                # violations route through a static 500 detail and a
+                # structured slog event so on-call dashboards can filter on
+                # ``guided.invariant_violated``.  Without this handler an
+                # InvariantError raised from the post-compose transition_consumed
+                # impossible-state guard would land at FastAPI's default 500
+                # ({"detail": "Internal Server Error"}) with no structured log.
+                slog.error(
+                    "guided.invariant_violated",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="send_message",
+                    frames=_safe_frame_strings(exc),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Server invariant violated. See application audit log for diagnostic detail.",
+                ) from exc
             except asyncio.CancelledError as exc:
                 # Client-disconnect or operator cancel during the
                 # composer-engaged window. Publish a discriminated
@@ -3523,7 +3544,7 @@ def create_session_router() -> APIRouter:
                     # transition_consumed flip — _guided is non-None because
                     # _guided_terminal_for_compose was derived from _guided.terminal.
                     if _guided is None:
-                        raise RuntimeError(
+                        raise InvariantError(
                             "guided_terminal_for_compose is set but guided_session is None — "
                             "impossible state: transition gate should have blocked this path"
                         )
@@ -3691,6 +3712,22 @@ def create_session_router() -> APIRouter:
                 )
                 terminal_status = "completed"
                 return response
+            except InvariantError as exc:
+                # Mirror of send_message InvariantError handler — same
+                # B1-sanitization rationale. Static 500 detail; slog carries
+                # exc_class + frames only.
+                slog.error(
+                    "guided.invariant_violated",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    exc_class=type(exc).__name__,
+                    site="recompose",
+                    frames=_safe_frame_strings(exc),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Server invariant violated. See application audit log for diagnostic detail.",
+                ) from exc
             except asyncio.CancelledError as exc:
                 # Mirror of send_message cancellation path. See block
                 # comment there for the shielded-publish rationale.

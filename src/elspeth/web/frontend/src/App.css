@@ -4568,6 +4568,114 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   GuidedHistory (Task 7.9)
+   Classes prefixed guided-history-*.
+
+   Collapsible read-only list of completed wizard steps.  Rendered above the
+   active turn widget so the user can see what was decided in prior steps.
+
+   Visual design:
+     - Muted appearance (secondary text colour) to avoid competing with the
+       active turn widget.
+     - Toggle button matches the ExitToFreeformButton secondary style
+       (transparent background, border, muted text) but is visually lighter.
+     - List items use small text with separator dots between step name,
+       turn type, and emitter.
+
+   Collapsible region contract (Task 7.5 I2):
+     The region is ALWAYS rendered (hidden attribute toggles, not conditional
+     mounting) so the toggle's aria-controls always resolves.  Native browser
+     `[hidden] { display: none; }` handles both visual and AT-tree hiding —
+     no additional CSS required for the hidden state.
+
+   Sized to WCAG 2.5.8 minimum target (min-height: 44px on toggle button).
+   Focus ring and hover match the guided-* family convention.
+   --------------------------------------------------------------------------- */
+
+.guided-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-sm);
+}
+
+.guided-history-toggle {
+  align-self: flex-start;
+  padding: var(--space-xs) var(--space-sm);
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease,
+    color 0.1s ease;
+}
+
+.guided-history-toggle:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.guided-history-toggle:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* The region itself: native [hidden] { display: none; } handles collapse.
+   No explicit display rule needed here — the browser default applies.  */
+.guided-history-region {
+  padding: var(--space-xs) 0;
+}
+
+.guided-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.guided-history-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.guided-history-step-number {
+  font-weight: 600;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.guided-history-step-name {
+  color: var(--color-text-secondary);
+}
+
+.guided-history-separator {
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.guided-history-turn-type {
+  font-family: monospace;
+  font-size: var(--font-size-xs, 0.75rem);
+  color: var(--color-text-muted);
+}
+
+.guided-history-emitter {
+  font-size: var(--font-size-xs, 0.75rem);
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -4587,7 +4695,8 @@ summary:focus-visible {
   .guided-propose-accept-btn,
   .guided-recipe-apply-btn,
   .guided-recipe-build-btn,
-  .guided-exit-button {
+  .guided-exit-button,
+  .guided-history-toggle {
     transition: none;
   }
 }

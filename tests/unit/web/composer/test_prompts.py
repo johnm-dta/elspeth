@@ -15,9 +15,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.prompts import (
     SYSTEM_PROMPT,
@@ -497,6 +500,60 @@ class TestBuildMessagesGuidedTerminal:
 
         system_content = messages[0]["content"]
         assert "solver_exhausted" in system_content
+
+    def test_guided_terminal_exited_without_reason_raises_invariant_error_no_leak(self) -> None:
+        """obs-ae69e10e00 regression: an EXITED_TO_FREEFORM TerminalState with
+        ``reason=None`` violates the TerminalState invariant.  build_messages must:
+
+        1. Raise ``InvariantError`` (server-bug sentinel routed through the
+           B1-sanitized 500 handler at routes.py:3252 / 3764), NOT
+           ``RuntimeError`` (which would land at FastAPI's default 500 and
+           bypass the slog event + _safe_frame_strings capture).
+        2. NOT embed ``pipeline_yaml`` or other TerminalState repr content in
+           the exception message — same Tier-1 leak vector that B1
+           (commit eb30f669) and I1 (commit ba424ad9) sanitized at
+           routes.py:4634/4696.  The PR-introduced ``{guided_terminal!r}``
+           formatter would have leaked source paths, plugin options, and
+           secret references via the exception message into any handler that
+           reads ``str(exc)`` (e.g., FastAPI default 500 surfacing).
+        """
+        state = _empty_state()
+        catalog = _stub_catalog()
+        # Construct an invalid TerminalState directly — bypass the step_advance
+        # invariant that would normally prevent this combination.  Sentinel
+        # strings in pipeline_yaml pin the no-leak assertion: if the {!r}
+        # interpolation regresses, the assertion fires.
+        sentinel_yaml = "source:\n  options:\n    secret_ref: env://LEAKED_SECRET_SENTINEL_AE69E10E00\n"
+        bad_terminal = TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=None,
+            pipeline_yaml=sentinel_yaml,
+        )
+
+        with pytest.raises(InvariantError) as exc_info:
+            build_messages(
+                [],
+                state,
+                "continue",
+                catalog,
+                guided_terminal=bad_terminal,
+            )
+
+        # Class swap pin (B1 conformance): InvariantError is the project
+        # sentinel for server-side invariant violations; the route handler
+        # dispatches on this exact class.
+        assert type(exc_info.value) is InvariantError
+
+        # No-leak pin (load-bearing security assertion): the corrupted
+        # value's repr must not appear in the exception message.  Without
+        # this assertion the {!r}-leak regression would silently re-land.
+        exc_message = str(exc_info.value)
+        assert "LEAKED_SECRET_SENTINEL_AE69E10E00" not in exc_message
+        assert "pipeline_yaml" not in exc_message
+        assert "secret_ref" not in exc_message
+        assert sentinel_yaml not in exc_message
+        # Invariant name is preserved for diagnostic value.
+        assert "EXITED_TO_FREEFORM" in exc_message
 
 
 class TestBuildContextStringRedaction:

@@ -16,6 +16,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
 from elspeth.web.composer.guided.state_machine import TerminalKind
 from elspeth.web.composer.redaction import redact_source_storage_path
@@ -245,9 +246,21 @@ def build_messages(
         if guided_terminal.kind is TerminalKind.COMPLETED:
             reason_str = "completed_pipeline"
         else:
-            # EXITED_TO_FREEFORM — reason must be non-None for this kind
+            # EXITED_TO_FREEFORM — reason must be non-None for this kind.
+            # Use InvariantError (server-bug sentinel) rather than RuntimeError
+            # so the send_message / recompose route handlers route this through
+            # the B1-sanitized static-500 path (slog event + _safe_frame_strings
+            # capture) rather than landing at FastAPI's default 500.
+            #
+            # The diagnostic value here is the invariant name; we deliberately
+            # drop the ``{guided_terminal!r}`` interpolation that would otherwise
+            # embed ``pipeline_yaml`` (Tier-1 — may contain source paths, plugin
+            # options, secret references) into the exception message. Same leak
+            # vector that B1 (commit eb30f669) and I1 (commit ba424ad9)
+            # sanitized at routes.py:4634/4696; this site was missed by the
+            # original PR sweep (obs-ae69e10e00).
             if guided_terminal.reason is None:
-                raise RuntimeError(f"EXITED_TO_FREEFORM terminal must have a reason: {guided_terminal!r}")
+                raise InvariantError("EXITED_TO_FREEFORM terminal must have a reason")
             reason_str = guided_terminal.reason.value
         # Thread data_dir and advisor_enabled through the transition prompt so the
         # first freeform turn after guided exit carries the same deployment overlay

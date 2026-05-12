@@ -1015,6 +1015,7 @@ The boundary discipline is summarised:
 | Failure mode | Trust tier | Walker disposition |
 |---|---|---|
 | Unknown response key (key in input dict, not in any declared set) | Tier-3 (LLM-supplied response data) | Fixed-sentinel substitute, counter increment, continue |
+| **Unknown tool name (LLM hallucination)** | **Tier-3** | **Walker not invoked.** Dispatcher fall-through at `tools.py:5731` returns `ToolResult(success=False, data={"error": "Unknown tool: <name>"})` without raising. `dispatch_with_audit` enters its SUCCESS branch (no exception caught) and records `ComposerToolStatus.SUCCESS` with the failure payload in `result_canonical`. The compose loop continues; the LLM receives the failure payload as a `role=tool` message and can self-correct. The audit record carries the full semantic outcome. **This is the canonical SUCCESS-with-semantic-failure pattern** — documented in `ComposerToolStatus.SUCCESS`'s docstring (`contracts/composer_audit.py:34-37`). Pinned by `test_compose_loop_unknown_tool_name.py::TestUnknownToolNameComposeLoopAuditShape::test_unknown_tool_name_audit_shape`. |
 | Argument fails Pydantic validation (type-driven) | Tier-3 | Walker not invoked; promoted handler catches `pydantic.ValidationError` and re-raises as `ToolArgumentError` (per `tools.py:2668–2801`); `ToolArgumentError` caught at `service.py:2480`; ARG_ERROR path runs |
 | Manifest entry missing for dispatched tool name | Tier-1 (registry consistency) | `AuditIntegrityError` |
 | Summarizer raises | Tier-1 (system code; CLAUDE.md plugin policy) | `telemetry.summarizer_error(tool_name=…)` fired; then `AuditIntegrityError` chained |
@@ -2366,17 +2367,27 @@ Boundary disposition (per §4.2.6 table):
 
 - **Tier-3 input**: an LLM-supplied tool name with no entry in any of
   the six dispatch registries at `tools.py:5250–5314` is handled via
-  the dispatcher's fall-through at `tools.py:5481` (`return
+  the dispatcher's fall-through at `tools.py:5731` (`return
   _failure_result(state, f"Unknown tool: {tool_name}")`). The
-  dispatcher returns a failure `ToolResult`; the compose loop records
-  the failure as an audit entry and continues to the next iteration.
+  dispatcher returns a failure `ToolResult` **without raising** — no
+  exception escapes. `dispatch_with_audit` therefore enters its SUCCESS
+  branch and records `ComposerToolStatus.SUCCESS` with the failure
+  payload (`result.data["error"] = "Unknown tool: <name>"`) in
+  `result_canonical`. The compose loop continues; the LLM receives the
+  failure payload as a `role=tool` message and can self-correct. This
+  is the canonical **SUCCESS-with-semantic-failure** pattern: the
+  dispatch itself completed successfully, and the audit record carries
+  the full semantic outcome so an auditor can read it. The pattern is
+  documented in the `ComposerToolStatus.SUCCESS` docstring
+  (`contracts/composer_audit.py:34-37`). Pinned by
+  `test_compose_loop_unknown_tool_name.py::TestUnknownToolNameComposeLoopAuditShape::test_unknown_tool_name_audit_shape`.
   (The JSON-decode / non-dict / missing-required-paths pre-dispatch
   gate at `service.py:1836–1870` is a separate, earlier site that
   handles malformed arguments for a tool name that was at least
   recognized; the unknown-tool-name fall-through is handled by
-  `tools.py:5481`, not `service.py:1836–1870`.) **The walker is
-  not invoked for unknown tool names** because dispatch never
-  succeeds — there is nothing to redact.
+  `tools.py:5731`, not `service.py:1836–1870`.) **The walker is
+  not invoked for unknown tool names** — `execute_tool` returns before
+  dispatch completes, so there is no dispatched-tool record to redact.
 - **Tier-1 invariant**: a manifest entry missing for a tool name
   that *did* dispatch successfully is a registry-consistency
   violation. The walker raises `AuditIntegrityError` chained from a
@@ -2609,7 +2620,7 @@ polish.
   - `tests/unit/web/composer/test_redact_tool_call_arguments.py` — full disposition table from §4.2.6; type-driven walks via shared iterator; declarative walks via `sensitive_argument_keys`; manifest-entry-missing-for-dispatched-tool-name crashes (Tier-1 registry violation distinct from Tier-3 LLM-hallucinated tool name).
   - `tests/unit/web/composer/test_adequacy_guard.py` — five assertions per §4.4 (registry-manifest set equality; per-entry shape walk; mass-copy uniqueness; policy-hash snapshot equality; `extra="forbid"` on type-driven entries). Sanity bound: < 5 s for the current 37-tool set.
   - `tests/unit/web/composer/test_promote_*.py` — one per promoted tool (`set_source`, `create_blob`, `update_blob`, `set_source_from_blob`, `set_pipeline`, `apply_pipeline_recipe`, optionally `patch_*_options`). Each asserts `ToolArgumentError` raised on invalid input (with `pydantic.ValidationError` as `__cause__`, per the §4.2.6 promoted-handler pattern at `tools.py:2668, 2761, 2767, 2773, 2787, 2801`) AND existing handler-behaviour regression for valid input.
-  - `tests/unit/web/composer/test_compose_loop_unknown_tool_name.py` — pins existing `ARG_ERROR + continue` routing for LLM-supplied unknown tool names. The dispatcher returns a failure `ToolResult` via `tools.py:5481`; the compose loop records the failure and continues. Closes plan-review M7 / W3.
+  - `tests/unit/web/composer/test_compose_loop_unknown_tool_name.py` — two pins: (1) `TestUnknownToolNameComposeLoopAuditShape::test_unknown_tool_name_audit_shape` pins the **SUCCESS-with-semantic-failure** audit shape for LLM-supplied unknown tool names: the dispatcher fall-through at `tools.py:5731` returns `ToolResult(success=False, data={"error": "Unknown tool: …"})` without raising; `dispatch_with_audit` records `ComposerToolStatus.SUCCESS` (not `ARG_ERROR`) with the failure payload in `result_canonical`; the compose loop continues. Closes plan-review M7 / W3. (2) `test_redact_tool_call_arguments_raises_for_unknown_tool` pins the Phase 3 call-order precondition (redaction walker must not be called before the unknown-tool check). Closes rev-3 M2.
   - `tests/unit/web/composer/test_redaction_completeness_property.py` — Hypothesis property test: for each manifest entry with `argument_model`, for generated valid payloads, no raw value of any `Sensitive`-annotated field appears in `json.dumps(redact_tool_call_arguments(…))`. Closes rev-2 BLOCKER_A quality MAJOR-4.
   - `tests/unit/web/composer/test_walker_guard_parity.py` — behavioural parity test asserting `walk_model_schema(M, with_values=False)` and `walk_model_schema(M, with_values=True)` produce identical path-sets and marker-presence for each manifest entry's argument model. Closes rev-2 M_walker_guard_parity.
   - `tests/unit/web/composer/redaction_policy_snapshot.json` — committed hash snapshot covering every manifest entry (type-driven + declarative; broadened from rev 4's legacy-only coverage). Closes plan-review M9 / W12.
@@ -3497,7 +3508,7 @@ compose loop:
    `MANIFEST` — this is reserved for system-internal registry-consistency
    violations, NOT for Tier-3 LLM hallucinations. Unknown LLM-supplied
    tool names MUST continue to route through the existing `_failure_result`
-   path at `tools.py:5481` BEFORE redaction is attempted. Violating this
+   path at `tools.py:5731` BEFORE redaction is attempted. Violating this
    ordering converts a graceful Tier-3 quarantine into a Tier-1 crash.
 2. **`arguments_canonical` is NOT redacted.** Phase 3 MUST NOT thread
    redacted arguments through `begin_dispatch` / `begin_dispatch_or_arg_error`
@@ -3659,7 +3670,7 @@ alongside §12.1.
 | **B4** Task 13 unconditionally invokes `gh pr create`, violating operator PR-confirmation discipline | quality | §11 Phase 2 done-when removes PR-open from scope; plan rewrite ends at "gate green; await operator PR-open instruction" (per Phase 1B/1C convention) |
 | **W1** `ComposerTool` name collides with existing `ComposerToolInvocation` / `ComposerToolStatus` / `ComposerToolRecorder` L0 family | architecture + reality | No `ComposerTool` name introduced; manifest-entry dataclass is `ToolRedaction` (§4.2.1) |
 | **W2** Calendar synchronicity at migration → 365-day mass batch expiry → date-bump ritual | systems + architecture | §4.4.4 replaces calendar-keyed review with content-hash-keyed review via the policy-hash snapshot (§4.4.3); `last_reviewed_iso` field removed from `HandlesNoSensitiveDataReason` |
-| **W3** `MissingToolError` for LLM-hallucinated tool name treats Tier-3 input as crash condition | systems | §4.2.6 walker boundary table (manifest-missing for compose-loop input is registry-consistency, not Tier-3); plan rewrite Task `compose-loop unknown-tool-name routing test` confirms the dispatcher's fall-through at `tools.py:5481` returns a failure `ToolResult` (no exception); compose loop records and continues (closed; the `service.py:1836–1870` JSON-decode pre-dispatch gate is a separate, earlier site) |
+| **W3** `MissingToolError` for LLM-hallucinated tool name treats Tier-3 input as crash condition | systems | §4.2.6 walker boundary table (new row: unknown tool name → SUCCESS-with-semantic-failure); §5.7.5 (audit status clarified); `tools.py:5731` fall-through returns `ToolResult(success=False, data={"error": "Unknown tool: …"})` without raising; `dispatch_with_audit` records `ComposerToolStatus.SUCCESS`; compose loop continues. Pinned by `test_compose_loop_unknown_tool_name.py::TestUnknownToolNameComposeLoopAuditShape::test_unknown_tool_name_audit_shape`. (The `service.py:1836–1870` JSON-decode pre-dispatch gate is a separate, earlier site.) Closed (Task 17 option a). |
 | **W4** Telemetry call is duck-typed (`telemetry=None` default with attribute access) | quality | §4.2.4 typed `RedactionTelemetry` Protocol; walker accepts a real instance, never `None` |
 | **W5** Summarizer non-string return value silently flows into Tier-1 audit row | quality | §4.2.6 walker disposition table; §9 RSK-03 amended (crash on non-`str` return) |
 | **W6** `len(repr(value))` discloses structural metadata (RSK-03 weak echo) | quality | §4.2.3 sentinel `<redacted-unknown-response-key>` is fixed-form; §4.2.6 boundary table; no length disclosure |

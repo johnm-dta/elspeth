@@ -573,6 +573,8 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/redaction.py:_redact_via_schema:return"
   - "src/elspeth/web/composer/redaction.py:redact_tool_call_arguments:arguments"
   - "src/elspeth/web/composer/redaction.py:redact_tool_call_arguments:return"
+  - "src/elspeth/web/composer/redaction.py:redact_tool_call_response:response"
+  - "src/elspeth/web/composer/redaction.py:redact_tool_call_response:return"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Tool executor (Tier 3 LLM tool call arguments)

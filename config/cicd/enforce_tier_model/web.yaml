@@ -1427,21 +1427,21 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=e3d940dd7b7ea311
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=fdba27918c4c19cf
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=a938186d04e35b24
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=05156dc4d02f8f87
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
     Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R5:_has_sensitive:fp=6f24e75027ce3ccc
+- key: web/composer/redaction.py:R5:_has_sensitive:fp=b139fd016caf44f7
   owner: web-composer
   reason: Marker-class discrimination over an Annotated metadata tuple (spec §4.2.5).
     The metadata comes from Python typing primitives at module load — not external
@@ -1451,7 +1451,7 @@ allow_hits:
   safety: Returns bool; never silently substitutes a default for malformed input —
     metadata tuple is always well-typed because we control its construction site.
   expires: null
-- key: web/composer/redaction.py:R5:_count_sensitive:fp=d258fd23b6bde0d4
+- key: web/composer/redaction.py:R5:_count_sensitive:fp=e9775883f773b8f5
   owner: web-composer
   reason: Same as _has_sensitive — marker discrimination over Annotated metadata.
     The count is used solely to detect the spec §4.2.5 violation of multiple
@@ -1459,7 +1459,7 @@ allow_hits:
   safety: Returns int >= 0; downstream consumer raises on count > 1 with field
     name in the error message.
   expires: null
-- key: web/composer/redaction.py:R5:walk_model_schema:fp=15ca23874ad35fe1
+- key: web/composer/redaction.py:R5:walk_model_schema:fp=2cac9f07818be842
   owner: web-composer
   reason: Reflection over Python typing — isinstance(model, type) and issubclass(model,
     BaseModel) verify that the input is a pydantic schema class. There is no other
@@ -1468,7 +1468,7 @@ allow_hits:
   safety: Raises TypeError with descriptive message if a non-BaseModel is passed.
     No silent default; no coercion.
   expires: null
-- key: web/composer/redaction.py:R5:_walk_type:fp=fb3e3b345e8af380
+- key: web/composer/redaction.py:R5:_walk_type:fp=1a8f475e0295aacd
   owner: web-composer
   reason: Reflection over Python typing — isinstance(field_type, type) and issubclass(field_type,
     BaseModel) tests whether a Union/container element is a nested model that
@@ -1477,7 +1477,7 @@ allow_hits:
   safety: If neither container nor BaseModel, falls through to the scalar-leaf
     emission branch. No silent error suppression.
   expires: null
-- key: web/composer/redaction.py:R5:_is_descendable:fp=8ac030b772495552
+- key: web/composer/redaction.py:R5:_is_descendable:fp=9b25b049e82eae87
   owner: web-composer
   reason: Reflection helper used during Union-arm fan-out — same BaseModel detection
     primitive as the surrounding walker. Decides whether a Union arm carries
@@ -1486,7 +1486,7 @@ allow_hits:
     routes Annotated[scalar, Sensitive()] arms through _has_sensitive instead so
     Sensitive markers on scalar Union arms still emit a node.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=c24a4bd00827620d
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=ea92b1fcd03687a2
   owner: web-composer
   reason: Marker-class discrimination over Annotated metadata tuple — identical to
     _has_sensitive/_count_sensitive (spec §4.2.5). _SensitiveMarker is a sentinel
@@ -1496,7 +1496,7 @@ allow_hits:
     never from external input. Mismatched metadata entries fall through to the
     skip branch.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=0f8acdec9989d2f2
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=d40c19a01a491c77
   owner: web-composer
   reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
     the summarizer contract (spec §4.2.6) requires str return; a non-str return

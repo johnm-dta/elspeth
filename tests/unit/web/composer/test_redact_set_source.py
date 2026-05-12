@@ -184,55 +184,43 @@ def test_serialization_boundary_canary_not_in_json_output() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task-4 → Task-8 staging boundary: NotImplementedError pin tests
+# Task-7 boundary tests: no-summarizer → sentinel; nested-path → NotImplementedError
 # ---------------------------------------------------------------------------
 
 
-def test_redact_via_schema_raises_for_sensitive_field_without_summarizer() -> None:
-    """Pin the Task-4 → Task-8 staging boundary.
+def test_redact_via_schema_substitutes_sentinel_for_sensitive_field_without_summarizer() -> None:
+    """Task-7: Sensitive field with no summarizer receives REDACTED_SENSITIVE_NO_SUMMARIZER.
 
-    _redact_via_schema is intentionally tracer-bullet scope (set_source only,
-    top-level Sensitive fields with summarizers).  When a field is declared
-    ``Annotated[T, Sensitive()]`` WITHOUT a summarizer, the tracer-bullet impl
-    raises ``NotImplementedError`` so Task 8's scope is mechanically explicit at
-    the code level.  A future Task 8 refactor must not silently turn this into
-    'returns wrong answer'.
-
-    Raise site: redaction.py line ~553 —
-        ``if marker.summarizer is None: raise NotImplementedError(...)``
-    Condition triggered: top-level field with a ``_SensitiveMarker`` whose
-    ``summarizer`` attribute is ``None`` (i.e., ``Sensitive()`` called with no
-    keyword argument).
+    The Task-4 tracer-bullet raised ``NotImplementedError`` here to force
+    Task 8 to define the policy.  Task 7 defines the policy: substitute the
+    no-summarizer sentinel rather than preserving the raw value.  Task 8 will
+    generalise nested-path handling; this test pins the top-level case.
     """
+    from elspeth.web.composer.redaction import REDACTED_SENSITIVE_NO_SUMMARIZER
 
     class _StubModel(BaseModel):
         secret: Annotated[str, Sensitive()]  # no summarizer
 
-    validated = _StubModel.model_validate({"secret": "x"})
-    with pytest.raises(NotImplementedError):
-        _redact_via_schema(validated, _StubModel)
+    validated = _StubModel.model_validate({"secret": "CANARY"})
+    tel = NoopRedactionTelemetry()
+    result = _redact_via_schema("stub_tool", validated, _StubModel, telemetry=tel)
+    assert result["secret"] == REDACTED_SENSITIVE_NO_SUMMARIZER
+    assert "CANARY" not in str(result.values())
 
 
 def test_redact_via_schema_raises_for_nested_sensitive_path() -> None:
-    """Pin the Task-4 → Task-8 staging boundary (nested path).
+    """Task-8 staging boundary: nested-path Sensitive field raises NotImplementedError.
 
-    _redact_via_schema is intentionally tracer-bullet scope (set_source only,
-    top-level Sensitive fields).  When a Sensitive marker is encountered at a
-    NESTED path — e.g., a nested BaseModel field whose subfield carries
-    ``Sensitive(summarizer=...)`` — ``walk_model_schema`` yields a node with
-    path ``"payload.inner_secret"`` (containing a dot).  The tracer-bullet
-    impl raises ``NotImplementedError`` rather than silently performing a
-    shallow substitution.  Task 8 generalises; this test pins the staging
-    boundary so Task 8 cannot silently regress to 'returns wrong answer'.
+    _redact_via_schema supports only top-level paths (Task 7 scope).  When a
+    Sensitive marker is encountered at a NESTED path — e.g., a nested BaseModel
+    field whose subfield carries ``Sensitive(summarizer=...)`` — ``walk_model_schema``
+    yields a node with path ``"payload.inner_secret"`` (containing a dot).  The
+    impl raises ``NotImplementedError`` rather than silently performing a shallow
+    substitution.  Task 8 generalises; this test pins the staging boundary.
 
-    Raise site: redaction.py line ~558 —
-        ``if "." in node.path or "[" in node.path or "{" in node.path:
-            raise NotImplementedError(...)``
-    Condition triggered: node path ``"payload.inner_secret"`` contains ``"."``
-    because ``inner_secret`` is a field on a nested BaseModel (``_InnerModel``)
-    reached via the ``payload`` field of the outer model.  The inner field MUST
-    carry a summarizer so that the no-summarizer raise (line ~553) does not fire
-    first — i.e., we reach the nested-path guard cleanly.
+    The inner field MUST carry a summarizer so that the no-summarizer sentinel
+    substitution (top-level case) does not fire first — i.e., we reach the
+    nested-path guard cleanly.
     """
 
     class _InnerModel(BaseModel):
@@ -242,5 +230,6 @@ def test_redact_via_schema_raises_for_nested_sensitive_path() -> None:
         payload: _InnerModel
 
     validated = _OuterModel.model_validate({"payload": {"inner_secret": "x"}})
+    tel = NoopRedactionTelemetry()
     with pytest.raises(NotImplementedError):
-        _redact_via_schema(validated, _OuterModel)
+        _redact_via_schema("stub_tool", validated, _OuterModel, telemetry=tel)

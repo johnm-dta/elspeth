@@ -28,6 +28,20 @@ from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 
+# Fixed sentinel for response keys that appear in the input but are not
+# declared in the manifest entry's known_response_keys or
+# sensitive_response_keys sets.  The value is a closed constant — callers
+# MUST compare by ==, not by prefix or regex.  No length disclosure
+# (closes W6 / spec §8.1 RSK-03 weak echo).
+REDACTED_UNKNOWN_RESPONSE_KEY = "<redacted-unknown-response-key>"
+
+# Sentinel applied to Sensitive[T] fields whose _SensitiveMarker carries no
+# summarizer callable.  A field declared ``Annotated[T, Sensitive()]`` (with
+# no ``summarizer=`` keyword) receives this value instead of the raw payload.
+# It is distinct from REDACTED_UNKNOWN_RESPONSE_KEY so audit consumers can
+# distinguish "known sensitive, no summarizer" from "unknown key, fail-closed".
+REDACTED_SENSITIVE_NO_SUMMARIZER = "<redacted>"
+
 
 class _SensitiveMarker:
     """Annotated metadata marker (spec §4.2.2).
@@ -613,19 +627,26 @@ class SetSourceArgumentsModel(BaseModel):
 
 
 def _redact_via_schema(
+    tool_name: str,
     validated: BaseModel,
     model_cls: type[BaseModel],
+    *,
+    telemetry: RedactionTelemetry,
 ) -> dict[str, Any]:
     """Walk the validated model's schema; substitute Sensitive fields.
-
-    Tracer-bullet implementation (Task 4): supports only top-level
-    sensitive fields (``set_source.options`` is the only such field in
-    this commit).  Task 8 generalises this to nested paths under
-    containers and BaseModel descent.
 
     Operates on ``model_dump()`` output (a plain dict) and substitutes
     in-place on a deep copy so the input model and any external caller
     references are not affected.  Returns the dict ready for serialization.
+
+    Sensitive fields with no summarizer receive ``REDACTED_SENSITIVE_NO_SUMMARIZER``.
+    Summarizer failures fire ``telemetry.summarizer_error(tool_name=...)``
+    BEFORE raising ``AuditIntegrityError`` (rev-2 M.8 discipline).
+
+    Scope (Task 7): top-level paths only.  Nested-path substitution
+    (containers, BaseModel descent) requires the value_provider-driven
+    path-walker added in Task 8; nested paths raise ``NotImplementedError``
+    to preserve the staging boundary.
     """
     dumped = copy.deepcopy(validated.model_dump())
     for node in walk_model_schema(model_cls, with_values=True):
@@ -633,11 +654,11 @@ def _redact_via_schema(
         if marker is None:
             continue
         if marker.summarizer is None:
-            # Task 8 decides the no-summarizer policy.  No reachable node
-            # in this tracer commit lacks a summarizer; pin that here so
-            # a future field-level omission surfaces immediately rather
-            # than passing silently with the original value preserved.
-            raise NotImplementedError(f"Sensitive field at path {node.path!r} has no summarizer; Task 8 defines the no-summarizer policy.")
+            # No summarizer: substitute the no-summarizer sentinel.
+            # Declarative sensitive keys always use this path; type-driven
+            # Sensitive() fields without a summarizer keyword also land here.
+            dumped[node.path] = REDACTED_SENSITIVE_NO_SUMMARIZER
+            continue
         # Tracer-bullet scope: top-level paths only.  Nested-path
         # substitution requires the value_provider-driven path-walker
         # added in Task 8.
@@ -652,9 +673,21 @@ def _redact_via_schema(
                 "This is an internal walker contract violation."
             )
         raw_value = node.value_provider(dumped)
-        summary = marker.summarizer(raw_value)
+        try:
+            summary = marker.summarizer(raw_value)
+        except Exception as exc:
+            telemetry.summarizer_error(tool_name=tool_name)  # BEFORE raise (rev-2 M.8)
+            raise AuditIntegrityError(f"Summarizer for {tool_name!r} path {node.path!r} raised {type(exc).__name__}: {exc}") from exc
         if not isinstance(summary, str):
-            raise AuditIntegrityError(f"Summarizer for path {node.path!r} returned {type(summary).__name__}, expected str (spec §4.2.6).")
+            # _SensitiveMarker.summarizer is typed as Callable[[Any], str]; mypy
+            # considers this branch unreachable after isinstance narrowing.  We
+            # keep it as an offensive invariant guard: a misconfigured or mocked
+            # summarizer may violate the return-type contract at runtime
+            # (spec §4.2.6 M.8).  type: ignore suppresses the false-positive.
+            telemetry.summarizer_error(tool_name=tool_name)  # type: ignore[unreachable]  # BEFORE raise (rev-2 M.8)
+            raise AuditIntegrityError(
+                f"Summarizer for {tool_name!r} path {node.path!r} returned {type(summary).__name__}, expected str (spec §4.2.6)."
+            )
         dumped[node.path] = summary
     return dumped
 
@@ -682,7 +715,7 @@ def redact_tool_call_arguments(
     if entry.argument_model is not None:
         telemetry.manifest_dispatch(tool_name=tool_name, shape="type_driven")
         validated = entry.argument_model.model_validate(arguments)
-        return _redact_via_schema(validated, entry.argument_model)
+        return _redact_via_schema(tool_name, validated, entry.argument_model, telemetry=telemetry)
     # Declarative branch added in Task 8.
     raise NotImplementedError(f"Declarative manifest entry for {tool_name!r} — see Task 8.")
 
@@ -697,6 +730,90 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
     }
 )
+
+
+def redact_tool_call_response(
+    tool_name: str,
+    response: dict[str, Any],
+    *,
+    telemetry: RedactionTelemetry,
+) -> dict[str, Any]:
+    """Produce the redacted response dict for the persistence boundary (spec §4.2.4, §4.2.6).
+
+    Disposition by manifest-entry shape:
+
+    **Type-driven entry with response_model:**
+      Walk via ``walk_model_schema``; ``Sensitive[T]`` fields are substituted
+      with the summarizer output, or ``REDACTED_SENSITIVE_NO_SUMMARIZER`` when
+      no summarizer is declared.  Nested-path substitution is delegated to
+      Task 8 (raises ``NotImplementedError`` for paths containing ``.``,
+      ``[``, or ``{``).
+
+    **Type-driven entry without response_model:**
+      No response-surface declared; return a shallow copy (passthrough).
+
+    **Declarative entry:**
+      Walk ``response.keys()``; each key is one of:
+        - In ``policy.sensitive_response_keys`` → ``REDACTED_SENSITIVE_NO_SUMMARIZER``
+          (declarative entries have no response_summarizers; the argument_summarizers
+          mapping covers only argument keys).
+        - In ``policy.known_response_keys`` but not sensitive → passthrough.
+        - In neither → ``REDACTED_UNKNOWN_RESPONSE_KEY`` (fail-closed; counter fires).
+
+    **Failure modes (all raise AuditIntegrityError):**
+      - Manifest entry missing for ``tool_name`` (registry-consistency invariant).
+      - Summarizer raises → ``telemetry.summarizer_error(tool_name=...)`` BEFORE
+        raise; ``AuditIntegrityError`` chained from the underlying exception (M.8).
+      - Summarizer returns non-str → ``telemetry.summarizer_error(tool_name=...)``
+        BEFORE raise; ``AuditIntegrityError`` with a typed message.
+
+    **Walker atomicity:** the output dict is built in a local variable and
+    only returned on success.  A mid-walk raise leaves no partial dict
+    observable to the caller (rev-3 W8b / rev-4 W8b).
+    """
+    if tool_name not in MANIFEST:
+        raise AuditIntegrityError(
+            f"redact_tool_call_response called for unknown tool {tool_name!r}; "
+            "the manifest is the source of truth for the registry/redaction "
+            "set-equality invariant.  Add a manifest entry for this tool or "
+            "verify that the dispatch path passes the correct tool name."
+        )
+    entry = MANIFEST[tool_name]
+
+    # --- Type-driven path ---
+    if entry.argument_model is not None:
+        if entry.response_model is None:
+            # No response surface declared: nothing to redact.
+            return dict(response)
+        # Walk the response via its Pydantic model schema.
+        # model_validate coerces the raw response dict to the declared shape;
+        # unknown keys raise ValidationError if extra="forbid" is set on the
+        # model, but that is a model-design choice, not enforced here.
+        validated = entry.response_model.model_validate(response)
+        return _redact_via_schema(tool_name, validated, entry.response_model, telemetry=telemetry)
+
+    # --- Declarative path ---
+    # entry.policy is not None (ToolRedaction.__post_init__ guarantees exactly
+    # one of {argument_model, policy} is set).
+    policy = entry.policy
+    assert policy is not None  # offensive: satisfies the type-checker contract
+
+    redacted: dict[str, Any] = {}
+    for key, value in response.items():
+        if key in policy.sensitive_response_keys:
+            # Sensitive key: declarative entries have no response summarizers
+            # (argument_summarizers covers only argument keys).  Substitute
+            # the no-summarizer sentinel.
+            redacted[key] = REDACTED_SENSITIVE_NO_SUMMARIZER
+        elif key in policy.known_response_keys:
+            # Known, non-sensitive: passthrough.
+            redacted[key] = value
+        else:
+            # Unknown key: fail-closed sentinel + telemetry counter (W6).
+            redacted[key] = REDACTED_UNKNOWN_RESPONSE_KEY
+            telemetry.unknown_response_key_redacted(tool_name=tool_name)
+
+    return redacted
 
 
 def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:

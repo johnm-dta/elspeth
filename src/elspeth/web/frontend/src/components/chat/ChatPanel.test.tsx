@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPanel } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -401,5 +401,141 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();
+  });
+});
+
+// ── Focus-on-step-advance tests (Phase 8 fix-up, spec §7.4) ─────────────────
+//
+// Verifies the useEffect in ChatPanel that moves focus to the first interactive
+// element inside chat-panel-guided-log when the guided wizard advances to a
+// new step.  Without this, a step-advancing button click unmounts the button
+// before the browser returns focus, so focus falls to <body>.
+//
+// GuidedTurn is NOT mocked — tests use the real SingleSelectTurn widget (rendered
+// by the singleSelectTurn() fixture) which produces genuine <button> children
+// inside a <fieldset>.
+describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    Element.prototype.scrollIntoView = vi.fn();
+    resetStore(useSessionStore);
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: null,
+    });
+  });
+
+  const guidedSessionFixture: Session = {
+    id: "session-focus",
+    title: "Guided focus test session",
+    created_at: "2026-05-12T10:00:00Z",
+    updated_at: "2026-05-12T10:00:00Z",
+  };
+
+  function activeGuidedSession(): GuidedSession {
+    return { step: "step_1_source", history: [], terminal: null };
+  }
+
+  function singleSelectTurn(stepIndex: number): TurnPayload {
+    const payload: SingleSelectPayload = {
+      question: "Which source plugin should we use?",
+      options: [
+        { id: "csv", label: "CSV", hint: null },
+        { id: "api", label: "API", hint: null },
+      ],
+      allow_custom: false,
+    };
+    return { type: "single_select", step_index: stepIndex, payload };
+  }
+
+  it("moves focus to the first button in chat-panel-guided-log when the turn first renders (step 0)", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-focus",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(0),
+    });
+
+    render(<ChatPanel />);
+
+    // SingleSelectTurn renders one button per option; the first should receive
+    // focus via the step-advance effect.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "CSV" }),
+      );
+    });
+  });
+
+  it("moves focus to the first button again when step_index advances (step 0 → step 1)", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-focus",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(0),
+    });
+
+    render(<ChatPanel />);
+
+    // Wait for initial focus (step 0).
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "CSV" }),
+      );
+    });
+
+    // Advance to step 1 with a new turn payload.
+    useSessionStore.setState({
+      guidedNextTurn: singleSelectTurn(1),
+    });
+
+    // Focus should still land on the first button in the new turn.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "CSV" }),
+      );
+    });
+  });
+
+  it("does NOT re-focus when step_index is unchanged (same-step store mutation)", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-focus",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(0),
+    });
+
+    render(<ChatPanel />);
+
+    // Wait for the initial focus (step 0, first button = "CSV").
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "CSV" }),
+      );
+    });
+
+    // Manually move focus to the second button as the user would after interacting
+    // with the widget.
+    const apiButton = screen.getByRole("button", { name: "API" });
+    apiButton.focus();
+    expect(document.activeElement).toBe(apiButton);
+
+    // Issue a same-step store mutation: new object reference, same step_index.
+    // The effect dep [guidedNextTurn?.step_index] should NOT re-fire.
+    useSessionStore.setState({
+      guidedNextTurn: { ...singleSelectTurn(0) },
+    });
+
+    // Flush React updates — give the effect a chance to incorrectly re-fire.
+    await Promise.resolve();
+
+    // Focus must remain on the API button; effect did not pull it back to CSV.
+    expect(document.activeElement).toBe(apiButton);
   });
 });

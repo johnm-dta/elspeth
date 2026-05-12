@@ -104,7 +104,7 @@ The right choice depends on demo timing. If the demo needs the hand-built path t
 
 The plan body at line 4623 says: *"Force LLM stub to return invalid chains twice; assert wizard auto-drops and freeform `<ChatInput>` appears with the partial pipeline state in `compositionState`."*
 
-The auto-drop logic was finalized in Phase 5 (per `project_phase5_implementation_complete` memory: "auto-drop + progressive disclosure + audit-emission tests"). The discriminator's fall-through-to-freeform branch is verified by `ChatPanel.test.tsx` test 4 (Phase 8). 
+The auto-drop logic was finalized in Phase 5 (per `project_phase5_implementation_complete` memory: "auto-drop + progressive disclosure + audit-emission tests"). The discriminator's fall-through-to-freeform branch is verified by `ChatPanel.test.tsx` test 4 (Phase 8).
 
 **Blocker:** depends on LLM-stub fixture availability (see §"Playwright infrastructure verification" state b/c). If the fixture exists, 9.3 is unblocked. If not, building the fixture is shared work with Task 9.2.
 

@@ -44,6 +44,7 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const guidedLogRef = useRef<HTMLDivElement>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showBlobManager, setShowBlobManager] = useState(false);
   const [inputText, setInputText] = useState("");
@@ -83,6 +84,26 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   useEffect(() => {
     setShowScrollButton(false);
   }, [activeSessionId]);
+
+  // Spec §7.4 — maintain focus on the first interactive element of the new turn
+  // after step advance.  Without this, a step-advancing button click unmounts
+  // the button before the browser can return focus elsewhere, so focus falls to
+  // <body>.  Keyboard users then have to Tab from the very top to reach the new
+  // turn widget — unacceptable for the demo SLA budget and for general a11y.
+  //
+  // Keyed on step_index: fires only when the guided wizard advances to a new
+  // step, not on every store mutation that produces a new TurnPayload object
+  // with the same step_index.  The ref-null short-circuit handles all non-guided
+  // branches implicitly — guidedLogRef.current is null whenever the
+  // chat-panel-guided-log div is not mounted (completed surface, freeform
+  // surface, no session).  Observation elspeth-obs-5ea21f94af documents the
+  // original defect and the chosen Option (c) implementation.
+  useEffect(() => {
+    if (!guidedLogRef.current) return;
+    const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE);
+    first?.focus();
+  }, [guidedNextTurn?.step_index]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -202,6 +223,7 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
         */}
         <GuidedHistory history={guidedSession.history} />
         <div
+          ref={guidedLogRef}
           className="chat-panel-guided-log"
           role="log"
           aria-label="Guided wizard step"

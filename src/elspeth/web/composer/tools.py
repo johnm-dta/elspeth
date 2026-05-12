@@ -44,6 +44,9 @@ from elspeth.web.composer.recipes import (
 from elspeth.web.composer.redaction import (
     ApplyPipelineRecipeArgumentsModel,
     CreateBlobArgumentsModel,
+    PatchNodeOptionsArgumentsModel,
+    PatchOutputOptionsArgumentsModel,
+    PatchSourceOptionsArgumentsModel,
     SetPipelineArgumentsModel,
     SetSourceArgumentsModel,
     SetSourceFromBlobArgumentsModel,
@@ -4414,11 +4417,32 @@ def _execute_patch_source_options(
     state: CompositionState,
     data_dir: str | None = None,
 ) -> ToolResult:
+    """Apply a merge-patch to the current source options.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`PatchSourceOptionsArgumentsModel`
+    (the single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["patch_source_options"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.  A bare
+    ``ValidationError`` would escape into the catch-all
+    (``ComposerPluginCrashError`` → HTTP 500) — wrong disposition for
+    Tier-3 input.
+    """
     if state.source is None:
         return _failure_result(state, "No source configured to patch.")
-    patch = args["patch"]
-    if not isinstance(patch, dict):
-        return _failure_result(state, "patch must be an object.")
+    try:
+        validated = PatchSourceOptionsArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="patch_source_options arguments",
+            expected="object conforming to PatchSourceOptionsArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    patch = validated.patch
 
     # Lock the (path, blob_ref) pair on blob-backed sources.  Once
     # set_source_from_blob has bound a source to a blob, the path is the
@@ -4518,10 +4542,34 @@ def _execute_patch_node_options(
     args: dict[str, Any],
     state: CompositionState,
 ) -> ToolResult:
-    node_id = args["node_id"]
-    patch = args["patch"]
-    if not isinstance(patch, dict):
-        return _failure_result(state, "patch must be an object.")
+    """Apply a merge-patch to a node's plugin options.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`PatchNodeOptionsArgumentsModel`
+    (the single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["patch_node_options"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.
+
+    Routing-key guard: :func:`_node_routing_option_patch_error` rejects
+    routing-field keys in ``patch`` (on_error, on_success, input, routes,
+    fork_to).  This is a value-domain check that Pydantic cannot express;
+    it runs AFTER Pydantic validation — same discipline as
+    ``set_pipeline``'s blob_id/inline_blob mutual-exclusion check.
+    """
+    try:
+        validated = PatchNodeOptionsArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="patch_node_options arguments",
+            expected="object conforming to PatchNodeOptionsArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    node_id = validated.node_id
+    patch = validated.patch
     current = next((n for n in state.nodes if n.id == node_id), None)
     if current is None:
         return _failure_result(state, f"Node '{node_id}' not found.")
@@ -4579,10 +4627,28 @@ def _execute_patch_output_options(
     state: CompositionState,
     data_dir: str | None = None,
 ) -> ToolResult:
-    sink_name = args["sink_name"]
-    patch = args["patch"]
-    if not isinstance(patch, dict):
-        return _failure_result(state, "patch must be an object.")
+    """Apply a merge-patch to an output's plugin options.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`PatchOutputOptionsArgumentsModel`
+    (the single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["patch_output_options"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.
+    """
+    try:
+        validated = PatchOutputOptionsArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="patch_output_options arguments",
+            expected="object conforming to PatchOutputOptionsArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    sink_name = validated.sink_name
+    patch = validated.patch
     current = next((o for o in state.outputs if o.name == sink_name), None)
     if current is None:
         return _failure_result(state, f"Output '{sink_name}' not found.")

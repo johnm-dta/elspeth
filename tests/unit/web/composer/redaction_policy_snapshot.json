@@ -9,6 +9,21 @@
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },
+  "patch_node_options": {
+    "hash": "3b1f3b0d29fb353ff0d14cd29f44a6696c2c782c352d390e5c9f7082d7d916e4",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "patch_output_options": {
+    "hash": "9814a33f89e0c73c1bd70a20f0befbf001627d50fc5219ccb3e57bd450003fe7",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "patch_source_options": {
+    "hash": "0abdc57fc2d25ef0b7d16966e8c6b424beed0ab45d7ae3a40f20844b434be5f0",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
   "set_pipeline": {
     "hash": "00da6f3969ebaf58b480cb69548328a3d96b0bedfefdbf7b92d887a6de5a0f5c",
     "sensitive_path_count": 6,

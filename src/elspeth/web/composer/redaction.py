@@ -1268,6 +1268,126 @@ class SetPipelineArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# ---------------------------------------------------------------------------
+# patch_source_options / patch_node_options / patch_output_options
+# argument models (Task 15 / Wave 4).
+#
+# All three tools accept a ``patch`` argument — a merge-patch dict that is
+# applied to the current plugin-options dict via :func:`_apply_merge_patch`.
+# The patch carries the same content surface as the original ``options`` on
+# ``set_source``, ``upsert_node``, and ``set_output`` respectively: plugin
+# option keys including credential-ref markers
+# (``api_key: {"secret_ref": "NAME"}``), filesystem paths
+# (``path: "outputs/results.json"``), and prompt-template payloads.
+#
+# ``patch: dict[str, Any]`` without a Sensitive annotation would fail the
+# adequacy guard (§4.4.2): the value type resolves to ``Any``, which is
+# inspection-resistant — the guard fails closed on that shape.  Wrapping
+# ``patch`` with :class:`Sensitive` and :func:`_summarize_set_source_options`
+# is mandatory, and reusing the source-side summarizer is structurally sound
+# because :func:`redact_source_storage_path` is content-agnostic (it applies
+# path-blob_ref redaction when the relevant keys are present; all other keys
+# pass through verbatim).  Uniformity with the Waves 2-3 source/node/output
+# options surfaces is an explicit design goal.
+#
+# ``patch_node_options`` adds a ``node_id: str`` selector; the routing-key
+# guard (_node_routing_option_patch_error) is a SEMANTIC check on patch
+# contents (on_success, on_error, input, routes, fork_to), not a shape check.
+# It runs after Pydantic validation and is NOT replicated in the model —
+# same pattern as set_pipeline.source blob_id/inline_blob mutual exclusion
+# which the handler checks post-validation.
+#
+# ``patch_output_options`` adds a ``sink_name: str`` selector.
+# ---------------------------------------------------------------------------
+
+
+class PatchSourceOptionsArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``patch_source_options`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:883-897`` for the
+    ``patch_source_options`` definition and its ``required: ["patch"]``.
+
+    ``patch`` carries :class:`Sensitive` with
+    :func:`_summarize_set_source_options` — the merge-patch dict has the same
+    content surface as ``set_source.options``: plugin option keys including
+    credential-ref markers, filesystem paths, and prompt-template payloads.
+    Reusing :func:`_summarize_set_source_options` maintains the
+    uniformity-across-source-binding-tools contract from Tasks 4 / 13.
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    ``patch_node_options`` (``node_id``) and ``patch_output_options``
+    (``sink_name``) are intentionally absent so ``extra="forbid"``
+    rejects misrouted argument shapes early.
+    """
+
+    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PatchNodeOptionsArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``patch_node_options`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:899-922`` for the
+    ``patch_node_options`` definition and its ``required: ["node_id", "patch"]``.
+
+    ``node_id`` is a plain string naming the target node — structural
+    identity, no sensitive surface.
+
+    ``patch`` carries :class:`Sensitive` with
+    :func:`_summarize_set_source_options` — node plugin-option dicts carry
+    the same content surface as ``set_pipeline.nodes[*].options``
+    (:class:`_PipelineNodeModel.options` is already marked Sensitive here
+    in Task 14).  Reusing :func:`_summarize_set_source_options` maintains
+    uniformity-across-node-options-tools.
+
+    Post-validation semantic check: the routing-key guard
+    (:func:`_node_routing_option_patch_error`) rejects routing-field keys
+    (``on_error``, ``on_success``, ``input``, ``routes``, ``fork_to``) in
+    ``patch`` and is a value-domain check that Pydantic cannot express.
+    It runs inside ``_execute_patch_node_options`` AFTER this model's
+    validation — the same discipline as ``set_pipeline``'s
+    ``blob_id`` / ``inline_blob`` mutual-exclusion check that lives in
+    ``_execute_set_pipeline`` post-validation.
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    ``patch_source_options`` (no ``node_id``) and ``patch_output_options``
+    (``sink_name``) are intentionally absent.
+    """
+
+    node_id: str
+    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PatchOutputOptionsArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``patch_output_options`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:925-942`` for the
+    ``patch_output_options`` definition and its ``required: ["sink_name", "patch"]``.
+
+    ``sink_name`` is a plain string naming the target output — structural
+    identity, no sensitive surface.
+
+    ``patch`` carries :class:`Sensitive` with
+    :func:`_summarize_set_source_options` — sink option dicts carry the same
+    content surface as ``set_pipeline.outputs[*].options``
+    (:class:`_PipelineOutputModel.options` is already marked Sensitive here
+    in Task 14).  Reusing :func:`_summarize_set_source_options` maintains
+    uniformity-across-output-options-tools.
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    ``patch_source_options`` (no selector) and ``patch_node_options``
+    (``node_id`` vs ``sink_name``) are intentionally absent.
+    """
+
+    sink_name: str
+    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 def _redact_via_schema(
     tool_name: str,
     validated: BaseModel,
@@ -1501,6 +1621,9 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
         "set_pipeline": ToolRedaction(argument_model=SetPipelineArgumentsModel),
         "apply_pipeline_recipe": ToolRedaction(argument_model=ApplyPipelineRecipeArgumentsModel),
+        "patch_source_options": ToolRedaction(argument_model=PatchSourceOptionsArgumentsModel),
+        "patch_node_options": ToolRedaction(argument_model=PatchNodeOptionsArgumentsModel),
+        "patch_output_options": ToolRedaction(argument_model=PatchOutputOptionsArgumentsModel),
     }
 )
 

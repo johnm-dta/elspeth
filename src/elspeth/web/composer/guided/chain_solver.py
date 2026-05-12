@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import (
     build_repair_addendum,
     build_step_3_context_block,
@@ -81,9 +82,9 @@ async def solve_chain(
     )
     name, arguments = _extract_tool_call(response)
     if name != "emit_turn":
-        raise ValueError(f"chain solver expected emit_turn, got {name!r}")
+        raise InvariantError(f"chain solver expected emit_turn, got {name!r}")
     if arguments["turn_type"] != "propose_chain":
-        raise ValueError(f"chain solver expected propose_chain turn, got {arguments['turn_type']!r}")
+        raise InvariantError(f"chain solver expected propose_chain turn, got {arguments['turn_type']!r}")
     payload = arguments["payload"]
     return ChainProposal(
         steps=tuple(dict(s) for s in payload["steps"]),
@@ -100,6 +101,6 @@ def _extract_tool_call(response: Any) -> tuple[str, dict[str, Any]]:
     message = response.choices[0].message
     tool_calls = message.tool_calls
     if not tool_calls:
-        raise ValueError("solve_chain: response had no tool_calls")
+        raise InvariantError("solve_chain: response had no tool_calls")
     call = tool_calls[0]
     return call.function.name, json.loads(call.function.arguments)

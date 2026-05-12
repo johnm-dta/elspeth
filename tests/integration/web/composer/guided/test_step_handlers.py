@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
     SinkOutputResolved,
@@ -159,7 +160,7 @@ class TestStep2Handler:
     def test_refuses_empty_outputs(self) -> None:
         catalog = create_catalog_service()
 
-        with pytest.raises(ValueError, match="empty list"):
+        with pytest.raises(InvariantError, match="empty list"):
             handle_step_2_sink(
                 state=_empty_state(),
                 session=GuidedSession.initial(),
@@ -402,7 +403,7 @@ class TestStep3Handler:
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
-        with pytest.raises(ValueError, match="zero steps"):
+        with pytest.raises(InvariantError, match="zero steps"):
             handle_step_3_chain_accept(
                 state=_empty_state(),
                 session=GuidedSession.initial(),
@@ -418,7 +419,7 @@ class TestStep3Handler:
             steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "x"},),
             why="x",
         )
-        with pytest.raises(ValueError, match=r"no.*source|committed source"):
+        with pytest.raises(InvariantError, match=r"no.*source|committed source"):
             handle_step_3_chain_accept(
                 state=_empty_state(),
                 session=GuidedSession.initial(),

@@ -23,6 +23,7 @@ from enum import StrEnum
 from typing import Any
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnResponse, TurnType
 
 
@@ -68,7 +69,7 @@ class TerminalState:
                 pipeline_yaml=d["pipeline_yaml"],
             )
         except (KeyError, ValueError) as exc:
-            raise ValueError(f"TerminalState.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"TerminalState.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +104,7 @@ class TurnRecord:
                 emitter=d["emitter"],
             )
         except (KeyError, ValueError) as exc:
-            raise ValueError(f"TurnRecord.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"TurnRecord.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +142,7 @@ class SourceResolved:
                 sample_rows=tuple(dict(r) for r in d["sample_rows"]),
             )
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"SourceResolved.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"SourceResolved.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +180,7 @@ class SinkOutputResolved:
                 schema_mode=d["schema_mode"],
             )
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"SinkOutputResolved.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"SinkOutputResolved.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +205,7 @@ class SinkResolved:
         try:
             return cls(outputs=tuple(SinkOutputResolved.from_dict(o) for o in d["outputs"]))
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"SinkResolved.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"SinkResolved.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +253,7 @@ class SourceIntent:
                 sample_rows=tuple(dict(r) for r in d["sample_rows"]),
             )
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"SourceIntent.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"SourceIntent.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +295,7 @@ class SinkIntent:
                 options=d["options"],
             )
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"SinkIntent.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"SinkIntent.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +327,7 @@ class ChainProposal:
                 why=d["why"],
             )
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"ChainProposal.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"ChainProposal.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,7 +420,7 @@ class GuidedSession:
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
             )
         except (KeyError, ValueError, TypeError) as exc:
-            raise ValueError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
+            raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +548,7 @@ def _advance_step_1(
 
     intent = session.step_1_source_intent
     if intent is None:
-        raise ValueError(
+        raise InvariantError(
             "_advance_step_1: step_1_source_intent is None when INSPECT_AND_CONFIRM "
             "was received — the INSPECT_AND_CONFIRM emit site must set it before "
             "emitting the turn. This is a state-machine invariant violation."
@@ -615,7 +616,7 @@ def _advance_step_2(
 
     intent = session.step_2_sink_intent
     if intent is None:
-        raise ValueError(
+        raise InvariantError(
             "_advance_step_2: step_2_sink_intent is None when MULTI_SELECT_WITH_CUSTOM "
             "was received — the SCHEMA_FORM dispatcher must set it before emitting "
             "the MULTI_SELECT_WITH_CUSTOM turn. This is a state-machine invariant "

@@ -52,6 +52,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
 )
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
@@ -4337,11 +4338,21 @@ def create_session_router() -> APIRouter:
             )
 
             # Run step_advance (pure — no I/O).
-            new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
-                guided,
-                turn_response,
-                current_turn_type=current_turn_type,
-            )
+            # InvariantError from step_advance or the downstream dispatcher
+            # indicates a server-side bug — propagate as HTTP 500 with a
+            # "Server invariant violated" prefix so it's distinguishable from
+            # client-fault HTTP 400s in dashboards and on-call runbooks.
+            try:
+                new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
+                    guided,
+                    turn_response,
+                    current_turn_type=current_turn_type,
+                )
+            except InvariantError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Server invariant violated: {exc}",
+                ) from exc
 
             # Fan directives to emit_* helpers.
             for directive in directives:
@@ -4379,19 +4390,25 @@ def create_session_router() -> APIRouter:
             session_engine = request.app.state.session_engine
 
             if terminal is None:
-                state, guided, next_turn = await _dispatch_guided_respond(
-                    state=state,
-                    guided=guided,
-                    current_step=current_step,
-                    current_turn_type=current_turn_type,
-                    turn_response=turn_response,
-                    catalog=catalog,
-                    recorder=recorder,
-                    user_id=user.user_id,
-                    data_dir=data_dir,
-                    session_engine=session_engine,
-                    session_id=str(session_id),
-                )
+                try:
+                    state, guided, next_turn = await _dispatch_guided_respond(
+                        state=state,
+                        guided=guided,
+                        current_step=current_step,
+                        current_turn_type=current_turn_type,
+                        turn_response=turn_response,
+                        catalog=catalog,
+                        recorder=recorder,
+                        user_id=user.user_id,
+                        data_dir=data_dir,
+                        session_engine=session_engine,
+                        session_id=str(session_id),
+                    )
+                except InvariantError as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Server invariant violated: {exc}",
+                    ) from exc
                 terminal = guided.terminal
 
             # Persist updated state.

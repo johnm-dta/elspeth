@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import Engine
 
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.recipe_match import RecipeMatch
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -171,7 +172,7 @@ def handle_step_2_sink(
             guarantees at least one output.
     """
     if not resolved.outputs:
-        raise ValueError("step 2 sink resolved with no outputs — handler refuses empty list")
+        raise InvariantError("step 2 sink resolved with no outputs — handler refuses empty list")
 
     entry_state = state
     current_state = state
@@ -308,11 +309,11 @@ def handle_step_3_chain_accept(
             Step 1 and Step 2 have committed before reaching Step 3).
     """
     if not proposal.steps:
-        raise ValueError("step 3 proposal had zero steps; refusing empty commit")
+        raise InvariantError("step 3 proposal had zero steps; refusing empty commit")
     if state.source is None:
-        raise ValueError("step 3 reached without a committed source; dispatcher bug")
+        raise InvariantError("step 3 reached without a committed source; dispatcher bug")
     if not state.outputs:
-        raise ValueError("step 3 reached without committed outputs; dispatcher bug")
+        raise InvariantError("step 3 reached without committed outputs; dispatcher bug")
 
     n = len(proposal.steps)
     node_args: list[dict[str, Any]] = []

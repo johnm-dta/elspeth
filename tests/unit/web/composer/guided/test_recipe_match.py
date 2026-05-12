@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.recipe_match import RecipeMatch, match_recipe
 from elspeth.web.composer.guided.state_machine import (
     SinkOutputResolved,
@@ -285,7 +286,7 @@ class TestMissingBlobRef:
             sample_rows=(),
         )
         sink = _make_single_json_sink(required_fields=("category",))
-        with pytest.raises(ValueError, match="blob_ref"):
+        with pytest.raises(InvariantError, match="blob_ref"):
             match_recipe(source, sink)
 
     def test_threshold_raises_when_blob_ref_absent(self) -> None:
@@ -297,7 +298,7 @@ class TestMissingBlobRef:
             sample_rows=(),
         )
         sink = _make_two_json_sink()
-        with pytest.raises(ValueError, match="blob_ref"):
+        with pytest.raises(InvariantError, match="blob_ref"):
             match_recipe(source, sink)
 
 
@@ -390,10 +391,11 @@ class TestUnsatisfiedSlots:
     def test_rejects_slot_overlapping_with_unsatisfied(self) -> None:
         """A name present in both ``slots`` and ``unsatisfied_slots`` is a
         direct contradiction of the invariant: a slot cannot simultaneously
-        be resolved and unsatisfied.  Constructor must raise ValueError."""
+        be resolved and unsatisfied.  Constructor must raise InvariantError
+        (server bug — only our own code constructs RecipeMatch)."""
         from elspeth.web.composer.recipes import SlotSpec
 
-        with pytest.raises(ValueError, match="overlap") as exc_info:
+        with pytest.raises(InvariantError, match="overlap") as exc_info:
             RecipeMatch(
                 recipe_name="test-recipe",
                 slots={"foo": "resolved-value"},
@@ -409,10 +411,11 @@ class TestUnsatisfiedSlots:
         """``unsatisfied_slots`` is the schema for *required* slots the resolver
         could not pre-fill.  Optional slots have declared defaults and are
         auto-filled by ``validate_slots`` at apply time — surfacing them to
-        the operator is a contract violation.  Constructor must raise."""
+        the operator is a contract violation.  Constructor must raise
+        InvariantError (server bug — only our own code constructs RecipeMatch)."""
         from elspeth.web.composer.recipes import SlotSpec
 
-        with pytest.raises(ValueError, match="optional") as exc_info:
+        with pytest.raises(InvariantError, match="optional") as exc_info:
             RecipeMatch(
                 recipe_name="test-recipe",
                 slots={},

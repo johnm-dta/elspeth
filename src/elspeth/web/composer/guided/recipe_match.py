@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import SinkResolved, SourceResolved
 from elspeth.web.composer.recipes import SlotSpec, get_recipe
 
@@ -105,14 +106,14 @@ class RecipeMatch:
         # "unsatisfied".  The two mappings are complementary by definition.
         overlap = set(self.unsatisfied_slots) & set(self.slots)
         if overlap:
-            raise ValueError(f"RecipeMatch.unsatisfied_slots must be disjoint from slots; overlap on: {sorted(overlap)}")
+            raise InvariantError(f"RecipeMatch.unsatisfied_slots must be disjoint from slots; overlap on: {sorted(overlap)}")
         # Invariant 2: only required slots belong in ``unsatisfied_slots``.
         # Optional slots with declared defaults are auto-filled by
         # ``validate_slots`` at apply time and must not be surfaced to the
         # operator as fields they need to fill.
         for name, spec in self.unsatisfied_slots.items():
             if not spec.required:
-                raise ValueError(
+                raise InvariantError(
                     f"RecipeMatch.unsatisfied_slots[{name!r}] is optional; "
                     "only required slots belong in unsatisfied_slots "
                     "(optional slots are auto-filled by validate_slots)"
@@ -176,7 +177,7 @@ def _classify_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mappi
     reached for blob-backed sources.
     """
     if "blob_ref" not in source.options:
-        raise ValueError(
+        raise InvariantError(
             "Recipe slot resolver requires source.options['blob_ref'] "
             "(set by _execute_set_source_from_blob or handle_step_1_source "
             "blob enrichment path); source options present: "
@@ -215,7 +216,7 @@ def _split_threshold_slot_resolver(source: SourceResolved, sink: SinkResolved) -
     rubber-stampable suggested default.
     """
     if "blob_ref" not in source.options:
-        raise ValueError(
+        raise InvariantError(
             "Recipe slot resolver requires source.options['blob_ref'] "
             "(set by _execute_set_source_from_blob or handle_step_1_source "
             "blob enrichment path); source options present: "
@@ -273,7 +274,9 @@ def match_recipe(
             # — if not, that's an invariant violation, crash loudly.
             recipe = get_recipe(recipe_name)
             if recipe is None:
-                raise ValueError(f"Recipe '{recipe_name}' is in _RECIPE_PREDICATES but not registered in recipes.py — invariant violation.")
+                raise InvariantError(
+                    f"Recipe '{recipe_name}' is in _RECIPE_PREDICATES but not registered in recipes.py — invariant violation."
+                )
             unsatisfied: dict[str, SlotSpec] = {
                 name: spec for name, spec in recipe.slots.items() if spec.required and name not in resolved_slots
             }

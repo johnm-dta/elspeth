@@ -7,6 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -232,17 +233,17 @@ class TestStepAdvance:
         assert any(d.tool_name == "guided_step_advanced" for d in directives)
 
     def test_advance_step_1_raises_when_intent_missing(self) -> None:
-        """INSPECT_AND_CONFIRM without step_1_source_intent raises ValueError.
+        """INSPECT_AND_CONFIRM without step_1_source_intent raises InvariantError.
 
         The intent must be set by the emit site before the turn is sent.
         Arriving at INSPECT_AND_CONFIRM with intent=None is a state-machine
-        invariant violation.
+        invariant violation (server bug, not client fault).
         """
         session = GuidedSession.initial()
         # Confirm intent is None (initial state — no emit site set it).
         assert session.step_1_source_intent is None
         response = _make_response(edited_values={"columns": ["id", "name"]})
-        with pytest.raises(ValueError, match="step_1_source_intent is None"):
+        with pytest.raises(InvariantError, match="step_1_source_intent is None"):
             step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
 
     def test_advance_step_1_columns_are_coerced_to_str(self) -> None:
@@ -383,7 +384,7 @@ class TestStepAdvance:
 
     def test_step_2_without_sink_intent_raises(self) -> None:
         """MULTI_SELECT_WITH_CUSTOM with step_2_sink_intent=None is a state-machine
-        invariant violation — raises ValueError immediately."""
+        invariant violation — raises InvariantError immediately (server bug)."""
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
             history=(),
@@ -406,7 +407,7 @@ class TestStepAdvance:
             "edit_step_index": None,
             "control_signal": None,
         }
-        with pytest.raises(ValueError, match="step_2_sink_intent is None"):
+        with pytest.raises(InvariantError, match="step_2_sink_intent is None"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
     # ---------------------------------------------------------------------------

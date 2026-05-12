@@ -342,15 +342,36 @@ def _walk_type(
         return
 
     # Union/Optional: descend into every non-None arm at the SAME path.
+    #
+    # Two emission rules apply (closes rev-3 M1 floor-check):
+    #
+    #   1. A descendable arm (BaseModel, parameterised container, nested Union)
+    #      is always walked — that's the structural-descent contract Tasks 1/7
+    #      established for nested-path redaction.
+    #   2. A non-descendable scalar arm (str, int, bool, ...) is walked iff
+    #      either (a) it carries a Sensitive marker (rev-3 W8a:
+    #      Optional[Annotated[str, Sensitive()]]) OR (b) the Union is
+    #      structurally an Optional — exactly one non-None arm.  Case (b)
+    #      means the Pydantic model still declared a single field; the walker
+    #      must emit a leaf at the field path so the rev-3 M1 floor-check
+    #      (every ``model_fields`` key appears as a walk root) holds.  The
+    #      legacy "skip non-descendable scalar arms" rule existed to prevent
+    #      spurious duplicate yields for genuine multi-arm scalar Unions like
+    #      ``str | _Model | bool`` (test_walk_three_arm_union pins this);
+    #      Optional-of-scalar is single-armed by construction so duplicate-
+    #      yield risk does not apply.
+    #
+    # The Optional-of-scalar carve-out is deliberately narrow: we still skip
+    # scalar arms when ANY other non-None arm is present.  test_walk_three_arm_union
+    # (``field: str | _InnerWithSecret | bool``) MUST continue to walk only via
+    # the BaseModel arm; this fix is purely additive for the Optional[scalar]
+    # case that previously emitted no node at all.
     if _is_union(origin):
-        for arm in get_args(field_type):
-            if arm is type(None):
-                continue
+        non_none_arms = [a for a in get_args(field_type) if a is not type(None)]
+        is_optional_of_scalar = len(non_none_arms) == 1
+        for arm in non_none_arms:
             arm_type, arm_metadata = _normalise(arm, ())
-            # A scalar arm with a Sensitive marker MUST be emitted (rev-3 W8a):
-            # Optional[Annotated[str, Sensitive()]] is a common shape and the
-            # marker would otherwise be silently dropped.
-            if not _is_descendable(arm_type) and not _has_sensitive(arm_metadata):
+            if not _is_descendable(arm_type) and not _has_sensitive(arm_metadata) and not is_optional_of_scalar:
                 continue
             yield from _walk_type(
                 field_type=arm_type,

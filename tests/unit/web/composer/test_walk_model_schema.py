@@ -252,6 +252,42 @@ def test_walk_optional_annotated_scalar_arm() -> None:
     )
 
 
+def test_walk_optional_non_sensitive_scalar_arm() -> None:
+    """``Optional[str]`` (no Sensitive marker) emits a leaf at the field path.
+
+    Closes rev-3 M1 floor-check landing-pin: the floor-check (every
+    ``model_fields`` key appears as a walk root) was passing accidentally
+    for ``set_source`` because that model has no Optional non-Sensitive
+    scalar fields.  Task 13 / Wave 2 brings the first such field
+    (``create_blob.description: str | None = None``) into the manifest;
+    the walker had been silently dropping it because the legacy "skip
+    non-descendable scalar Union arms" rule (introduced to suppress
+    spurious yields for ``str | _Model | bool`` per
+    :func:`test_walk_three_arm_union`) was too broad.
+
+    The carve-out is structural: a Union with exactly one non-None arm is
+    an Optional, single-armed by construction, so duplicate-yield risk
+    does not apply.  Multi-arm scalar Unions (``str | int | bool``) still
+    skip scalar arms — :func:`test_walk_three_arm_union` keeps that pin.
+    """
+
+    class _OptionalNonSensitiveScalarModel(BaseModel):
+        description: str | None = None
+
+    nodes = list(walk_model_schema(_OptionalNonSensitiveScalarModel))
+    paths = [n.path for n in nodes]
+    assert "description" in paths, (
+        "Optional[str] field with no Sensitive marker did not appear in walk "
+        "output. Walker must emit a leaf at the field path so the adequacy "
+        "guard's walker-completeness floor-check (rev-3 M1) holds."
+    )
+    # The leaf must have NO Sensitive marker — this field is structural,
+    # not sensitive.  A future change that conflates "emit a leaf" with
+    # "mark as sensitive" would fail this assertion.
+    description_node = next(n for n in nodes if n.path == "description")
+    assert not any(isinstance(m, _SensitiveMarker) for m in description_node.metadata)
+
+
 def test_walk_three_arm_union() -> None:
     """Iterator descends into BaseModel arm of a 3-arm Union; skips non-BaseModel
     arms cleanly without spurious yields (rev-2 quality MAJOR-1 gap D)."""

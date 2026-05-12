@@ -198,7 +198,8 @@ export interface ProposedStep {
  * Submit shape (verified against routes.py:2030-2137):
  *   Accept all: { chosen: ["accept"], ... all other fields null }
  *   Reject / per-step Edit / Ask advisor: NOT wired in Phase 4.
- *   See observation elspeth-obs-98eab6aa67 for Phase 5 catch-up tracking.
+ *
+ * Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion).
  */
 export interface ProposeChainPayload {
   steps: ProposedStep[];

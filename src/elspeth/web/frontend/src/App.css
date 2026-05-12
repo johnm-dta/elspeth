@@ -4313,8 +4313,12 @@ summary:focus-visible {
   flex-shrink: 0;
 }
 
-/* Plugin name heading */
+/* Plugin name -- rendered as <h3> for SR landmark navigation.
+   Reset default <h*> margin so the visual layout matches the prior <span>;
+   font-size is pinned to --font-size-base so the browser's default <h3>
+   sizing does not leak in. */
 .guided-propose-step-plugin {
+  margin: 0;
   font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--color-text);

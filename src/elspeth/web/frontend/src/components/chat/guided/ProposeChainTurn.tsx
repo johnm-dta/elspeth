@@ -24,8 +24,10 @@
 //   DROPPED: per-step Edit  -> backend has no handler; would HTTP 400
 //   DROPPED: Reject         -> backend returns HTTP 501 (Phase 5 stub)
 //   DROPPED: Ask advisor    -> backend has no handler; would HTTP 400
-// The three dropped paths are tracked in filigree obs elspeth-obs-98eab6aa67
-// and must be added in Phase 5 once the backend handlers are wired.
+// The three dropped paths must be added in Phase 5 once the backend handlers
+// are wired.
+//
+// Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion)
 //
 // WIRE-SHAPE (single submit path):
 //   Accept proposal: { chosen: ["accept"], custom_inputs: null, edited_values: null,
@@ -130,7 +132,13 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
                 <span className="guided-propose-step-number">
                   {idx + 1}
                 </span>
-                <span className="guided-propose-step-plugin">{step.plugin}</span>
+                {/* <h3> (not <span>) so screen-reader users can navigate the
+                    proposed chain by heading landmarks. The CSS rule on
+                    .guided-propose-step-plugin already pins font-size to
+                    --font-size-base, so the visual rank does not jump to the
+                    browser-default <h3> size. Same convention as Task 7.3 M10
+                    (edit-mode heading). */}
+                <h3 className="guided-propose-step-plugin">{step.plugin}</h3>
               </div>
 
               {/* Options as a key-value definition list.
@@ -162,7 +170,8 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
       {/* Action row -- Accept proposal only.
           Reject, per-step Edit, and Ask advisor are deferred to Phase 5:
           the backend returns HTTP 501 / HTTP 400 for those paths today.
-          See filigree observation elspeth-obs-98eab6aa67. */}
+          Tracker: filigree elspeth-2c08408170 (Step-3 backend handler
+          completion). */}
       <div className="guided-propose-actions">
         <button
           type="button"

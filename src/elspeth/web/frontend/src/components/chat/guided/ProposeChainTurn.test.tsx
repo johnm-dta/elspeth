@@ -9,8 +9,8 @@
 //      chosen: ["accept"] and all other fields null.  This is the ONLY submit
 //      path implemented: Edit, Reject, and Ask-advisor buttons are absent because
 //      the backend handler (routes.py:2030-2137) only processes chosen==["accept"]
-//      today.  Per-step Edit returns HTTP 400; Reject returns HTTP 501.  See
-//      observation elspeth-obs-98eab6aa67 for the Phase-5 catch-up ticket.
+//      today.  Per-step Edit returns HTTP 400; Reject returns HTTP 501.
+//      Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion).
 //   3. payload.blockers show/hide based on emptiness — blockers list renders when
 //      non-empty; absent from DOM when blockers is [].
 //   4. DOM-ID distinctness pin — two simultaneous instances produce element IDs
@@ -86,6 +86,17 @@ describe("ProposeChainTurn — card-list rendering", () => {
     // Each step card has a heading with the plugin name.
     expect(screen.getByText("csv_transform")).toBeInTheDocument();
     expect(screen.getByText("geo_enrich")).toBeInTheDocument();
+  });
+
+  it("each step's plugin name is a level-3 heading for screen-reader navigation", () => {
+    // Pins the <h3> semantics so a future "simplify back to <span>" regresses
+    // the test instead of silently breaking landmark navigation. Same convention
+    // as Task 7.3 M10 (edit-mode <h3>).
+    renderWidget(TWO_STEP_PAYLOAD);
+    const headings = screen.getAllByRole("heading", { level: 3 });
+    expect(headings).toHaveLength(TWO_STEP_PAYLOAD.steps.length);
+    expect(headings[0]).toHaveTextContent(TWO_STEP_PAYLOAD.steps[0].plugin);
+    expect(headings[1]).toHaveTextContent(TWO_STEP_PAYLOAD.steps[1].plugin);
   });
 
   it("renders the rationale for each step", () => {

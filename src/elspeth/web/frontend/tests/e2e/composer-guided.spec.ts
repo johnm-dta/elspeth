@@ -5,35 +5,49 @@
 //   ≤9 user clicks to reach CompletionSummary via the recipe-match path.
 //   <30s wall-clock (recipe match is deterministic — zero LLM calls).
 //
-// ── FIXME — BLOCKED (Phase 9, 2026-05-12) ───────────────────────────────────
+// ── Gap 5 fixed (2026-05-12, commit 74ea68eb) ────────────────────────────────
 //
-// This spec was run against the live backend during Phase 9 Task 9.1 and
-// verified step-by-step using Playwright traces and server logs. The wizard
-// UI advances correctly through csv→SCHEMA_FORM→json→SCHEMA_FORM→
-// MULTI_SELECT_WITH_CUSTOM, but the RECIPE_OFFER "Apply recipe" step returns
-// HTTP 400.
+// This spec was previously blocked by Gap 5 (recipe-match path unreachable via
+// SchemaForm).  The fix uses a combined approach (options a + b):
 //
-// Root cause (Gap 5 below): the guided wizard's Step 1 SchemaForm path writes
-// the source via _execute_set_source (handle_step_1_source in steps.py:83),
-// which stores options={path, schema, on_validation_failure} with NO blob_id
-// key.  The recipe slot resolver _classify_slot_resolver (recipe_match.py:133)
-// reads `source.options.get("blob_id", "")` → returns "".  The recipe builder
-// _build_classify_recipe (recipes.py:250) puts `"blob_id": ""` into the source
-// args.  _execute_set_pipeline then calls _resolve_source_blob(blob_id=""),
-// which fails: "Blob '' not found." → HTTP 400.
+//   (a) recipe_match.py: _classify_slot_resolver / _split_threshold_slot_resolver
+//       now read source.options["blob_ref"] (composer-canonical) instead of
+//       source.options.get("blob_id", ""). Missing blob_ref → offensive crash
+//       (state-machine invariant: resolver is only reached for blob-backed sources).
 //
-// The recipe-match path is structurally unreachable when the source is set via
-// SchemaForm.  Fixing it requires one of:
-//   (a) _classify_slot_resolver also checks source.options["blob_ref"] (set by
-//       _execute_set_source_from_blob but not by _execute_set_source);
-//   (b) handle_step_1_source detects blob-storage paths and writes blob_ref
-//       alongside path;
-//   (c) _build_classify_recipe treats blob_id="" as None and falls back to the
-//       already-committed source path in state.source.options.
-// All three options require backend design review. Filed as observation for
-// triage (see below).
+//   (b) steps.py / tools.py: handle_step_1_source now accepts session_engine +
+//       session_id, looks up the blob by storage_path after _execute_set_source
+//       commits, and injects blob_ref into SourceResolved.options when found.
+//       This lets the guided SchemaForm path (where the user types the blob's
+//       file path) populate blob_ref without switching to set_source_from_blob.
 //
-// Gaps discovered (in order encountered during the Phase 9 run):
+// Gap 5 VERIFIED FIXED: Playwright page snapshot after clicking "Apply recipe"
+// shows source_blob_id: f2852ea6-9e19-4db1-a03d-4dba2b92b9da (real UUID) in
+// the recipe_offer card. Steps 1–5 now return HTTP 200. The 400 is downstream.
+//
+// ── Gap 6 — recipe_offer missing unsatisfied-slot UX (blocks Apply recipe) ───
+//
+// The recipe_offer step still returns HTTP 400 at Apply recipe time.  This is a
+// NEW blocker revealed after Gap 5 was fixed.
+//
+// Root cause: RecipeOfferPayload.slots carries only the pre-filled slots
+// {source_blob_id, output_path, label_field}.  The RecipeOfferTurn widget echoes
+// payload.slots unchanged in edited_values when "Apply recipe" is clicked.  But
+// classify-rows-llm-jsonl declares three required slots without defaults:
+//   - classifier_template (str)
+//   - model (str)
+//   - api_key_secret (str)
+// validate_slots raises RecipeValidationError for each missing required slot →
+// _execute_apply_pipeline_recipe returns failure → HTTP 400.
+//
+// The RecipeOfferPayload type (guided.ts:240-244) carries no slot-schema, so the
+// frontend cannot know which slots need user input.  Both layers need changes:
+//   (a) backend: include the recipe's slot specs (type, required, description) in
+//       RecipeOfferPayload so the frontend can distinguish pre-filled from empty.
+//   (b) frontend: RecipeOfferTurn renders editable form fields for unsatisfied
+//       required slots (using payload.slot_specs[name].required + value absent).
+//
+// Gaps discovered during Phase 9 Task 9.1 (in order encountered):
 //
 //   Gap 1 — startGuided not wired to any UI entry point:
 //     sessionStore.createSession and selectSession both set guidedSession: null.
@@ -41,7 +55,7 @@
 //     component. ChatPanel's guided-mode discriminator never fires. Fix applied
 //     in sessionStore.ts (both createSession and selectSession now call
 //     void get().startGuided(id)) — this is the minimum needed for the wizard
-//     to render. See observation filed as elspeth-obs-PLACEHOLDER-gap1.
+//     to render. See observation filed as elspeth-obs-d3d0d7fa70.
 //
 //   Gap 2 — S2 path allowlist blocks raw /tmp paths:
 //     _validate_source_path (tools.py:2086) rejects paths outside data_dir/blobs/.
@@ -62,29 +76,28 @@
 //     must expand the section and set "auto_increment".  Adds 1 to click budget.
 //
 //   Gap 5 — recipe-match structurally unreachable (blocks Apply recipe → 400):
-//     See root cause above.  THIS IS THE HARD BLOCKER.  No in-test workaround
-//     exists without modifying the backend.
+//     FIXED in commit 74ea68eb (Phase 9 dispatch).
+//
+//   Gap 6 — recipe_offer missing unsatisfied-slot UX (blocks Apply recipe → 400):
+//     See root cause above.  THIS IS THE CURRENT HARD BLOCKER.
+//     Filed as elspeth-obs-<gap6-id> (see Observations section).
 //
 // ── Observations filed ───────────────────────────────────────────────────────
 //
-// Observations will be filed by the Phase 9 controller after reviewing this
-// spec.  Placeholder IDs below; update when observation IDs are assigned.
-//
-//   elspeth-obs-PLACEHOLDER-gap1: startGuided not wired to UI entry point
-//   elspeth-obs-PLACEHOLDER-gap5: recipe-match unreachable via SchemaForm path
-//     (source_blob_id always "" for SCHEMA_FORM-set sources)
+//   elspeth-obs-d3d0d7fa70: startGuided not wired to UI entry point (Gap 1)
+//     Fixed in sessionStore.ts (createSession + selectSession now call startGuided).
+//   elspeth-obs-a8a9bc010a: recipe-match unreachable via SchemaForm path (Gap 5)
+//     Fixed in 74ea68eb (this Phase 9 dispatch).
+//   elspeth-obs-f626607b13: RecipeOfferTurn missing editable form for
+//     unsatisfied required slots; RecipeOfferPayload missing slot-schema (Gap 6).
 //
 // ── What the spec verifies today ─────────────────────────────────────────────
 //
-// The smoke spec (smoke.spec.ts) already verifies session CRUD and auth.
-// The guided spec WOULD verify the full recipe-match flow once Gap 5 is fixed.
-//
-// The partial steps 1-4 (csv chip → source schema → json chip → sink schema)
-// were verified to work correctly during Phase 9 testing:
-//   POST /guided/respond 200 OK ×4 (one per step)
-//   POST /guided/respond 400 Bad Request (Apply recipe fails, Gap 5)
-// The test is written as fixme so that the step-by-step logic and commentary
-// are preserved for the developer who fixes Gap 5.
+// Steps 1–5 (csv chip → source schema → json chip → sink schema → required
+// fields → recipe_offer render) now return HTTP 200 (verified in this dispatch).
+// The test is marked fixme because Apply recipe still returns HTTP 400 (Gap 6).
+// All step-by-step logic is preserved so whoever fixes Gap 6 can un-fixme in
+// one step without reconstructing the test.
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,11 +140,16 @@ const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-out
 test.describe("composer-guided — recipe-match happy path", () => {
   test.fixme(
     true,
-    "BLOCKED: recipe-match path unreachable (Gap 5) — source set via SchemaForm " +
-    "has no blob_id in options; _classify_slot_resolver returns source_blob_id=''; " +
-    "_resolve_source_blob fails 'Blob not found' → HTTP 400 on Apply recipe. " +
-    "Backend fix required (steps.py / recipe_match.py / recipes.py). " +
-    "Full blocker analysis in spec file header.",
+    "BLOCKED: Apply recipe → HTTP 400 (Gap 6) — recipe_offer payload contains " +
+    "only the pre-filled slots {source_blob_id, output_path, label_field}; the " +
+    "RecipeOfferTurn widget echoes payload.slots unchanged; missing required slots " +
+    "classifier_template / model / api_key_secret cause RecipeValidationError at " +
+    "apply time.  Gap 5 (blob_ref lookup) is VERIFIED FIXED (page snapshot shows " +
+    "source_blob_id: f2852ea6-...) — the recipe_offer now renders correctly. " +
+    "Fix requires: (a) backend to include slot-schema in RecipeOfferPayload so the " +
+    "frontend knows which slots need user input, and (b) RecipeOfferTurn editable " +
+    "form fields for unsatisfied required slots. " +
+    "Full analysis in spec file header."
   );
 
   test(
@@ -232,8 +250,11 @@ test.describe("composer-guided — recipe-match happy path", () => {
         clicks++;
 
         // ── Step 2.5 RECIPE_OFFER — Apply recipe ──────────────────────────
-        // Blocked by Gap 5: Apply recipe → HTTP 400 (source_blob_id = "").
-        // This assertion is expected to fail until Gap 5 is fixed.
+        // Gap 5 FIXED: recipe_offer now renders with correct source_blob_id.
+        // Apply recipe still returns HTTP 400 (Gap 6): required slots
+        // classifier_template / model / api_key_secret are not pre-filled and
+        // the RecipeOfferTurn widget has no editable form to supply them.
+        // This assertion is expected to fail until Gap 6 is fixed.
         await expect(
           page.getByRole("button", { name: "Apply recipe", exact: true }),
         ).toBeVisible();

@@ -103,7 +103,88 @@ headed exactly:
 ## Redaction policy weakening rationale
 ```
 
-The CI step grep-asserts this section header exists.
+The CI step grep-asserts this section header exists (the workflow's
+Python check uses substring match on the body string — exact phrasing is
+load-bearing).
+
+---
+
+## What the weakening rationale section MUST contain
+
+A label is a routing signal; the rationale is the substantive control.
+The CI gate cannot inspect the *content* of the rationale section — that
+is the auditor's job. A complete rationale answers all of the following:
+
+1. **What was weakened, and how?** Name the manifest entry or entries
+   and the specific path(s) removed or replaced. Quote the
+   `sensitive_path_count` before and after.
+
+2. **Why is this weakening *safe*?** From an auditor's perspective, not
+   the implementer's. The default presumption is that redaction
+   coverage exists for a reason; removing it requires showing the
+   reason no longer applies. Acceptable arguments include:
+
+   - The path was redundant because an upstream component already
+     redacts the same field before the data reaches this tool.
+   - The path covered a field that has been removed from the tool's
+     input schema entirely — there is no data flowing through it any
+     more.
+   - The path was a copy-paste artefact that never matched real data
+     (verifiable from run history showing zero redactions on that
+     path).
+
+   Arguments that are NOT sufficient:
+
+   - "The path was annoying in tests" — annoyance is not an audit
+     argument.
+   - "I want to log this value for debugging" — see
+     `logging-telemetry-policy`; this needs an audit or telemetry
+     channel, not a removed redaction.
+   - "Nothing sensitive ever appears here" — claims about absence of
+     sensitive data require evidence, not assertion.
+
+3. **What new mitigation replaces the prior coverage?** If the
+   weakened path is being replaced (e.g., redaction moved upstream),
+   name the replacement and cite its tests. If no replacement exists,
+   explain why none is needed.
+
+4. **Bulk-editorial-PR saturation acknowledgement.** This is the most
+   important auditor-facing assertion. A PR that touches many files
+   with a single weakening tucked in among them is exactly the failure
+   mode this gate is designed to detect. The rationale section MUST
+   include a sentence of the form:
+
+   > This PR includes a weakening of the redaction policy. The
+   > weakening is the substantive change, not an incidental
+   > side-effect of refactoring. I am not relying on reviewer fatigue
+   > to land it.
+
+   If the author cannot make this assertion honestly, the PR should
+   be split: refactoring in one PR with `policy-strengthen` (or no
+   redaction label if the manifest is untouched), and the weakening
+   alone in a small follow-up PR with the rationale.
+
+---
+
+## Escalation: when a weakening rationale is insufficient
+
+If a reviewer (or, in a single-owner repo, the future-self auditor
+reading this in CI logs) believes a weakening rationale is insufficient,
+the correct response is to **re-open the PR with a stricter posture**,
+not to merge with a warning attached.
+
+Options for "stricter posture":
+
+- Decline the weakening and keep the existing path.
+- Replace the weakening with an explicit, narrower mitigation (e.g.,
+  remove one specific sensitive path rather than the entire manifest
+  entry).
+- Split the PR so the weakening lands separately with its own
+  reviewable diff.
+
+The bar to clear is "would this hold up under formal inquiry?" — see
+`CLAUDE.md` § *Auditability Standard*. If the answer is "probably, but
+I'd rather not have to defend it," the PR isn't ready.
 
 ---
 

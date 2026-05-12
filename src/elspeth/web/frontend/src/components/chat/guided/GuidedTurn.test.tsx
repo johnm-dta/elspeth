@@ -26,6 +26,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GuidedTurn } from "./GuidedTurn";
+import { nullResponse } from "@/test/guided-fixtures";
 import type {
   TurnPayload,
   SingleSelectPayload,
@@ -215,12 +216,9 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
       chosen: ["csv"],
-      edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: null,
     });
   });
 });

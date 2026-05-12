@@ -1,12 +1,12 @@
-# Merge Analysis — `feat/composer-progress-persistence-1a` → `RC5.2`
+# Merge Analysis — `feat/composer-progress-persistence-1a` → `RC5.2` (rev 2)
 
-**Date:** 2026-05-12
+**Date:** 2026-05-12 (rev-1 same day; rev-2 same day folding reality-check reviewer findings — see §10)
 **Branches compared:**
-- This branch HEAD: `f5bc5dbb` (`docs(plan): Phase 3 plan rev-2 — re-baseline against Phase 2 as shipped (f54ee7e8)`)
+- This branch HEAD: `f5bc5dbb` (`docs(plan): Phase 3 plan rev-2 — re-baseline against Phase 2 as shipped (f54ee7e8)`) — note that the rev-2 commit of THIS document (`<commit-sha>`) is appended after `f5bc5dbb` and does not affect the merge analysis.
 - RC5.2 HEAD: `3e46a976` (`docs(plan): fold post-review errata (rev 2) into composer guided-mode plan`)
 - Merge base: `91133f32`
 **Worktree path:** `/home/john/elspeth/.worktrees/composer-progress-1a`
-**Author:** Plan/merge analysis session, 2026-05-12. Reality-checked separately (see §10).
+**Author:** Plan/merge analysis session, 2026-05-12. Reality-checked by `axiom-planning:plan-review-reality` (see §10); reviewer corrections folded into rev-2 in-session per `feedback_default_is_fix_not_ticket`.
 
 ---
 
@@ -85,20 +85,22 @@ uv.lock
 This branch's contribution since fork:
 
 ```
-src/elspeth/web/composer/tools.py  | 668 net  (+692 -208)  [Phase 2 promotion wave + 38-entry MANIFEST plumbing]
-src/elspeth/web/sessions/models.py | 232 net  [Phase 1A schema additions]
+src/elspeth/web/composer/tools.py  | 668 lines touched  (+467 -201)  [Phase 2 promotion wave + 38-entry MANIFEST plumbing]
+src/elspeth/web/sessions/models.py | 232 lines touched  (+225 -7)    [Phase 1A schema additions]
 ```
 
 RC5.2's contribution since fork:
 
 ```
-src/elspeth/web/composer/service.py  | 386 net  (+243 -143)  [4 commits — see §5.1]
-src/elspeth/web/composer/tools.py    | 221 net               [grounding-related]
-src/elspeth/web/sessions/routes.py   | 103 net (mostly -)    [single commit 2c043a11]
-src/elspeth/web/sessions/models.py   |  24 net (mostly -)    [single commit 0964922c — release stamp]
-src/elspeth/web/sessions/protocol.py |  18 net               [single commit 2c043a11]
-src/elspeth/web/sessions/service.py  |   5 net (-)           [single commit 2c043a11]
+src/elspeth/web/composer/service.py  | 386 lines touched  (+238 -148)  [4 commits — see §5.1]
+src/elspeth/web/composer/tools.py    | 221 lines touched               [grounding-related]
+src/elspeth/web/sessions/routes.py   | 103 lines touched (+43 -60)     [single commit 2c043a11]
+src/elspeth/web/sessions/models.py   |  24 lines touched ( +2 -22)     [single commit 0964922c — release stamp]
+src/elspeth/web/sessions/protocol.py |  18 lines touched ( +9  -9)     [single commit 2c043a11]
+src/elspeth/web/sessions/service.py  |   5 lines touched ( +0  -5)     [single commit 2c043a11]
 ```
+
+(Rev-2 reviewer note: prior draft used `net` ambiguously and had two incorrect `(+N -M)` splits for `composer/service.py` and `composer/tools.py`-this-branch. The totals were always right; only the parenthetical splits were wrong. Re-derived from `git diff --numstat 91133f32..RC5.2 -- <file>` and `git diff --numstat 91133f32..feat/composer-progress-persistence-1a -- <file>` 2026-05-12.)
 
 **Concentration observation:** RC5.2's sessions-side risk concentrates in **one commit**: `2c043a11`. That commit alone touched sessions/routes.py, sessions/protocol.py, sessions/service.py, plus composer/service.py. The composer-side risk is split across 4 commits with `2c043a11` dominating.
 
@@ -154,7 +156,15 @@ Date:   Sun May 10 10:52:21 2026 +1000
 
     Deleted tests pinning the removed behavior:
     - test_runtime_preflight_failure_message_uses_failed_check_when_errors_empty
+    - test_runtime_preflight_failure_message_has_bare_fallback
+    - test_enforce_replacement_non_prefix_invariant_accepts_unrelated_content
+    - test_enforce_replacement_non_prefix_invariant_raises_on_empty_content
+    - test_enforce_replacement_non_prefix_invariant_raises_on_accidental_prefix
+    - test_intercepted_assistant_history_is_annotated_without_raw_content
+    - test_send_message_annotates_intercepted_assistant_history_for_llm
 ```
+
+(Rev-2 reviewer note: the prior draft of this document quoted only the first deleted test from `2c043a11`'s body. The actual commit deletes 7 tests; all 7 are still present on this branch and must be deleted during reconciliation — see §9 step 3.)
 
 The premise on RC5.2 was: a *prior* commit (`elspeth-9cfbad6901` — note this is a Filigree ID, not a git SHA; the actual RC5.2 git commit that did the migration is unnamed in this body) migrated the only producer of replacement-shape rows to augmentation. With no producer, the consumers became dead code, and per the No-Legacy-Code Policy in CLAUDE.md, they were removed.
 
@@ -356,7 +366,16 @@ Estimated effort: 30-minute edit pass on the line-numbers table only. The task s
 
 1. **Decide Option 1 vs Option 2.** (Default: Option 1.)
 2. **Verify caveats §8.1 and §8.2.** Read the two diffs; confirm no unexpected schema or dispatch-dict collisions. Surface anomalies before reconciliation.
-3. **Reconcile replacement-shape on this branch.** Port consumers to augmentation (or delete, matching `2c043a11`). Delete the corresponding test (`test_runtime_preflight_failure_message_uses_failed_check_when_errors_empty`). Commit: `refactor(composer): align replacement-shape model with RC5.2 (delete dead machinery)`. Body cites `2c043a11` as upstream model.
+3. **Reconcile replacement-shape on this branch.** Port consumers to augmentation (or delete, matching `2c043a11`). **Delete all 7 tests** that pin the removed behaviour on this branch (per RC5.2 commit `2c043a11`'s deletion list — see §5.1):
+   - `tests/unit/web/composer/test_service.py:4242` — `test_runtime_preflight_failure_message_uses_failed_check_when_errors_empty`
+   - `tests/unit/web/composer/test_service.py:4260` — `test_runtime_preflight_failure_message_has_bare_fallback`
+   - `tests/unit/web/composer/test_service.py:4434` — `test_enforce_replacement_non_prefix_invariant_accepts_unrelated_content`
+   - `tests/unit/web/composer/test_service.py:4447` — `test_enforce_replacement_non_prefix_invariant_raises_on_empty_content`
+   - `tests/unit/web/composer/test_service.py:4469` — `test_enforce_replacement_non_prefix_invariant_raises_on_accidental_prefix`
+   - `tests/unit/web/sessions/test_routes.py:5836` — `test_intercepted_assistant_history_is_annotated_without_raw_content`
+   - `tests/unit/web/sessions/test_routes.py:6097` — `test_send_message_annotates_intercepted_assistant_history_for_llm`
+
+   Commit: `refactor(composer): align replacement-shape model with RC5.2 (delete dead machinery)`. Body cites `2c043a11` as upstream model and enumerates the 4 deleted symbols + 7 deleted tests for traceability.
 4. **Rerun full gate suite on this branch.** Confirm clean.
 5. **Merge `feat/composer-progress-persistence-1a` to RC5.2.** Resolve the 5 textual conflicts (tier-model allowlist union; uv.lock regenerate; 3 test files manual). Commit message names the conflict resolutions.
 6. **Rerun full gate suite on the merged RC5.2.** Confirm clean.
@@ -371,13 +390,32 @@ Estimated effort: 30-minute edit pass on the line-numbers table only. The task s
 
 ## 10. Reality-check status
 
-A reality-check review pass on this document was dispatched separately via `axiom-planning:plan-review-reality` ("the hallucination hunter"). The reviewer's brief: verify every commit SHA, file path, line number, symbol name, and count claim in this document against actual codebase state at HEAD `f5bc5dbb`.
+A reality-check review pass on this document was dispatched via `axiom-planning:plan-review-reality` ("the hallucination hunter") on 2026-05-12 against rev-1 of this document. Reviewer brief: verify every commit SHA, file path, line number, symbol name, and count claim against actual codebase state at HEAD `f5bc5dbb`.
 
-**Reviewer verdict:** [pending — see review JSON at `notes/composer-progress-1a-rc5-2-merge-analysis-2026-05-12.review.json` when complete]
+**Initial verdict (rev-1):** CHANGES_REQUESTED. Confidence: HIGH. One BLOCKER, one WARNING.
 
-**Operator action on review return:**
-- **APPROVED / APPROVED_WITH_WARNINGS:** treat this document as load-bearing for the Option-1 sequence.
-- **CHANGES_REQUESTED:** fold corrections back into this document (rev-2) before proceeding.
+| Check category | Findings against rev-1 |
+|---|---|
+| Counts and SHAs | 0 hallucinations |
+| Overlap file list (17 files) | 0 hallucinations |
+| Line-number claims (11 specific) | 0 hallucinations — all exact |
+| Diff stat totals | 0 hallucinations |
+| Diff stat splits | **WARNING** — 2 incorrect parenthetical splits (`composer/service.py` RC5.2 side; `composer/tools.py` this-branch side). Totals were right; splits were wrong. |
+| Commit body for `2c043a11` quotation | **BLOCKER** — body quote in §5.1 listed only 1 of 7 deleted tests; §9 step 3 instructed deleting only that 1 test. Following §9 as drafted would leave 6 orphan tests pinning deleted symbols. |
+| `audit_access_log_table` INERT claim | 0 hallucinations |
+| MANIFEST count (38 = 10+28) | 0 hallucinations |
+| F2 module-tail helper locations | 0 hallucinations |
+| Phase 1B primitive dormancy | 0 hallucinations |
+| Command-syntax accuracy | 0 hallucinations |
+
+**Rev-2 changes (this revision, 2026-05-12 same day):**
+- §5.1: Quoted commit body extended to enumerate all 7 deleted tests; added a parenthetical reviewer-note explaining the prior truncation.
+- §9 step 3: Replaced single-test deletion instruction with the full 7-test list, each cited with file:line for the operator.
+- §3.1: Replaced `net` with `lines touched` (the actual semantics); corrected the two wrong parenthetical splits with verified values from `git diff --numstat`; added reviewer-note explaining the prior drift.
+
+**Rev-2 disposition:** all rev-1 BLOCKER and WARNING items addressed. A re-review pass is optional; the corrections are mechanical (numeric values from `git diff --numstat`; test names from `git show 2c043a11`) and verifiable without subjective judgement. Operator may choose to re-dispatch the reality-check reviewer on rev-2 if a fully-clean verdict is required for the merge sequence to proceed.
+
+**Operator action:** treat this document as load-bearing for the Option-1 sequence at rev-2. If discrepancies surface during execution, fold corrections back as rev-3.
 
 ---
 
